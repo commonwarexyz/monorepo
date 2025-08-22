@@ -62,7 +62,7 @@ pub enum Keyless<V: Codec> {
     Append(V),
 
     /// Indicates the database has been committed.
-    Commit,
+    Commit(Option<V>),
 }
 
 /// An operation applied to an authenticated database with a variable size value.
@@ -70,11 +70,11 @@ pub enum Keyless<V: Codec> {
 pub enum Variable<K: Array, V: Codec> {
     // Operations for immutable stores.
     Set(K, V),
-    Commit(),
+    Commit(Option<V>),
     // Operations for mutable stores.
     Delete(K),
     Update(K, V),
-    CommitFloor(u64),
+    CommitFloor(Option<V>, u64),
 }
 
 impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
@@ -86,9 +86,9 @@ impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
         1 + match self {
             Variable::Delete(_) => K::SIZE,
             Variable::Update(_, v) => K::SIZE + v.encode_size(),
-            Variable::CommitFloor(floor_loc) => UInt(*floor_loc).encode_size(),
+            Variable::CommitFloor(v, floor_loc) => v.encode_size() + UInt(*floor_loc).encode_size(),
             Variable::Set(_, v) => K::SIZE + v.encode_size(),
-            Variable::Commit() => 0,
+            Variable::Commit(v) => v.encode_size(),
         }
     }
 }
@@ -97,7 +97,7 @@ impl<V: Codec> EncodeSize for Keyless<V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Keyless::Append(v) => v.encode_size(),
-            Keyless::Commit => 0,
+            Keyless::Commit(v) => v.encode_size(),
         }
     }
 }
@@ -137,10 +137,10 @@ impl<K: Array, V: Codec> Variable<K, V> {
     pub fn to_key(&self) -> Option<&K> {
         match self {
             Variable::Set(key, _) => Some(key),
-            Variable::Commit() => None,
+            Variable::Commit(_) => None,
             Variable::Delete(key) => Some(key),
             Variable::Update(key, _) => Some(key),
-            Variable::CommitFloor(_) => None,
+            Variable::CommitFloor(_, _) => None,
         }
     }
 
@@ -148,10 +148,10 @@ impl<K: Array, V: Codec> Variable<K, V> {
     pub fn to_value(&self) -> Option<&V> {
         match self {
             Variable::Set(_, value) => Some(value),
-            Variable::Commit() => None,
+            Variable::Commit(value) => value.as_ref(),
             Variable::Delete(_) => None,
             Variable::Update(_, value) => Some(value),
-            Variable::CommitFloor(_) => None,
+            Variable::CommitFloor(value, _) => value.as_ref(),
         }
     }
 }
@@ -163,8 +163,9 @@ impl<V: Codec> Write for Keyless<V> {
                 APPEND_CONTEXT.write(buf);
                 value.write(buf);
             }
-            Keyless::Commit => {
+            Keyless::Commit(metadata) => {
                 COMMIT_CONTEXT.write(buf);
+                metadata.write(buf);
             }
         }
     }
@@ -202,8 +203,9 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
                 k.write(buf);
                 v.write(buf);
             }
-            Variable::Commit() => {
+            Variable::Commit(v) => {
                 COMMIT_CONTEXT.write(buf);
+                v.write(buf);
             }
             Variable::Delete(k) => {
                 DELETE_CONTEXT.write(buf);
@@ -214,8 +216,9 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
                 k.write(buf);
                 v.write(buf);
             }
-            Variable::CommitFloor(floor_loc) => {
+            Variable::CommitFloor(v, floor_loc) => {
                 COMMIT_FLOOR_CONTEXT.write(buf);
+                v.write(buf);
                 UInt(*floor_loc).write(buf);
             }
         }
@@ -228,7 +231,7 @@ impl<V: Codec> Read for Keyless<V> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             APPEND_CONTEXT => Ok(Self::Append(V::read_cfg(buf, cfg)?)),
-            COMMIT_CONTEXT => Ok(Self::Commit),
+            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
@@ -286,7 +289,7 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
                 let value = V::read_cfg(buf, cfg)?;
                 Ok(Self::Set(key, value))
             }
-            COMMIT_CONTEXT => Ok(Self::Commit()),
+            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
             DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 Ok(Self::Delete(key))
@@ -297,8 +300,9 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
                 Ok(Self::Update(key, value))
             }
             COMMIT_FLOOR_CONTEXT => {
+                let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
-                Ok(Self::CommitFloor(floor_loc.into()))
+                Ok(Self::CommitFloor(metadata, floor_loc.into()))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -309,7 +313,13 @@ impl<V: Codec> Display for Keyless<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Keyless::Append(value) => write!(f, "[append value:{}]", hex(&value.encode())),
-            Keyless::Commit => write!(f, "[commit]"),
+            Keyless::Commit(value) => {
+                if let Some(value) = value {
+                    write!(f, "[commit {}]", hex(&value.encode()))
+                } else {
+                    write!(f, "[commit]")
+                }
+            }
         }
     }
 }
@@ -328,10 +338,26 @@ impl<K: Array, V: Codec> Display for Variable<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Variable::Set(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
-            Variable::Commit() => write!(f, "[commit]"),
+            Variable::Commit(value) => {
+                if let Some(value) = value {
+                    write!(f, "[commit {}]", hex(&value.encode()))
+                } else {
+                    write!(f, "[commit]")
+                }
+            }
             Variable::Delete(key) => write!(f, "[key:{key} <deleted>]"),
             Variable::Update(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
-            Variable::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
+            Variable::CommitFloor(value, loc) => {
+                if let Some(value) = value {
+                    write!(
+                        f,
+                        "[commit {} with inactivity floor: {loc}]",
+                        hex(&value.encode())
+                    )
+                } else {
+                    write!(f, "[commit with inactivity floor: {loc}]")
+                }
+            }
         }
     }
 }
@@ -466,14 +492,17 @@ mod tests {
 
     #[test]
     fn test_keyless_commit() {
-        let commit_op = Keyless::<U64>::Commit;
+        let metadata = Some(U64::new(12345));
+        let commit_op = Keyless::<U64>::Commit(metadata.clone());
 
         let encoded = commit_op.encode();
-        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded.len(), 1 + metadata.encode_size());
 
         let decoded = Keyless::<U64>::decode(encoded).unwrap();
-        assert_eq!(commit_op, decoded);
-        assert_eq!(format!("{commit_op}"), "[commit]");
+        let Keyless::Commit(metadata_decoded) = decoded else {
+            panic!("expected commit operation");
+        };
+        assert_eq!(metadata, metadata_decoded);
     }
 
     #[test]
@@ -484,25 +513,5 @@ mod tests {
             decoded.unwrap_err(),
             CodecError::InvalidEnum(0xFF)
         ));
-    }
-
-    #[test]
-    fn test_keyless_commit_padding() {
-        // Test that commit operation has proper zero padding
-        let commit_op = Keyless::<U64>::Commit;
-        let encoded = commit_op.encode();
-
-        // Check that bytes after context byte are all zero
-        for i in 1..encoded.len() {
-            assert_eq!(encoded[i], 0, "Padding byte at position {i} should be 0");
-        }
-
-        // Test non-zero padding detection
-        let mut invalid = commit_op.encode();
-        if invalid.len() > 2 {
-            invalid[2] = 0xFF; // Corrupt padding
-            let decoded = Keyless::<U64>::decode(invalid.as_ref());
-            assert!(matches!(decoded.unwrap_err(), CodecError::Invalid(_, _)));
-        }
     }
 }

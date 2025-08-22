@@ -56,6 +56,7 @@ fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
         let mut db = Store::<_, _, _, EightCap>::init(ctx, store_cfg)
             .await
             .unwrap();
+        let metadata = Sha256::fill(0);
 
         // Insert a random value for every possible element into the db.
         let mut rng = StdRng::seed_from_u64(42);
@@ -75,10 +76,10 @@ fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
             let v = hash(&rng.next_u32().to_be_bytes());
             db.update(rand_key, v).await.unwrap();
             if rng.next_u32() % COMMIT_FREQUENCY == 0 {
-                db.commit().await.unwrap();
+                db.commit(Some(metadata)).await.unwrap();
             }
         }
-        db.commit().await.unwrap();
+        db.commit(Some(metadata)).await.unwrap();
         db.close().await.unwrap();
     });
 }
