@@ -1,5 +1,10 @@
 //! Disseminate data over a wide-area network.
 
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/rustdoc_logo.png",
+    html_favicon_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/favicon.ico"
+)]
+
 use commonware_codec::Codec;
 use futures::channel::oneshot;
 use std::future::Future;

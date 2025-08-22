@@ -43,4 +43,9 @@
 //!
 //! Destroy all resources associated with a given deployment.
 
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/rustdoc_logo.png",
+    html_favicon_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/favicon.ico"
+)]
+
 pub mod ec2;

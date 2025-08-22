@@ -5,6 +5,11 @@
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/rustdoc_logo.png",
+    html_favicon_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/favicon.ico"
+)]
+
 use commonware_codec::{Encode, ReadExt};
 use commonware_utils::Array;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};

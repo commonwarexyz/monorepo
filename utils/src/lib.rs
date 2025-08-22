@@ -1,5 +1,10 @@
 //! Leverage common functionality across multiple primitives.
 
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/rustdoc_logo.png",
+    html_favicon_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/favicon.ico"
+)]
+
 use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
 use std::time::Duration;

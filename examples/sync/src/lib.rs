@@ -5,6 +5,11 @@
 //!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/rustdoc_logo.png",
+    html_favicon_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/favicon.ico"
+)]
+
 pub mod error;
 pub use error::Error;
 pub mod databases;

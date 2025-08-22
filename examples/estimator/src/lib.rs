@@ -1,5 +1,10 @@
 //! Simulate mechanism performance under realistic network conditions.
 
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/rustdoc_logo.png",
+    html_favicon_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/favicon.ico"
+)]
+
 use commonware_cryptography::{
     ed25519::{self, PublicKey},
     PrivateKeyExt, Signer,
