@@ -1,4 +1,4 @@
-//! Any database types and helpers for the sync example.
+//! Fixed-size Any database types and helpers for the sync example.
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
@@ -11,10 +11,10 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU64};
 use std::future::Future;
 
-/// Database type alias.
+/// Fixed-size Any database type alias.
 pub type Database<E> = fixed::Any<E, Key, Value, Hasher, Translator>;
 
-/// Operation type alias.
+/// Fixed operation type alias.
 pub type Operation = operation::Fixed<Key, Value>;
 
 /// Create a database configuration for use in tests.
@@ -114,7 +114,7 @@ where
     }
 
     fn name() -> &'static str {
-        "any"
+        "fixed"
     }
 }
 
@@ -124,11 +124,11 @@ mod tests {
     use crate::databases::Syncable;
     use commonware_runtime::deterministic;
 
-    type AnyDb = Database<deterministic::Context>;
+    type FixedDb = Database<deterministic::Context>;
 
     #[test]
     fn test_create_test_operations() {
-        let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
+        let ops = <FixedDb as Syncable>::create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
         if let Operation::CommitFloor(loc) = &ops[5] {
@@ -141,12 +141,12 @@ mod tests {
     #[test]
     fn test_deterministic_operations() {
         // Operations should be deterministic based on seed
-        let ops1 = <AnyDb as Syncable>::create_test_operations(3, 12345);
-        let ops2 = <AnyDb as Syncable>::create_test_operations(3, 12345);
+        let ops1 = <FixedDb as Syncable>::create_test_operations(3, 12345);
+        let ops2 = <FixedDb as Syncable>::create_test_operations(3, 12345);
         assert_eq!(ops1, ops2);
 
         // Different seeds should produce different operations
-        let ops3 = <AnyDb as Syncable>::create_test_operations(3, 54321);
+        let ops3 = <FixedDb as Syncable>::create_test_operations(3, 54321);
         assert_ne!(ops1, ops3);
     }
 }
