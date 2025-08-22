@@ -310,6 +310,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let loc = self.size;
         let section = self.current_section();
         let operation = Operation::Commit(metadata);
+        self.last_commit = Some(loc);
 
         // We must update & sync the operations log before writing the commit operation to locations
         // to ensure all committed locations will reference valid data in the event of a failure.
@@ -540,6 +541,10 @@ mod test {
             let metadata = Some(vec![3u8; 10]);
             db.commit(metadata.clone()).await.unwrap();
             assert_eq!(db.size(), 1); // floor op added
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((0, metadata.clone()))
+            );
             assert_eq!(db.get(0).await.unwrap(), metadata); // the commit op
             let root = db.root(&mut hasher);
             let db = open_db(context.clone()).await;
@@ -570,7 +575,7 @@ mod test {
             // Make sure closing/reopening gets us back to the same state.
             db.commit(None).await.unwrap();
             assert_eq!(db.size(), 3); // 2 appends, 1 commit
-            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((2, None)));
             assert_eq!(db.get(2).await.unwrap(), None); // the commit op
             let root = db.root(&mut hasher);
             db.close().await.unwrap();

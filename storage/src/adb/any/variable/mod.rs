@@ -374,6 +374,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(None)
     }
 
+    /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
+    /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
+    pub async fn keyless_get(&self, loc: u64) -> Result<Option<V>, Error> {
+        if loc < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        let offset = self.locations.read(loc).await?.into();
+        let section = loc / self.log_items_per_section;
+        let op = self.log.get(section, offset).await?.expect("invalid loc");
+
+        Ok(op.into_value())
+    }
+
     /// Returns the location of the operation that set the key's current value, or None if the key isn't currently assigned any value.
     pub async fn get_loc(&self, key: &K) -> Result<Option<u64>, Error> {
         let iter = self.snapshot.get(key);
@@ -609,7 +623,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Get the metadata associated with the last commit, or None if no commit has been made.
-    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
         let mut last_commit = self.op_count() - self.uncommitted_ops;
         if last_commit == 0 {
             return Ok(None);
@@ -621,7 +635,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(metadata)
+        Ok(Some((last_commit, metadata)))
     }
 
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
@@ -646,7 +660,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
-        let Some(key) = op.to_key() else {
+        let Some(key) = op.key() else {
             // `op` is not a key-related operation, so it is not active.
             return Ok(None);
         };
@@ -952,7 +966,7 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
 
             // Make sure we can still get the metadata.
-            assert_eq!(db.get_metadata().await.unwrap(), metadata);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((8, metadata)));
 
             // Re-activate the keys by updating them.
             db.update(d1, v1.clone()).await.unwrap();
@@ -964,12 +978,14 @@ pub(super) mod test {
 
             // Confirm close/reopen gets us back to the same state.
             db.commit(None).await.unwrap();
+            assert_eq!(db.op_count(), 19);
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
-            let mut db = open_db(context).await;
+            let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.snapshot.keys(), 2);
-            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert_eq!(db.op_count(), 19);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((18, None)));
 
             // Commit will raise the inactivity floor, which won't affect state but will affect the
             // root.

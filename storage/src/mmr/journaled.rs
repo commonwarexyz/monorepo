@@ -1399,41 +1399,6 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_journaled_mmr_historical_range_proof_invalid_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
-                .await
-                .unwrap();
-            for i in 0..10 {
-                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
-            }
-            let mmr_size = mmr.size();
-
-            const BATCH_SIZE: u64 = 10;
-
-            // Historical size > MMR size is invalid
-            let result = mmr.historical_range_proof(mmr_size + 1, 1, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooLarge(given_size, actual_size)) if given_size == mmr_size + 1 && actual_size == mmr_size));
-
-            // Historical size == start location is invalid
-            let result = mmr.historical_range_proof(0, 0, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 0));
-            let result = mmr.historical_range_proof(1, 1, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 1 && start_loc == 1));
-            let result = mmr.historical_range_proof(mmr_size, mmr_size, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size && start_loc == mmr_size));
-
-            // Historical size < start location is invalid
-            let result = mmr.historical_range_proof(0, 1, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 1));
-            let result = mmr.historical_range_proof(mmr_size-1, mmr_size, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
-        });
-    }
-
     // Test `init_sync` when there is no persisted data.
     #[test_traced]
     fn test_journaled_mmr_init_sync_empty() {

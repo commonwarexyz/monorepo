@@ -611,10 +611,7 @@ mod tests {
             assert_eq!(synced_db.root(&mut hasher), root);
 
             // Verify the synced database doesn't have any operations beyond the sync range.
-            assert_eq!(
-                synced_db.get(final_op.to_key().unwrap()).await.unwrap(),
-                None
-            );
+            assert_eq!(synced_db.get(final_op.key().unwrap()).await.unwrap(), None);
 
             synced_db.destroy().await.unwrap();
         });
@@ -701,15 +698,15 @@ mod tests {
             }
 
             for target_op in &original_ops {
-                if let Some(key) = target_op.to_key() {
+                if let Some(key) = target_op.key() {
                     let target_value = target_db.read().await.get(key).await.unwrap();
                     let synced_value = sync_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);
                 }
             }
             // Verify the last operation is present
-            let last_key = last_op[0].to_key().unwrap();
-            let last_value = *last_op[0].to_value().unwrap();
+            let last_key = last_op[0].key().unwrap();
+            let last_value = *last_op[0].value().unwrap();
             assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
 
             sync_db.destroy().await.unwrap();
@@ -795,7 +792,7 @@ mod tests {
 
             // Verify state matches for sample operations
             for target_op in &target_ops {
-                if let Some(key) = target_op.to_key() {
+                if let Some(key) = target_op.key() {
                     let target_value = target_db.get(key).await.unwrap();
                     let synced_value = sync_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);

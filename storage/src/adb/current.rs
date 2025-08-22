@@ -262,6 +262,13 @@ impl<
         self.any.get(key).await
     }
 
+    /// Get the value of the operation with location `loc` in the db. Returns
+    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// otherwise assumed valid.
+    pub async fn keyless_get(&self, loc: u64) -> Result<Option<V>, Error> {
+        self.any.keyless_get(loc).await
+    }
+
     /// Get the level of the base MMR into which we are grafting.
     ///
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
@@ -1048,9 +1055,9 @@ pub mod test {
                 }
                 // Found an active operation! Create a proof for its active current key/value.
                 let op = db.any.log.read(i).await.unwrap();
-                let key = op.to_key().unwrap();
+                let key = op.key().unwrap();
                 let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
-                assert_eq!(info.value, *op.to_value().unwrap());
+                assert_eq!(info.value, *op.value().unwrap());
                 // Proof should validate against the current value and correct root.
                 assert!(CurrentTest::verify_key_value_proof(
                     hasher.inner(),
