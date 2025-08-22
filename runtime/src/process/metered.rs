@@ -9,13 +9,13 @@ const TICK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Process metrics collector.
 pub struct Metrics {
-    /// Process ID.
-    pub pid: u32,
     /// Resident set size in bytes.
     pub rss: Gauge,
     /// Virtual memory size in bytes.
     pub virtual_memory: Gauge,
 
+    /// Process ID.
+    pid: sysinfo::Pid,
     /// System information handle.
     system: System,
 }
@@ -24,7 +24,7 @@ impl Metrics {
     /// Initialize process metrics and register them with the given registry.
     pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
-            pid: std::process::id(),
+            pid: sysinfo::Pid::from_u32(std::process::id()),
             rss: Gauge::default(),
             virtual_memory: Gauge::default(),
 
@@ -49,15 +49,14 @@ impl Metrics {
     /// Update all process metrics.
     fn update(&mut self) {
         // Refresh process information
-        let pid = sysinfo::Pid::from_u32(self.pid);
         self.system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&[pid]),
+            ProcessesToUpdate::Some(&[self.pid]),
             false,
             ProcessRefreshKind::nothing().with_memory(),
         );
 
         // If the process exists, update the metrics
-        if let Some(process) = self.system.process(pid) {
+        if let Some(process) = self.system.process(self.pid) {
             self.rss.set(process.memory() as i64);
             self.virtual_memory.set(process.virtual_memory() as i64);
         }
@@ -90,9 +89,6 @@ mod tests {
 
         // Update metrics
         metrics.update();
-
-        // Ensure that the process ID is set
-        assert_ne!(metrics.pid, 0);
 
         // Check that RSS is reasonable (> 1MB for a running process)
         let rss = metrics.rss.get();
