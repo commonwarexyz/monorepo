@@ -32,6 +32,7 @@ libc = { workspace = true }
 
 [features]
 default = []
+iouring = [ "iouring-storage", "iouring-network" ]
 iouring-storage = ["io-uring"]
 iouring-network = ["io-uring"]
 
