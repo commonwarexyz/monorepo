@@ -334,7 +334,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Get the metadata associated with the last commit, or None if no commit has been made or
     /// there is no metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
         let Some(loc) = self.last_commit else {
             return Ok(None);
         };
@@ -347,7 +347,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             return Ok(None);
         };
 
-        Ok(metadata)
+        Ok(Some((loc, metadata)))
     }
 
     /// Return the root of the db.
@@ -544,7 +544,7 @@ mod test {
             let root = db.root(&mut hasher);
             let db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.get_metadata().await.unwrap(), metadata);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((0, metadata)));
 
             db.destroy().await.unwrap();
         });
