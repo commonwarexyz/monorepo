@@ -163,8 +163,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         &mut self.context.clone(),
                         public_key.clone(),
                         self.get_next_socket(),
-                        None,
-                        None,
+                        usize::MAX,
+                        usize::MAX,
                         self.max_size,
                     );
                     self.peers.insert(public_key.clone(), peer);
@@ -313,32 +313,21 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 (receiver.ingress_bps, receiver.ingress_available_at)
             };
 
-            let effective_bps = match (sender_egress_bps, receiver_ingress_bps) {
-                (Some(egress), Some(ingress)) => Some(egress.min(ingress)),
-                (Some(egress), None) => Some(egress),
-                (None, Some(ingress)) => Some(ingress),
-                (None, None) => None,
-            };
+            let effective_bps = sender_egress_bps.min(receiver_ingress_bps);
 
             // Calculate transmission timing
-            let (send_complete_at, mut receive_complete_at) = if let Some(bps) = effective_bps {
-                let tx_duration =
-                    Duration::from_millis((message.len() as f64 / bps as f64 * 1000.0) as u64);
+            let tx_duration = Duration::from_millis(
+                (message.len() as f64 / effective_bps as f64 * 1000.0) as u64,
+            );
 
-                // Sender can start when free, receiver must be free when first bit arrives
-                let sender_ready_at = sender_egress_available_at.max(now);
-                let receiver_ready_at = receiver_ingress_available_at
-                    .checked_sub(latency)
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
+            // Sender can start when free, receiver must be free when first bit arrives
+            let sender_ready_at = sender_egress_available_at.max(now);
+            let receiver_ready_at = receiver_ingress_available_at
+                .checked_sub(latency)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
 
-                let send_complete_at = sender_ready_at.max(receiver_ready_at) + tx_duration;
-                let receive_complete_at = send_complete_at + latency;
-
-                (send_complete_at, receive_complete_at)
-            } else {
-                // No bandwidth limits
-                (now, now + latency)
-            };
+            let send_complete_at = sender_ready_at.max(receiver_ready_at) + tx_duration;
+            let mut receive_complete_at = send_complete_at + latency;
 
             // Apply ordering constraint: messages must arrive after previous message on this link
             // (we add a 1 microsecond epsilon to ensure strict ordering)
@@ -348,14 +337,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             // Update the link's last arrival time
             link.last_arrival_at = receive_complete_at;
 
-            // Update availability times for peers with bandwidth limits
-            if sender_egress_bps.is_some() {
-                self.peers.get_mut(&origin).unwrap().egress_available_at = send_complete_at;
-            }
-
-            if receiver_ingress_bps.is_some() {
-                self.peers.get_mut(&recipient).unwrap().ingress_available_at = receive_complete_at;
-            }
+            // Update availability times
+            self.peers.get_mut(&origin).unwrap().egress_available_at = send_complete_at;
+            self.peers.get_mut(&recipient).unwrap().ingress_available_at = receive_complete_at;
 
             let should_deliver = self.context.gen_bool(link.success_rate);
             trace!(
@@ -572,8 +556,8 @@ struct Peer<P: PublicKey> {
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
 
     // Bandwidth configuration in bytes per second
-    egress_bps: Option<usize>,
-    ingress_bps: Option<usize>,
+    egress_bps: usize,
+    ingress_bps: usize,
 
     // When this peer can next send/receive
     egress_available_at: SystemTime,
@@ -589,8 +573,8 @@ impl<P: PublicKey> Peer<P> {
         context: &mut E,
         public_key: P,
         socket: SocketAddr,
-        egress_bps: Option<usize>,
-        ingress_bps: Option<usize>,
+        egress_bps: usize,
+        ingress_bps: usize,
         max_size: usize,
     ) -> Self {
         // The control is used to register channels.
@@ -730,20 +714,12 @@ impl<P: PublicKey> Peer<P> {
 
     /// Set bandwidth limits for the peer.
     ///
-    /// Bandwidth is specified for the peer's egress (upload) and ingress (download)
-    /// rates in bytes per second. `usize::MAX` is converted to `None` internally
-    /// for unlimited bandwidth.
+    /// Bandwidth is specified for the peer's egress (upload) and ingress
+    /// (download) rates in bytes per second. Use `usize::MAX` for effectively
+    /// unlimited bandwidth.
     fn set_bandwidth(&mut self, egress_bps: usize, ingress_bps: usize) {
-        self.egress_bps = if egress_bps == usize::MAX {
-            None
-        } else {
-            Some(egress_bps)
-        };
-        self.ingress_bps = if ingress_bps == usize::MAX {
-            None
-        } else {
-            Some(ingress_bps)
-        };
+        self.egress_bps = egress_bps;
+        self.ingress_bps = ingress_bps;
     }
 }
 
