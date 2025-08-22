@@ -63,3 +63,4 @@ name = "futures"
 path = "fuzz_targets/futures.rs"
 test = false
 doc = false
+bench = false
