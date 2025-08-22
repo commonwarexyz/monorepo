@@ -1,9 +1,9 @@
-//! System metrics collection for process monitoring.
+//! Process metrics collection.
 
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-/// System metrics collector.
+/// Process metrics collector.
 pub struct Metrics {
     /// Resident set size in bytes.
     pub process_rss_bytes: Gauge,
@@ -15,7 +15,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Initialize system metrics and register them with the given registry.
+    /// Initialize process metrics and register them with the given registry.
     pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
             process_rss_bytes: Gauge::default(),
@@ -39,7 +39,7 @@ impl Metrics {
         metrics
     }
 
-    /// Update all system metrics.
+    /// Update all process metrics.
     pub fn update(&mut self) {
         // Refresh process information
         let pid = sysinfo::Pid::from(std::process::id() as usize);
@@ -63,7 +63,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_system_metrics_init() {
+    fn test_process_metrics_init() {
         let mut registry = Registry::default();
         let mut metrics = Metrics::init(&mut registry);
 

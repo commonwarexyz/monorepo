@@ -10,10 +10,9 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    network::metered::Network as MeteredNetwork, signal::Signal,
-    storage::metered::Storage as MeteredStorage, system::metered::Metrics as SystemMetrics,
-    telemetry::metrics::task::Label, utils::signal::Stopper, Clock, Error, Handle, SinkOf,
-    StreamOf, METRICS_PREFIX,
+    network::metered::Network as MeteredNetwork, process::metered::Metrics as ProcessMetrics,
+    signal::Signal, storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
+    utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -306,13 +305,13 @@ impl crate::Runner for Runner {
             }
         }
 
-        // Collect system metrics
-        let mut system = SystemMetrics::init(runtime_registry);
-        system.update();
+        // Collect process metrics
+        let mut process = ProcessMetrics::init(runtime_registry);
+        process.update();
         runtime.spawn(async move {
             loop {
                 tokio::time::sleep(TICK_INTERVAL).await;
-                system.update();
+                process.update();
             }
         });
 

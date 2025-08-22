@@ -39,8 +39,8 @@ cfg_if::cfg_if! {
     }
 }
 mod network;
+mod process;
 mod storage;
-mod system;
 pub mod telemetry;
 mod utils;
 pub use utils::*;
@@ -1674,7 +1674,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_rss_metric() {
+    fn test_tokio_process_rss_metric() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             // Give RSS updater time to run
