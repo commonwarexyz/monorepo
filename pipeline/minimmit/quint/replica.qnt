@@ -670,19 +670,22 @@ module replica {
             nondet view = VIEWS.oneOf()
             nondet block_hash = AllBlocks.oneOf()
             nondet sig = oneOf(FAULTY)
-            nondet kind = oneOf(Set(NotarizationKind, NullificationKind))
+            nondet kind = oneOf(Set(NotarizeKind, NullifyKind))
             val votes = sent_vote.filter(v => and {
                 v.view == view,
                 v.block_hash == block_hash,
                 v.kind == kind
             })
             nondet agg_sig = votes.map(v => v.sig).union(FAULTY).powerset().oneOf()
+            val cert_kind = if (kind == NullifyKind) {
+                NullificationKind
+            } else if (votes.size()> M) FinalizationKind else NotarizationKind
             val cert = {
                 view: view,
                 block_hash: block_hash,
                 signatures: agg_sig,
                 ghost_sender: sender,
-                kind: kind
+                kind: cert_kind
             }
             sent_certificate' = sent_certificate.union(Set(cert))
         },
