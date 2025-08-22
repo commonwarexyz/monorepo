@@ -479,7 +479,10 @@ mod tests {
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(got_db.oldest_retained_loc, target_oldest_retained_loc);
             assert_eq!(got_db.root(&mut hasher), target_root);
-            assert_eq!(got_db.get_metadata().await.unwrap(), Some(Sha256::fill(1)));
+            assert_eq!(
+                got_db.get_metadata().await.unwrap(),
+                Some((0, Some(Sha256::fill(1))))
+            );
 
             got_db.destroy().await.unwrap();
             let target_db = match Arc::try_unwrap(target_db) {

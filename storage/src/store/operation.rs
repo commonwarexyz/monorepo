@@ -113,7 +113,7 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
 
     /// If this is a [Fixed::Update] or [Fixed::Delete] operation, returns the key.
     /// Otherwise, returns None.
-    pub fn to_key(&self) -> Option<&K> {
+    pub fn key(&self) -> Option<&K> {
         match self {
             Fixed::Delete(key) => Some(key),
             Fixed::Update(key, _) => Some(key),
@@ -121,9 +121,19 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
         }
     }
 
-    ///If this is a [Fixed::Update] operation, returns the value.
+    /// If this is a [Fixed::Update] operation, returns the value.
     /// Otherwise, returns None.
-    pub fn to_value(&self) -> Option<&V> {
+    pub fn value(&self) -> Option<&V> {
+        match self {
+            Fixed::Delete(_) => None,
+            Fixed::Update(_, value) => Some(value),
+            Fixed::CommitFloor(_) => None,
+        }
+    }
+
+    /// If this is a [Fixed::Update] operation, returns the value.
+    /// Otherwise, returns None.
+    pub fn into_value(self) -> Option<V> {
         match self {
             Fixed::Delete(_) => None,
             Fixed::Update(_, value) => Some(value),
@@ -134,7 +144,7 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
 
 impl<K: Array, V: Codec> Variable<K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
-    pub fn to_key(&self) -> Option<&K> {
+    pub fn key(&self) -> Option<&K> {
         match self {
             Variable::Set(key, _) => Some(key),
             Variable::Commit(_) => None,
@@ -145,13 +155,24 @@ impl<K: Array, V: Codec> Variable<K, V> {
     }
 
     /// If this is an operation involving a value, returns the value. Otherwise, returns None.
-    pub fn to_value(&self) -> Option<&V> {
+    pub fn value(&self) -> Option<&V> {
         match self {
             Variable::Set(_, value) => Some(value),
             Variable::Commit(value) => value.as_ref(),
             Variable::Delete(_) => None,
             Variable::Update(_, value) => Some(value),
             Variable::CommitFloor(value, _) => value.as_ref(),
+        }
+    }
+
+    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
+    pub fn into_value(self) -> Option<V> {
+        match self {
+            Variable::Set(_, value) => Some(value),
+            Variable::Commit(value) => value,
+            Variable::Delete(_) => None,
+            Variable::Update(_, value) => Some(value),
+            Variable::CommitFloor(value, _) => value,
         }
     }
 }
@@ -374,13 +395,13 @@ mod tests {
         let value = U64::new(56789);
 
         let update_op = Fixed::Update(key.clone(), value.clone());
-        assert_eq!(&key, update_op.to_key().unwrap());
+        assert_eq!(&key, update_op.key().unwrap());
 
         let delete_op = Fixed::<U64, U64>::Delete(key.clone());
-        assert_eq!(&key, delete_op.to_key().unwrap());
+        assert_eq!(&key, delete_op.key().unwrap());
 
         let commit_op = Fixed::<U64, U64>::CommitFloor(42);
-        assert_eq!(None, commit_op.to_key());
+        assert_eq!(None, commit_op.key());
     }
 
     #[test]
@@ -389,13 +410,13 @@ mod tests {
         let value = U64::new(56789);
 
         let update_op = Fixed::Update(key.clone(), value.clone());
-        assert_eq!(&value, update_op.to_value().unwrap());
+        assert_eq!(&value, update_op.value().unwrap());
 
         let delete_op = Fixed::<U64, U64>::Delete(key.clone());
-        assert_eq!(None, delete_op.to_value());
+        assert_eq!(None, delete_op.value());
 
         let commit_op = Fixed::<U64, U64>::CommitFloor(42);
-        assert_eq!(None, commit_op.to_value());
+        assert_eq!(None, commit_op.value());
     }
 
     #[test]
@@ -404,24 +425,24 @@ mod tests {
         let value = U64::new(56789);
 
         let update_op = Fixed::Update(key.clone(), value.clone());
-        assert_eq!(&key, update_op.to_key().unwrap());
-        assert_eq!(&value, update_op.to_value().unwrap());
+        assert_eq!(&key, update_op.key().unwrap());
+        assert_eq!(&value, update_op.value().unwrap());
 
         let from = Fixed::<U64, U64>::decode(update_op.encode()).unwrap();
-        assert_eq!(&key, from.to_key().unwrap());
-        assert_eq!(&value, from.to_value().unwrap());
+        assert_eq!(&key, from.key().unwrap());
+        assert_eq!(&value, from.value().unwrap());
         assert_eq!(update_op, from);
 
         let key2 = U64::new(42);
         let delete_op = Fixed::<U64, U64>::Delete(key2.clone());
         let from = Fixed::<U64, U64>::decode(delete_op.encode()).unwrap();
-        assert_eq!(&key2, from.to_key().unwrap());
-        assert_eq!(None, from.to_value());
+        assert_eq!(&key2, from.key().unwrap());
+        assert_eq!(None, from.value());
         assert_eq!(delete_op, from);
 
         let commit_op = Fixed::<U64, U64>::CommitFloor(42);
         let from = Fixed::<U64, U64>::decode(commit_op.encode()).unwrap();
-        assert_eq!(None, from.to_value());
+        assert_eq!(None, from.value());
         assert!(matches!(from, Fixed::CommitFloor(42)));
         assert_eq!(commit_op, from);
 

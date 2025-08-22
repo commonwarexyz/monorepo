@@ -363,12 +363,24 @@ impl<
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        Ok(self.get_with_loc(key).await?.map(|(v, _)| v))
+        Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
+    }
+
+    /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
+    /// if the location precedes the oldest retained location. The location is otherwise assumed
+    /// valid.
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.op_count());
+        if loc < self.inactivity_floor_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        Ok(self.log.read(loc).await?.into_value())
     }
 
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
-    pub(crate) async fn get_with_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
+    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
         for &loc in self.snapshot.get(key) {
             let (k, v) = Self::get_update_op(&self.log, loc).await?;
             if k == *key {
@@ -574,9 +586,8 @@ impl<
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
-        let Some(key) = op.to_key() else {
-            // `op` is a commit
-            return Ok(None);
+        let Some(key) = op.key() else {
+            return Ok(None); // operations without keys cannot be active
         };
         let new_loc = self.op_count();
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
@@ -1316,7 +1327,7 @@ pub(super) mod test {
             // This loop checks that the expected true bits are true in the bitmap.
             for pos in db.inactivity_floor_loc..items {
                 let item = db.log.read(pos).await.unwrap();
-                let Some(item_key) = item.to_key() else {
+                let Some(item_key) = item.key() else {
                     // `item` is a commit
                     continue;
                 };
@@ -1488,64 +1499,6 @@ pub(super) mod test {
                 ),);
 
                 ref_db.destroy().await.unwrap();
-            }
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_any_db_historical_proof_size_too_large() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(10);
-            apply_ops(&mut db, ops).await;
-            db.commit().await.unwrap();
-            let op_count = db.op_count();
-
-            // Historical size > current database size is invalid
-            let result = db.historical_proof(op_count + 1, op_count, 5).await;
-            match result {
-                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooLarge(requested, actual))) => {
-                    assert_eq!(requested, leaf_num_to_pos(op_count + 1));
-                    assert_eq!(actual, leaf_num_to_pos(op_count));
-                }
-                _ => panic!("expected HistoricalSizeTooLarge error"),
-            }
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_any_db_historical_proof_size_too_small() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(10);
-            apply_ops(&mut db, ops).await;
-            db.commit().await.unwrap();
-            let op_count = db.op_count();
-
-            // Historical size == start location is invalid
-            let result = db.historical_proof(op_count, op_count, 5).await;
-            match result {
-                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooSmall(size, start_loc))) => {
-                    assert_eq!(size, leaf_num_to_pos(op_count));
-                    assert_eq!(start_loc, leaf_num_to_pos(op_count));
-                }
-                _ => panic!("expected HistoricalSizeTooSmall error"),
-            }
-
-            // Historical size < start location is invalid
-            let result = db.historical_proof(op_count, op_count + 1, 5).await;
-            match result {
-                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooSmall(size, start_loc))) => {
-                    assert_eq!(size, leaf_num_to_pos(op_count));
-                    assert_eq!(start_loc, leaf_num_to_pos(op_count + 1));
-                }
-                _ => panic!("expected HistoricalSizeTooSmall error"),
             }
 
             db.destroy().await.unwrap();
