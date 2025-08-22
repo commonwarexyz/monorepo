@@ -5,7 +5,7 @@ use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// The interval at which to update process metrics.
-const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
+const TICK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Process metrics collector.
 pub struct Metrics {
@@ -74,7 +74,7 @@ impl Metrics {
     {
         loop {
             self.update();
-            sleep_fn(UPDATE_INTERVAL).await;
+            sleep_fn(TICK_INTERVAL).await;
         }
     }
 }
