@@ -328,8 +328,8 @@ where
         self.prune_inactive().await
     }
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made or
-    /// there is no metadata associated with the last commit.
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
     pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
         let mut last_commit = self.op_count() - self.uncommitted_ops;
         if last_commit == 0 {

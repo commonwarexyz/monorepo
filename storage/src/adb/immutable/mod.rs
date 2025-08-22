@@ -615,8 +615,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.sync().await
     }
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made or if
-    /// there is no metadata associated with the last commit.
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
     pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
