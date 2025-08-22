@@ -4,6 +4,7 @@ use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
+/// The interval at which to update process metrics.
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Process metrics collector.
