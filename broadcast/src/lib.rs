@@ -1,7 +1,7 @@
 //! Disseminate data over a wide-area network.
 
 #![doc(
-    html_logo_url = "https://commonware.xyz/rustdoc_logo.svg",
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
