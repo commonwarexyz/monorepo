@@ -101,6 +101,9 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     hasher: Standard<H>,
+
+    /// The location of the last commit, if any.
+    last_commit: Option<u64>,
 }
 
 impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
@@ -174,7 +177,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             let section = op_index / cfg.log_items_per_section.get();
             let op = log.get(section, offset).await?.expect("no operation found");
             match op {
-                Operation::Commit => {
+                Operation::Commit(_) => {
                     last_commit_loc = Some(op_index);
                     break;
                 }
@@ -219,6 +222,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations,
             log_items_per_section: cfg.log_items_per_section.get(),
             hasher,
+            last_commit: last_commit_loc,
         })
     }
 
@@ -231,15 +235,15 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let Some(op) = self.log.get(section, offset).await? else {
             panic!("didn't find operation at location {loc} and offset {offset}");
         };
-        let Operation::Append(value) = op else {
-            return Ok(None);
-        };
-
-        Ok(Some(value))
+        match op {
+            Operation::Append(v) => Ok(Some(v)),
+            Operation::Commit(v) => Ok(v),
+        }
     }
 
-    /// Get the number of appends + commits that have been applied to the db.
-    pub fn size(&self) -> u64 {
+    /// Get the number of operations (appends + commits) that have been applied to the db since
+    /// inception.
+    pub fn op_count(&self) -> u64 {
         self.size
     }
 
@@ -302,10 +306,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable.
-    pub async fn commit(&mut self) -> Result<u64, Error> {
+    /// Caller can associate an arbitrary `metadata` value with the commit.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<u64, Error> {
         let loc = self.size;
         let section = self.current_section();
-        let operation = Operation::Commit;
+        let operation = Operation::Commit(metadata);
+        self.last_commit = Some(loc);
 
         // We must update & sync the operations log before writing the commit operation to locations
         // to ensure all committed locations will reference valid data in the event of a failure.
@@ -326,6 +332,24 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )?;
 
         Ok(loc)
+    }
+
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
+        let Some(loc) = self.last_commit else {
+            return Ok(None);
+        };
+        let offset = self.locations.read(loc).await?;
+        let section = loc / self.log_items_per_section;
+        let Some(op) = self.log.get(section, offset).await? else {
+            panic!("didn't find operation at location {loc} and offset {offset}");
+        };
+        let Operation::Commit(metadata) = op else {
+            return Ok(None);
+        };
+
+        Ok(Some((loc, metadata)))
     }
 
     /// Return the root of the db.
@@ -419,7 +443,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         sync_mmr: bool,
         sync_locations: bool,
     ) -> Result<(), Error> {
-        let operation = Operation::Commit;
+        let operation = Operation::Commit(None);
 
         // We must update & sync the operations log before writing the commit operation to locations
         // to ensure all committed locations will reference valid data in the event of a failure.
@@ -499,9 +523,10 @@ mod test {
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
-            assert_eq!(db.size(), 0);
+            assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc().await.unwrap(), None);
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let v1 = vec![1u8; 8];
@@ -510,14 +535,22 @@ mod test {
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.size(), 0);
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            db.commit().await.unwrap();
-            assert_eq!(db.size(), 1); // floor op added
+            let metadata = Some(vec![3u8; 10]);
+            db.commit(metadata.clone()).await.unwrap();
+            assert_eq!(db.op_count(), 1); // floor op added
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((0, metadata.clone()))
+            );
+            assert_eq!(db.get(0).await.unwrap(), metadata); // the commit op
             let root = db.root(&mut hasher);
             let db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((0, metadata)));
 
             db.destroy().await.unwrap();
         });
@@ -541,12 +574,14 @@ mod test {
             assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
 
             // Make sure closing/reopening gets us back to the same state.
-            db.commit().await.unwrap();
-            assert_eq!(db.size(), 3); // 2 appends, 1 commit
+            db.commit(None).await.unwrap();
+            assert_eq!(db.op_count(), 3); // 2 appends, 1 commit
+            assert_eq!(db.get_metadata().await.unwrap(), Some((2, None)));
+            assert_eq!(db.get(2).await.unwrap(), None); // the commit op
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.size(), 3);
+            assert_eq!(db.op_count(), 3);
             assert_eq!(db.root(&mut hasher), root);
 
             assert_eq!(db.get(loc1).await.unwrap().unwrap(), v1);
@@ -563,7 +598,7 @@ mod test {
             // Make sure commit operation remains after close/reopen.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
-            assert_eq!(db.size(), 3);
+            assert_eq!(db.op_count(), 3);
             assert_eq!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();
@@ -594,7 +629,7 @@ mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.append(v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Append even more values.
@@ -640,13 +675,13 @@ mod test {
                 let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
                 db.append(v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Make sure we can close/reopen and get back to the same state.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
-            assert_eq!(db.size(), 2 * ELEMENTS + 2);
+            assert_eq!(db.op_count(), 2 * ELEMENTS + 2);
             assert_eq!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();
@@ -668,7 +703,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Test proof generation for various ranges
@@ -692,7 +727,7 @@ mod test {
                 );
 
                 // Check that we got the expected number of operations
-                let expected_ops = std::cmp::min(max_ops, db.size() - start_loc);
+                let expected_ops = std::cmp::min(max_ops, db.op_count() - start_loc);
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
@@ -712,7 +747,7 @@ mod test {
                     } else if loc == ELEMENTS {
                         // Should be a Commit operation
                         assert!(
-                            matches!(op, Operation::Commit),
+                            matches!(op, Operation::Commit(_)),
                             "Expected Commit operation at location {loc}, got {op:?}",
                         );
                     }
@@ -753,7 +788,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             // Add more elements and commit again
             for i in ELEMENTS..ELEMENTS * 2 {
@@ -761,7 +796,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Prune the first 30 operations
@@ -785,7 +820,7 @@ mod test {
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.size(), 2 * ELEMENTS + 2);
+            assert_eq!(db.op_count(), 2 * ELEMENTS + 2);
             assert!(db.oldest_retained_loc().await.unwrap().unwrap() <= PRUNE_LOC);
 
             // Test that we can't get pruned values
@@ -824,7 +859,7 @@ mod test {
                 );
 
                 // Check that we got operations
-                let expected_ops = std::cmp::min(max_ops, db.size() - start_loc);
+                let expected_ops = std::cmp::min(max_ops, db.op_count() - start_loc);
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
@@ -848,13 +883,13 @@ mod test {
             );
 
             // Test edge case: prune everything except the last few operations
-            let almost_all = db.size() - 5;
+            let almost_all = db.op_count() - 5;
             db.prune(almost_all).await.unwrap();
 
             let final_oldest = db.oldest_retained_loc().await.unwrap().unwrap();
 
             // Should still be able to prove the remaining operations
-            if final_oldest < db.size() {
+            if final_oldest < db.op_count() {
                 let (final_proof, final_ops) = db.proof(final_oldest, 10).await.unwrap();
                 assert!(
                     verify_proof(&mut hasher, &final_proof, final_oldest, &final_ops, &root),

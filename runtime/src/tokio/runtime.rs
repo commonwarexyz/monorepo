@@ -10,8 +10,8 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    network::metered::Network as MeteredNetwork, signal::Signal,
-    storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
+    network::metered::Network as MeteredNetwork, process::metered::Metrics as MeteredProcess,
+    signal::Signal, storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
     utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -253,6 +253,14 @@ impl crate::Runner for Runner {
             .build()
             .expect("failed to create Tokio runtime");
 
+        // Collect process metrics.
+        //
+        // We prefer to collect process metrics outside of `Context` because
+        // we are using `runtime_registry` rather than the one provided by `Context`.
+        let process = MeteredProcess::init(runtime_registry);
+        runtime.spawn(process.collect(tokio::time::sleep));
+
+        // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_storage");
@@ -274,6 +282,7 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");

@@ -442,12 +442,10 @@ impl<D: Digest> Proof<D> {
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<D>, Error> {
-        if size > mmr.size() {
-            return Err(Error::HistoricalSizeTooLarge(size, mmr.size()));
-        }
-        if size <= start_element_pos {
-            return Err(Error::HistoricalSizeTooSmall(size, start_element_pos));
-        }
+        assert!(start_element_pos <= end_element_pos);
+        assert!(start_element_pos < mmr.size());
+        assert!(end_element_pos < mmr.size());
+
         let mut digests: Vec<D> = Vec::new();
         let positions =
             Self::nodes_required_for_range_proof(size, start_element_pos, end_element_pos);
@@ -1304,40 +1302,6 @@ mod tests {
                 0,
                 &single_root
             ));
-        });
-    }
-
-    #[test_traced]
-    fn test_historical_range_proof_invalid_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut mmr = Mmr::new();
-            let mut hasher: Standard<Sha256> = Standard::new();
-            for i in 0..10 {
-                mmr.add(&mut hasher, &test_digest(i));
-            }
-            let mmr_size = mmr.size();
-
-            const BATCH_SIZE: u64 = 10;
-
-            // Historical size > MMR size is invalid
-            let result = Proof::historical_range_proof(&mmr, mmr_size+1, 0, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooLarge(given_size, actual_size)) if given_size == mmr_size+1 && actual_size == mmr_size));
-
-            // Historical size == start location is invalid
-            let result = Proof::historical_range_proof(&mmr, 0, 0, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 0));
-            let result = Proof::historical_range_proof(&mmr, 1, 1, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 1 && start_loc == 1));
-            let result = Proof::historical_range_proof(&mmr, mmr_size, mmr_size, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size && start_loc == mmr_size));
-
-
-            // Historical size < start location is invalid
-            let result = Proof::historical_range_proof(&mmr, 0, 1, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 1));
-            let result = Proof::historical_range_proof(&mmr, mmr_size-1, mmr_size, BATCH_SIZE).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
         });
     }
 

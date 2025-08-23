@@ -47,7 +47,7 @@ fn generate_random_bytes(rng: &mut StdRng, min_len: usize, max_len: usize) -> Ve
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.seed);
 
-    let mut lthash = LtHash::new();
+    let mut lthash = LtHash::default();
 
     lthash.add(&input.initial_value);
     let initial_checksum = lthash.checksum();
