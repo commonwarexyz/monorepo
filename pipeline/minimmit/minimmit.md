@@ -1,5 +1,7 @@
 # Specification
 
+_For a formal analysis of Minimmit, please refer to [arXiv](https://arxiv.org/abs/2508.10862)._
+
 ## 1. Introduction
 
 Minimmit is a responsive, leader-based consensus protocol designed for simplicity and speed, tolerant of a Byzantine adversary that controls fewer than `20%` of replicas. Minimmit advances to the next view when a `40%` quorum is reached and finalizes blocks when an `80%` quorum is reached (after only a single round of voting). Minimmit can be instantiated with a number of practical optimizations to improve performance when deployed in production.
@@ -17,7 +19,7 @@ _Minimmit is so-named for the `2f + 1` proofs that provide its "faster block tim
 - `M = 2f + 1`
 - `L = n - f`
 
-_There exists `≥ 1` honest replica in any `L`-set and `M`-set intersection._
+_There exists `≥ 1` honest replica in any `M`-set and `L`-set intersection._
 
 ## 4. Message Types
 
