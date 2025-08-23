@@ -221,8 +221,8 @@ let (resolver_sender, resolver_receiver) = oracle.register(pk, 2).await.unwrap()
 
 // Configure network links with realistic conditions
 oracle.add_link(pk1, pk2, Link {
-    latency: 10.0,      // ms
-    jitter: 2.5,        // ms
+    latency: Duration::from_millis(10),
+    jitter: Duration::from_millis(3),
     success_rate: 0.95, // 95% success
 }).await.unwrap();
 ```
@@ -238,17 +238,17 @@ link_validators(&mut oracle, &validators, Action::Unlink, Some(separated)).await
 
 // Update links dynamically
 let degraded_link = Link {
-    latency: 3_000.0,  // Simulate slow network
-    jitter: 0.0,
+    latency: Duration::from_millis(3_000), // Simulate slow network
+    jitter: Duration::from_millis(0),
     success_rate: 1.0,
 };
 oracle.update_link(pk1, pk2, degraded_link).await.unwrap();
 
 // Test with lossy networks
 let lossy_link = Link {
-    latency: 200.0,
-    jitter: 150.0,
-    success_rate: 0.5,  // 50% packet loss
+    latency: Duration::from_millis(200),
+    jitter: Duration::from_millis(150),
+    success_rate: 0.5, // 50% packet loss
 };
 ```
 
