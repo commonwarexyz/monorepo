@@ -257,7 +257,16 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
 
         // Try to fill the submission queue with incoming work.
         // Stop if we are at the max number of processing work.
-        while waiters.len() < cfg.size as usize {
+        // NOTE: When op_timeout is set, each operation uses 2 SQ entries
+        // (op + linked timeout), so we can only have half as many in-flight
+        // operations.
+        let max_waiters = if cfg.op_timeout.is_some() {
+            (cfg.size as usize) / 2
+        } else {
+            cfg.size as usize
+        };
+
+        while waiters.len() < max_waiters {
             // Wait for more work
             let op = if waiters.is_empty() {
                 // Block until there is something to do
@@ -606,7 +615,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[should_panic]
     async fn test_linked_timeout_ensure_enough_capacity() {
         // This is a regression test for a bug where we don't reserve enough SQ
         // space for operations with linked timeouts. Each op needs 2 SQEs (op +
