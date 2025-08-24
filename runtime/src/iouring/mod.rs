@@ -175,6 +175,20 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     }
     if cfg.single_issuer {
         builder = builder.setup_single_issuer();
+        // Enable `DEFER_TASKRUN` to defer work processing until `io_uring_enter` is
+        // called with `IORING_ENTER_GETEVENTS`. By default, io_uring processes work at
+        // the end of any system call or thread interrupt, which can delay application
+        // progress. With `DEFER_TASKRUN`, completions are only processed when explicitly
+        // requested, reducing overhead and improving CPU cache locality.
+        //
+        // This is safe in our implementation since we always call `submit_and_wait()`
+        // (which sets `IORING_ENTER_GETEVENTS`), and we are also enabling
+        // `IORING_SETUP_SINGLE_ISSUER` here, which is a pre-requisite.
+        //
+        // This is available since kernel 6.1.
+        //
+        // See IORING_SETUP_DEFER_TASKRUN in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
+        builder = builder.setup_defer_taskrun();
     }
     builder.build(cfg.size)
 }
