@@ -136,42 +136,55 @@ pub fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     peaks
 }
 
-/// Returns the number of the leaf at position `leaf_pos` in an MMR, or None if
-/// this is not a leaf.
+/// Returns the leaf number of the leaf at position `pos` in an MMR, or None if this is not a
+/// leaf. This is a constant-time implementation that is 4-5x faster than the naive tree traversal
+/// approach (see `./mmr/benches/leaf_pos_to_num.rs`).
 ///
-/// This computation is O(log2(n)) in the given position.
-pub const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
-    if leaf_pos == 0 {
-        return Some(0);
+/// The algorithm returns the value `num` such that `2*num - num.count_ones() == pos`. It does this
+/// by repeatedly applying the refinement function `g(n) = (pos + n.count_ones())/2`, starting with
+/// input `n = pos/2`.
+///
+/// Only 3 applications of `g(n)` brings us within 1 of the true answer. At this point, we can
+/// therefore identify the true answer by applying the inverse function on each of the 3 remaining
+/// possibilities (num, num-1, num+1) and returning the one that matches.
+///
+/// Use of wrapping_sub in this implementation is both faster than regular subtraction and protects
+/// against overflow.
+#[inline]
+pub const fn leaf_pos_to_num(pos: u64) -> Option<u64> {
+    // Apply the refinement function three times to get within 1 of the true answer.
+    let mut num = pos >> 1;
+    num = (pos + (num.count_ones() as u64)) >> 1;
+    num = (pos + (num.count_ones() as u64)) >> 1;
+    num = (pos + (num.count_ones() as u64)) >> 1;
+
+    // Check if `num` is the right answer.
+    if pos == (num << 1).wrapping_sub(num.count_ones() as u64) {
+        return Some(num);
     }
 
-    let start = u64::MAX >> (leaf_pos + 1).leading_zeros();
-    let height = start.trailing_ones();
-    let mut two_h = 1 << (height - 1);
-    let mut cur_node = start - 1;
-    let mut leaf_num_floor = 0u64;
-
-    while two_h > 1 {
-        if cur_node == leaf_pos {
-            return None;
-        }
-        let left_pos = cur_node - two_h;
-        two_h >>= 1;
-        if leaf_pos > left_pos {
-            // The leaf is in the right subtree, so we must account for the leaves in the left
-            // subtree all of which precede it.
-            leaf_num_floor += two_h;
-            cur_node -= 1; // move to the right child
-        } else {
-            // The node is in the left subtree
-            cur_node = left_pos;
+    // Check if `num - 1` is the right answer.
+    if num > 0 {
+        let check = num - 1;
+        if pos == (check << 1).wrapping_sub(check.count_ones() as u64) {
+            return Some(check);
         }
     }
 
-    Some(leaf_num_floor)
+    // Check if `num + 1` is the right answer.
+    if num != u64::MAX {
+        let check = num + 1;
+        if pos == (check << 1).wrapping_sub(check.count_ones() as u64) {
+            return Some(check);
+        }
+    }
+
+    // The input is not a valid leaf position.
+    None
 }
 
 /// Returns the position of the leaf with number `leaf_num` in an MMR.
+#[inline]
 pub const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     // This will never underflow since 2*n >= count_ones(n).
     leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
@@ -260,9 +273,10 @@ mod tests {
     use crate::mmr::{hasher::Standard, mem::Mmr};
     use commonware_cryptography::{sha256::hash, Sha256};
     use commonware_runtime::{deterministic, Runner};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     #[test]
-    fn test_leaf_num_calculation() {
+    fn test_leaf_num_calculation_on_mmr() {
         let digest = hash(b"testing");
 
         let executor = deterministic::Runner::default();
@@ -288,5 +302,23 @@ mod tests {
                 last_leaf_pos = *leaf_pos;
             }
         });
+    }
+
+    #[test]
+    fn test_leaf_num_calculation_on_random_large_inputs() {
+        let mut rng = StdRng::seed_from_u64(0);
+        for _ in 0..1_000_000 {
+            // Test pos -> num -> pos
+            let leaf_pos = rng.gen_range(1 << 62..1 << 63);
+            let leaf_num = leaf_pos_to_num(leaf_pos);
+            if let Some(leaf_num) = leaf_num {
+                assert_eq!(leaf_num_to_pos(leaf_num), leaf_pos);
+            }
+
+            // Test num -> pos -> num
+            let leaf_num = rng.gen_range(1 << 61..1 << 62);
+            let leaf_pos = leaf_num_to_pos(leaf_num);
+            assert_eq!(leaf_pos_to_num(leaf_pos), Some(leaf_num));
+        }
     }
 }
