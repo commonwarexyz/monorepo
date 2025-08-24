@@ -338,7 +338,6 @@ impl<D: Digest> Proof<D> {
         let mut peak_digests: Vec<D> = Vec::new();
         let mut proof_digests_used = 0;
         let mut leaves_iter = leaves.iter();
-        let mut leaf_pos = start_element_pos;
         for (peak_pos, height) in PeakIterator::new(self.size) {
             let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
             if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
@@ -351,7 +350,6 @@ impl<D: Digest> Proof<D> {
                         rightmost_pos: end_element_pos,
                     },
                     &mut leaves_iter,
-                    &mut leaf_pos,
                     &mut siblings_iter,
                     collected_digests.as_deref_mut(),
                 )?;
@@ -580,7 +578,6 @@ fn peak_digest_from_range<'a, I, H, E, L, S>(
     hasher: &mut H,
     range_info: RangeInfo,
     leaves: &mut L,
-    leaf_pos: &mut u64,
     sibling_digests: &mut S,
     mut collected_digests: Option<&mut Vec<(u64, I::Digest)>>,
 ) -> Result<I::Digest, ReconstructionError>
@@ -596,19 +593,19 @@ where
         // For leaves, either hash the element or use the pre-computed digest
         match leaves.next() {
             Some(MixedLeaf::Element(element)) => {
-                let digest = hasher.leaf_digest(*leaf_pos, element.as_ref());
-                *leaf_pos = leaf_num_to_pos(leaf_pos_to_num(*leaf_pos).unwrap() + 1);
+                let digest = hasher.leaf_digest(range_info.pos, element.as_ref());
                 return Ok(digest);
             }
             Some(MixedLeaf::Digest(digest)) => {
-                *leaf_pos = leaf_num_to_pos(leaf_pos_to_num(*leaf_pos).unwrap() + 1);
                 return Ok(*digest);
             }
             None => return Err(ReconstructionError::MissingDigests),
         }
     }
+
     let mut left_digest: Option<I::Digest> = None;
     let mut right_digest: Option<I::Digest> = None;
+
     let left_pos = range_info.pos - range_info.two_h;
     let right_pos = left_pos + range_info.two_h - 1;
     if left_pos >= range_info.leftmost_pos {
@@ -622,13 +619,12 @@ where
                 rightmost_pos: range_info.rightmost_pos,
             },
             leaves,
-            leaf_pos,
             sibling_digests,
             collected_digests.as_deref_mut(),
         )?;
         left_digest = Some(digest);
     }
-    if right_pos <= range_info.rightmost_pos {
+    if left_pos < range_info.rightmost_pos {
         // Descend right
         let digest = peak_digest_from_range(
             hasher,
@@ -639,35 +635,39 @@ where
                 rightmost_pos: range_info.rightmost_pos,
             },
             leaves,
-            leaf_pos,
             sibling_digests,
             collected_digests.as_deref_mut(),
         )?;
         right_digest = Some(digest);
     }
-    let hash = match (left_digest, right_digest) {
-        (Some(l), Some(r)) => hasher.node_digest(range_info.pos, &l, &r),
-        (Some(h), None) | (None, Some(h)) => {
-            let sibling_digest = sibling_digests
-                .next()
-                .ok_or(ReconstructionError::MissingDigests)?;
-            if let Some(ref mut collected_digests) = collected_digests {
-                let sibling_pos = if left_digest.is_some() {
-                    right_pos
-                } else {
-                    left_pos
-                };
-                collected_digests.push((sibling_pos, *sibling_digest));
+
+    if left_digest.is_none() {
+        match sibling_digests.next() {
+            Some(hash) => {
+                left_digest = Some(*hash);
             }
-            if left_digest.is_some() {
-                hasher.node_digest(range_info.pos, &h, sibling_digest)
-            } else {
-                hasher.node_digest(range_info.pos, sibling_digest, &h)
-            }
+            None => return Err(ReconstructionError::MissingDigests),
         }
-        (None, None) => panic!("peak digest from empty range"),
-    };
-    Ok(hash)
+    }
+    if right_digest.is_none() {
+        match sibling_digests.next() {
+            Some(hash) => {
+                right_digest = Some(*hash);
+            }
+            None => return Err(ReconstructionError::MissingDigests),
+        }
+    }
+
+    if let Some(ref mut collected_digests) = collected_digests {
+        collected_digests.push((left_pos, left_digest.unwrap()));
+        collected_digests.push((right_pos, right_digest.unwrap()));
+    }
+
+    Ok(hasher.node_digest(
+        range_info.pos,
+        &left_digest.unwrap(),
+        &right_digest.unwrap(),
+    ))
 }
 
 #[cfg(test)]
