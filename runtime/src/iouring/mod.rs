@@ -422,6 +422,7 @@ mod tests {
             mpsc::channel,
             oneshot::{self, Canceled},
         },
+        executor::block_on,
         SinkExt as _,
     };
     use io_uring::{
@@ -617,5 +618,40 @@ mod tests {
         let err = rx.await.unwrap_err();
         assert!(matches!(err, Canceled { .. }));
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_single_issuer() {
+        // Test that SINGLE_ISSUER with DEFER_TASKRUN works correctly.
+        // The simplest test: just submit a no-op and verify it completes.
+        let cfg = super::Config {
+            single_issuer: true,
+            ..Default::default()
+        };
+
+        let (mut sender, receiver) = channel(1);
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+
+        // Run io_uring in a dedicated thread
+        let uring_thread = std::thread::spawn(move || block_on(super::run(cfg, metrics, receiver)));
+
+        // Submit a no-op
+        let (tx, rx) = oneshot::channel();
+        sender
+            .send(Op {
+                work: opcode::Nop::new().build(),
+                sender: tx,
+                buffer: None,
+            })
+            .await
+            .unwrap();
+
+        // Verify it completes successfully
+        let (result, _) = rx.await.unwrap();
+        assert_eq!(result, 0);
+
+        // Clean shutdown
+        drop(sender);
+        uring_thread.join().unwrap();
     }
 }
