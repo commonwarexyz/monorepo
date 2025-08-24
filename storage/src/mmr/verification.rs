@@ -643,17 +643,13 @@ where
 
     if left_digest.is_none() {
         match sibling_digests.next() {
-            Some(hash) => {
-                left_digest = Some(*hash);
-            }
+            Some(hash) => left_digest = Some(*hash),
             None => return Err(ReconstructionError::MissingDigests),
         }
     }
     if right_digest.is_none() {
         match sibling_digests.next() {
-            Some(hash) => {
-                right_digest = Some(*hash);
-            }
+            Some(hash) => right_digest = Some(*hash),
             None => return Err(ReconstructionError::MissingDigests),
         }
     }
