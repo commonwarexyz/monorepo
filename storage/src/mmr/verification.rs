@@ -22,6 +22,14 @@ use futures::future::try_join_all;
 use std::collections::HashMap;
 use tracing::debug;
 
+/// Represents either a raw element that needs hashing or a pre-computed leaf digest
+pub enum MixedLeaf<'a, E, D> {
+    /// Raw element that will be hashed to produce a leaf digest
+    Element(&'a E),
+    /// Pre-computed leaf digest
+    Digest(D),
+}
+
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(Error, Debug)]
 pub(crate) enum ReconstructionError {
@@ -198,6 +206,29 @@ impl<D: Digest> Proof<D> {
         }
     }
 
+    /// Return true if `proof` proves that the mixed leaves (elements or pre-computed digests)
+    /// appear consecutively starting at position `start_element_pos` within the MMR with root digest `root`.
+    pub fn verify_range_inclusion_mixed<I, H, E>(
+        &self,
+        hasher: &mut H,
+        leaves: &[MixedLeaf<E, D>],
+        start_element_pos: u64,
+        root: &D,
+    ) -> bool
+    where
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: AsRef<[u8]>,
+    {
+        match self.reconstruct_root_mixed(hasher, leaves, start_element_pos) {
+            Ok(reconstructed_root) => *root == reconstructed_root,
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
+                false
+            }
+        }
+    }
+
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
     /// of elements, returning the (position,digest) of every node whose digest was required by the
     /// process (including those from the proof itself). Returns a [Error::InvalidProof] if the
@@ -248,6 +279,22 @@ impl<D: Digest> Proof<D> {
         let peak_digests =
             self.reconstruct_peak_digests(hasher, elements, start_element_pos, None)?;
 
+        Ok(hasher.root(self.size, peak_digests.iter()))
+    }
+
+    pub(crate) fn reconstruct_root_mixed<I, H, E>(
+        &self,
+        hasher: &mut H,
+        leaves: &[MixedLeaf<E, D>],
+        start_element_pos: u64,
+    ) -> Result<D, ReconstructionError>
+    where
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: AsRef<[u8]>,
+    {
+        let peak_digests =
+            self.reconstruct_peak_digests_mixed(hasher, leaves, start_element_pos, None)?;
         Ok(hasher.root(self.size, peak_digests.iter()))
     }
 
@@ -324,6 +371,90 @@ impl<D: Digest> Proof<D> {
         }
 
         if elements_iter.next().is_some() {
+            return Err(ReconstructionError::ExtraDigests);
+        }
+        if let Some(next_sibling) = siblings_iter.next() {
+            if proof_digests_used == 0 || *next_sibling != self.digests[proof_digests_used - 1] {
+                return Err(ReconstructionError::ExtraDigests);
+            }
+        }
+
+        Ok(peak_digests)
+    }
+
+    /// Reconstruct the peak digests from mixed leaves (elements or pre-computed digests)
+    fn reconstruct_peak_digests_mixed<I, H, E>(
+        &self,
+        hasher: &mut H,
+        leaves: &[MixedLeaf<E, D>],
+        start_element_pos: u64,
+        mut collected_digests: Option<&mut Vec<(u64, D)>>,
+    ) -> Result<Vec<D>, ReconstructionError>
+    where
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: AsRef<[u8]>,
+    {
+        if leaves.is_empty() {
+            if start_element_pos == 0 {
+                return Ok(vec![]);
+            }
+            return Err(ReconstructionError::MissingElements);
+        }
+        let Some(start_leaf) = leaf_pos_to_num(start_element_pos) else {
+            debug!(pos = start_element_pos, "start pos is not a leaf");
+            return Err(ReconstructionError::InvalidStartPos);
+        };
+        let end_element_pos = if leaves.len() == 1 {
+            start_element_pos
+        } else {
+            leaf_num_to_pos(start_leaf + leaves.len() as u64 - 1)
+        };
+        if end_element_pos >= self.size {
+            return Err(ReconstructionError::InvalidEndPos);
+        }
+
+        let mut proof_digests_iter = self.digests.iter();
+        let mut siblings_iter = self.digests.iter().rev();
+
+        // Include peak digests only for trees that have no elements from the range, and keep track
+        // of the starting and ending trees of those that do contain some.
+        let mut peak_digests: Vec<D> = Vec::new();
+        let mut proof_digests_used = 0;
+        let mut leaves_iter = leaves.iter();
+        let mut leaf_pos = start_element_pos;
+        for (peak_pos, height) in PeakIterator::new(self.size) {
+            let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
+            if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
+                let hash = peak_digest_from_range_mixed(
+                    hasher,
+                    RangeInfo {
+                        pos: peak_pos,
+                        two_h: 1 << height,
+                        leftmost_pos: start_element_pos,
+                        rightmost_pos: end_element_pos,
+                    },
+                    &mut leaves_iter,
+                    &mut leaf_pos,
+                    &mut siblings_iter,
+                    collected_digests.as_deref_mut(),
+                )?;
+                peak_digests.push(hash);
+                if let Some(ref mut collected_digests) = collected_digests {
+                    collected_digests.push((peak_pos, hash));
+                }
+            } else if let Some(hash) = proof_digests_iter.next() {
+                proof_digests_used += 1;
+                peak_digests.push(*hash);
+                if let Some(ref mut collected_digests) = collected_digests {
+                    collected_digests.push((peak_pos, *hash));
+                }
+            } else {
+                return Err(ReconstructionError::MissingDigests);
+            }
+        }
+
+        if leaves_iter.next().is_some() {
             return Err(ReconstructionError::ExtraDigests);
         }
         if let Some(next_sibling) = siblings_iter.next() {
@@ -527,6 +658,100 @@ struct RangeInfo {
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
+}
+
+fn peak_digest_from_range_mixed<'a, I, H, E, L, S>(
+    hasher: &mut H,
+    range_info: RangeInfo,
+    leaves: &mut L,
+    leaf_pos: &mut u64,
+    sibling_digests: &mut S,
+    mut collected_digests: Option<&mut Vec<(u64, I::Digest)>>,
+) -> Result<I::Digest, ReconstructionError>
+where
+    I: CHasher,
+    H: Hasher<I>,
+    E: AsRef<[u8]> + 'a,
+    L: Iterator<Item = &'a MixedLeaf<'a, E, I::Digest>>,
+    S: Iterator<Item = &'a I::Digest>,
+{
+    assert_ne!(range_info.two_h, 0);
+    if range_info.two_h == 1 {
+        // For leaves, either hash the element or use the pre-computed digest
+        match leaves.next() {
+            Some(MixedLeaf::Element(element)) => {
+                let digest = hasher.leaf_digest(*leaf_pos, element.as_ref());
+                *leaf_pos = leaf_num_to_pos(leaf_pos_to_num(*leaf_pos).unwrap() + 1);
+                return Ok(digest);
+            }
+            Some(MixedLeaf::Digest(digest)) => {
+                *leaf_pos = leaf_num_to_pos(leaf_pos_to_num(*leaf_pos).unwrap() + 1);
+                return Ok(digest.clone());
+            }
+            None => return Err(ReconstructionError::MissingDigests),
+        }
+    }
+    let mut left_digest: Option<I::Digest> = None;
+    let mut right_digest: Option<I::Digest> = None;
+    let left_pos = range_info.pos - range_info.two_h;
+    let right_pos = left_pos + range_info.two_h - 1;
+    if left_pos >= range_info.leftmost_pos {
+        // Descend left
+        let digest = peak_digest_from_range_mixed(
+            hasher,
+            RangeInfo {
+                pos: left_pos,
+                two_h: range_info.two_h >> 1,
+                leftmost_pos: range_info.leftmost_pos,
+                rightmost_pos: range_info.rightmost_pos,
+            },
+            leaves,
+            leaf_pos,
+            sibling_digests,
+            collected_digests.as_deref_mut(),
+        )?;
+        left_digest = Some(digest);
+    }
+    if right_pos <= range_info.rightmost_pos {
+        // Descend right
+        let digest = peak_digest_from_range_mixed(
+            hasher,
+            RangeInfo {
+                pos: right_pos,
+                two_h: range_info.two_h >> 1,
+                leftmost_pos: range_info.leftmost_pos,
+                rightmost_pos: range_info.rightmost_pos,
+            },
+            leaves,
+            leaf_pos,
+            sibling_digests,
+            collected_digests.as_deref_mut(),
+        )?;
+        right_digest = Some(digest);
+    }
+    let hash = match (left_digest, right_digest) {
+        (Some(l), Some(r)) => hasher.parent_digest(left_pos, &l, &r),
+        (Some(h), None) | (None, Some(h)) => {
+            let sibling_digest = sibling_digests
+                .next()
+                .ok_or(ReconstructionError::MissingDigests)?;
+            if let Some(ref mut collected_digests) = collected_digests {
+                let sibling_pos = if left_digest.is_some() {
+                    right_pos
+                } else {
+                    left_pos
+                };
+                collected_digests.push((sibling_pos, *sibling_digest));
+            }
+            if left_digest.is_some() {
+                hasher.parent_digest(left_pos, &h, sibling_digest)
+            } else {
+                hasher.parent_digest(left_pos, sibling_digest, &h)
+            }
+        }
+        (None, None) => panic!("peak digest from empty range"),
+    };
+    Ok(hash)
 }
 
 fn peak_digest_from_range<'a, I, H, E, S>(

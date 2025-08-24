@@ -66,6 +66,46 @@ pub fn construct_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
     Proof::<D> { size, digests }
 }
 
+/// Verify that a proof is valid for a range of mixed operations and pre-computed digests
+pub fn verify_proof_mixed<Op, H, D>(
+    hasher: &mut Standard<H>,
+    proof: &Proof<D>,
+    start_loc: u64,
+    operations: &[FilteredOperation<Op, D>],
+    target_root: &D,
+) -> bool
+where
+    Op: Encode,
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    use crate::mmr::verification::MixedLeaf;
+    
+    let start_pos = leaf_num_to_pos(start_loc);
+    
+    // First encode all included operations
+    let encoded_ops: Vec<Vec<u8>> = operations
+        .iter()
+        .map(|op| match op {
+            FilteredOperation::Included(op) => op.encode().to_vec(),
+            FilteredOperation::Digest(_) => Vec::new(), // Won't be used
+        })
+        .collect();
+    
+    // Convert FilteredOperation to MixedLeaf for the MMR verification
+    let mixed_leaves: Vec<MixedLeaf<Vec<u8>, D>> = operations
+        .iter()
+        .zip(encoded_ops.iter())
+        .map(|(op, encoded)| match op {
+            FilteredOperation::Included(_) => MixedLeaf::Element(encoded),
+            FilteredOperation::Digest(digest) => MixedLeaf::Digest(digest.clone()),
+        })
+        .collect();
+    
+    // Use the new mixed verification method
+    proof.verify_range_inclusion_mixed(hasher, &mixed_leaves, start_pos, target_root)
+}
+
 /// Create a filtered proof that includes only specified operations while maintaining
 /// proof validity by replacing filtered operations with their digests.
 ///
@@ -139,18 +179,13 @@ pub enum FilteredOperation<Op, D> {
 }
 
 impl<Op: Encode, D: Digest> FilteredOperation<Op, D> {
-    /// Get the digest of this operation
-    pub fn digest<H>(&self, hasher: &mut Standard<H>) -> D
-    where
-        H: Hasher<Digest = D>,
-    {
+    /// Get the encoded bytes for proof verification
+    /// For Included operations, encode them
+    /// For Digest operations, encode the digest (which is what the proof expects for that leaf)
+    pub fn encode_for_proof(&self) -> Vec<u8> {
         match self {
-            FilteredOperation::Included(op) => {
-                let h = MmrHasher::<H>::inner(hasher);
-                h.update(&op.encode());
-                h.finalize()
-            }
-            FilteredOperation::Digest(digest) => digest.clone(),
+            FilteredOperation::Included(op) => op.encode().to_vec(),
+            FilteredOperation::Digest(digest) => digest.encode().to_vec(),
         }
     }
 }
