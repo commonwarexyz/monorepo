@@ -197,13 +197,10 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        match self.reconstruct_root(hasher, elements, start_element_pos) {
-            Ok(reconstructed_root) => *root == reconstructed_root,
-            Err(error) => {
-                debug!(error = ?error, "invalid proof input");
-                false
-            }
-        }
+        // Convert raw elements to MixedLeaf for uniform handling
+        let mixed_leaves: Vec<MixedLeaf<E, D>> =
+            elements.iter().map(|e| MixedLeaf::Element(e)).collect();
+        self.verify_range_inclusion_mixed(hasher, &mixed_leaves, start_element_pos, root)
     }
 
     /// Return true if `proof` proves that the mixed leaves (elements or pre-computed digests)
@@ -246,10 +243,14 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
+        // Convert raw elements to MixedLeaf for uniform handling
+        let mixed_leaves: Vec<MixedLeaf<E, D>> =
+            elements.iter().map(|e| MixedLeaf::Element(e)).collect();
+
         let mut collected_digests = Vec::new();
-        let Ok(peak_digests) = self.reconstruct_peak_digests(
+        let Ok(peak_digests) = self.reconstruct_peak_digests_mixed(
             hasher,
-            elements,
+            &mixed_leaves,
             start_element_pos,
             Some(&mut collected_digests),
         ) else {
@@ -276,10 +277,10 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let peak_digests =
-            self.reconstruct_peak_digests(hasher, elements, start_element_pos, None)?;
-
-        Ok(hasher.root(self.size, peak_digests.iter()))
+        // Convert raw elements to MixedLeaf for uniform handling
+        let mixed_leaves: Vec<MixedLeaf<E, D>> =
+            elements.iter().map(|e| MixedLeaf::Element(e)).collect();
+        self.reconstruct_root_mixed(hasher, &mixed_leaves, start_element_pos)
     }
 
     pub(crate) fn reconstruct_root_mixed<I, H, E>(
@@ -306,80 +307,22 @@ impl<D: Digest> Proof<D> {
         hasher: &mut H,
         elements: &[E],
         start_element_pos: u64,
-        mut collected_digests: Option<&mut Vec<(u64, D)>>,
+        collected_digests: Option<&mut Vec<(u64, D)>>,
     ) -> Result<Vec<D>, ReconstructionError>
     where
         I: CHasher<Digest = D>,
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if elements.is_empty() {
-            if start_element_pos == 0 {
-                return Ok(vec![]);
-            }
-            return Err(ReconstructionError::MissingElements);
-        }
-        let Some(start_leaf) = leaf_pos_to_num(start_element_pos) else {
-            debug!(pos = start_element_pos, "start pos is not a leaf");
-            return Err(ReconstructionError::InvalidStartPos);
-        };
-        let end_element_pos = if elements.len() == 1 {
-            start_element_pos
-        } else {
-            leaf_num_to_pos(start_leaf + elements.len() as u64 - 1)
-        };
-        if end_element_pos >= self.size {
-            return Err(ReconstructionError::InvalidEndPos);
-        }
-
-        let mut proof_digests_iter = self.digests.iter();
-        let mut siblings_iter = self.digests.iter().rev();
-
-        // Include peak digests only for trees that have no elements from the range, and keep track
-        // of the starting and ending trees of those that do contain some.
-        let mut peak_digests: Vec<D> = Vec::new();
-        let mut proof_digests_used = 0;
-        let mut elements_iter = elements.iter();
-        for (peak_pos, height) in PeakIterator::new(self.size) {
-            let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
-            if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
-                let hash = peak_digest_from_range(
-                    hasher,
-                    RangeInfo {
-                        pos: peak_pos,
-                        two_h: 1 << height,
-                        leftmost_pos: start_element_pos,
-                        rightmost_pos: end_element_pos,
-                    },
-                    &mut elements_iter,
-                    &mut siblings_iter,
-                    collected_digests.as_deref_mut(),
-                )?;
-                peak_digests.push(hash);
-                if let Some(ref mut collected_digests) = collected_digests {
-                    collected_digests.push((peak_pos, hash));
-                }
-            } else if let Some(hash) = proof_digests_iter.next() {
-                proof_digests_used += 1;
-                peak_digests.push(*hash);
-                if let Some(ref mut collected_digests) = collected_digests {
-                    collected_digests.push((peak_pos, *hash));
-                }
-            } else {
-                return Err(ReconstructionError::MissingDigests);
-            }
-        }
-
-        if elements_iter.next().is_some() {
-            return Err(ReconstructionError::ExtraDigests);
-        }
-        if let Some(next_sibling) = siblings_iter.next() {
-            if proof_digests_used == 0 || *next_sibling != self.digests[proof_digests_used - 1] {
-                return Err(ReconstructionError::ExtraDigests);
-            }
-        }
-
-        Ok(peak_digests)
+        // Convert raw elements to MixedLeaf for uniform handling
+        let mixed_leaves: Vec<MixedLeaf<E, D>> =
+            elements.iter().map(|e| MixedLeaf::Element(e)).collect();
+        self.reconstruct_peak_digests_mixed(
+            hasher,
+            &mixed_leaves,
+            start_element_pos,
+            collected_digests,
+        )
     }
 
     /// Reconstruct the peak digests from mixed leaves (elements or pre-computed digests)
@@ -426,7 +369,7 @@ impl<D: Digest> Proof<D> {
         for (peak_pos, height) in PeakIterator::new(self.size) {
             let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
             if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
-                let hash = peak_digest_from_range_mixed(
+                let hash = peak_digest_from_range(
                     hasher,
                     RangeInfo {
                         pos: peak_pos,
@@ -660,7 +603,7 @@ struct RangeInfo {
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
 }
 
-fn peak_digest_from_range_mixed<'a, I, H, E, L, S>(
+fn peak_digest_from_range<'a, I, H, E, L, S>(
     hasher: &mut H,
     range_info: RangeInfo,
     leaves: &mut L,
@@ -697,7 +640,7 @@ where
     let right_pos = left_pos + range_info.two_h - 1;
     if left_pos >= range_info.leftmost_pos {
         // Descend left
-        let digest = peak_digest_from_range_mixed(
+        let digest = peak_digest_from_range(
             hasher,
             RangeInfo {
                 pos: left_pos,
@@ -714,7 +657,7 @@ where
     }
     if right_pos <= range_info.rightmost_pos {
         // Descend right
-        let digest = peak_digest_from_range_mixed(
+        let digest = peak_digest_from_range(
             hasher,
             RangeInfo {
                 pos: right_pos,
@@ -752,90 +695,6 @@ where
         (None, None) => panic!("peak digest from empty range"),
     };
     Ok(hash)
-}
-
-fn peak_digest_from_range<'a, I, H, E, S>(
-    hasher: &mut H,
-    range_info: RangeInfo,
-    elements: &mut E,
-    sibling_digests: &mut S,
-    mut collected_digests: Option<&mut Vec<(u64, I::Digest)>>,
-) -> Result<I::Digest, ReconstructionError>
-where
-    I: CHasher,
-    H: Hasher<I>,
-    E: Iterator<Item: AsRef<[u8]>>,
-    S: Iterator<Item = &'a I::Digest>,
-{
-    assert_ne!(range_info.two_h, 0);
-    if range_info.two_h == 1 {
-        match elements.next() {
-            Some(element) => return Ok(hasher.leaf_digest(range_info.pos, element.as_ref())),
-            None => return Err(ReconstructionError::MissingDigests),
-        }
-    }
-
-    let mut left_digest: Option<I::Digest> = None;
-    let mut right_digest: Option<I::Digest> = None;
-
-    let left_pos = range_info.pos - range_info.two_h;
-    let right_pos = left_pos + range_info.two_h - 1;
-    if left_pos >= range_info.leftmost_pos {
-        // Descend left
-        let digest = peak_digest_from_range(
-            hasher,
-            RangeInfo {
-                pos: left_pos,
-                two_h: range_info.two_h >> 1,
-                leftmost_pos: range_info.leftmost_pos,
-                rightmost_pos: range_info.rightmost_pos,
-            },
-            elements,
-            sibling_digests,
-            collected_digests.as_deref_mut(),
-        )?;
-        left_digest = Some(digest);
-    }
-    if left_pos < range_info.rightmost_pos {
-        // Descend right
-        let digest = peak_digest_from_range(
-            hasher,
-            RangeInfo {
-                pos: right_pos,
-                two_h: range_info.two_h >> 1,
-                leftmost_pos: range_info.leftmost_pos,
-                rightmost_pos: range_info.rightmost_pos,
-            },
-            elements,
-            sibling_digests,
-            collected_digests.as_deref_mut(),
-        )?;
-        right_digest = Some(digest);
-    }
-
-    if left_digest.is_none() {
-        match sibling_digests.next() {
-            Some(hash) => left_digest = Some(*hash),
-            None => return Err(ReconstructionError::MissingDigests),
-        }
-    }
-    if right_digest.is_none() {
-        match sibling_digests.next() {
-            Some(hash) => right_digest = Some(*hash),
-            None => return Err(ReconstructionError::MissingDigests),
-        }
-    }
-
-    if let Some(ref mut collected_digests) = collected_digests {
-        collected_digests.push((left_pos, left_digest.unwrap()));
-        collected_digests.push((right_pos, right_digest.unwrap()));
-    }
-
-    Ok(hasher.node_digest(
-        range_info.pos,
-        &left_digest.unwrap(),
-        &right_digest.unwrap(),
-    ))
 }
 
 #[cfg(test)]
