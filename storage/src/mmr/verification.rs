@@ -246,9 +246,8 @@ impl<D: Digest> Proof<D> {
         // Convert raw elements to MixedLeaf for uniform handling
         let mixed_leaves: Vec<MixedLeaf<E, D>> =
             elements.iter().map(|e| MixedLeaf::Element(e)).collect();
-
         let mut collected_digests = Vec::new();
-        let Ok(peak_digests) = self.reconstruct_peak_digests_mixed(
+        let Ok(peak_digests) = self.reconstruct_peak_digests(
             hasher,
             &mixed_leaves,
             start_element_pos,
@@ -295,38 +294,12 @@ impl<D: Digest> Proof<D> {
         E: AsRef<[u8]>,
     {
         let peak_digests =
-            self.reconstruct_peak_digests_mixed(hasher, leaves, start_element_pos, None)?;
+            self.reconstruct_peak_digests(hasher, leaves, start_element_pos, None)?;
         Ok(hasher.root(self.size, peak_digests.iter()))
     }
 
-    /// Reconstruct the peak digests of the MMR that produced this proof, returning
-    /// [ReconstructionError] if the input data is invalid.  If collected_digests is Some, then all
-    /// node digests used in the process will be added to the wrapped vector.
-    fn reconstruct_peak_digests<I, H, E>(
-        &self,
-        hasher: &mut H,
-        elements: &[E],
-        start_element_pos: u64,
-        collected_digests: Option<&mut Vec<(u64, D)>>,
-    ) -> Result<Vec<D>, ReconstructionError>
-    where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
-        E: AsRef<[u8]>,
-    {
-        // Convert raw elements to MixedLeaf for uniform handling
-        let mixed_leaves: Vec<MixedLeaf<E, D>> =
-            elements.iter().map(|e| MixedLeaf::Element(e)).collect();
-        self.reconstruct_peak_digests_mixed(
-            hasher,
-            &mixed_leaves,
-            start_element_pos,
-            collected_digests,
-        )
-    }
-
     /// Reconstruct the peak digests from mixed leaves (elements or pre-computed digests)
-    fn reconstruct_peak_digests_mixed<I, H, E>(
+    fn reconstruct_peak_digests<I, H, E>(
         &self,
         hasher: &mut H,
         leaves: &[MixedLeaf<E, D>],
@@ -629,7 +602,7 @@ where
             }
             Some(MixedLeaf::Digest(digest)) => {
                 *leaf_pos = leaf_num_to_pos(leaf_pos_to_num(*leaf_pos).unwrap() + 1);
-                return Ok(digest.clone());
+                return Ok(*digest);
             }
             None => return Err(ReconstructionError::MissingDigests),
         }
