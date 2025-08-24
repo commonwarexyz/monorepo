@@ -28,6 +28,18 @@ impl Buffer {
         }
     }
 
+    /// Creates a new buffer with the provided `size` and `capacity` from an
+    /// existing [`Vec<u8>`], resizing it to the specified capacity.
+    pub(super) fn from_vec(mut data: Vec<u8>, size: u64, capacity: NonZeroUsize) -> Self {
+        data.reserve(capacity.get().saturating_sub(data.len()));
+
+        Self {
+            data,
+            offset: size,
+            capacity: capacity.get(),
+        }
+    }
+
     /// Returns the current logical size of the blob including any buffered data.
     pub(super) fn size(&self) -> u64 {
         self.offset + self.data.len() as u64
