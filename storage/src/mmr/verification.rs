@@ -169,27 +169,11 @@ impl<D: Digest> Default for Proof<D> {
 impl<D: Digest> Proof<D> {
     /// Return true if `proof` proves that `element` appears at position `element_pos` within the
     /// MMR with root digest `root`.
-    pub fn verify_element_inclusion<I, H>(
+    pub fn verify_element_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
-        element: &[u8],
+        leaf: MixedLeaf<E, D>,
         element_pos: u64,
-        root: &D,
-    ) -> bool
-    where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
-    {
-        self.verify_range_inclusion(hasher, &[element], element_pos, root)
-    }
-
-    /// Return true if `proof` proves that the `elements` appear consecutively starting at position
-    /// `start_element_pos` within the MMR with root digest `root`.
-    pub fn verify_range_inclusion<I, H, E>(
-        &self,
-        hasher: &mut H,
-        elements: &[E],
-        start_element_pos: u64,
         root: &D,
     ) -> bool
     where
@@ -197,15 +181,12 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        // Convert raw elements to MixedLeaf for uniform handling
-        let mixed_leaves: Vec<MixedLeaf<E, D>> =
-            elements.iter().map(|e| MixedLeaf::Element(e)).collect();
-        self.verify_range_inclusion_mixed(hasher, &mixed_leaves, start_element_pos, root)
+        self.verify_range_inclusion(hasher, &[leaf], element_pos, root)
     }
 
     /// Return true if `proof` proves that the mixed leaves (elements or pre-computed digests)
     /// appear consecutively starting at position `start_element_pos` within the MMR with root digest `root`.
-    pub fn verify_range_inclusion_mixed<I, H, E>(
+    pub fn verify_range_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
         leaves: &[MixedLeaf<E, D>],
@@ -217,7 +198,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        match self.reconstruct_root_mixed(hasher, leaves, start_element_pos) {
+        match self.reconstruct_root(hasher, leaves, start_element_pos) {
             Ok(reconstructed_root) => *root == reconstructed_root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -263,26 +244,7 @@ impl<D: Digest> Proof<D> {
         Ok(collected_digests)
     }
 
-    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements, or returns a [ReconstructionError] if the input data is invalid.
     pub(crate) fn reconstruct_root<I, H, E>(
-        &self,
-        hasher: &mut H,
-        elements: &[E],
-        start_element_pos: u64,
-    ) -> Result<D, ReconstructionError>
-    where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
-        E: AsRef<[u8]>,
-    {
-        // Convert raw elements to MixedLeaf for uniform handling
-        let mixed_leaves: Vec<MixedLeaf<E, D>> =
-            elements.iter().map(|e| MixedLeaf::Element(e)).collect();
-        self.reconstruct_root_mixed(hasher, &mixed_leaves, start_element_pos)
-    }
-
-    pub(crate) fn reconstruct_root_mixed<I, H, E>(
         &self,
         hasher: &mut H,
         leaves: &[MixedLeaf<E, D>],
