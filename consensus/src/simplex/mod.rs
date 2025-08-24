@@ -770,7 +770,7 @@ mod tests {
 
             // Degrade network connections for online peers
             let link = Link {
-                latency: Duration::from_millis(3_000),
+                latency: Duration::from_secs(3),
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
@@ -1317,7 +1317,7 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: Duration::from_millis(3_000),
+                latency: Duration::from_secs(3),
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };

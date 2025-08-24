@@ -238,7 +238,7 @@ link_validators(&mut oracle, &validators, Action::Unlink, Some(separated)).await
 
 // Update links dynamically
 let degraded_link = Link {
-    latency: Duration::from_millis(3_000), // Simulate slow network
+    latency: Duration::from_secs(3), // Simulate slow network
     jitter: Duration::from_millis(0),
     success_rate: 1.0,
 };

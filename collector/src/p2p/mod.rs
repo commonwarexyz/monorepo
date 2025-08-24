@@ -71,7 +71,7 @@ mod tests {
         success_rate: 1.0,
     };
     const LINK_SLOW: Link = Link {
-        latency: Duration::from_millis(1_000),
+        latency: Duration::from_secs(1),
         jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };

@@ -313,6 +313,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 (receiver.ingress_bps, receiver.ingress_available_at)
             };
 
+            // Effective bandwidth is limited by the slower endpoint (like TCP flow control),
+            // sender can't transmit faster than receiver can accept, modeling backpressure
             let effective_bps = sender_egress_bps.min(receiver_ingress_bps);
 
             // Calculate transmission timing
@@ -338,11 +340,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             receive_complete_at =
                 receive_complete_at.max(link.last_arrival_at + Duration::from_micros(1));
 
-            // Determine if message should be delivered
-            let should_deliver = self.context.gen_bool(link.success_rate);
-
             // Always update sender's egress (sender uses bandwidth regardless of delivery)
             self.peers.get_mut(&origin).unwrap().egress_available_at = send_complete_at;
+
+            // Determine if message should be delivered
+            let should_deliver = self.context.gen_bool(link.success_rate);
 
             // Only update receiver's ingress and link arrival time if message will be delivered
             if should_deliver {
@@ -703,13 +705,14 @@ impl<P: PublicKey> Peer<P> {
         });
 
         // Return peer
+        let now = context.current();
         Self {
             socket,
             control: control_sender,
             egress_bps,
             ingress_bps,
-            egress_available_at: SystemTime::UNIX_EPOCH,
-            ingress_available_at: SystemTime::UNIX_EPOCH,
+            egress_available_at: now,
+            ingress_available_at: now,
         }
     }
 
@@ -750,7 +753,7 @@ struct Link {
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork + Metrics, P: PublicKey>(
+    fn new<E: Spawner + RNetwork + Clock + Metrics, P: PublicKey>(
         context: &mut E,
         dialer: P,
         socket: SocketAddr,
@@ -763,7 +766,7 @@ impl Link {
             sampler,
             success_rate,
             inbox,
-            last_arrival_at: SystemTime::UNIX_EPOCH,
+            last_arrival_at: context.current(),
         };
 
         // Spawn a task that will wait for messages to be sent to the link and then send them

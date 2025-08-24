@@ -44,7 +44,7 @@ fn create_message(id: u32, target_size: Option<usize>) -> Message {
             let mut message = Vec::with_capacity(size);
             message.extend_from_slice(&id.to_be_bytes());
             if size > 4 {
-                message.resize(size, 42u8);
+                message.resize(size, 0);
             }
             message
         }
@@ -54,11 +54,8 @@ fn create_message(id: u32, target_size: Option<usize>) -> Message {
 
 /// Extract the ID from a message.
 fn extract_id_from_message(message: &Message) -> u32 {
-    if message.len() >= 4 {
-        u32::from_be_bytes([message[0], message[1], message[2], message[3]])
-    } else {
-        0
-    }
+    // Messages are always at least 4 bytes by construction
+    u32::from_be_bytes([message[0], message[1], message[2], message[3]])
 }
 
 /// All state for a given peer
@@ -344,8 +341,7 @@ async fn setup_network_identities(
                 .register(identity.clone(), DEFAULT_CHANNEL)
                 .await
                 .unwrap();
-            // Allow messages up to 10MB
-            let codec_config = (commonware_codec::RangeCfg::from(0..=10_000_000), ());
+            let codec_config = (commonware_codec::RangeCfg::from(..), ());
             let (sender, receiver) = wrap::<_, _, Message>(codec_config, sender, receiver);
             identities.push((identity, region.clone(), sender, receiver));
             peer_idx += 1;
