@@ -730,7 +730,7 @@ where
         right_digest = Some(digest);
     }
     let hash = match (left_digest, right_digest) {
-        (Some(l), Some(r)) => hasher.parent_digest(left_pos, &l, &r),
+        (Some(l), Some(r)) => hasher.node_digest(range_info.pos, &l, &r),
         (Some(h), None) | (None, Some(h)) => {
             let sibling_digest = sibling_digests
                 .next()
@@ -744,9 +744,9 @@ where
                 collected_digests.push((sibling_pos, *sibling_digest));
             }
             if left_digest.is_some() {
-                hasher.parent_digest(left_pos, &h, sibling_digest)
+                hasher.node_digest(range_info.pos, &h, sibling_digest)
             } else {
-                hasher.parent_digest(left_pos, sibling_digest, &h)
+                hasher.node_digest(range_info.pos, sibling_digest, &h)
             }
         }
         (None, None) => panic!("peak digest from empty range"),
