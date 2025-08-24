@@ -604,4 +604,47 @@ mod tests {
         assert!(matches!(err, Canceled { .. }));
         handle.await.unwrap();
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[should_panic]
+    async fn test_linked_timeout_ensure_enough_capacity() {
+        // This is a regression test for a bug where we don't reserve enough SQ
+        // space for operations with linked timeouts. Each op needs 2 SQEs (op +
+        // timeout) but the code only ensured 1 slot is available before pushing
+        // both.
+        let cfg = super::Config {
+            size: 8,
+            op_timeout: Some(Duration::from_millis(5)),
+            ..Default::default()
+        };
+        let (mut submitter, receiver) = channel(8);
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
+
+        // Submit more operations than the SQ size to force batching.
+        let total = 64usize;
+        let mut rxs = Vec::with_capacity(total);
+        for _ in 0..total {
+            let nop = opcode::Nop::new().build();
+            let (tx, rx) = oneshot::channel();
+            submitter
+                .send(Op {
+                    work: nop,
+                    sender: tx,
+                    buffer: None,
+                })
+                .await
+                .unwrap();
+            rxs.push(rx);
+        }
+
+        // All NOPs should complete successfully
+        for rx in rxs {
+            let (res, _) = rx.await.unwrap();
+            assert_eq!(res, 0, "NOP op failed: {res}");
+        }
+
+        drop(submitter);
+        handle.await.unwrap();
+    }
 }
