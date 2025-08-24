@@ -593,12 +593,9 @@ where
         // For leaves, either hash the element or use the pre-computed digest
         match leaves.next() {
             Some(MixedLeaf::Element(element)) => {
-                let digest = hasher.leaf_digest(range_info.pos, element.as_ref());
-                return Ok(digest);
+                return Ok(hasher.leaf_digest(range_info.pos, element.as_ref()))
             }
-            Some(MixedLeaf::Digest(digest)) => {
-                return Ok(*digest);
-            }
+            Some(MixedLeaf::Digest(digest)) => return Ok(*digest),
             None => return Err(ReconstructionError::MissingDigests),
         }
     }
