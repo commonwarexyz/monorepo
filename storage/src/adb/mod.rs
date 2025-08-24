@@ -18,7 +18,7 @@ pub mod immutable;
 pub mod keyless;
 pub mod sync;
 pub mod verify;
-pub use verify::{extract_pinned_nodes, verify_proof};
+pub use verify::{create_filtered_proof, extract_pinned_nodes, verify_proof, FilteredOperation};
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
