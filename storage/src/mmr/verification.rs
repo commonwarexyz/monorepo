@@ -119,8 +119,6 @@ pub struct Proof<D: Digest> {
 pub struct MultiProof<D: Digest> {
     /// The total number of nodes in the MMR.
     pub size: u64,
-    /// The element positions being proven, in ascending order.
-    pub positions: Vec<u64>,
     /// The deduplicated digests necessary for proving all elements.
     pub digests: Vec<D>,
 }
@@ -133,9 +131,7 @@ impl<D: Digest> PartialEq for Proof<D> {
 
 impl<D: Digest> PartialEq for MultiProof<D> {
     fn eq(&self, other: &Self) -> bool {
-        self.size == other.size
-            && self.positions == other.positions
-            && self.digests == other.digests
+        self.size == other.size && self.digests == other.digests
     }
 }
 
@@ -172,7 +168,7 @@ impl<D: Digest> Read for Proof<D> {
 
 impl<D: Digest> EncodeSize for MultiProof<D> {
     fn encode_size(&self) -> usize {
-        UInt(self.size).encode_size() + self.positions.encode_size() + self.digests.encode_size()
+        UInt(self.size).encode_size() + self.digests.encode_size()
     }
 }
 
@@ -180,9 +176,6 @@ impl<D: Digest> Write for MultiProof<D> {
     fn write(&self, buf: &mut impl BufMut) {
         // Write the number of nodes in the MMR as a varint
         UInt(self.size).write(buf);
-
-        // Write the positions
-        self.positions.write(buf);
 
         // Write the digests
         self.digests.write(buf);
@@ -197,17 +190,10 @@ impl<D: Digest> Read for MultiProof<D> {
         // Read the number of nodes in the MMR
         let size = UInt::<u64>::read(buf)?.into();
 
-        // Read the positions
-        let range = ..=max_len;
-        let positions = Vec::<u64>::read_range(buf, range.clone())?;
-
         // Read the digests
+        let range = ..=max_len;
         let digests = Vec::<D>::read_range(buf, range)?;
-        Ok(MultiProof {
-            size,
-            positions,
-            digests,
-        })
+        Ok(MultiProof { size, digests })
     }
 }
 
@@ -220,7 +206,6 @@ impl<D: Digest> MultiProof<D> {
         if proofs.is_empty() {
             return Ok(MultiProof {
                 size: 0,
-                positions: vec![],
                 digests: vec![],
             });
         }
@@ -233,15 +218,15 @@ impl<D: Digest> MultiProof<D> {
             }
         }
 
-        // Collect all positions being proven
+        // Collect all positions being proven and sort them
         let mut all_positions: Vec<u64> = proofs.iter().map(|(_, pos)| *pos).collect();
         all_positions.sort_unstable();
         all_positions.dedup();
 
         // Collect all required node positions for all proofs
         let mut all_required_positions = Vec::new();
-        for (_, position) in &proofs {
-            let required = Proof::<D>::nodes_required_for_range_proof(size, *position, *position);
+        for pos in &all_positions {
+            let required = Proof::<D>::nodes_required_for_range_proof(size, *pos, *pos);
             all_required_positions.extend(required);
         }
 
@@ -273,35 +258,35 @@ impl<D: Digest> MultiProof<D> {
             }
         }
 
-        Ok(MultiProof {
-            size,
-            positions: all_positions,
-            digests,
-        })
+        Ok(MultiProof { size, digests })
     }
 
     /// Verify that all elements at their respective positions are included in the MMR
     /// with the given root digest.
     ///
-    /// The elements vector must contain elements in the same order as the positions
-    /// in the MultiProof.
-    pub fn verify<I, H, E>(&self, hasher: &mut H, elements: &[E], root: &D) -> bool
+    /// The elements_with_positions vector must contain (element, position) pairs.
+    /// Positions must be provided in sorted order.
+    pub fn verify<I, H, E>(&self, hasher: &mut H, elements_with_positions: &[(E, u64)], root: &D) -> bool
     where
         I: CHasher<Digest = D>,
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if elements.len() != self.positions.len() {
-            return false;
+        if elements_with_positions.is_empty() {
+            return self.size == 0 && *root == hasher.root(0, std::iter::empty());
         }
 
-        if self.positions.is_empty() {
-            return self.size == 0 && *root == hasher.root(0, std::iter::empty());
+        // Extract positions and verify they are sorted
+        let positions: Vec<u64> = elements_with_positions.iter().map(|(_, pos)| *pos).collect();
+        for i in 1..positions.len() {
+            if positions[i] <= positions[i - 1] {
+                return false; // Positions not in sorted order
+            }
         }
 
         // Get all required positions for verifying all elements
         let mut all_required_positions = Vec::new();
-        for pos in &self.positions {
+        for pos in &positions {
             let required = Proof::<D>::nodes_required_for_range_proof(self.size, *pos, *pos);
             all_required_positions.extend(required);
         }
@@ -333,7 +318,7 @@ impl<D: Digest> MultiProof<D> {
         }
 
         // Verify each element independently
-        for (pos, element) in self.positions.iter().zip(elements.iter()) {
+        for (element, pos) in elements_with_positions {
             // Create a temporary proof for this single element
             let temp_proof = self.create_single_proof(*pos, &position_to_digest);
 
@@ -1679,15 +1664,15 @@ mod tests {
             .unwrap();
 
             assert_eq!(multi_proof.size, mmr.size());
-            assert_eq!(
-                multi_proof.positions,
-                vec![positions[0], positions[5], positions[10]]
-            );
 
             // Verify the multi-proof
             assert!(multi_proof.verify(
                 &mut hasher,
-                &[elements[0], elements[5], elements[10]],
+                &[
+                    (elements[0], positions[0]),
+                    (elements[5], positions[5]),
+                    (elements[10], positions[10]),
+                ],
                 &root
             ));
 
@@ -1698,7 +1683,15 @@ mod tests {
                 vec![252u8, 251u8, 250u8],
                 vec![249u8, 248u8, 247u8],
             ];
-            let wrong_verification = multi_proof.verify(&mut hasher, &wrong_elements, &root);
+            let wrong_verification = multi_proof.verify(
+                &mut hasher,
+                &[
+                    (wrong_elements[0].as_slice(), positions[0]),
+                    (wrong_elements[1].as_slice(), positions[5]),
+                    (wrong_elements[2].as_slice(), positions[10]),
+                ],
+                &root,
+            );
             assert!(!wrong_verification, "Should fail with wrong elements");
 
             // Test 3: Verify that we can combine many individual proofs efficiently
@@ -1717,7 +1710,12 @@ mod tests {
             
             assert!(multi_proof2.verify(
                 &mut hasher,
-                &[elements[2], elements[4], elements[15], elements[17]],
+                &[
+                    (elements[2], positions[2]),
+                    (elements[4], positions[4]),
+                    (elements[15], positions[15]),
+                    (elements[17], positions[17]),
+                ],
                 &root
             ));
 
@@ -1725,19 +1723,22 @@ mod tests {
             let wrong_root = test_digest(99);
             assert!(!multi_proof.verify(
                 &mut hasher,
-                &[elements[0], elements[5], elements[10]],
+                &[
+                    (elements[0], positions[0]),
+                    (elements[5], positions[5]),
+                    (elements[10], positions[10]),
+                ],
                 &wrong_root
             ));
 
             // Test 3: Empty multi-proof
             let empty_multi = MultiProof::<Digest>::combine(vec![]).unwrap();
             assert_eq!(empty_multi.size, 0);
-            assert!(empty_multi.positions.is_empty());
             assert!(empty_multi.digests.is_empty());
 
             let empty_mmr = Mmr::new();
             let empty_root = empty_mmr.root(&mut hasher);
-            assert!(empty_multi.verify(&mut hasher, &[] as &[Digest], &empty_root));
+            assert!(empty_multi.verify(&mut hasher, &[] as &[(Digest, u64)], &empty_root));
         });
     }
 
@@ -1772,7 +1773,7 @@ mod tests {
             let serialized = multi_proof.encode().freeze();
             assert_eq!(serialized.len(), expected_size);
 
-            let max_len = multi_proof.digests.len().max(multi_proof.positions.len());
+            let max_len = multi_proof.digests.len();
             let deserialized = MultiProof::<Digest>::decode_cfg(serialized, &max_len).unwrap();
 
             assert_eq!(multi_proof, deserialized);
@@ -1781,7 +1782,11 @@ mod tests {
             let root = mmr.root(&mut hasher);
             assert!(deserialized.verify(
                 &mut hasher,
-                &[elements[1], elements[7], elements[12]],
+                &[
+                    (elements[1], positions[1]),
+                    (elements[7], positions[7]),
+                    (elements[12], positions[12]),
+                ],
                 &root
             ));
         });
@@ -1819,7 +1824,11 @@ mod tests {
 
             // Verify it still works
             let root = mmr.root(&mut hasher);
-            assert!(multi_proof.verify(&mut hasher, &[elements[0], elements[1]], &root));
+            assert!(multi_proof.verify(
+                &mut hasher,
+                &[(elements[0], positions[0]), (elements[1], positions[1])],
+                &root
+            ));
         });
     }
 
@@ -1879,10 +1888,14 @@ mod tests {
             let multi_proof = MultiProof::combine(proofs).unwrap();
 
             // Verify the combined proof
-            assert!(multi_proof.verify(&mut hasher, &selected_elements, &root));
+            let elements_with_positions: Vec<(Digest, u64)> = indices
+                .iter()
+                .map(|&idx| (elements[idx], positions[idx]))
+                .collect();
+            assert!(multi_proof.verify(&mut hasher, &elements_with_positions, &root));
 
             // Test that verification fails with elements in wrong order
-            let mut wrong_order = selected_elements.clone();
+            let mut wrong_order = elements_with_positions.clone();
             wrong_order.swap(0, 1);
             assert!(!multi_proof.verify(&mut hasher, &wrong_order, &root));
 
@@ -1911,9 +1924,9 @@ mod tests {
 
             // Verify with just these individual elements
             let verify_elements = vec![
-                elements[10],
-                elements[12],
-                elements[50],
+                (elements[10], positions[10]),
+                (elements[12], positions[12]),
+                (elements[50], positions[50]),
             ];
 
             assert!(combined.verify(&mut hasher, &verify_elements, &root), 
