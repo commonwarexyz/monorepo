@@ -1063,6 +1063,7 @@ dependencies = [
  "commonware-storage",
  "criterion",
  "rand 0.8.5",
+ "rayon",
  "reed-solomon-simd",
  "thiserror 2.0.12",
 ]

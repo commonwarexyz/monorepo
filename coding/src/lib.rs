@@ -11,3 +11,4 @@
 )]
 
 pub mod reed_solomon;
+pub mod zoda;
