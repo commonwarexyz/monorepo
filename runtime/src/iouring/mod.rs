@@ -176,7 +176,17 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     if cfg.single_issuer {
         builder = builder.setup_single_issuer();
     }
-    builder.build(cfg.size)
+
+    // When `op_timeout` is set, each operation uses 2 SQ entries (op + linked
+    // timeout). We double the ring size to ensure users get the number of
+    // concurrent operations they configured.
+    let ring_size = if cfg.op_timeout.is_some() {
+        cfg.size * 2
+    } else {
+        cfg.size
+    };
+
+    builder.build(ring_size)
 }
 
 /// An operation submitted to the io_uring event loop which will be processed
@@ -257,16 +267,13 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
 
         // Try to fill the submission queue with incoming work.
         // Stop if we are at the max number of processing work.
-        // NOTE: When op_timeout is set, each operation uses 2 SQ entries
-        // (op + linked timeout), so we can only have half as many in-flight
-        // operations.
-        let max_waiters = if cfg.op_timeout.is_some() {
-            (cfg.size as usize) / 2
-        } else {
-            cfg.size as usize
-        };
-
-        while waiters.len() < max_waiters {
+        //
+        // NOTE: We can safely use `cfg.size` directly as the limit here, even
+        // when `op_timeout` is enabled, because we already doubled the ring
+        // size in `new_ring()` to account for the fact that each operation
+        // needs 2 SQ entries (op + timeout). This ensures users get the number
+        // of concurrent operations they configured.
+        while waiters.len() < cfg.size as usize {
             // Wait for more work
             let op = if waiters.is_empty() {
                 // Block until there is something to do
