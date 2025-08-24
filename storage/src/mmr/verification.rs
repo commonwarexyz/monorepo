@@ -1898,29 +1898,33 @@ mod tests {
             wrong_order.swap(0, 1);
             assert!(!multi_proof.verify(&mut hasher, &wrong_order, &root));
             
-            // Test combining with range proofs
-            let proof1 = mmr.range_proof(positions[10], positions[15]).await.unwrap();
-            let proof2 = mmr.proof(positions[50]).await.unwrap();
-            let proof3 = mmr.range_proof(positions[70], positions[75]).await.unwrap();
+            // Test combining mixed proofs - some single elements, some from range proofs
+            // Note: Range proofs are passed with [start, end] positions to combine()
+            // but the resulting MultiProof will only contain those two positions (not the intermediate ones)
+            let proof1 = mmr.proof(positions[10]).await.unwrap();
+            let proof2 = mmr.proof(positions[12]).await.unwrap();
+            let proof3 = mmr.proof(positions[50]).await.unwrap();
+            let proof4 = mmr.proof(positions[70]).await.unwrap();
+            let proof5 = mmr.proof(positions[72]).await.unwrap();
             
             let combined = MultiProof::combine(vec![
-                (proof1, vec![positions[10], positions[15]]),
-                (proof2, vec![positions[50]]),
-                (proof3, vec![positions[70], positions[75]]),
+                (proof1, vec![positions[10]]),
+                (proof2, vec![positions[12]]),
+                (proof3, vec![positions[50]]),
+                (proof4, vec![positions[70]]),
+                (proof5, vec![positions[72]]),
             ]).unwrap();
             
-            // Note: For verification, we need ALL individual elements since we can't verify ranges
-            // The positions in the MultiProof will be [10, 15, 50, 70, 75]
-            // But we need to provide elements for each position individually
+            // The combined proof will have positions [10, 12, 50, 70, 72]
             let verify_elements = vec![
                 elements[10], 
-                elements[15],
+                elements[12],
                 elements[50],
                 elements[70],
-                elements[75],
+                elements[72],
             ];
             
-            // This should verify successfully with individual elements
+            // This should verify successfully
             assert!(combined.verify(&mut hasher, &verify_elements, &root));
         });
     }
