@@ -320,38 +320,40 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let effective_bps = sender_egress_bps.min(receiver_ingress_bps);
 
             // Calculate transmission timing
-            let tx_duration = if effective_bps == 0 {
+            let transmission_duration = if effective_bps == 0 {
                 Duration::MAX
-            } else if effective_bps == usize::MAX {
-                Duration::ZERO
             } else {
                 Duration::from_secs_f64(message.len() as f64 / effective_bps as f64)
             };
 
-            // Sender can start when free, receiver must be free when first bit arrives
-            let sender_ready_at = sender_egress_available_at.max(now);
-            let receiver_ready_at = receiver_ingress_available_at
-                .checked_sub(latency)
-                .unwrap_or(SystemTime::UNIX_EPOCH);
+            // The transmission can start when both the sender and receiver's bandwidth is
+            // free
+            let transmission_start_at = now
+                .max(sender_egress_available_at)
+                .max(receiver_ingress_available_at);
 
-            let send_complete_at = sender_ready_at.max(receiver_ready_at) + tx_duration;
-            let receive_complete_at = send_complete_at + latency;
+            // Determine when transmission completes
+            let transmission_complete_at = transmission_start_at + transmission_duration;
 
-            // Always update sender's egress (sender uses bandwidth regardless of delivery)
-            self.peers.get_mut(&origin).unwrap().egress_available_at = send_complete_at;
+            // Always update sender's egress (sender uses bandwidth regardless of
+            // delivery), this reserves the "pipe" for the duration of the transmission
+            self.peers.get_mut(&origin).unwrap().egress_available_at = transmission_complete_at;
 
             // Determine if message should be delivered
             let should_deliver = self.context.gen_bool(link.success_rate);
 
-            // Only update receiver's ingress if message will be delivered and
-            // if the tx actually consumes time
-            if should_deliver && !tx_duration.is_zero() {
-                self.peers.get_mut(&recipient).unwrap().ingress_available_at = receive_complete_at;
+            // Only update receiver's ingress if message will be delivered
+            if should_deliver {
+                self.peers.get_mut(&recipient).unwrap().ingress_available_at =
+                    transmission_complete_at;
             }
 
             // If the message should be delivered, queue it immediately on the
             // link to preserve ordering
             if should_deliver {
+                // The final arrival time includes the per-message latency
+                let receive_complete_at = transmission_complete_at + latency;
+
                 if let Err(err) = link.send(channel, message.clone(), receive_complete_at) {
                     // This can only happen if the receiver exited.
                     error!(?origin, ?recipient, ?err, "failed to send");
@@ -363,7 +365,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 ?origin,
                 ?recipient,
                 latency_ms = latency.as_millis(),
-                tx_duration_ms = tx_duration.as_millis(),
+                transmission_duration_ms = transmission_duration.as_millis(),
                 "sending message",
             );
 
@@ -372,8 +374,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let recipient = recipient.clone();
                 let mut acquired_sender = acquired_sender.clone();
                 move |context| async move {
-                    // Wait for transmission to complete from sender's perspective
-                    context.sleep_until(send_complete_at).await;
+                    // Wait for transmission to complete
+                    context.sleep_until(transmission_complete_at).await;
 
                     // Mark as sent once transmission completes
                     acquired_sender.send(()).await.unwrap();
