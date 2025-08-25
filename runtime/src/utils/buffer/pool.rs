@@ -7,7 +7,7 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -49,7 +49,7 @@ pub struct Pool {
     clock: usize,
 
     /// The next id to assign to a blob that will be managed by this pool.
-    next_id: u64,
+    next_id: AtomicU64,
 
     /// The maximum number of pages that will be cached.
     capacity: usize,
@@ -93,7 +93,7 @@ impl PoolRef {
 
     /// Returns a unique id for the next blob that will use this buffer pool.
     pub async fn next_id(&self) -> u64 {
-        let mut pool = self.pool.write().await;
+        let pool = self.pool.read().await;
         pool.next_id()
     }
 
@@ -269,17 +269,15 @@ impl Pool {
             index: HashMap::new(),
             cache: Vec::new(),
             clock: 0,
-            next_id: 0,
+            next_id: AtomicU64::new(0),
             capacity,
             page_fetches: HashMap::new(),
         }
     }
 
     /// Assign and return the next unique blob id.
-    pub(super) fn next_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+    pub(super) fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
