@@ -529,8 +529,8 @@ impl<D: Digest> Proof<D> {
         let mut nodes_required = HashMap::new();
         for (_, pos) in elements {
             let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
-            for req_pos in required.clone() {
-                node_positions.insert(req_pos);
+            for req_pos in &required {
+                node_positions.insert(*req_pos);
             }
             nodes_required.insert(*pos, required);
         }
