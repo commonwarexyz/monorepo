@@ -18,6 +18,7 @@ members = [
     "examples/estimator",
     "examples/flood",
     "examples/log",
+    "examples/epocher",
     "examples/sync",
     "examples/vrf",
 
