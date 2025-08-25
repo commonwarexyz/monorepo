@@ -99,13 +99,13 @@ mod tests {
     const TIMEOUT: Duration = Duration::from_millis(400);
     const FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
     const LINK: Link = Link {
-        latency: 10.0,
-        jitter: 1.0,
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
     const LINK_UNRELIABLE: Link = Link {
-        latency: 10.0,
-        jitter: 1.0,
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
         success_rate: 0.5,
     };
 
@@ -393,7 +393,7 @@ mod tests {
     /// Also tests that the peer can get data from multiple peers that have different sets of data.
     #[test_traced]
     fn test_concurrent_fetch_requests() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        let executor = deterministic::Runner::timed(Duration::from_secs(90));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;

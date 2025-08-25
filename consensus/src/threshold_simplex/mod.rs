@@ -364,8 +364,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -633,8 +633,8 @@ mod tests {
 
                 // Link all validators
                 let link = Link {
-                    latency: 50.0,
-                    jitter: 50.0,
+                    latency: Duration::from_millis(50),
+                    jitter: Duration::from_millis(50),
                     success_rate: 1.0,
                 };
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -811,8 +811,8 @@ mod tests {
 
             // Link all validators except first
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(
@@ -917,8 +917,8 @@ mod tests {
 
             // Degrade network connections for online peers
             let link = Link {
-                latency: 3_000.0,
-                jitter: 0.0,
+                latency: Duration::from_secs(3),
+                jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
             link_validators(
@@ -957,8 +957,8 @@ mod tests {
 
             // Restore network connections for all online peers
             let link = Link {
-                latency: 10.0,
-                jitter: 2.5,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(3),
                 success_rate: 1.0,
             };
             link_validators(
@@ -1081,8 +1081,8 @@ mod tests {
 
             // Link all validators except first
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(
@@ -1348,8 +1348,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -1537,8 +1537,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 3_000.0,
-                jitter: 0.0,
+                latency: Duration::from_secs(3),
+                jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -1651,8 +1651,8 @@ mod tests {
 
             // Update links
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -1748,8 +1748,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
@@ -1955,8 +1955,8 @@ mod tests {
 
             // Link all validators
             let degraded_link = Link {
-                latency: 200.0,
-                jitter: 150.0,
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
                 success_rate: 0.5,
             };
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
@@ -2131,8 +2131,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2325,8 +2325,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2504,8 +2504,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2682,8 +2682,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2869,8 +2869,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -3037,8 +3037,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 80.0,
-                jitter: 10.0,
+                latency: Duration::from_millis(80),
+                jitter: Duration::from_millis(10),
                 success_rate: 0.98,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -3189,8 +3189,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 5.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(5),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;

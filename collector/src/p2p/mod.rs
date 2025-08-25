@@ -66,13 +66,13 @@ mod tests {
 
     const MAILBOX_SIZE: usize = 1024;
     const LINK: Link = Link {
-        latency: 10.0,
-        jitter: 1.0,
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
     const LINK_SLOW: Link = Link {
-        latency: 1_000.0,
-        jitter: 1.0,
+        latency: Duration::from_secs(1),
+        jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
 

@@ -284,8 +284,8 @@ mod tests {
     type Pk = commonware_cryptography::ed25519::PublicKey;
 
     const LINK: Link = Link {
-        latency: 0.0,
-        jitter: 0.0,
+        latency: Duration::from_millis(0),
+        jitter: Duration::from_millis(0),
         success_rate: 1.0,
     };
     const CAPACITY: usize = 5usize;
