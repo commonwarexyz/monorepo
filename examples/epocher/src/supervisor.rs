@@ -21,12 +21,15 @@ pub struct Supervisor<P: PublicKey> {
     polynomial: Vec<<MinSig as Variant>::Public>,
     participants: Vec<P>,
     participants_map: HashMap<P, u32>,
-
-    share: group::Share,
+    share: Option<group::Share>,
 }
 
 impl<P: PublicKey> Supervisor<P> {
-    pub fn new(polynomial: Public<MinSig>, mut participants: Vec<P>, share: group::Share) -> Self {
+    pub fn new(
+        polynomial: Public<MinSig>,
+        mut participants: Vec<P>,
+        share: Option<group::Share>,
+    ) -> Self {
         // Setup participants
         participants.sort();
         let mut participants_map = HashMap::new();
@@ -85,6 +88,6 @@ impl<P: PublicKey> TSu for Supervisor<P> {
     }
 
     fn share(&self, _: Self::Index) -> Option<&Self::Share> {
-        Some(&self.share)
+        self.share.as_ref()
     }
 }

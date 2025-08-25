@@ -9,7 +9,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt as _, Signer as _,
 };
-use commonware_epocher::{application::Application, orchestrator, supervisor::Supervisor};
+use commonware_epocher::{application::Application, orchestrator};
 use commonware_p2p::authenticated::discovery;
 use commonware_resolver::p2p::mocks as resolver_mocks;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
@@ -44,13 +44,10 @@ fn main() {
     let signer = ed25519::PrivateKey::from_seed(key);
     let port = parts[1].parse::<u16>().expect("port not well-formed");
 
-    // Fixed participants (single network)
-    let mut validators = vec![
-        ed25519::PrivateKey::from_seed(1).public_key(),
-        ed25519::PrivateKey::from_seed(2).public_key(),
-        ed25519::PrivateKey::from_seed(3).public_key(),
-        ed25519::PrivateKey::from_seed(4).public_key(),
-    ];
+    // Fixed participants (network authorization) - 10 total validators
+    let mut validators = (1u64..=10u64)
+        .map(|s| ed25519::PrivateKey::from_seed(s).public_key())
+        .collect::<Vec<_>>();
     validators.sort();
 
     // Optional bootstrappers
@@ -149,13 +146,14 @@ fn main() {
             Application::new(context.with_label("application"), 1024, marshal.clone());
 
         // Initialize orchestrator
-        let supervisor = Supervisor::new(polynomial, validators.clone(), my_share);
+        // Supervisor will be constructed per-epoch in orchestrator using selected participants
         let orchestrator_cfg = orchestrator::Config {
             oracle,
             signer: signer.clone(),
             application: application.clone(),
             marshal,
-            supervisor,
+            polynomial,
+            share: my_share,
             namespace,
             validators,
             muxer_size: 1024,

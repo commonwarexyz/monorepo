@@ -1,9 +1,15 @@
 use commonware_codec::{varint::UInt, Encode, EncodeSize, Read, ReadExt, Write};
+use commonware_consensus::types::Round;
 use commonware_cryptography::{
     sha256::{self, Digest as Sha256Digest},
     Committable, Digestible, Hasher,
 };
 
+/// Genesis round and block.
+pub const GENESIS_ROUND: Round = Round::new(0, 0);
+pub const GENESIS_BLOCK: Block = Block::new(Sha256Digest([0; 32]), 0, 0);
+
+/// Block type.
 #[derive(Clone, Debug)]
 pub struct Block {
     pub parent: Sha256Digest,

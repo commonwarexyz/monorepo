@@ -756,6 +756,11 @@ impl<
         pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
     ) {
+        // Ignore if we are not a validator
+        if self.supervisor.share(self.view).is_none() {
+            return;
+        }
+
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
@@ -1344,7 +1349,7 @@ impl<
         round.broadcast_notarize = true;
 
         // Construct notarize
-        let share = self.supervisor.share(view).unwrap();
+        let share = self.supervisor.share(view)?;
         let proposal = round.proposal.as_ref().unwrap();
         Some(Notarize::sign(&self.namespace, share, proposal.clone()))
     }
@@ -1395,7 +1400,7 @@ impl<
             return None;
         }
         round.broadcast_finalize = true;
-        let share = self.supervisor.share(view).unwrap();
+        let share = self.supervisor.share(view)?;
         let Some(proposal) = &round.proposal else {
             return None;
         };

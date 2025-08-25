@@ -1,10 +1,13 @@
 use super::ingress::{Mailbox, Message};
-use crate::types::{block::Block, epoch};
+use crate::{
+    orchestrator::EpochUpdate,
+    types::{
+        block::{Block, GENESIS_BLOCK, GENESIS_ROUND},
+        epoch,
+    },
+};
 use commonware_consensus::{
-    marshal,
-    threshold_simplex::types::Context,
-    types::{Epoch, Round},
-    Block as _, Reporter,
+    marshal, threshold_simplex::types::Context, types::Round, Block as _, Reporter,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, sha256::Digest as Sha256Digest, Committable,
@@ -24,10 +27,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tracing::{debug, info};
-
-/// Genesis round and block.
-const GENESIS_ROUND: Round = Round::new(0, 0);
-const GENESIS_BLOCK: Block = Block::new(Sha256Digest([0; 32]), 0, 0);
 
 /// Application actor for a single-network epocher.
 ///
@@ -58,11 +57,11 @@ impl<R: Rng + Spawner> Application<R> {
         )
     }
 
-    pub fn start<O: Reporter<Activity = Epoch>>(mut self, orchestrator: O) -> Handle<()> {
+    pub fn start<O: Reporter<Activity = EpochUpdate>>(mut self, orchestrator: O) -> Handle<()> {
         self.context.spawn_ref()(self.run(orchestrator))
     }
 
-    async fn run<O: Reporter<Activity = Epoch>>(mut self, mut orchestrator: O) {
+    async fn run<O: Reporter<Activity = EpochUpdate>>(mut self, mut orchestrator: O) {
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { epoch, response } => {
@@ -115,10 +114,29 @@ impl<R: Rng + Spawner> Application<R> {
                     self.finalized.lock().unwrap().insert(height, block.clone());
                     info!(height, "finalized-delivered-to-app");
 
-                    // If the block is the last block in the epoch, report to the orchestrator.
-                    if let Some(epoch) = epoch::is_last_block_in_epoch(height) {
-                        orchestrator.report(epoch + 1).await;
-                    }
+                    // Return early if not the last block in the epoch.
+                    let Some(epoch) = epoch::is_last_block_in_epoch(height) else {
+                        continue;
+                    };
+
+                    let seed = if epoch == 0 {
+                        GENESIS_BLOCK.commitment()
+                    } else {
+                        let seed_height = epoch::get_last_height(epoch - 1);
+                        self.finalized
+                            .lock()
+                            .unwrap()
+                            .get(&seed_height)
+                            .expect("seed block should exist")
+                            .commitment()
+                    };
+
+                    orchestrator
+                        .report(EpochUpdate {
+                            epoch: epoch + 1,
+                            seed,
+                        })
+                        .await;
                 }
             }
         }

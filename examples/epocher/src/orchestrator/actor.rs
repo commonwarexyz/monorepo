@@ -1,14 +1,15 @@
 use super::{Config, Mailbox, Message};
-use crate::types::block::Block;
+use crate::types::block::{Block, GENESIS_BLOCK};
+use commonware_codec::EncodeFixed;
 use commonware_consensus::{
     marshal,
     threshold_simplex::{self, types::Context},
-    types::{Epoch, View},
-    Automaton, Relay, ThresholdSupervisor,
+    types::Epoch,
+    Automaton, Relay,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
-    sha256, Signer,
+    bls12381::primitives::{group, group::Scalar, poly, variant::MinSig},
+    sha256, Committable, Signer,
 };
 use commonware_p2p::{
     authenticated::discovery::Oracle,
@@ -19,8 +20,9 @@ use commonware_runtime::{buffer::PoolRef, Clock, Handle, Metrics, Spawner, Stora
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
-use rand::{CryptoRng, Rng};
+use rand::{rngs::StdRng, seq::SliceRandom, CryptoRng, Rng, SeedableRng};
 use std::time::Duration;
+use tracing::info;
 
 type D = sha256::Digest;
 
@@ -28,23 +30,15 @@ type D = sha256::Digest;
 pub struct Orchestrator<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Signer,
-    V: Variant,
     A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch> + Relay<Digest = D>,
-    S: ThresholdSupervisor<
-        Index = View,
-        PublicKey = C::PublicKey,
-        Identity = V::Public,
-        Seed = V::Signature,
-        Polynomial = Vec<V::Public>,
-        Share = group::Share,
-    >,
 > {
     context: E,
     signer: C,
     application: A,
-    supervisor: S,
+    polynomial: poly::Public<MinSig>,
+    share_private: Scalar,
     oracle: Oracle<E, C::PublicKey>,
-    marshal: marshal::Mailbox<V, Block>,
+    marshal: marshal::Mailbox<MinSig, Block>,
 
     mailbox: mpsc::Receiver<Message>,
 
@@ -61,26 +55,18 @@ pub struct Orchestrator<
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Signer,
-        V: Variant,
         A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch> + Relay<Digest = D>,
-        S: ThresholdSupervisor<
-            Index = View,
-            PublicKey = C::PublicKey,
-            Identity = V::Public,
-            Seed = V::Signature,
-            Polynomial = Vec<V::Public>,
-            Share = group::Share,
-        >,
-    > Orchestrator<E, C, V, A, S>
+    > Orchestrator<E, C, A>
 {
-    pub fn new(context: E, cfg: Config<E, C, V, A, S>) -> (Self, Mailbox) {
+    pub fn new(context: E, cfg: Config<E, C, A>) -> (Self, Mailbox) {
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 context,
                 signer: cfg.signer,
                 application: cfg.application,
-                supervisor: cfg.supervisor,
+                polynomial: cfg.polynomial,
+                share_private: cfg.share.private,
                 oracle: cfg.oracle,
                 marshal: cfg.marshal,
 
@@ -152,18 +138,22 @@ impl<
         );
         mux.start();
 
-        // Enter initial epoch.
-        self.enter_epoch(0, &mut p_mux, &mut rc_mux, &mut rs_mux)
+        // Enter initial epoch using genesis seed (genesis block hash).
+        let genesis_seed = GENESIS_BLOCK.commitment();
+        // Register all possible validators (ensures all validators receive consensus messages)
+        self.oracle.register(0, self.validators.clone()).await;
+        self.enter_epoch(0, genesis_seed, &mut p_mux, &mut rc_mux, &mut rs_mux)
             .await;
 
         // Keep waiting for epoch updates.
         while let Some(message) = self.mailbox.next().await {
             match message {
-                Message::EnterEpoch { epoch } => {
+                Message::EnterEpoch { epoch, seed } => {
+                    // Skip if already entered this epoch.
                     if epoch <= self.epoch {
                         continue;
                     }
-                    self.enter_epoch(epoch, &mut p_mux, &mut rc_mux, &mut rs_mux)
+                    self.enter_epoch(epoch, seed, &mut p_mux, &mut rc_mux, &mut rs_mux)
                         .await;
                 }
             }
@@ -173,6 +163,7 @@ impl<
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
+        seed: sha256::Digest,
         p_mux: &mut MuxHandle<
             E,
             impl Sender<PublicKey = C::PublicKey>,
@@ -194,8 +185,28 @@ impl<
             engine.abort();
         }
 
-        // Register authorized peers for this epoch (for discovery)
-        self.oracle.register(epoch, self.validators.clone()).await;
+        self.epoch = epoch;
+
+        // Select 4 participants deterministically using the provided seed
+        let mut shuffled = self.validators.clone();
+        let mut rng = StdRng::from_seed(seed.encode_fixed());
+        shuffled.shuffle(&mut rng);
+        let mut participants = shuffled.into_iter().take(4).collect::<Vec<_>>();
+        participants.sort();
+        info!("epoch {epoch} participants: {:?}", participants);
+
+        // Build per-epoch supervisor from selected participants; if not selected, do nothing
+        let my_pk = self.signer.public_key();
+        let my_share = participants
+            .iter()
+            .position(|pk| pk == &my_pk)
+            .map(|i| i as u32)
+            .map(|index| group::Share {
+                index,
+                private: self.share_private.clone(),
+            });
+        let supervisor =
+            crate::supervisor::Supervisor::new(self.polynomial.clone(), participants, my_share);
 
         // Initialize consensus engine for this epoch
         let engine = threshold_simplex::Engine::new(
@@ -206,9 +217,8 @@ impl<
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
                 reporter: self.marshal.clone(),
-                supervisor: self.supervisor.clone(),
+                supervisor,
                 partition: format!("epocher-consensus-{}-{}", self.signer.public_key(), epoch),
-                compression: Some(3),
                 mailbox_size: 1024,
                 epoch,
                 namespace: self.namespace.clone(),
