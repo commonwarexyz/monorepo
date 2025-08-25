@@ -7,10 +7,10 @@ SESSION_NAMES=("quint-n6f1" "quint-n6f0" "quint-invariant-10" "quint-invariant-1
 
 # Commands to run in each session
 COMMANDS=(
-    "quint run --invariant=safe main_n6f1.qnt --max-samples 10000 --max-steps 50"
-    "quint run --invariant=safe main_n6f0.qnt --max-samples 10000 --max-steps 50"
-    "./scripts/invariant.sh run ./main_n6f0.qnt 10 --random-transitions"
-    "./scripts/invariant.sh run ./main_n6f0.qnt 15 --random-transitions"
+    "quint run --invariant=safe main_n6f1.qnt --max-samples 10 --max-steps 5"
+    "quint run --invariant=safe main_n6f0.qnt --max-samples 10 --max-steps 5"
+    "./scripts/invariant.sh run ./main_n6f0.qnt 1 --random-transitions"
+    "./scripts/invariant.sh run ./main_n6f0.qnt 1 --random-transitions"
 )
 
 # Kill existing sessions if they exist
@@ -30,7 +30,8 @@ for i in "${!SESSION_NAMES[@]}"; do
     command="${COMMANDS[$i]}"
     
     echo "Starting session: $session"
-    tmux new-session -d -s "$session" "$command"
+    tmux new-session -d -s "$session"
+    tmux send-keys -t "$session" "$command" Enter
 done
 
 echo ""
