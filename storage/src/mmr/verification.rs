@@ -19,7 +19,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use futures::future::try_join_all;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use tracing::debug;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
@@ -463,12 +463,10 @@ impl<D: Digest> Proof<D> {
         Ok(Proof { size, digests })
     }
 
-    /// Generate an inclusion proof for multiple non-contiguous elements in the MMR.
-    /// This is more efficient than separate proofs as it deduplicates shared digests.
-    ///
-    /// The positions array must contain the element positions to prove, in any order
-    /// (they will be sorted internally).
+    /// Return an inclusion proof for the specified positions. This is analogous to range_proof
+    /// but supports non-contiguous positions.
     pub async fn multi_proof<S: Storage<D>>(mmr: &S, positions: &[u64]) -> Result<Proof<D>, Error> {
+        // If there are no positions, return an empty proof
         if positions.is_empty() {
             return Ok(Proof {
                 size: mmr.size(),
@@ -476,10 +474,8 @@ impl<D: Digest> Proof<D> {
             });
         }
 
-        // Collect positions
+        // Collect all required node positions
         let size = mmr.size();
-
-        // Process each position and collect its required nodes
         let mut node_positions = BTreeSet::new();
         for pos in positions {
             let required = Self::nodes_required_for_range_proof(size, *pos, *pos);
@@ -489,11 +485,15 @@ impl<D: Digest> Proof<D> {
         }
 
         // Fetch all required digests in parallel
-        let positions = node_positions.into_iter().collect::<Vec<_>>();
-        let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
-        let hash_results = try_join_all(node_futures).await?;
-        let mut digests = Vec::new();
-        for (i, hash_result) in hash_results.into_iter().enumerate() {
+        let mut node_futures = Vec::with_capacity(node_positions.len());
+        for pos in node_positions {
+            node_futures.push(mmr.get_node(pos));
+        }
+        let results = try_join_all(node_futures).await?;
+
+        // Build the proof
+        let mut digests = Vec::with_capacity(results.len());
+        for (i, hash_result) in results.into_iter().enumerate() {
             match hash_result {
                 Some(hash) => digests.push(hash),
                 None => return Err(Error::ElementPruned(positions[i])),
@@ -503,11 +503,8 @@ impl<D: Digest> Proof<D> {
         Ok(Proof { size, digests })
     }
 
-    /// Verify that multiple elements at their respective positions are included in the MMR
-    /// with the given root digest.
-    ///
-    /// The elements_with_positions vector must contain (element, position) pairs.
-    /// Positions must be provided in sorted order.
+    /// Return true if `proof` proves that the elements at the specified positions are included in the MMR
+    /// with the root digest `root`.
     pub fn verify_multi_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
@@ -519,6 +516,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
+        // Empty proof is valid for an empty MMR
         if elements.is_empty() {
             return self.size == 0 && *root == hasher.root(0, std::iter::empty());
         }
@@ -538,7 +536,7 @@ impl<D: Digest> Proof<D> {
         }
 
         // Build position to digest mapping once
-        let position_to_digest: HashMap<u64, D> = node_positions
+        let node_digests: HashMap<u64, D> = node_positions
             .iter()
             .zip(self.digests.iter())
             .map(|(&pos, digest)| (pos, *digest))
@@ -549,22 +547,21 @@ impl<D: Digest> Proof<D> {
             // Get required positions for this element
             let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
 
-            // Build temporary proof with just this element's digests
-            let mut element_digests = Vec::with_capacity(required.len());
+            // Build proof with required digests
+            let mut digests = Vec::with_capacity(required.len());
             for req_pos in required {
-                match position_to_digest.get(&req_pos) {
-                    Some(digest) => element_digests.push(*digest),
+                match node_digests.get(&req_pos) {
+                    Some(digest) => digests.push(*digest),
                     None => return false,
                 }
             }
-
-            // Create temporary proof and verify
-            let temp_proof = Proof {
+            let proof = Proof {
                 size: self.size,
-                digests: element_digests,
+                digests,
             };
 
-            if !temp_proof.verify_element_inclusion(hasher, element.as_ref(), *pos, root) {
+            // Verify the proof
+            if !proof.verify_element_inclusion(hasher, element.as_ref(), *pos, root) {
                 return false;
             }
         }
