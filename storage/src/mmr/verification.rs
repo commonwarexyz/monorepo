@@ -527,11 +527,13 @@ impl<D: Digest> Proof<D> {
 
         // Single pass to collect all required positions with deduplication
         let mut node_positions = BTreeSet::new();
+        let mut required_nodes = HashMap::new();
         for (_, pos) in elements {
             let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
-            for req_pos in required {
+            for req_pos in required.clone() {
                 node_positions.insert(req_pos);
             }
+            required_nodes.insert(*pos, required);
         }
 
         // Verify we have the exact number of digests needed
@@ -549,12 +551,12 @@ impl<D: Digest> Proof<D> {
         // Verify each element by reconstructing its path
         for (element, pos) in elements {
             // Get required positions for this element
-            let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
+            let required = required_nodes.get(pos).unwrap();
 
             // Build proof with required digests
             let mut digests = Vec::with_capacity(required.len());
             for req_pos in required {
-                match node_digests.get(&req_pos) {
+                match node_digests.get(req_pos) {
                     Some(digest) => digests.push(*digest),
                     None => return false,
                 }
@@ -1580,6 +1582,18 @@ mod tests {
                     (elements[10], positions[10]),
                     (elements[5], positions[5]),
                     (elements[0], positions[0]),
+                ],
+                &root
+            ));
+
+            // Verify with duplicate items
+            assert!(multi_proof.verify_multi_inclusion(
+                &mut hasher,
+                &[
+                    (elements[0], positions[0]),
+                    (elements[0], positions[0]),
+                    (elements[10], positions[10]),
+                    (elements[5], positions[5]),
                 ],
                 &root
             ));
