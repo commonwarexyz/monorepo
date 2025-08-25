@@ -555,10 +555,10 @@ impl<D: Digest> Proof<D> {
             // Build proof with required digests
             let mut digests = Vec::with_capacity(required.len());
             for req_pos in required {
-                match node_digests.get(req_pos) {
-                    Some(digest) => digests.push(*digest),
-                    None => return false,
-                }
+                // There must exist a digest for each required position (by
+                // construction of `node_digests`)
+                let digest = node_digests.get(req_pos).unwrap();
+                digests.push(*digest);
             }
             let proof = Proof {
                 size: self.size,
