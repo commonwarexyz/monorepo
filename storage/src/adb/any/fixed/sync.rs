@@ -1088,8 +1088,8 @@ mod tests {
                 fetch_batch_size: NZU64!(20),
                 target: Target {
                     root,
-                    lower_bound: lower_bound,
-                    upper_bound: upper_bound,
+                    lower_bound,
+                    upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,

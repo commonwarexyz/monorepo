@@ -1,4 +1,4 @@
-//! Server that serves operations and proofs to clients attempting to sync a
+//! Server that serves data and proofs to clients attempting to sync a
 //! [commonware_storage::adb::any::fixed::Any] database.
 
 use clap::{Arg, Command};
@@ -29,7 +29,7 @@ use std::{
 };
 use tracing::{debug, error, info, warn};
 
-/// Maximum batch size for operations.
+/// Maximum batch size for data.
 const MAX_BATCH_SIZE: u64 = 100;
 
 /// Size of the channel for responses.
@@ -42,16 +42,16 @@ struct Config {
     database_type: DatabaseType,
     /// Port to listen on.
     port: u16,
-    /// Number of initial operations to create.
-    initial_ops: usize,
+    /// Number of initial data items to create.
+    initial_data: usize,
     /// Storage directory.
     storage_dir: String,
     /// Port on which metrics are exposed.
     metrics_port: u16,
-    /// Interval for adding new operations.
-    op_interval: Duration,
-    /// Number of operations to add each interval.
-    ops_per_interval: usize,
+    /// Interval for adding new data.
+    data_interval: Duration,
+    /// Number of data items to add each interval.
+    data_per_interval: usize,
 }
 
 /// Server state containing the database and metrics.
@@ -62,10 +62,10 @@ struct State<DB> {
     request_counter: Counter,
     /// Error counter for metrics.
     error_counter: Counter,
-    /// Counter for operations added.
-    ops_counter: Counter,
-    /// Last time we added operations.
-    last_operation_time: RwLock<SystemTime>,
+    /// Counter for data items added.
+    data_counter: Counter,
+    /// Last time we added data.
+    last_data_time: RwLock<SystemTime>,
 }
 
 impl<DB> State<DB> {
@@ -77,8 +77,8 @@ impl<DB> State<DB> {
             database: RwLock::new(database),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
-            ops_counter: Counter::default(),
-            last_operation_time: RwLock::new(SystemTime::now()),
+            data_counter: Counter::default(),
+            last_data_time: RwLock::new(SystemTime::now()),
         };
         context.register(
             "requests",
@@ -87,16 +87,16 @@ impl<DB> State<DB> {
         );
         context.register("error", "Number of errors", state.error_counter.clone());
         context.register(
-            "ops_added",
-            "Number of operations added since server start, not including the initial operations",
-            state.ops_counter.clone(),
+            "data_added",
+            "Number of data items added since server start, not including the initial data",
+            state.data_counter.clone(),
         );
         state
     }
 }
 
-/// Add operations to the database if the configured interval has passed.
-async fn maybe_add_operations<DB, E>(
+/// Add data to the database if the configured interval has passed.
+async fn maybe_add_data<DB, E>(
     state: &State<DB>,
     context: &mut E,
     config: &Config,
@@ -105,35 +105,34 @@ where
     DB: Syncable,
     E: Storage + Clock + Metrics + RngCore,
 {
-    let mut last_time = state.last_operation_time.write().await;
+    let mut last_time = state.last_data_time.write().await;
     let now = context.current();
 
-    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
+    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.data_interval {
         *last_time = now;
 
-        // Generate new operations
-        let new_operations =
-            DB::create_test_operations(config.ops_per_interval, context.next_u64());
+        // Generate new data
+        let new_data = DB::create_test_data(config.data_per_interval, context.next_u64());
 
-        // Add operations to database and get the new root
+        // Add data to database and get the new root
         let root = {
             let mut database = state.database.write().await;
-            if let Err(e) = DB::add_operations(&mut *database, new_operations.clone()).await {
-                error!(error = %e, "failed to add operations to database");
+            if let Err(e) = DB::add_data(&mut *database, new_data.clone()).await {
+                error!(error = %e, "failed to add data to database");
             }
             DB::root(&*database, &mut Standard::new())
         };
 
-        state.ops_counter.inc_by(new_operations.len() as u64);
+        state.data_counter.inc_by(new_data.len() as u64);
         let root_hex = root
             .as_ref()
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
         info!(
-            operations_added = new_operations.len(),
+            data_added = new_data.len(),
             root = %root_hex,
-            "added operations"
+            "added data"
         );
     }
 
@@ -151,21 +150,21 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, lower_bound_ops, upper_bound_ops) = {
+    let (root, lower_bound, upper_bound) = {
         let mut hasher = Standard::new();
         let database = state.database.read().await;
         (
             database.root(&mut hasher),
-            database.lower_bound_ops(),
-            database.op_count().saturating_sub(1),
+            database.lower_bound_data(),
+            database.size().saturating_sub(1),
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound: lower_bound_ops,
-            upper_bound: upper_bound_ops,
+            lower_bound,
+            upper_bound,
         },
     };
 
@@ -173,11 +172,11 @@ where
     Ok(response)
 }
 
-/// Handle a GetOperationsRequest and return operations with proof.
-async fn handle_get_operations<DB>(
+/// Handle a GetDataRequest and return data with proof.
+async fn handle_get_data<DB>(
     state: &State<DB>,
-    request: wire::GetOperationsRequest,
-) -> Result<wire::GetOperationsResponse<DB::Operation, Key>, Error>
+    request: wire::GetDataRequest,
+) -> Result<wire::GetDataResponse<DB::Data, Key>, Error>
 where
     DB: Syncable,
 {
@@ -187,7 +186,7 @@ where
     let database = state.database.read().await;
 
     // Check if we have enough operations
-    let db_size = database.op_count();
+    let db_size = database.size();
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc >= database size ({}) >= ({})",
@@ -195,57 +194,57 @@ where
         )));
     }
 
-    // Calculate how many operations to return
-    let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
-    let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
+    // Calculate how many data items to return
+    let max_data = std::cmp::min(request.max_data.get(), db_size - request.start_loc);
+    let max_data = std::cmp::min(max_data, MAX_BATCH_SIZE);
 
     debug!(
         request_id = request.request_id,
-        max_ops,
+        max_data,
         start_loc = request.start_loc,
         db_size,
-        "operations request"
+        "data request"
     );
 
-    // Get the historical proof and operations
+    // Get the historical proof and data
     let result = database
-        .historical_proof(request.size, request.start_loc, max_ops)
+        .historical_proof(request.size, request.start_loc, max_data)
         .await;
 
     drop(database);
 
-    let (proof, operations) = result.map_err(|e| {
+    let (proof, data) = result.map_err(|e| {
         warn!(error = %e, "failed to generate historical proof");
         Error::Database(e)
     })?;
 
     debug!(
         request_id = request.request_id,
-        operations_len = operations.len(),
+        data_len = data.len(),
         proof_len = proof.digests.len(),
-        "sending operations and proof"
+        "sending data and proof"
     );
 
-    Ok(wire::GetOperationsResponse::<DB::Operation, Key> {
+    Ok(wire::GetDataResponse::<DB::Data, Key> {
         request_id: request.request_id,
         proof,
-        operations,
+        data,
     })
 }
 
 /// Handle a message from a client and return the appropriate response.
 async fn handle_message<DB>(
     state: &State<DB>,
-    message: wire::Message<DB::Operation, Key>,
-) -> wire::Message<DB::Operation, Key>
+    message: wire::Message<DB::Data, Key>,
+) -> wire::Message<DB::Data, Key>
 where
     DB: Syncable,
 {
     let request_id = message.request_id();
     match message {
-        wire::Message::GetOperationsRequest(request) => {
-            match handle_get_operations::<DB>(state, request).await {
-                Ok(response) => wire::Message::GetOperationsResponse(response),
+        wire::Message::GetDataRequest(request) => {
+            match handle_get_data::<DB>(state, request).await {
+                Ok(response) => wire::Message::GetDataResponse(response),
                 Err(e) => {
                     state.error_counter.inc();
                     wire::Message::Error(ErrorResponse {
@@ -298,7 +297,7 @@ where
 
     // Wait until we receive a message from the client or we have a response to send.
     let (response_sender, mut response_receiver) =
-        mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
+        mpsc::channel::<wire::Message<DB::Data, Key>>(RESPONSE_BUFFER_SIZE);
     loop {
         select! {
             incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
@@ -353,7 +352,7 @@ where
     }
 }
 
-/// Initialize and display database state with initial operations.
+/// Initialize and display database state with initial data.
 async fn initialize_database<DB, E>(
     database: &mut DB,
     config: &Config,
@@ -366,14 +365,11 @@ where
     info!("starting {} database", DB::name());
 
     // Create and initialize database
-    let initial_ops = DB::create_test_operations(config.initial_ops, context.next_u64());
-    info!(
-        operations_len = initial_ops.len(),
-        "creating initial operations"
-    );
-    DB::add_operations(database, initial_ops).await?;
+    let initial_data = DB::create_test_data(config.initial_data, context.next_u64());
+    info!(data_len = initial_data.len(), "creating initial data");
+    DB::add_data(database, initial_data).await?;
 
-    // Commit the database to ensure operations are persisted
+    // Commit the database to ensure data is persisted
     database.commit().await?;
 
     // Display database state
@@ -385,7 +381,7 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = database.op_count(),
+        op_count = database.size(),
         root = %root_hex,
         "{} database ready",
         DB::name()
@@ -413,22 +409,22 @@ where
     let mut listener = context.with_label("listener").bind(addr).await?;
     info!(
         addr = %addr,
-        op_interval = ?config.op_interval,
-        ops_per_interval = config.ops_per_interval,
-        "{} server listening and continuously adding operations",
+        data_interval = ?config.data_interval,
+        data_per_interval = config.data_per_interval,
+        "{} server listening and continuously adding data",
         DB::name()
     );
 
     let state = Arc::new(State::new(context.with_label("server"), database));
-    let mut next_op_time = context.current() + config.op_interval;
+    let mut next_data_time = context.current() + config.data_interval;
     loop {
         select! {
-            _ = context.sleep_until(next_op_time) => {
-                // Add operations to the database
-                if let Err(e) = maybe_add_operations(&state, &mut context, &config).await {
-                    warn!(error = %e, "failed to add additional operations");
+            _ = context.sleep_until(next_data_time) => {
+                // Add data to the database
+                if let Err(e) = maybe_add_data(&state, &mut context, &config).await {
+                    warn!(error = %e, "failed to add additional data");
                 }
-                next_op_time = context.current() + config.op_interval;
+                next_data_time = context.current() + config.data_interval;
             },
             client_result = listener.accept() => {
                 match client_result {
@@ -481,7 +477,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     // Parse command line arguments
     let matches = Command::new("Sync Server")
         .version(crate_version())
-        .about("Serves database operations and proofs to sync clients")
+        .about("Serves database data and proofs to sync clients")
         .arg(
             Arg::new("db")
                 .long("db")
@@ -498,11 +494,11 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .default_value("8080"),
         )
         .arg(
-            Arg::new("initial-ops")
+            Arg::new("initial-data")
                 .short('i')
-                .long("initial-ops")
+                .long("initial-data")
                 .value_name("COUNT")
-                .help("Number of initial operations to create")
+                .help("Number of initial data items to add to the database")
                 .default_value("100"),
         )
         .arg(
@@ -522,19 +518,19 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .default_value("9090"),
         )
         .arg(
-            Arg::new("op-interval")
+            Arg::new("data-interval")
                 .short('t')
-                .long("op-interval")
+                .long("data-interval")
                 .value_name("DURATION")
-                .help("Interval for adding new operations ('ms', 's', 'm', 'h')")
+                .help("Interval for adding new data ('ms', 's', 'm', 'h')")
                 .default_value("100ms"),
         )
         .arg(
-            Arg::new("ops-per-interval")
+            Arg::new("data-per-interval")
                 .short('o')
-                .long("ops-per-interval")
+                .long("data-per-interval")
                 .value_name("COUNT")
-                .help("Number of operations to add each interval")
+                .help("Number of data items to add each interval")
                 .default_value("5"),
         )
         .get_matches();
@@ -551,11 +547,11 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .unwrap()
             .parse()
             .map_err(|e| format!("Invalid port: {e}"))?,
-        initial_ops: matches
-            .get_one::<String>("initial-ops")
+        initial_data: matches
+            .get_one::<String>("initial-data")
             .unwrap()
             .parse()
-            .map_err(|e| format!("Invalid initial operations count: {e}"))?,
+            .map_err(|e| format!("Invalid initial data count: {e}"))?,
         storage_dir: {
             let storage_dir = matches
                 .get_one::<String>("storage-dir")
@@ -574,13 +570,13 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .unwrap()
             .parse()
             .map_err(|e| format!("Invalid metrics port: {e}"))?,
-        op_interval: parse_duration(matches.get_one::<String>("op-interval").unwrap())
-            .map_err(|e| format!("Invalid operation interval: {e}"))?,
-        ops_per_interval: matches
-            .get_one::<String>("ops-per-interval")
+        data_interval: parse_duration(matches.get_one::<String>("data-interval").unwrap())
+            .map_err(|e| format!("Invalid data interval: {e}"))?,
+        data_per_interval: matches
+            .get_one::<String>("data-per-interval")
             .unwrap()
             .parse()
-            .map_err(|e| format!("Invalid ops per interval: {e}"))?,
+            .map_err(|e| format!("Invalid data per interval: {e}"))?,
     })
 }
 
@@ -592,11 +588,11 @@ fn main() {
     info!(
         database_type = %config.database_type.as_str(),
         port = config.port,
-        initial_ops = config.initial_ops,
+        initial_data = config.initial_data,
         storage_dir = %config.storage_dir,
         metrics_port = config.metrics_port,
-        op_interval = ?config.op_interval,
-        ops_per_interval = config.ops_per_interval,
+        data_interval = ?config.data_interval,
+        data_per_interval = config.data_per_interval,
         "configuration"
     );
 

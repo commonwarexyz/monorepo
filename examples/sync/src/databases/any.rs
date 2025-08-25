@@ -14,8 +14,8 @@ use std::future::Future;
 /// Database type alias.
 pub type Database<E> = fixed::Any<E, Key, Value, Hasher, Translator>;
 
-/// Operation type alias.
-pub type Operation = operation::Fixed<Key, Value>;
+/// Data type alias.
+pub type Data = operation::Fixed<Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config() -> fixed::Config<Translator> {
@@ -38,11 +38,11 @@ impl<E> crate::databases::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
-    type Operation = Operation;
+    type Data = Data;
 
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
+    fn create_test_data(count: usize, seed: u64) -> Vec<Self::Data> {
         let mut hasher = <Hasher as CryptoHasher>::new();
-        let mut operations = Vec::new();
+        let mut data = Vec::new();
         for i in 0..count {
             let key = {
                 hasher.update(&i.to_be_bytes());
@@ -56,31 +56,31 @@ where
                 hasher.finalize()
             };
 
-            operations.push(Operation::Update(key, value));
+            data.push(Data::Update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(i as u64 + 1));
+                data.push(Data::CommitFloor(i as u64 + 1));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(count as u64));
-        operations
+        data.push(Data::CommitFloor(count as u64));
+        data
     }
 
-    async fn add_operations(
+    async fn add_data(
         database: &mut Self,
-        operations: Vec<Self::Operation>,
+        data: Vec<Self::Data>,
     ) -> Result<(), commonware_storage::adb::Error> {
-        for operation in operations {
-            match operation {
-                Operation::Update(key, value) => {
+        for item in data {
+            match item {
+                Data::Update(key, value) => {
                     database.update(key, value).await?;
                 }
-                Operation::Delete(key) => {
+                Data::Delete(key) => {
                     database.delete(key).await?;
                 }
-                Operation::CommitFloor(_) => {
+                Data::CommitFloor(_) => {
                     database.commit().await?;
                 }
             }
@@ -96,11 +96,11 @@ where
         self.root(hasher)
     }
 
-    fn op_count(&self) -> u64 {
+    fn size(&self) -> u64 {
         self.op_count()
     }
 
-    fn lower_bound_ops(&self) -> u64 {
+    fn lower_bound_data(&self) -> u64 {
         self.inactivity_floor_loc()
     }
 
@@ -108,9 +108,9 @@ where
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(size, start_loc, max_ops)
+        max_data: u64,
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Data>), adb::Error>> + Send {
+        self.historical_proof(size, start_loc, max_data)
     }
 
     fn name() -> &'static str {
@@ -127,26 +127,26 @@ mod tests {
     type AnyDb = Database<deterministic::Context>;
 
     #[test]
-    fn test_create_test_operations() {
-        let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
-        assert_eq!(ops.len(), 6); // 5 operations + 1 commit
+    fn test_create_test_data() {
+        let data = <AnyDb as Syncable>::create_test_data(5, 12345);
+        assert_eq!(data.len(), 6); // 5 data items + 1 commit
 
-        if let Operation::CommitFloor(loc) = &ops[5] {
+        if let Data::CommitFloor(loc) = &data[5] {
             assert_eq!(*loc, 5);
         } else {
-            panic!("Last operation should be a commit");
+            panic!("Last data item should be a commit");
         }
     }
 
     #[test]
-    fn test_deterministic_operations() {
-        // Operations should be deterministic based on seed
-        let ops1 = <AnyDb as Syncable>::create_test_operations(3, 12345);
-        let ops2 = <AnyDb as Syncable>::create_test_operations(3, 12345);
-        assert_eq!(ops1, ops2);
+    fn test_deterministic_data() {
+        // Data should be deterministic based on seed
+        let data1 = <AnyDb as Syncable>::create_test_data(3, 12345);
+        let data2 = <AnyDb as Syncable>::create_test_data(3, 12345);
+        assert_eq!(data1, data2);
 
-        // Different seeds should produce different operations
-        let ops3 = <AnyDb as Syncable>::create_test_operations(3, 54321);
-        assert_ne!(ops1, ops3);
+        // Different seeds should produce different data
+        let data3 = <AnyDb as Syncable>::create_test_data(3, 54321);
+        assert_ne!(data1, data3);
     }
 }

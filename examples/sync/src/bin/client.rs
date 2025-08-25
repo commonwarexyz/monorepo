@@ -1,5 +1,5 @@
 //! This client binary creates or opens an [commonware_storage::adb::any] database and
-//! synchronizes it to a remote server's state. It uses the [Resolver] to fetch operations and
+//! synchronizes it to a remote server's state. It uses the [Resolver] to fetch data and
 //! sync target updates from the server, and continuously syncs to demonstrate that sync works
 //! with both empty and already-initialized databases.
 
@@ -38,7 +38,7 @@ struct Config {
     database_type: DatabaseType,
     /// Server address to connect to.
     server: SocketAddr,
-    /// Batch size for fetching operations.
+    /// Batch size for fetching data.
     batch_size: NonZeroU64,
     /// Storage directory.
     storage_dir: String,
@@ -46,7 +46,7 @@ struct Config {
     metrics_port: u16,
     /// Interval for requesting target updates.
     target_update_interval: Duration,
-    /// Interval between sync operations.
+    /// Interval between sync data.
     sync_interval: Duration,
     /// Maximum number of outstanding requests.
     max_outstanding_requests: usize,
@@ -112,7 +112,7 @@ where
     let mut iteration = 0u32;
     loop {
         let resolver =
-            Resolver::<any::Operation, Digest>::connect(context.clone(), config.server).await?;
+            Resolver::<any::Data, Digest>::connect(context.clone(), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
@@ -134,17 +134,16 @@ where
             })
         };
 
-        let sync_config =
-            sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
-                context: context.clone(),
-                db_config,
-                fetch_batch_size: config.batch_size,
-                target: initial_target,
-                resolver,
-                apply_batch_size: 1024,
-                max_outstanding_requests: config.max_outstanding_requests,
-                update_rx: Some(update_receiver),
-            };
+        let sync_config = sync::engine::Config::<any::Database<_>, Resolver<any::Data, Digest>> {
+            context: context.clone(),
+            db_config,
+            fetch_batch_size: config.batch_size,
+            target: initial_target,
+            resolver,
+            apply_batch_size: 1024,
+            max_outstanding_requests: config.max_outstanding_requests,
+            update_rx: Some(update_receiver),
+        };
 
         let database: any::Database<_> = sync::sync(sync_config).await?;
         let got_root = database.root(&mut hasher::Standard::new());
@@ -170,7 +169,7 @@ where
     let mut iteration = 0u32;
     loop {
         let resolver =
-            Resolver::<immutable::Operation, Key>::connect(context.clone(), config.server).await?;
+            Resolver::<immutable::Data, Key>::connect(context.clone(), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
@@ -193,7 +192,7 @@ where
         };
 
         let sync_config =
-            sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
+            sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Data, Key>> {
                 context: context.clone(),
                 db_config,
                 fetch_batch_size: config.batch_size,
@@ -244,7 +243,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .short('b')
                 .long("batch-size")
                 .value_name("SIZE")
-                .help("Batch size for fetching operations")
+                .help("Batch size for fetching data")
                 .default_value("50"),
         )
         .arg(
@@ -268,7 +267,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .short('t')
                 .long("target-update-interval")
                 .value_name("DURATION")
-                .help("Interval for requesting target updates ('ms', 's', 'm', 'h')")
+                .help("Frequency at which sync target is updated ('ms', 's', 'm', 'h')")
                 .default_value("1s"),
         )
         .arg(
@@ -276,7 +275,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .short('i')
                 .long("sync-interval")
                 .value_name("DURATION")
-                .help("Interval between sync operations ('ms', 's', 'm', 'h')")
+                .help("Frequency at which database is re-synced ('ms', 's', 'm', 'h')")
                 .default_value("10s"),
         )
         .arg(

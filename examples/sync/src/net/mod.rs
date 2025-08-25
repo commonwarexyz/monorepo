@@ -113,7 +113,7 @@ impl Read for ErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use crate::net::{request_id::Generator, wire::GetOperationsRequest, ErrorCode};
+    use crate::net::{request_id::Generator, wire::GetDataRequest, ErrorCode};
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_utils::NZU64;
 
@@ -147,23 +147,23 @@ mod tests {
     }
 
     #[test]
-    fn test_get_operations_request_validation() {
+    fn test_get_data_request_validation() {
         // Valid request
         let requester = Generator::new();
-        let request = GetOperationsRequest {
+        let request = GetDataRequest {
             request_id: requester.next(),
             size: 100,
             start_loc: 10,
-            max_ops: NZU64!(50),
+            max_data: NZU64!(50),
         };
         assert!(request.validate().is_ok());
 
         // Invalid start_loc
-        let request = GetOperationsRequest {
+        let request = GetDataRequest {
             request_id: requester.next(),
             size: 100,
             start_loc: 100,
-            max_ops: NZU64!(50),
+            max_data: NZU64!(50),
         };
         assert!(matches!(
             request.validate(),
@@ -171,11 +171,11 @@ mod tests {
         ));
 
         // start_loc beyond size
-        let request = GetOperationsRequest {
+        let request = GetDataRequest {
             request_id: requester.next(),
             size: 100,
             start_loc: 150,
-            max_ops: NZU64!(50),
+            max_data: NZU64!(50),
         };
         assert!(matches!(
             request.validate(),

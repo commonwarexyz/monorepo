@@ -83,14 +83,14 @@ where
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: NonZeroU64,
+        max_data: NonZeroU64,
     ) -> Result<sync::resolver::FetchResult<Self::Data, Self::Digest>, Self::Error> {
         let request_id = self.request_id_generator.next();
-        let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
+        let request = wire::Message::GetDataRequest(wire::GetDataRequest {
             request_id,
             size,
             start_loc,
-            max_ops,
+            max_data,
         });
         let (tx, rx) = oneshot::channel();
         self.request_tx
@@ -104,8 +104,8 @@ where
         let response = rx
             .await
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
-        let (proof, operations) = match response {
-            wire::Message::GetOperationsResponse(r) => (r.proof, r.operations),
+        let (proof, data) = match response {
+            wire::Message::GetDataResponse(r) => (r.proof, r.data),
             wire::Message::Error(err) => {
                 return Err(crate::Error::Server {
                     code: err.error_code,
@@ -117,7 +117,7 @@ where
         let (tx, _rx) = oneshot::channel();
         Ok(sync::resolver::FetchResult {
             proof,
-            data: operations,
+            data,
             success_tx: tx,
         })
     }
