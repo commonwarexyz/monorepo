@@ -557,7 +557,9 @@ impl<D: Digest> Proof<D> {
             for req_pos in required {
                 // There must exist a digest for each required position (by
                 // construction of `node_digests`)
-                let digest = node_digests.get(req_pos).unwrap();
+                let digest = node_digests
+                    .get(req_pos)
+                    .expect("missing digest for required position");
                 digests.push(*digest);
             }
             let proof = Proof {
