@@ -478,26 +478,25 @@ impl<D: Digest> Proof<D> {
 
         // Collect positions
         let size = mmr.size();
-        let positions: BTreeSet<u64> = positions.iter().copied().collect();
 
         // Process each position and collect its required nodes
-        let mut inner_positions = BTreeSet::new();
-        for &pos in &positions {
-            let required = Self::nodes_required_for_range_proof(size, pos, pos);
+        let mut node_positions = BTreeSet::new();
+        for pos in positions {
+            let required = Self::nodes_required_for_range_proof(size, *pos, *pos);
             for req_pos in required {
-                inner_positions.insert(req_pos);
+                node_positions.insert(req_pos);
             }
         }
 
         // Fetch all required digests in parallel
-        let inner_positions = inner_positions.into_iter().collect::<Vec<_>>();
-        let node_futures = inner_positions.iter().map(|pos| mmr.get_node(*pos));
+        let positions = node_positions.into_iter().collect::<Vec<_>>();
+        let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
         let hash_results = try_join_all(node_futures).await?;
         let mut digests = Vec::new();
         for (i, hash_result) in hash_results.into_iter().enumerate() {
             match hash_result {
                 Some(hash) => digests.push(hash),
-                None => return Err(Error::ElementPruned(inner_positions[i])),
+                None => return Err(Error::ElementPruned(positions[i])),
             };
         }
 
@@ -512,7 +511,7 @@ impl<D: Digest> Proof<D> {
     pub fn verify_multi_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
-        elements_with_positions: &[(E, u64)],
+        elements: &[(E, u64)],
         root: &D,
     ) -> bool
     where
@@ -520,44 +519,33 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if elements_with_positions.is_empty() {
+        if elements.is_empty() {
             return self.size == 0 && *root == hasher.root(0, std::iter::empty());
         }
 
-        // Extract positions and verify they are sorted
-        let positions: Vec<u64> = elements_with_positions
-            .iter()
-            .map(|(_, pos)| *pos)
-            .collect();
-        for i in 1..positions.len() {
-            if positions[i] <= positions[i - 1] {
-                return false; // Positions not in sorted order
-            }
-        }
-
         // Single pass to collect all required positions with deduplication
-        let mut inner_positions = BTreeSet::new();
-        for &pos in &positions {
-            let required = Self::nodes_required_for_range_proof(self.size, pos, pos);
+        let mut node_positions = BTreeSet::new();
+        for (_, pos) in elements {
+            let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
             for req_pos in required {
-                inner_positions.insert(req_pos);
+                node_positions.insert(req_pos);
             }
         }
 
         // Verify we have the exact number of digests needed
-        if inner_positions.len() != self.digests.len() {
+        if node_positions.len() != self.digests.len() {
             return false;
         }
 
         // Build position to digest mapping once
-        let position_to_digest: HashMap<u64, D> = inner_positions
+        let position_to_digest: HashMap<u64, D> = node_positions
             .iter()
             .zip(self.digests.iter())
             .map(|(&pos, digest)| (pos, *digest))
             .collect();
 
         // Verify each element by reconstructing its path
-        for (element, pos) in elements_with_positions {
+        for (element, pos) in elements {
             // Get required positions for this element
             let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
 
@@ -1766,26 +1754,12 @@ mod tests {
                 &root
             ));
 
-            // Test that verification fails with elements in wrong order
+            // Test that verification passes with elements in wrong order
             let mut wrong_order = elements_with_positions.clone();
             wrong_order.swap(0, 1);
-            assert!(!multi_proof.verify_multi_inclusion(&mut hasher, &wrong_order, &root));
+            assert!(multi_proof.verify_multi_inclusion(&mut hasher, &wrong_order, &root));
 
-            // Test that range proofs still work normally
-            let range_proof = mmr.range_proof(positions[10], positions[12]).await.unwrap();
-
-            // First verify the range proof works normally
-            assert!(
-                range_proof.verify_range_inclusion(
-                    &mut hasher,
-                    &[elements[10], elements[11], elements[12]],
-                    positions[10],
-                    &root
-                ),
-                "Range proof should verify"
-            );
-
-            // Now test multi-proof with different elements
+            // Test multi-proof with different elements
             let multi_proof_mixed =
                 Proof::multi_proof(&mmr, &[positions[10], positions[12], positions[50]])
                     .await
