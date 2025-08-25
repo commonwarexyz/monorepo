@@ -1,16 +1,18 @@
 #!/bin/bash
 
 # Script to run quint tests in parallel tmux sessions
-# Usage: ./run_quint_tests.sh
+# Usage: ./smoke.sh
 
-SESSION_NAMES=("quint-n6f1" "quint-n6f0" "quint-invariant-10" "quint-invariant-15")
+SESSION_NAMES=("quint-r1" "quint-r2" "quint-verify" "quint-inv-1"  "quint-inv-2" "quint-ver-1")
 
 # Commands to run in each session
 COMMANDS=(
-    "quint run --invariant=safe main_n6f1.qnt --max-samples 10 --max-steps 5"
-    "quint run --invariant=safe main_n6f0.qnt --max-samples 10 --max-steps 5"
-    "./scripts/invariant.sh run ./main_n6f0.qnt 1 --random-transitions"
-    "./scripts/invariant.sh run ./main_n6f0.qnt 1 --random-transitions"
+    "quint run --invariant=safe main_n6f1.qnt --max-samples 10000 --max-steps 100"
+    "quint run --invariant=safe main_n6f0.qnt --max-samples 10000 --max-steps 100"
+    "quint verify --invariant=safe main_n6f0.qnt --max-steps 7"
+    "./scripts/invariant.sh run ./main_n6f0.qnt 10 --random-transitions"
+    "./scripts/invariant.sh run ./main_n6f1.qnt 15 --random-transitions"
+    "./scripts/verify.sh run ./main_n6f1.qnt 10 --random-transitions"
 )
 
 # Kill existing sessions if they exist
@@ -44,7 +46,7 @@ done
 
 echo ""
 echo "Commands to interact with sessions:"
-echo "  List all sessions:     tmux list-sessions"
-echo "  Attach to a session:   tmux attach-session -t <session-name>"
+echo "  List all sessions:     tmux ls"
+echo "  Attach to a session:   tmux a -t <session-name>"
 echo "  Kill a specific session: tmux kill-session -t <session-name>"
-echo "  Kill all test sessions: make kill-quint-tests"
+echo "  Kill all sessions: tmux kill-session -a"
