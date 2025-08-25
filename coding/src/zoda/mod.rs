@@ -136,7 +136,7 @@
 //! - <https://baincapitalcrypto.com/zoda-explainer/>
 //! - <https://github.com/angeris/zoda-livestream>
 
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{
     Builder as TreeBuilder, Error as TreeError, Proof as TreeProof, Tree,
@@ -400,8 +400,34 @@ pub struct EncodingProof<F: BinaryField> {
     w_r_prime: Vec<F>,
 }
 
+impl<F: BinaryField> Write for EncodingProof<F> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.y_r.write(buf);
+        self.w_r_prime.write(buf);
+    }
+}
+
+impl<F: BinaryField> EncodeSize for EncodingProof<F> {
+    fn encode_size(&self) -> usize {
+        self.y_r.encode_size() + self.w_r_prime.encode_size()
+    }
+}
+
+impl<F: BinaryField<Cfg = ()>> Read for EncodingProof<F> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let range_cfg = RangeCfg::from(0..=usize::MAX);
+
+        let y_r = Vec::<F>::read_cfg(buf, &(range_cfg, ()))?;
+        let w_r_prime = Vec::<F>::read_cfg(buf, &(range_cfg, ()))?;
+
+        Ok(Self { y_r, w_r_prime })
+    }
+}
+
 /// A set of openings for sampled rows and columns in a [`Commitment`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Sample<H: Hasher, F: BinaryField> {
     row_root: H::Digest,
     col_root: H::Digest,
@@ -418,6 +444,82 @@ impl<H: Hasher, F: BinaryField> Sample<H, F> {
     /// Returns the indices of sampled columns
     pub fn sampled_col_indices(&self) -> Vec<usize> {
         self.cols.keys().copied().collect::<Vec<_>>()
+    }
+}
+
+impl<H: Hasher, F: BinaryField> Write for Sample<H, F> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.row_root.write(buf);
+        self.col_root.write(buf);
+
+        self.rows.len().write(buf);
+        self.rows.iter().for_each(|(idx, (row, proof))| {
+            idx.write(buf);
+            row.write(buf);
+            proof.write(buf);
+        });
+
+        self.cols.len().write(buf);
+        self.cols.iter().for_each(|(idx, (col, proof))| {
+            idx.write(buf);
+            col.write(buf);
+            proof.write(buf);
+        });
+    }
+}
+
+impl<H: Hasher, F: BinaryField> EncodeSize for Sample<H, F> {
+    fn encode_size(&self) -> usize {
+        let sample_map_encode_size = |map: &HashMap<usize, (Vec<F>, TreeProof<H>)>| {
+            map.iter()
+                .fold(map.len().encode_size(), |acc, (idx, (row, proof))| {
+                    acc + idx.encode_size() + row.encode_size() + proof.encode_size()
+                })
+        };
+
+        self.row_root.encode_size()
+            + self.col_root.encode_size()
+            + sample_map_encode_size(&self.rows)
+            + sample_map_encode_size(&self.cols)
+    }
+}
+
+impl<H: Hasher, F: BinaryField<Cfg = ()>> Read for Sample<H, F> {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let row_root = H::Digest::read_cfg(buf, cfg)?;
+        let col_root = H::Digest::read_cfg(buf, cfg)?;
+
+        let range_cfg = RangeCfg::from(0..=usize::MAX);
+
+        let row_count = usize::read_cfg(buf, &range_cfg)?;
+        let mut rows = HashMap::with_capacity(row_count);
+        for _ in 0..row_count {
+            let idx = usize::read_cfg(buf, &range_cfg)?;
+            let row = Vec::<F>::read_cfg(buf, &(range_cfg, ()))?;
+            let proof = TreeProof::<H>::read_cfg(buf, cfg)?;
+            rows.insert(idx, (row, proof));
+        }
+
+        let col_count = usize::read_cfg(buf, &range_cfg)?;
+        let mut cols = HashMap::with_capacity(col_count);
+        for _ in 0..col_count {
+            let idx = usize::read_cfg(buf, &range_cfg)?;
+            let col = Vec::<F>::read_cfg(buf, &(range_cfg, ()))?;
+            let proof = TreeProof::<H>::read_cfg(buf, cfg)?;
+            cols.insert(idx, (col, proof));
+        }
+
+        Ok(Self {
+            row_root,
+            col_root,
+            rows,
+            cols,
+        })
     }
 }
 
