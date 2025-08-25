@@ -477,6 +477,8 @@ impl<D: Digest> Proof<D> {
         }
 
         // Collect all required node positions
+        //
+        // TODO(#1472): Optimize this loop
         let size = mmr.size();
         let node_positions: BTreeSet<_> = positions
             .iter()
