@@ -119,7 +119,7 @@ pub mod types;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         mod actors;
-        mod config;
+        pub mod config;
         pub use config::Config;
         mod engine;
         pub use engine::Engine;
@@ -127,7 +127,7 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 pub mod mocks;
 
 #[cfg(test)]
@@ -252,6 +252,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -495,6 +496,7 @@ mod tests {
                     context.with_label("network"),
                     Config {
                         max_size: 1024 * 1024,
+                        ignore_blocks: true,
                     },
                 );
 
@@ -656,6 +658,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -898,6 +901,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -1126,6 +1130,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -1295,6 +1300,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -1482,6 +1488,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -1659,6 +1666,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -1812,6 +1820,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -1984,6 +1993,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -2148,6 +2158,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -2298,6 +2309,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
