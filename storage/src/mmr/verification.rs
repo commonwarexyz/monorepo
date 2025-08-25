@@ -1586,7 +1586,7 @@ mod tests {
 
             // Test 2: Verify with wrong elements should fail
             // Use completely different byte arrays
-            let wrong_elements = vec![
+            let wrong_elements = [
                 vec![255u8, 254u8, 253u8],
                 vec![252u8, 251u8, 250u8],
                 vec![249u8, 248u8, 247u8],
@@ -1750,7 +1750,7 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Test generating proof for many single elements
-            let indices = vec![3, 7, 15, 31, 63, 95];
+            let indices = [3, 7, 15, 31, 63, 95];
             let selected_positions: Vec<u64> = indices.iter().map(|&idx| positions[idx]).collect();
 
             let multi_proof = Proof::multi_proof(&mmr, &selected_positions).await.unwrap();
