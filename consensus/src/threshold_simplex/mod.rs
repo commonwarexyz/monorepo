@@ -164,7 +164,7 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use types::View;
+use crate::types::View;
 
 pub mod types;
 
@@ -209,7 +209,8 @@ pub(crate) fn interesting(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{threshold_simplex::types::seed_namespace, Monitor};
+    use crate::{threshold_simplex::types::seed_namespace, types::Round, Monitor};
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -418,6 +419,7 @@ mod tests {
                     partition: validator.to_string(),
                     compression: Some(3),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -685,6 +687,7 @@ mod tests {
                         partition: validator.to_string(),
                         compression: Some(3),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -880,6 +883,7 @@ mod tests {
                     partition: validator.to_string(),
                     compression: Some(3),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1004,6 +1008,7 @@ mod tests {
                 partition: validator.to_string(),
                 compression: Some(3),
                 mailbox_size: 1024,
+                epoch: 333,
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -1150,6 +1155,7 @@ mod tests {
                     partition: validator.to_string(),
                     compression: Some(3),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1416,6 +1422,7 @@ mod tests {
                     partition: validator.to_string(),
                     compression: Some(3),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1591,6 +1598,7 @@ mod tests {
                     partition: validator.to_string(),
                     compression: Some(3),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1802,6 +1810,7 @@ mod tests {
                     partition: validator.to_string(),
                     compression: Some(3),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2009,6 +2018,7 @@ mod tests {
                     partition: validator.to_string(),
                     compression: Some(3),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2170,6 +2180,7 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
                         supervisor,
+                        epoch: 333,
                         namespace: namespace.clone(),
                     };
 
@@ -2204,6 +2215,7 @@ mod tests {
                         partition: validator.to_string(),
                         compression: Some(3),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2395,6 +2407,7 @@ mod tests {
                         partition: validator.to_string(),
                         compression: Some(3),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2577,6 +2590,7 @@ mod tests {
                         partition: validator.to_string(),
                         compression: Some(3),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2721,6 +2735,7 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
                         supervisor,
+                        epoch: 333,
                         namespace: namespace.clone(),
                     };
                     let engine: mocks::nuller::Nuller<_, V, Sha256, _> =
@@ -2751,6 +2766,7 @@ mod tests {
                         partition: validator.to_string(),
                         compression: Some(3),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2939,6 +2955,7 @@ mod tests {
                         partition: validator.to_string(),
                         compression: Some(3),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3091,6 +3108,7 @@ mod tests {
                     partition: validator.to_string(),
                     compression: Some(3),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -3252,6 +3270,7 @@ mod tests {
                     partition: validator.to_string(),
                     compression: Some(3),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_millis(100),
                     notarization_timeout: Duration::from_millis(200),
@@ -3276,8 +3295,7 @@ mod tests {
             }
 
             // Prepare TLE test data
-            let target = 10u64; // Encrypt for view 10
-            let target_bytes = target.to_be_bytes();
+            let target = Round::new(333, 10); // Encrypt for view 10
             let message_content = b"Secret message for future view10"; // 32 bytes
             let message = Block::new(*message_content);
 
@@ -3286,7 +3304,7 @@ mod tests {
             let ciphertext = encrypt::<_, V>(
                 &mut context,
                 public_key,
-                (Some(&seed_namespace), &target_bytes),
+                (Some(&seed_namespace), &target.encode()),
                 &message,
             );
 
@@ -3296,7 +3314,7 @@ mod tests {
                 // Wait for notarization
                 context.sleep(Duration::from_millis(100)).await;
                 let notarizations = supervisor.notarizations.lock().unwrap();
-                let Some(notarization) = notarizations.get(&target) else {
+                let Some(notarization) = notarizations.get(&target.view()) else {
                     continue;
                 };
 

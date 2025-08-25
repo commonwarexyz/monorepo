@@ -1,0 +1,36 @@
+[package]
+name = "commonware-epocher"
+edition = "2021"
+publish = true
+version = "0.0.58"
+license = "MIT OR Apache-2.0"
+description = "Continuously simulate epochs with rotating validator sets seeded by previous epoch's final block."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/epocher"
+documentation = "https://docs.rs/commonware-epocher"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-broadcast = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-resolver = { workspace = true, features = ["mocks"] }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
+rand = { workspace = true }
+clap = { workspace = true }
+governor = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+
+[[bin]]
+name = "commonware-epocher"
+bench = false
+path = "src/bin/validator.rs"
+
+

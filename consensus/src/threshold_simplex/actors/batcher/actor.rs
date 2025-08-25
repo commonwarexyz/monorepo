@@ -6,10 +6,11 @@ use crate::{
         metrics::Inbound,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            Finalize, Notarize, Nullify, NullifyFinalize, View, Voter,
+            Finalize, Notarize, Nullify, NullifyFinalize, Voter,
         },
     },
-    Reporter, ThresholdSupervisor, Viewable,
+    types::{Epoch, View},
+    Epochable, Reporter, ThresholdSupervisor, Viewable,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;
@@ -104,7 +105,7 @@ impl<
     async fn add(&mut self, sender: C, message: Voter<V, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.supervisor.is_participant(self.view, &sender) else {
-            warn!(?sender, "blocking peer");
+            warn!(?sender, "blocking peer since not a participant");
             self.blocker.block(sender).await;
             return false;
         };
@@ -119,7 +120,7 @@ impl<
 
                 // Verify sender is signer
                 if index != notarize.signer() {
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for invalid signer");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -132,7 +133,7 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer");
+                            warn!(?sender, "blocking peer for conflicting notarize");
                             self.blocker.block(sender).await;
                         }
                         false
@@ -155,7 +156,12 @@ impl<
 
                 // Verify sender is signer
                 if index != nullify.signer() {
-                    warn!(?sender, "blocking peer");
+                    warn!(
+                        ?sender,
+                        ?index,
+                        signer = nullify.signer(),
+                        "blocking peer for invalid signer"
+                    );
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -166,7 +172,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for nullify-finalize conflict");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -198,7 +204,7 @@ impl<
 
                 // Verify sender is signer
                 if index != finalize.signer() {
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for invalid signer");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -209,7 +215,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for nullify-finalize conflict");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -222,7 +228,7 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer");
+                            warn!(?sender, "blocking peer for conflicting finalize");
                             self.blocker.block(sender).await;
                         }
                         false
@@ -238,7 +244,7 @@ impl<
                 }
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
-                warn!(?sender, "blocking peer");
+                warn!(?sender, "blocking peer for invalid message type");
                 self.blocker.block(sender).await;
                 false
             }
@@ -336,6 +342,7 @@ pub struct Actor<
 
     activity_timeout: View,
     skip_timeout: View,
+    epoch: Epoch,
     namespace: Vec<u8>,
 
     mailbox_receiver: mpsc::Receiver<Message<C, V, D>>,
@@ -402,6 +409,7 @@ impl<
 
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
                 mailbox_receiver: receiver,
@@ -520,10 +528,17 @@ impl<
 
                     // If there is a decoding error, block
                     let Ok(message) = message else {
-                        warn!(?sender, "blocking peer");
+                        warn!(?sender, "blocking peer for decoding error");
                         self.blocker.block(sender).await;
                         continue;
                     };
+
+                    // If the epoch is not the current epoch, block
+                    if message.epoch() != self.epoch {
+                        warn!(?sender, "blocking peer for epoch mismatch");
+                        self.blocker.block(sender).await;
+                        continue;
+                    }
 
                     // If the view isn't interesting, we can skip
                     let view = message.view();
@@ -595,7 +610,7 @@ impl<
                 let participants = self.supervisor.participants(view).unwrap();
                 for invalid in failed {
                     let signer = participants[invalid as usize].clone();
-                    warn!(?signer, "blocking peer");
+                    warn!(?signer, "blocking peer for invalid signature");
                     self.blocker.block(signer).await;
                 }
             }

@@ -5,9 +5,10 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{Backfiller, Notarization, Nullification, Request, Response, View, Voter},
+        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
     },
-    ThresholdSupervisor, Viewable,
+    types::{Epoch, View},
+    Epochable, ThresholdSupervisor, Viewable,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;
@@ -114,6 +115,7 @@ pub struct Actor<
     blocker: B,
     supervisor: S,
 
+    epoch: Epoch,
     namespace: Vec<u8>,
 
     notarizations: BTreeMap<View, Notarization<V, D>>,
@@ -184,6 +186,7 @@ impl<
                 blocker: cfg.blocker,
                 supervisor: cfg.supervisor,
 
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
                 notarizations: BTreeMap::new(),
@@ -403,7 +406,7 @@ impl<
                         }
                         Message::Nullified { nullification } => {
                             // Update current view
-                            let view = nullification.view;
+                            let view = nullification.view();
                             if view > current_view {
                                 current_view = view;
                             } else {
@@ -455,16 +458,17 @@ impl<
                         break;
                     };
 
-                    // Skip if there is a decoding error
+                    // Block if there is a decoding error
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, sender = ?s, "blocking peer");
+                            warn!(?err, sender = ?s, "blocking peer for decoding error");
                             self.requester.block(s.clone());
                             self.blocker.block(s).await;
                             continue;
                         },
                     };
+
                     match msg{
                         Backfiller::Request(request) => {
                             let mut notarizations = Vec::new();
@@ -521,6 +525,14 @@ impl<
                                 continue;
                             }
 
+                            // Validate that all notarizations and nullifications are from the current epoch
+                            if response.notarizations.iter().any(|n| n.epoch() != self.epoch) || response.nullifications.iter().any(|n| n.epoch() != self.epoch) {
+                                warn!(sender = ?s, "blocking peer for epoch mismatch");
+                                self.requester.block(s.clone());
+                                self.blocker.block(s).await;
+                                continue;
+                            }
+
                             // Update cache
                             let mut voters = Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
                             let mut notarizations_found = BTreeSet::new();
@@ -537,7 +549,7 @@ impl<
                             }
                             let mut nullifications_found = BTreeSet::new();
                             for nullification in response.nullifications {
-                                let view = nullification.view;
+                                let view = nullification.view();
                                 let entry = Entry { task: Task::Nullification, view };
                                 if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary nullification");
