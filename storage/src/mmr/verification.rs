@@ -486,23 +486,22 @@ impl<D: Digest> Proof<D> {
         sorted_positions.sort_unstable();
         sorted_positions.dedup();
 
-        // Collect all required node positions for all elements
-        let mut all_required_positions = Vec::new();
-        for pos in &sorted_positions {
-            let required = Self::nodes_required_for_range_proof(size, *pos, *pos);
-            all_required_positions.extend(required);
-        }
-
-        // Deduplicate required positions while preserving order
+        // Use a single pass to collect all required positions with preserved order
+        // We'll track positions and their insertion order
         let mut seen_positions = std::collections::HashSet::new();
         let mut deduplicated_positions = Vec::new();
-        for pos in all_required_positions {
-            if seen_positions.insert(pos) {
-                deduplicated_positions.push(pos);
+        
+        // Process each position and collect its required nodes
+        for &pos in &sorted_positions {
+            let required = Self::nodes_required_for_range_proof(size, pos, pos);
+            for req_pos in required {
+                if seen_positions.insert(req_pos) {
+                    deduplicated_positions.push(req_pos);
+                }
             }
         }
 
-        // Fetch all required digests
+        // Fetch all required digests in parallel
         let node_futures = deduplicated_positions.iter().map(|pos| mmr.get_node(*pos));
         let hash_results = try_join_all(node_futures).await?;
 
@@ -545,60 +544,51 @@ impl<D: Digest> Proof<D> {
             }
         }
 
-        // Get all required positions for verifying all elements
-        let mut all_required_positions = Vec::new();
-        for pos in &positions {
-            let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
-            all_required_positions.extend(required);
-        }
-
-        // Deduplicate while preserving order
+        // Single pass to collect all required positions with deduplication
         let mut seen = std::collections::HashSet::new();
         let mut deduplicated_positions = Vec::new();
-        for pos in all_required_positions {
-            if seen.insert(pos) {
-                deduplicated_positions.push(pos);
+        
+        for &pos in &positions {
+            let required = Self::nodes_required_for_range_proof(self.size, pos, pos);
+            for req_pos in required {
+                if seen.insert(req_pos) {
+                    deduplicated_positions.push(req_pos);
+                }
             }
         }
 
-        // Map the deduplicated positions to digests from our proof
-        let mut position_to_digest = HashMap::new();
-        let mut digest_iter = self.digests.iter();
-
-        for pos in &deduplicated_positions {
-            if let Some(digest) = digest_iter.next() {
-                position_to_digest.insert(*pos, *digest);
-            } else {
-                return false;
-            }
-        }
-
-        // Verify we used all digests
-        if digest_iter.next().is_some() {
+        // Verify we have the exact number of digests needed
+        if deduplicated_positions.len() != self.digests.len() {
             return false;
         }
 
-        // Verify each element independently
+        // Build position to digest mapping once
+        let position_to_digest: HashMap<u64, D> = deduplicated_positions
+            .iter()
+            .zip(self.digests.iter())
+            .map(|(&pos, digest)| (pos, *digest))
+            .collect();
+
+        // Verify each element by reconstructing its path
         for (element, pos) in elements_with_positions {
             // Get required positions for this element
             let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
-            let mut element_digests = Vec::new();
-
+            
+            // Build temporary proof with just this element's digests
+            let mut element_digests = Vec::with_capacity(required.len());
             for req_pos in required {
-                if let Some(digest) = position_to_digest.get(&req_pos) {
-                    element_digests.push(*digest);
-                } else {
-                    return false;
+                match position_to_digest.get(&req_pos) {
+                    Some(digest) => element_digests.push(*digest),
+                    None => return false,
                 }
             }
 
-            // Create a temporary proof for this single element
+            // Create temporary proof and verify
             let temp_proof = Proof {
                 size: self.size,
                 digests: element_digests,
             };
 
-            // Verify this element against the root
             if !temp_proof.verify_element_inclusion(hasher, element.as_ref(), *pos, root) {
                 return false;
             }
