@@ -488,8 +488,8 @@ impl<D: Digest> Proof<D> {
 
         // Fetch all required digests in parallel
         let mut node_futures = Vec::with_capacity(node_positions.len());
-        for pos in node_positions {
-            node_futures.push(mmr.get_node(pos));
+        for pos in &node_positions {
+            node_futures.push(mmr.get_node(*pos));
         }
         let results = try_join_all(node_futures).await?;
 
@@ -498,7 +498,7 @@ impl<D: Digest> Proof<D> {
         for (i, hash_result) in results.into_iter().enumerate() {
             match hash_result {
                 Some(hash) => digests.push(hash),
-                None => return Err(Error::ElementPruned(positions[i])),
+                None => return Err(Error::ElementPruned(*node_positions.iter().nth(i).unwrap())),
             };
         }
 
