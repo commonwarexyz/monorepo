@@ -64,11 +64,6 @@ module replica {
         votes.exists(v=> v.view == view and v.kind == NotarizeKind and v.sig == id)
     }
 
-    // Get the blocks from the certificates that were notarized.
-    pure def notarized_blocks(certificates: Set[Certificate]): Set[Block] = {
-        certificates.filter(v => v.kind == NotarizationKind).map(v => v.block)
-    }
-
     // Does a set of certificates have a notarization certificate for a view?
     pure def is_view_notarized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
@@ -106,7 +101,7 @@ module replica {
         certificates.exists(v => v.kind == NullificationKind and v.view == view)
     }
 
-    pure def is_view_nullified_votes(view: ViewNumber, votes: Set[Vote],): bool = or {
+    pure def is_view_nullified_votes(view: ViewNumber, votes: Set[Vote]): bool = or {
         view == GENESIS_VIEW,
         select_votes(view, NullifyKind, votes)
             .filter(v => v.block == DUMMY_BLOCK)
@@ -184,16 +179,6 @@ module replica {
             false
     }
 
-    // Replica did not vote for dummy block (in other words, the replica did not complain or did not timeout)
-    def replica_did_not_send_nullify(id: ReplicaId, view: ViewNumber): bool = {
-        not({ view: view, block: DUMMY_BLOCK, kind: NullifyKind, sig: id }.in(sent_vote))
-    }
-
-    // Has the replica sent a nullify vote for the dummy block?
-    def has_replica_sent_nullify(id: ReplicaId, view: ViewNumber): bool = {
-        { view: view, kind: NullifyKind, block: DUMMY_BLOCK, sig: id }.in(sent_vote)
-    }
-
     // Enter a new view, unless it is older than the current view.
     pure def enter_new_view(self: ReplicaState, cert: Certificate): ReplicaState = {
         val new_view = cert.view + 1
@@ -210,7 +195,7 @@ module replica {
                 last_finalized: 
                     if (self.last_finalized < cert.view and cert.kind == FinalizationKind) cert.view else self.last_finalized,
                 ghost_last_seen_notarization:
-                    if (self.ghost_last_seen_notarization < cert.view) cert.view else self.ghost_last_seen_notarization
+                    if (self.ghost_last_seen_notarization < cert.view and cert.kind != NullificationKind) cert.view else self.ghost_last_seen_notarization
             }
     }
 
@@ -228,7 +213,7 @@ module replica {
             // the parent block is notarized in the parent view
             or {
                 certs.exists(c => and {
-                    c.kind == NotarizationKind,
+                    c.kind == NotarizationKind or c.kind == FinalizationKind,
                     c.view == parent_view,
                     c.block == parent_block,
                 }),
@@ -419,7 +404,7 @@ module replica {
     // 8.6 Nullify by Contradiction
     action on_nullify_by_contradiction(id: ReplicaId, view: ViewNumber): bool = all {
         val self = replica_state.get(id)
-        val certificates = store_certificate.get(id)
+
         all {
             self.view == view,
             self.has_notarized(),
@@ -447,7 +432,6 @@ module replica {
     // 8.4. Notarization & Finalization
     action on_vote_notarize(id: ReplicaId, view: ViewNumber, block: Block, votes: Set[Vote]): bool = all {
         val self = replica_state.get(id)
-        val certificates = store_certificate.get(id)
         val store = store_vote.get(id)
         all {
             votes != Set(),
@@ -545,7 +529,7 @@ module replica {
                 cert.kind == NullificationKind and cert.signatures.size() >= M and not(is_view_nullified(cert.view, certificates))
             },
             
-            // is_new_cert set to true, because this is a certificate and at this moment the view is not nullified, notarized, or nullified
+            // is_new_cert set to true, because this is a certificate and at this moment the view is not nullified, notarized, or finalized
             _process_certificate(id, cert, true),
 
             // unchanged
@@ -663,7 +647,6 @@ module replica {
             nondet senders = FAULTY.powerset().oneOf()
             nondet view = VIEWS.oneOf()
             nondet block = AllBlocks.oneOf()
-            nondet sig = oneOf(FAULTY)
             nondet kind = oneOf(Set(NotarizeKind, NullifyKind))
             val votes = sent_vote.filter(v => and {
                 v.view == view,
@@ -673,7 +656,7 @@ module replica {
             nondet agg_sig = votes.map(v => v.sig).union(FAULTY).powerset().oneOf()
             val cert_kind = if (kind == NullifyKind) {
                 NullificationKind
-            } else if (votes.size()> M) FinalizationKind else NotarizationKind
+            } else if (votes.size()>= L) FinalizationKind else NotarizationKind
             val cert = {
                 view: view,
                 block: block,
@@ -718,6 +701,7 @@ module replica {
     // Assumptions and thresholds.
     val assumptions_valid = all {
         CORRECT.size() + FAULTY.size() == N,
+        CORRECT.intersect(FAULTY) == Set(),
         N >= 5*F+1,
         2*M <= L + 1, // Liveness guard, prevents equivocation stall.
         M + L > N + F, // Every M-quorum and every L-quorum share at least one honest replica.
@@ -787,7 +771,7 @@ module replica {
         })
     })
 
-    val notarized_consistence = CORRECT.forall(id => {
+    val notarized_consistency = CORRECT.forall(id => {
         val self = replica_state.get(id)
         VIEWS.forall(v => self.notarized.get(v)!=EMPTY_BLOCK iff has_notarized_view(id, v, sent_vote))
     })
@@ -795,10 +779,10 @@ module replica {
     // Suppose that a block B for some slot v is finalized, then no other block B' for slot v can be finalized.
     val validity = tuples(CORRECT, CORRECT, VIEWS).forall(((id1, id2, v)) => {
         val certs1 = store_certificate.get(id1).filter(c => and {
-            c.signatures.size() >= L, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= L, c.kind == FinalizationKind, c.view == v
         })
         val certs2 = store_certificate.get(id2).filter(c => and {
-            c.signatures.size() >= L, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= L, c.kind == FinalizationKind, c.view == v
         })
 
         or {
@@ -846,7 +830,7 @@ module replica {
         validity,
         valid_last_finalized,
         certificates_are_valid_inv,
-        notarized_consistence,
+        notarized_consistency,
         safe_finalization,
     }
 
