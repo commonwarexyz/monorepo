@@ -3,7 +3,7 @@ use crate::net::request_id;
 use commonware_codec::{Encode, Read};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
-use commonware_storage::adb::sync;
+use commonware_storage::{adb::sync, mmr};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -77,6 +77,7 @@ where
 {
     type Digest = D;
     type Data = Op;
+    type Proof = mmr::verification::Proof<D>;
     type Error = crate::Error;
 
     async fn get_data(
@@ -84,7 +85,7 @@ where
         size: u64,
         start_loc: u64,
         max_data: NonZeroU64,
-    ) -> Result<sync::resolver::FetchResult<Self::Data, Self::Digest>, Self::Error> {
+    ) -> Result<sync::resolver::FetchResult<Self::Data, Self::Proof>, Self::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetDataRequest(wire::GetDataRequest {
             request_id,

@@ -7,6 +7,7 @@ pub trait Database: Sized {
     /// The increment of data synced by the [Database].
     type Data;
     type Proof;
+    type PinnedNodes;
     type Journal: Journal<Data = Self::Data>;
     type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
     type Config;
@@ -35,7 +36,7 @@ pub trait Database: Sized {
         context: Self::Context,
         config: Self::Config,
         journal: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        pinned_nodes: Option<Self::PinnedNodes>,
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
@@ -67,4 +68,11 @@ pub trait Database: Sized {
         start_loc: u64,
         root: Self::Digest,
     ) -> bool;
+
+    /// Extract pinned nodes from a proof
+    fn extract_pinned_nodes(
+        proof: &Self::Proof,
+        start_loc: u64,
+        data_len: u64,
+    ) -> Result<Self::PinnedNodes, Self::Error>;
 }

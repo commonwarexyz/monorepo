@@ -1,21 +1,20 @@
 //! Manages outstanding fetch requests
 
 use crate::adb::sync::engine::IndexedFetchResult;
-use commonware_cryptography::Digest;
 use futures::stream::FuturesUnordered;
 use std::{collections::BTreeSet, future::Future, pin::Pin};
 
 /// Manages outstanding fetch requests
-pub(super) struct Requests<Data, D: Digest, E> {
+pub(super) struct Requests<D, P, E> {
     /// Futures that will resolve to batches of data
     #[allow(clippy::type_complexity)]
-    futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Data, D, E>> + Send>>>,
+    futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<D, P, E>> + Send>>>,
     /// Start locations of outstanding requests
     /// Each element corresponds to an element in `futures` and vice versa
     locations: BTreeSet<u64>,
 }
 
-impl<Data, D: Digest, E> Requests<Data, D, E> {
+impl<D, P, E> Requests<D, P, E> {
     /// Create a new empty set of outstanding requests
     pub fn new() -> Self {
         Self {
@@ -28,7 +27,7 @@ impl<Data, D: Digest, E> Requests<Data, D, E> {
     pub fn add(
         &mut self,
         start_loc: u64,
-        future: Pin<Box<dyn Future<Output = IndexedFetchResult<Data, D, E>> + Send>>,
+        future: Pin<Box<dyn Future<Output = IndexedFetchResult<D, P, E>> + Send>>,
     ) {
         self.locations.insert(start_loc);
         self.futures.push(future);
@@ -49,7 +48,7 @@ impl<Data, D: Digest, E> Requests<Data, D, E> {
     #[allow(clippy::type_complexity)]
     pub fn futures_mut(
         &mut self,
-    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Data, D, E>> + Send>>>
+    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<D, P, E>> + Send>>>
     {
         &mut self.futures
     }
@@ -60,7 +59,7 @@ impl<Data, D: Digest, E> Requests<Data, D, E> {
     }
 }
 
-impl<Data, D: Digest, E> Default for Requests<Data, D, E> {
+impl<D, P, E> Default for Requests<D, P, E> {
     fn default() -> Self {
         Self::new()
     }

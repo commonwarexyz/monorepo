@@ -1,14 +1,11 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::{
-    adb::{
-        self,
-        sync::{
-            requests::Requests,
-            resolver::{FetchResult, Resolver},
-            target::validate_update,
-            Database, Error, Journal, Target,
-        },
+    adb::sync::{
+        requests::Requests,
+        resolver::{FetchResult, Resolver},
+        target::validate_update,
+        Database, Error, Journal, Target,
     },
     mmr::hasher,
 };
@@ -34,30 +31,30 @@ pub(crate) enum NextStep<C, D> {
 
 /// Events that can occur during synchronization
 #[derive(Debug)]
-enum Event<Data, D: Digest, E> {
+enum Event<Data, D: Digest, P, E> {
     /// A target update was received
     TargetUpdate(Target<D>),
     /// A batch of data was received
-    BatchReceived(IndexedFetchResult<Data, D, E>),
+    BatchReceived(IndexedFetchResult<Data, P, E>),
     /// The target update channel was closed
     UpdateChannelClosed,
 }
 
 /// Result of a fetch and its starting location
 #[derive(Debug)]
-pub(super) struct IndexedFetchResult<Data, D: Digest, E> {
+pub(super) struct IndexedFetchResult<D, P, E> {
     /// The location of the first data item in the batch
     pub start_loc: u64,
     /// The result of the fetch
-    pub result: Result<FetchResult<Data, D>, E>,
+    pub result: Result<FetchResult<D, P>, E>,
 }
 
 /// Wait for the next synchronization event from either target updates or fetch results.
 /// Returns `None` if the sync is stalled (there are no outstanding requests).
-async fn wait_for_event<Data, D: Digest, E>(
+async fn wait_for_event<Data, D: Digest, P, E>(
     update_receiver: &mut Option<mpsc::Receiver<Target<D>>>,
-    outstanding_requests: &mut Requests<Data, D, E>,
-) -> Option<Event<Data, D, E>> {
+    outstanding_requests: &mut Requests<Data, P, E>,
+) -> Option<Event<Data, D, P, E>> {
     let target_update_fut = match update_receiver {
         Some(update_rx) => Either::Left(update_rx.next()),
         None => Either::Right(futures::future::pending()),
@@ -104,17 +101,17 @@ where
 pub(crate) struct Engine<DB, R>
 where
     DB: Database,
-    R: Resolver<Data = DB::Data, Digest = DB::Digest>,
+    R: Resolver<Data = DB::Data, Proof = DB::Proof, Digest = DB::Digest>,
     DB::Data: Encode,
 {
     /// Tracks outstanding fetch requests and their futures
-    outstanding_requests: Requests<DB::Data, DB::Digest, R::Error>,
+    outstanding_requests: Requests<DB::Data, DB::Proof, R::Error>,
 
     /// Data that has been fetched but not yet applied to the log
     fetched_data: BTreeMap<u64, Vec<DB::Data>>,
 
     /// Pinned MMR nodes extracted from proofs, used for database construction
-    pinned_nodes: Option<Vec<DB::Digest>>,
+    pinned_nodes: Option<DB::PinnedNodes>,
 
     /// The current sync target (root digest and data bounds)
     target: Target<DB::Digest>,
@@ -151,7 +148,7 @@ where
 impl<DB, R> Engine<DB, R>
 where
     DB: Database,
-    R: Resolver<Data = DB::Data, Digest = DB::Digest>,
+    R: Resolver<Data = DB::Data, Proof = DB::Proof, Digest = DB::Digest>,
     DB::Data: Encode,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
@@ -162,7 +159,7 @@ where
 impl<DB, R> Engine<DB, R>
 where
     DB: Database,
-    R: Resolver<Data = DB::Data, Digest = DB::Digest>,
+    R: Resolver<Data = DB::Data, Proof = DB::Proof, Digest = DB::Digest>,
     DB::Data: Encode,
 {
     /// Create a new sync engine with the given configuration
@@ -392,7 +389,7 @@ where
     /// 5. Storing valid data for later application
     fn handle_fetch_result(
         &mut self,
-        fetch_result: IndexedFetchResult<DB::Data, DB::Digest, R::Error>,
+        fetch_result: IndexedFetchResult<DB::Data, DB::Proof, R::Error>,
     ) -> Result<(), EngineError<DB, R>> {
         // Mark request as complete
         self.outstanding_requests.remove(fetch_result.start_loc);
@@ -413,14 +410,7 @@ where
             return Ok(());
         }
 
-        // Verify the proof
-        let proof_valid = adb::verify_proof(
-            &mut self.hasher,
-            &proof,
-            start_loc,
-            &data,
-            &self.target.root,
-        );
+        let proof_valid = DB::verify_proof(&proof, &data, start_loc, self.target.root);
 
         // Report success or failure to the resolver
         let _ = success_tx.send(proof_valid);
@@ -428,7 +418,7 @@ where
         if proof_valid {
             // Extract pinned nodes if we don't have them and this is the first batch
             if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound {
-                if let Ok(nodes) = crate::adb::extract_pinned_nodes(&proof, start_loc, data_len) {
+                if let Ok(nodes) = DB::extract_pinned_nodes(&proof, start_loc, data_len) {
                     self.pinned_nodes = Some(nodes);
                 }
             }
@@ -538,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_outstanding_requests() {
-        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        let mut requests: Requests<i32, Proof<sha256::Digest>, ()> = Requests::new();
         assert_eq!(requests.len(), 0);
 
         // Test adding requests

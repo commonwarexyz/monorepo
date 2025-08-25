@@ -29,6 +29,7 @@ where
     type Context = E;
     type Data = Fixed<K, V>;
     type Proof = mmr::verification::Proof<H::Digest>;
+    type PinnedNodes = Vec<H::Digest>;
     type Journal = fixed::Journal<E, Fixed<K, V>>;
     type Hasher = H;
     type Error = adb::Error;
@@ -164,6 +165,15 @@ where
     ) -> bool {
         let mut hasher = Standard::<H>::new();
         adb::verify_proof(&mut hasher, proof, start_loc, data, &root)
+    }
+
+    fn extract_pinned_nodes(
+        proof: &Self::Proof,
+        start_loc: u64,
+        data_len: u64,
+    ) -> Result<Self::PinnedNodes, Self::Error> {
+        let pinned_nodes = adb::extract_pinned_nodes(proof, start_loc, data_len)?;
+        Ok(pinned_nodes)
     }
 }
 

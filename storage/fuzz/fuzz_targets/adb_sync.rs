@@ -8,7 +8,7 @@ use commonware_storage::{
         any::fixed::{Any, Config},
         sync,
     },
-    mmr::hasher::Standard,
+    mmr::{self, hasher::Standard},
     store::operation::Fixed,
     translator::TwoCap,
 };
@@ -58,6 +58,7 @@ async fn test_sync<
     R: sync::resolver::Resolver<
         Digest = commonware_cryptography::sha256::Digest,
         Data = Fixed<Key, Value>,
+        Proof = mmr::verification::Proof<commonware_cryptography::sha256::Digest>,
     >,
 >(
     context: deterministic::Context,

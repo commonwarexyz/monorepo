@@ -31,7 +31,7 @@ pub async fn sync<DB, R>(
 where
     DB: Database,
     DB::Data: Encode,
-    R: resolver::Resolver<Data = DB::Data, Digest = DB::Digest>,
+    R: resolver::Resolver<Data = DB::Data, Proof = DB::Proof, Digest = DB::Digest>,
 {
     Engine::new(config).await?.sync().await
 }
