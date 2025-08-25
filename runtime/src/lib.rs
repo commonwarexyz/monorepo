@@ -143,6 +143,36 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
+    /// Enqueue a child task to be executed that will be automatically aborted when the
+    /// parent task completes or is aborted.
+    ///
+    /// This method has the same semantics as [Spawner::spawn], but the spawned task will
+    /// be tracked as a child of the current task. When the parent task completes (either
+    /// successfully or via abort), all child tasks will be automatically aborted.
+    ///
+    /// # Note
+    ///
+    /// Only async tasks can be spawned as children, since blocking tasks cannot be
+    /// aborted and therefore can't support parent-child relationships.
+    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
+
+    /// Enqueue a child task to be executed (without consuming the context).
+    ///
+    /// The semantics are the same as [Spawner::spawn_child].
+    ///
+    /// # Warning
+    ///
+    /// If this function is used to spawn multiple tasks from the same context, the runtime will panic
+    /// to prevent accidental misuse.
+    fn spawn_child_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
+
     /// Enqueue a blocking task to be executed.
     ///
     /// This method is designed for synchronous, potentially long-running operations. Tasks can either
@@ -1168,6 +1198,188 @@ mod tests {
         });
     }
 
+    fn spawn_child_impl<C, F, Fut, T>(context: &C, use_ref: bool, task_fn: F) -> Handle<T>
+    where
+        C: Spawner,
+        F: FnOnce(C) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send,
+    {
+        if use_ref {
+            context.clone().spawn_child_ref()(task_fn(context.clone()))
+        } else {
+            context.clone().spawn_child(task_fn)
+        }
+    }
+
+    fn test_spawn_child<R: Runner>(runner: R, use_ref: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let child_handle = Arc::new(Mutex::new(None));
+            let child_handle2 = child_handle.clone();
+
+            let (parent_initialized_tx, parent_initialized_rx) = oneshot::channel();
+            let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
+            let parent_handle = context.clone().spawn(move |context| async move {
+                // Spawn child that completes immediately
+                let handle = spawn_child_impl(&context, use_ref, |_| async {});
+
+                // Store child handle so we can test it later
+                *child_handle2.lock().unwrap() = Some(handle);
+
+                parent_initialized_tx.send(()).unwrap();
+
+                // Parent task completes
+                parent_complete_rx.await.unwrap();
+            });
+
+            // Wait for parent task to spawn the children
+            parent_initialized_rx.await.unwrap();
+
+            // Child task completes successfully
+            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            assert!(child_handle.await.is_ok());
+
+            // Complete the parent task
+            parent_complete_tx.send(()).unwrap();
+
+            // Wait for parent task to complete successfully
+            assert!(parent_handle.await.is_ok());
+        });
+    }
+
+    fn test_spawn_child_abort_on_parent_abort<R: Runner>(runner: R, use_ref: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let child_handle = Arc::new(Mutex::new(None));
+            let child_handle2 = child_handle.clone();
+
+            let (parent_initialized_tx, parent_initialized_rx) = oneshot::channel();
+            let parent_handle = context.clone().spawn(move |context| async move {
+                // Spawn child task that hangs forever, should be aborted when parent aborts
+                let handle = spawn_child_impl(&context, use_ref, |_| pending::<()>());
+
+                // Store child task handle so we can test it later
+                *child_handle2.lock().unwrap() = Some(handle);
+
+                parent_initialized_tx.send(()).unwrap();
+
+                // Parent task runs until aborted
+                pending::<()>().await
+            });
+
+            // Wait for parent task to spawn the children
+            parent_initialized_rx.await.unwrap();
+
+            // Abort parent task
+            parent_handle.abort();
+            assert!(parent_handle.await.is_err());
+
+            // Child task should also resolve with error since its parent aborted
+            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            assert!(child_handle.await.is_err());
+        });
+    }
+
+    fn test_spawn_child_abort_on_parent_completion<R: Runner>(runner: R, use_ref: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let child_handle = Arc::new(Mutex::new(None));
+            let child_handle2 = child_handle.clone();
+
+            let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
+            let parent_handle = context.clone().spawn(move |context| async move {
+                // Spawn child task that hangs forever, should be aborted when parent completes
+                let handle = spawn_child_impl(&context, use_ref, |_| pending::<()>());
+
+                // Store child task handle so we can test it later
+                *child_handle2.lock().unwrap() = Some(handle);
+
+                // Parent task completes
+                parent_complete_rx.await.unwrap();
+            });
+
+            // Fire parent completion
+            parent_complete_tx.send(()).unwrap();
+
+            // Wait for parent task to complete
+            assert!(parent_handle.await.is_ok());
+
+            // Child task should also resolve with error since its parent has completed
+            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            assert!(child_handle.await.is_err());
+        });
+    }
+
+    fn test_spawn_child_cascading_abort<R: Runner>(runner: R, use_ref: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            // We create the following tree of tasks. All tasks will run
+            // indefinitely (until aborted).
+            //
+            //          root
+            //     /     |     \
+            //    /      |      \
+            //   c0      c1      c2
+            //  /  \    /  \    /  \
+            // g0  g1  g2  g3  g4  g5
+
+            let handles = Arc::new(Mutex::new(Vec::new()));
+            let (mut initialized_tx, mut initialized_rx) = mpsc::channel(9);
+            let root_task = {
+                let handles = handles.clone();
+                context.clone().spawn(move |context| async move {
+                    for _ in 0..3 {
+                        let handles2 = handles.clone();
+                        let mut initialized_tx2 = initialized_tx.clone();
+                        let handle =
+                            spawn_child_impl(&context, use_ref, move |context| async move {
+                                for _ in 0..2 {
+                                    let handle = spawn_child_impl(&context, use_ref, |_| async {
+                                        pending::<()>().await;
+                                    });
+                                    handles2.lock().unwrap().push(handle);
+                                    initialized_tx2.send(()).await.unwrap();
+                                }
+                                pending::<()>().await;
+                            });
+
+                        handles.lock().unwrap().push(handle);
+                        initialized_tx.send(()).await.unwrap();
+                    }
+
+                    pending::<()>().await;
+                })
+            };
+
+            // Wait for tasks to initialize
+            for _ in 0..9 {
+                initialized_rx.next().await.unwrap();
+            }
+
+            // Verify we have all 9 handles (3 children + 6 grandchildren)
+            assert_eq!(handles.lock().unwrap().len(), 9,);
+
+            // Abort root task
+            root_task.abort();
+            assert!(root_task.await.is_err());
+
+            // All handles should resolve with error due to cascading abort
+            let handles = handles.lock().unwrap().drain(..).collect::<Vec<_>>();
+            for handle in handles {
+                assert!(handle.await.is_err());
+            }
+        });
+    }
+
     fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -1424,6 +1636,54 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_child() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child(runner, false);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_ref() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child(runner, true);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_abort_on_parent_abort() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_abort_on_parent_abort(runner, false);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_ref_abort_on_parent_abort() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_abort_on_parent_abort(runner, true);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_abort_on_parent_completion() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_abort_on_parent_completion(runner, false);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_ref_abort_on_parent_completion() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_abort_on_parent_completion(runner, true);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_cascading_abort() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_cascading_abort(runner, false);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_ref_cascading_abort() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_cascading_abort(runner, true);
+    }
+
+    #[test]
     fn test_deterministic_spawn_blocking() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
@@ -1616,6 +1876,54 @@ mod tests {
     fn test_tokio_spawn_duplicate() {
         let executor = tokio::Runner::default();
         test_spawn_duplicate(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child() {
+        let runner = tokio::Runner::default();
+        test_spawn_child(runner, false);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_ref() {
+        let runner = tokio::Runner::default();
+        test_spawn_child(runner, true);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_abort_on_parent_abort() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_abort_on_parent_abort(runner, false);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_ref_abort_on_parent_abort() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_abort_on_parent_abort(runner, true);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_abort_on_parent_completion() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_abort_on_parent_completion(runner, false);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_ref_abort_on_parent_completion() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_abort_on_parent_completion(runner, true);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_cascading_abort() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_cascading_abort(runner, false);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_ref_cascading_abort() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_cascading_abort(runner, true);
     }
 
     #[test]
