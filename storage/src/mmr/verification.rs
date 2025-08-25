@@ -548,7 +548,7 @@ impl<D: Digest> Proof<D> {
         // Verify each element by reconstructing its path
         for (element, pos) in elements {
             // Get required positions for this element
-            let required = nodes_required.get(pos).unwrap();
+            let required = &nodes_required[pos];
 
             // Build proof with required digests
             let mut digests = Vec::with_capacity(required.len());
