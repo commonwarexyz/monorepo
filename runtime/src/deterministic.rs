@@ -302,13 +302,12 @@ impl crate::Runner for Runner {
         Fut: Future,
     {
         // Setup context (depending on how the runtime was initialized)
-        let context = match self.state {
+        let (executor, context) = match self.state {
             State::Config(config) => Context::new(config),
-            State::Context(context) => context,
+            State::Context(context) => (context.executor(), context),
         };
 
         // Pin root task to the heap
-        let executor = context.executor.clone();
         let mut root = Box::pin(f(context));
 
         // Register the root task
@@ -574,19 +573,13 @@ type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 pub struct Context {
     name: String,
     spawned: bool,
-    executor: Arc<Executor>,
+    executor: Weak<Executor>,
     network: Arc<Network>,
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
 }
 
-impl Default for Context {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
-}
-
 impl Context {
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(cfg: Config) -> (Arc<Executor>, Self) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -621,13 +614,15 @@ impl Context {
             recovered: Mutex::new(false),
         });
 
-        Context {
+        let ctx = Context {
             name: String::new(),
             spawned: false,
-            executor: executor.clone(),
+            executor: Arc::downgrade(&executor),
             network: Arc::new(network),
             storage,
-        }
+        };
+
+        (executor, ctx)
     }
 
     /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
@@ -643,13 +638,14 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     pub fn recover(self) -> Self {
         // Ensure we are finished
-        if !*self.executor.finished.lock().unwrap() {
+        let executor = self.executor();
+        if !*executor.finished.lock().unwrap() {
             panic!("execution is not finished");
         }
 
         // Ensure runtime has not already been recovered
         {
-            let mut recovered = self.executor.recovered.lock().unwrap();
+            let mut recovered = executor.recovered.lock().unwrap();
             if *recovered {
                 panic!("runtime has already been recovered");
             }
@@ -662,18 +658,19 @@ impl Context {
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
-        let auditor = self.executor.auditor.clone();
+        let executor = self.executor();
+        let auditor = executor.auditor.clone();
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
         let executor = Arc::new(Executor {
             // Copied from the current runtime
-            cycle: self.executor.cycle,
-            deadline: self.executor.deadline,
+            cycle: executor.cycle,
+            deadline: executor.deadline,
             auditor: auditor.clone(),
-            rng: Mutex::new(self.executor.rng.lock().unwrap().clone()),
-            time: Mutex::new(*self.executor.time.lock().unwrap()),
-            partitions: Mutex::new(self.executor.partitions.lock().unwrap().clone()),
+            rng: Mutex::new(executor.rng.lock().unwrap().clone()),
+            time: Mutex::new(*executor.time.lock().unwrap()),
+            partitions: Mutex::new(executor.partitions.lock().unwrap().clone()),
 
             // New state for the new runtime
             registry: Mutex::new(registry),
@@ -687,14 +684,24 @@ impl Context {
         Self {
             name: String::new(),
             spawned: false,
-            executor,
+            executor: Arc::downgrade(&executor),
             network: Arc::new(network),
             storage: self.storage,
         }
     }
 
-    pub fn auditor(&self) -> &Auditor {
-        &self.executor.auditor
+    pub fn auditor(&self) -> Arc<Auditor> {
+        self.executor().auditor.clone()
+    }
+
+    fn executor(&self) -> Arc<Executor> {
+        self.executor
+            .upgrade()
+            .expect("IMPOSSIBLE: Context's executor has already been dropped")
+    }
+
+    fn tasks(&self) -> Arc<Tasks> {
+        self.executor().tasks.clone()
     }
 }
 
@@ -724,12 +731,12 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
-        let executor = self.executor.clone();
+        let tasks = self.tasks();
         let future = f(self);
         let (f, handle) = Handle::init_future(future, gauge, false);
 
         // Spawn the task
-        Tasks::register_work(&executor.tasks, label, Box::pin(f));
+        Tasks::register_work(&tasks, label, Box::pin(f));
         handle
     }
 
@@ -746,12 +753,12 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
-        let executor = self.executor.clone();
+        let tasks = self.executor().tasks.clone();
         move |f: F| {
             let (f, handle) = Handle::init_future(f, gauge, false);
 
             // Spawn the task
-            Tasks::register_work(&executor.tasks, label, Box::pin(f));
+            Tasks::register_work(&tasks, label, Box::pin(f));
             handle
         }
     }
@@ -768,7 +775,7 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Initialize the blocking task
-        let executor = self.executor.clone();
+        let executor = self.executor();
         let (f, handle) = Handle::init_blocking(|| f(self), gauge, false);
 
         // Spawn the task
@@ -790,7 +797,7 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
-        let executor = self.executor.clone();
+        let executor = self.executor();
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, gauge, false);
 
@@ -802,11 +809,12 @@ impl crate::Spawner for Context {
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
-        self.executor.auditor.event(b"stop", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"stop", |hasher| {
             hasher.update(value.to_be_bytes());
         });
         let stop_resolved = {
-            let mut shutdown = self.executor.shutdown.lock().unwrap();
+            let mut shutdown = executor.shutdown.lock().unwrap();
             shutdown.stop(value)
         };
 
@@ -827,8 +835,10 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.auditor.event(b"stopped", |_| {});
-        self.executor.shutdown.lock().unwrap().stopped()
+        let executor = self.executor();
+        executor.auditor.event(b"stopped", |_| {});
+        let out = executor.shutdown.lock().unwrap().stopped();
+        out
     }
 }
 
@@ -865,7 +875,7 @@ impl crate::Metrics for Context {
         let help = help.into();
 
         // Register metric
-        self.executor.auditor.event(b"register", |hasher| {
+        self.executor().auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
         });
@@ -877,7 +887,7 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        self.executor
+        self.executor()
             .registry
             .lock()
             .unwrap()
@@ -885,9 +895,10 @@ impl crate::Metrics for Context {
     }
 
     fn encode(&self) -> String {
-        self.executor.auditor.event(b"encode", |_| {});
+        let executor = self.executor();
+        executor.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
-        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
         buffer
     }
 }
@@ -947,7 +958,7 @@ impl Future for Sleeper {
 
 impl Clock for Context {
     fn current(&self) -> SystemTime {
-        *self.executor.time.lock().unwrap()
+        *self.executor().time.lock().unwrap()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
@@ -960,8 +971,7 @@ impl Clock for Context {
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         Sleeper {
-            executor: self.executor.clone(),
-
+            executor: self.executor(),
             time: deadline,
             registered: false,
         }
@@ -995,31 +1005,39 @@ impl crate::Network for Context {
 
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
-        self.executor.auditor.event(b"rand", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        self.executor.rng.lock().unwrap().next_u32()
+        let out = executor.rng.lock().unwrap().next_u32();
+        out
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.executor.auditor.event(b"rand", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        self.executor.rng.lock().unwrap().next_u64()
+        let out = executor.rng.lock().unwrap().next_u64();
+        out
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.executor.auditor.event(b"rand", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
-        self.executor.rng.lock().unwrap().fill_bytes(dest)
+        let out = executor.rng.lock().unwrap().fill_bytes(dest);
+        out
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.executor.auditor.event(b"rand", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        self.executor.rng.lock().unwrap().try_fill_bytes(dest)
+        let out = executor.rng.lock().unwrap().try_fill_bytes(dest);
+        out
     }
 }
 

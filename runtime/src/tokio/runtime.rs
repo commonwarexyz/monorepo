@@ -368,6 +368,15 @@ pub struct Context {
     network: Network,
 }
 
+impl Context {
+    // Exists to have a uniform interface between this struct, and the deterministic variant,
+    // which holds a weak reference, and so has an access method. This gets used in macros,
+    // which work for both structs, and so we need a shared interface.
+    fn executor(&self) -> Arc<Executor> {
+        self.executor.clone()
+    }
+}
+
 impl Clone for Context {
     fn clone(&self) -> Self {
         Self {

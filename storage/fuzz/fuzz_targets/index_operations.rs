@@ -68,7 +68,7 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let context = deterministic::Context::default();
+    let (_executor, context) = deterministic::Context::new(Default::default());
     let mut index = Index::init(context.clone(), TwoCap);
 
     for op in input.operations.iter() {
