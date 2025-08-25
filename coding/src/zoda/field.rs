@@ -2,7 +2,7 @@
 
 #![allow(clippy::suspicious_arithmetic_impl, clippy::suspicious_op_assign_impl)]
 
-use commonware_codec::Encode;
+use commonware_codec::{Decode, Encode};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::{
     fmt::{Debug, Display},
@@ -25,6 +25,7 @@ pub trait BinaryField:
     + Add<Self, Output = Self>
     + AddAssign<Self>
     + Encode
+    + Decode
 {
     /// Size of the field in bits.
     const BIT_SIZE: usize;
@@ -169,6 +170,18 @@ macro_rules! binary_field {
         impl commonware_codec::Write for &$name {
             fn write(&self, buf: &mut impl bytes::BufMut) {
                 self.0.write(buf);
+            }
+        }
+
+        impl commonware_codec::Read for $name {
+            type Cfg = ();
+
+            fn read_cfg(
+                buf: &mut impl bytes::Buf,
+                _cfg: &Self::Cfg,
+            ) -> Result<Self, commonware_codec::Error> {
+                let val = <$ty>::read_cfg(buf, &())?;
+                Ok(Self(val))
             }
         }
     };
