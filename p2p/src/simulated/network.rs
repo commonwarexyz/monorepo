@@ -216,7 +216,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 };
 
                 // Require link to not already exist
-                let key = (sender.clone(), receiver);
+                let key = (sender.clone(), receiver.clone());
                 if self.links.contains_key(&key) {
                     return send_result(result, Err(Error::LinkExists));
                 }
@@ -224,10 +224,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let link = Link::new(
                     &mut self.context,
                     sender,
+                    receiver,
                     peer.socket,
                     sampler,
                     success_rate,
                     self.max_size,
+                    self.received_messages.clone(),
                 );
                 self.links.insert(key, link);
                 send_result(result, Ok(()))
@@ -333,12 +335,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .unwrap_or(SystemTime::UNIX_EPOCH);
 
             let send_complete_at = sender_ready_at.max(receiver_ready_at) + tx_duration;
-            let mut receive_complete_at = send_complete_at + latency;
-
-            // Apply ordering constraint: messages must arrive after previous message on this link
-            // (we add a 1 microsecond epsilon to ensure strict ordering)
-            receive_complete_at =
-                receive_complete_at.max(link.last_arrival_at + Duration::from_micros(1));
+            let receive_complete_at = send_complete_at + latency;
 
             // Always update sender's egress (sender uses bandwidth regardless of delivery)
             self.peers.get_mut(&origin).unwrap().egress_available_at = send_complete_at;
@@ -346,14 +343,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             // Determine if message should be delivered
             let should_deliver = self.context.gen_bool(link.success_rate);
 
-            // Only update receiver's ingress and link arrival time if message will be delivered
-            if should_deliver {
-                link.last_arrival_at = receive_complete_at;
+            // Only update receiver's ingress if message will be delivered and
+            // if the tx actually consumes time
+            if should_deliver && !tx_duration.is_zero() {
+                self.peers.get_mut(&recipient).unwrap().ingress_available_at = receive_complete_at;
+            }
 
-                // Only reserve receiver if tx actually consumes time
-                if !tx_duration.is_zero() {
-                    self.peers.get_mut(&recipient).unwrap().ingress_available_at =
-                        receive_complete_at;
+            // If the message should be delivered, queue it immediately on the
+            // link to preserve ordering
+            if should_deliver {
+                if let Err(err) = link.send(channel, message.clone(), receive_complete_at) {
+                    // This can only happen if the receiver exited.
+                    error!(?origin, ?recipient, ?err, "failed to send");
+                    continue;
                 }
             }
 
@@ -365,14 +367,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 "sending message",
             );
 
-            // Send message
-            self.context.with_label("messenger").spawn({
-                let mut link = link.clone();
-                let message = message.clone();
+            // Spawn task to handle sender timing
+            self.context.with_label("sender-timing").spawn({
                 let recipient = recipient.clone();
-                let origin = origin.clone();
                 let mut acquired_sender = acquired_sender.clone();
-                let received_messages = self.received_messages.clone();
                 move |context| async move {
                     // Wait for transmission to complete from sender's perspective
                     context.sleep_until(send_complete_at).await;
@@ -380,32 +378,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     // Mark as sent once transmission completes
                     acquired_sender.send(()).await.unwrap();
 
-                    // Drop message if success rate is too low
                     if !should_deliver {
                         trace!(
                             ?recipient,
                             reason = "random link failure",
                             "dropping message",
                         );
-                        return;
                     }
-
-                    // Wait for message to arrive at receiver
-                    context.sleep_until(receive_complete_at).await;
-
-                    // Send message
-                    if let Err(err) = link.send(channel, message).await {
-                        // This can only happen if the receiver exited.
-                        error!(?origin, ?recipient, ?err, "failed to send",);
-                        return;
-                    }
-
-                    // Only record received messages that were successfully sent
-                    received_messages
-                        .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
-                        .inc();
                 }
             });
+
             sent.push(recipient);
         }
 
@@ -746,27 +728,27 @@ impl<P: PublicKey> Peer<P> {
 struct Link {
     sampler: Normal<f64>,
     success_rate: f64,
-    inbox: mpsc::UnboundedSender<(Channel, Bytes)>,
-    // Tracks when the last message fully arrived at the destination, used to
-    // ensure in-order delivery.
-    last_arrival_at: SystemTime,
+    // Messages with their receive time for ordered delivery
+    inbox: mpsc::UnboundedSender<(Channel, Bytes, SystemTime)>,
 }
 
 impl Link {
+    #[allow(clippy::too_many_arguments)]
     fn new<E: Spawner + RNetwork + Clock + Metrics, P: PublicKey>(
         context: &mut E,
         dialer: P,
+        receiver: P,
         socket: SocketAddr,
         sampler: Normal<f64>,
         success_rate: f64,
         max_size: usize,
+        received_messages: Family<metrics::Message, Counter>,
     ) -> Self {
         let (inbox, mut outbox) = mpsc::unbounded();
         let result = Self {
             sampler,
             success_rate,
             inbox,
-            last_arrival_at: context.current(),
         };
 
         // Spawn a task that will wait for messages to be sent to the link and then send them
@@ -782,24 +764,37 @@ impl Link {
                     return;
                 }
 
-                // For any item placed in the inbox, send it to the sink
-                while let Some((channel, message)) = outbox.next().await {
+                // Process messages in order, waiting for their receive time
+                while let Some((channel, message, receive_complete_at)) = outbox.next().await {
+                    // Wait until the message should arrive at receiver
+                    context.sleep_until(receive_complete_at).await;
+
+                    // Send the message
                     let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
                     data.extend_from_slice(&channel.to_be_bytes());
                     data.extend_from_slice(&message);
                     let data = data.freeze();
                     send_frame(&mut sink, &data, max_size).await.unwrap();
+
+                    // Bump received messages metric
+                    received_messages
+                        .get_or_create(&metrics::Message::new(&dialer, &receiver, channel))
+                        .inc();
                 }
             });
 
         result
     }
 
-    // Send a message over the link.
-    async fn send(&mut self, channel: Channel, message: Bytes) -> Result<(), Error> {
+    // Send a message over the link with receive timing.
+    fn send(
+        &mut self,
+        channel: Channel,
+        message: Bytes,
+        receive_complete_at: SystemTime,
+    ) -> Result<(), Error> {
         self.inbox
-            .send((channel, message))
-            .await
+            .unbounded_send((channel, message, receive_complete_at))
             .map_err(|_| Error::NetworkClosed)?;
         Ok(())
     }
