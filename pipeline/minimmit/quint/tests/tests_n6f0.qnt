@@ -106,7 +106,7 @@ module tests {
                 assert(store_certificate.get("n0").size() == 1),
                 assert(store_certificate.get("n1").size() == 0),
                 assert(is_view_notarized(0, store_certificate.get("n0"))),
-                assert(is_view_notarized_votes(0, store_vote.get("n0"), hash(proposal.block))),
+                assert(is_view_notarized_votes(0, store_vote.get("n0"), proposal.block)),
                 unchanged_all
             })
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n3"))
@@ -233,7 +233,7 @@ module tests {
         val cert_n0n1n2n3n4 = {
                 view: 0,
                 kind: FinalizationKind,
-                block_hash: hash("val_b0"),
+                block: "val_b0",
                 signatures: Set("n0", "n1", "n2", "n3", "n4"),
                 ghost_sender: sig_of("n0"),
             }
@@ -292,7 +292,7 @@ module tests {
                 assert(store_certificate.get("n0").size() == 1),
                 assert(store_certificate.get("n1").size() == 0),
                 assert(is_view_notarized(0, store_certificate.get("n0"))),
-                assert(is_view_notarized_votes(0, store_vote.get("n0"), hash(proposal.block))),
+                assert(is_view_notarized_votes(0, store_vote.get("n0"), proposal.block)),
                 unchanged_all
             })
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n3"))
@@ -350,7 +350,7 @@ module tests {
                 assert(replica_state.get("n5").last_finalized==-1),
                 assert(store_certificate.get("n5").size() == 0),
                 assert(not(is_view_notarized(0, store_certificate.get("n5")))),
-                assert(not(is_view_notarized_votes(0, store_vote.get("n5"), hash(proposal.block)))),
+                assert(not(is_view_notarized_votes(0, store_vote.get("n5"), proposal.block))),
                 unchanged_all
             })
             .then(replica_receives_certificate("n5", cert_n0n1n2n3n4))
@@ -472,14 +472,14 @@ module tests {
 
         val n4_vote = {
             view: 0,
-            block_hash: hash("val_b0"),
+            block: "val_b0",
             sig: sig_of("n4"),
             kind: NotarizeKind
         }
 
         val n5_vote = {
             view: 0,
-            block_hash: hash("val_b0"),
+            block: "val_b0",
             sig: sig_of("n5"),
             kind: NotarizeKind
         }
@@ -487,7 +487,7 @@ module tests {
         val cert_n0n1n2 = {
             view: 0,
             kind: NotarizationKind,
-            block_hash: hash("val_b0"),
+            block: "val_b0",
             signatures: Set("n0", "n1", "n2"),
             ghost_sender: sig_of("n0"),
         }
@@ -545,7 +545,7 @@ module tests {
 
             .then(all{
                 assert(not(sent_vote.contains(n4_vote))),
-                assert(store_vote.get("n4").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b0").size() == 0),
+                assert(store_vote.get("n4").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block == "val_b0").size() == 0),
                 assert(store_certificate.get("n4").size() == 0),
                 unchanged_all
             })
@@ -562,7 +562,7 @@ module tests {
             .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n1"))
             .then(all{
                 assert(not(sent_vote.contains(n5_vote))),
-                assert(store_vote.get("n5").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b0").size() == 2),
+                assert(store_vote.get("n5").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block == "val_b0").size() == 2),
                 assert(store_certificate.get("n5").size() == 0),
                 assert(not(is_view_notarized(0, store_certificate.get("n5")))),
                 assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 0),
@@ -578,7 +578,7 @@ module tests {
                 assert(store_certificate.get("n5").size() == 1),
                 assert(sent_vote.contains(n5_vote)),
                 assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 1),
-                assert(replica_state.get("n5").notarized.get(0) == hash("val_b0")),
+                assert(replica_state.get("n5").notarized.get(0) == "val_b0"),
                 assert(replica_state.get("n5").view == 1),
                 unchanged_all
             })
@@ -691,7 +691,7 @@ module tests {
 
         val n5_vote = {
             view: 0,
-            block_hash: hash("val_b0"),
+            block: "val_b0",
             sig: sig_of("n5"),
             kind: NotarizeKind
         }
@@ -699,7 +699,7 @@ module tests {
         val notarization_n0n1n2 = {
             view: 0,
             kind: NotarizationKind,
-            block_hash: hash("val_b0"),
+            block: "val_b0",
             signatures: Set("n0", "n1", "n2"),
             ghost_sender: sig_of("n0"),
         }
@@ -707,7 +707,7 @@ module tests {
         val finalization_n0n1n2n3n4 = {
             view: 0,
             kind: FinalizationKind,
-            block_hash: hash("val_b0"),
+            block: "val_b0",
             signatures: Set("n0", "n1", "n2", "n3", "n4"),
             ghost_sender: sig_of("n0"),
         }
@@ -773,7 +773,7 @@ module tests {
 
             .then(all{
                 assert(not(sent_vote.contains(n5_vote))),
-                assert(store_vote.get("n5").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b0").size() == 0),
+                assert(store_vote.get("n5").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block == "val_b0").size() == 0),
                 assert(store_certificate.get("n5").size() == 0),
                 unchanged_all
             })
@@ -791,7 +791,7 @@ module tests {
                 assert(store_certificate.get("n5").size() == 2),
                 assert(sent_vote.contains(n5_vote)),
                 assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 1),
-                assert(replica_state.get("n5").notarized.get(0) == hash("val_b0")),
+                assert(replica_state.get("n5").notarized.get(0) == "val_b0"),
                 assert(replica_state.get("n5").view == 1),
                 unchanged_all
             })
@@ -1412,7 +1412,7 @@ module tests {
         val nullification_n1n2n3 = {
             view: 0,
             kind: NullificationKind,
-            block_hash: DUMMY_BLOCK_HASH,
+            block: DUMMY_BLOCK,
             signatures: Set("n1", "n2", "n3"),
             ghost_sender: sig_of("n1"),
         }
@@ -1420,7 +1420,7 @@ module tests {
         val nullification_n2n3n4 = {
             view: 0,
             kind: NullificationKind,
-            block_hash: DUMMY_BLOCK_HASH,
+            block: DUMMY_BLOCK,
             signatures: Set("n4", "n2", "n3"),
             ghost_sender: sig_of("n2"),
         }
@@ -1535,7 +1535,7 @@ module tests {
             .then(replica_receives_nullify_vote("n0", 0, "n4"))
 
             .then(all {
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash != "val_b0").size() == 0),
+                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block != "val_b0").size() == 0),
                 assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 2),
                 assert(replica_state.get("n0").nullified == false),
                 assert(replica_state.get("n0").notarized.get(0) == "val_b0"),
@@ -1568,8 +1568,8 @@ module tests {
             })
     }
 
-    action replica_receives_notarize_vote(id: ReplicaId, block_hash: BlockHash, view: ViewNumber, src: ReplicaId): bool =
-        on_vote_notarize(id, view, block_hash,  Set(notarize(view, src, block_hash)))
+    action replica_receives_notarize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool =
+        on_vote_notarize(id, view, block,  Set(notarize(view, src, block)))
     
     action replica_receives_certificate(id: ReplicaId, cert: Certificate): bool =
         on_certificate(id, cert)

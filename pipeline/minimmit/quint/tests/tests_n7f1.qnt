@@ -116,8 +116,8 @@ module tests {
             })
 
             .then(all {
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b0").size() == 3),
-                assert(store_vote.get("n3").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b1").size() == 3),
+                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block == "val_b0").size() == 3),
+                assert(store_vote.get("n3").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block == "val_b1").size() == 3),
                 assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 0),
                 assert(replica_state.get("n0").nullified == false),
                 assert(replica_state.get("n3").nullified == false),
@@ -154,8 +154,8 @@ module tests {
         replica_state' = replica_state,
     }
 
-     action replica_receives_notarize_vote(id: ReplicaId, block_hash: BlockHash, view: ViewNumber, src: ReplicaId): bool = 
-        on_vote_notarize(id, view, block_hash,  Set(notarize(view, src, block_hash)))  
+     action replica_receives_notarize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool = 
+        on_vote_notarize(id, view, block,  Set(notarize(view, src, block)))  
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool = 
         on_vote_nullify(id, view, Set(nullify(view, src)))    

@@ -90,7 +90,7 @@ module tests {
             // n3, n4, n5 notarize proposal n5-2
             .then(on_proposal("n3", proposal_from_n5_2))
             .then(on_proposal("n4", proposal_from_n5_2))
-            .then(inject_vote({ view: proposal_from_n5_2.view, sig: sig_of("n5"), kind: NotarizeKind, block_hash: proposal_from_n5_2.block }))
+            .then(inject_vote({ view: proposal_from_n5_2.view, sig: sig_of("n5"), kind: NotarizeKind, block: proposal_from_n5_2.block }))
 
             .expect(all_invariants)
 
@@ -154,8 +154,8 @@ module tests {
         replica_state' = replica_state,
     }
 
-     action replica_receives_notarize_vote(id: ReplicaId, block_hash: BlockHash, view: ViewNumber, src: ReplicaId): bool =
-        on_vote_notarize(id, view, block_hash,  Set(notarize(view, src, block_hash)))
+     action replica_receives_notarize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool =
+        on_vote_notarize(id, view, block,  Set(notarize(view, src, block)))
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool =
         on_vote_nullify(id, view, Set(nullify(view, src)))
