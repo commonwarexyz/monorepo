@@ -52,11 +52,31 @@ fn fuzz(input: FuzzInput) {
 
             let short_data = &encoded[..encoded.len().saturating_sub(1)];
             assert!(U64::decode(short_data).is_err());
+
+            let back_to_u64: u64 = u64_array.clone().into();
+            assert_eq!(back_to_u64, value);
+
+            let back_to_u64_ref: u64 = (&u64_array).into();
+            assert_eq!(back_to_u64_ref, value);
+
+            let deref_slice: &[u8] = &u64_array;
+            assert_eq!(deref_slice.len(), 8);
+            assert_eq!(deref_slice, &bytes);
+
+            let debug_str = format!("{u64_array:?}");
+            assert_eq!(debug_str, value.to_string());
+
+            let display_str = format!("{u64_array}");
+            assert_eq!(display_str, value.to_string());
+
+            assert_eq!(u64_array.len(), 8);
+            assert_eq!(u64_array[0], bytes[0]);
         }
 
         FuzzInput::TestU32 { value } => {
             let array = U32::new(value);
             assert_eq!(value, U32::decode(array.as_ref()).unwrap().into());
+
             let vec = array.to_vec();
             assert_eq!(value, U32::decode(vec.as_ref()).unwrap().into());
 
@@ -66,6 +86,32 @@ fn fuzz(input: FuzzInput) {
             assert_eq!(encoded, original.as_ref());
             let decoded = U32::decode(encoded).unwrap();
             assert_eq!(original, decoded);
+
+            let bytes_array = value.to_be_bytes();
+            let from_array: U32 = bytes_array.into();
+            assert_eq!(from_array, value.into());
+
+            let from_u32: U32 = value.into();
+            assert_eq!(from_u32, U32::new(value));
+
+            let back_to_u32: u32 = array.clone().into();
+            assert_eq!(back_to_u32, value);
+
+            let back_to_u32_ref: u32 = (&array).into();
+            assert_eq!(back_to_u32_ref, value);
+
+            let deref_slice: &[u8] = &array;
+            assert_eq!(deref_slice.len(), 4);
+            assert_eq!(deref_slice, &bytes_array);
+
+            let debug_str = format!("{array:?}");
+            assert_eq!(debug_str, value.to_string());
+
+            let display_str = format!("{array}");
+            assert_eq!(display_str, value.to_string());
+
+            assert_eq!(array.len(), 4);
+            assert_eq!(array[0], bytes_array[0]);
         }
 
         FuzzInput::TestPrefixed { prefix, value } => {
@@ -87,6 +133,34 @@ fn fuzz(input: FuzzInput) {
 
             let short_data = &encoded[..encoded.len().saturating_sub(1)];
             assert!(PrefixedU64::decode(short_data).is_err());
+
+            let bytes_array: [u8; PrefixedU64::SIZE] = encoded;
+            let from_array: PrefixedU64 = bytes_array.into();
+            assert_eq!(from_array.prefix(), prefix);
+            assert_eq!(from_array.value(), value);
+            assert_eq!(from_array, prefixed);
+
+            let as_ref_slice: &[u8] = prefixed.as_ref();
+            assert_eq!(as_ref_slice, &encoded);
+            assert_eq!(as_ref_slice.len(), PrefixedU64::SIZE);
+
+            let deref_slice: &[u8] = &prefixed;
+            assert_eq!(deref_slice.len(), 9);
+            assert_eq!(deref_slice, &encoded);
+            assert_eq!(deref_slice[0], prefix);
+
+            let debug_str = format!("{prefixed:?}");
+            let expected_debug = format!("{prefix}:{value}");
+            assert_eq!(debug_str, expected_debug);
+
+            let display_str = format!("{prefixed}");
+            assert_eq!(display_str, expected_debug);
+
+            assert_eq!(prefixed.len(), 9);
+            assert_eq!(prefixed[0], prefix);
+            assert_eq!(prefixed[1], value.to_be_bytes()[0]);
+
+            assert_eq!(prefixed.as_ref(), &*prefixed);
         }
     }
 }

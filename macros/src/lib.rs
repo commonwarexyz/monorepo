@@ -1,5 +1,10 @@
 //! Augment the development of primitives with procedural macros.
 
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{

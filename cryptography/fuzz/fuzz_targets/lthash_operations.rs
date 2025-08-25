@@ -78,7 +78,7 @@ fn verify_codec_roundtrip(hash: &LtHash) {
 }
 
 fn fuzz_operation(operations: Vec<Operation>) {
-    let mut hashes: Vec<LtHash> = vec![LtHash::new()];
+    let mut hashes: Vec<LtHash> = vec![LtHash::default()];
 
     for op in operations {
         match op {

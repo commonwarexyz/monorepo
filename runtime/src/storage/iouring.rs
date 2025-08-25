@@ -45,8 +45,8 @@ use std::{
 pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
-    /// Configuration for the io_uring instance.
-    pub ring_config: iouring::Config,
+    /// Configuration for the iouring instance.
+    pub iouring_config: iouring::Config,
 }
 
 #[derive(Clone)]
@@ -57,15 +57,22 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(cfg: Config, registry: &mut Registry) -> Self {
-        let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.ring_config.size as usize);
+    pub fn start(mut cfg: Config, registry: &mut Registry) -> Self {
+        let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.iouring_config.size as usize);
 
         let storage = Storage {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
         };
         let metrics = Arc::new(iouring::Metrics::new(registry));
-        std::thread::spawn(|| block_on(iouring::run(cfg.ring_config, metrics, receiver)));
+
+        // Optimize performance by hinting the kernel that a single task will
+        // submit requests. This is safe because each iouring instance runs in a
+        // dedicated thread, which guarantees that the same thread that creates
+        // the ring is the only thread submitting work to it.
+        cfg.iouring_config.single_issuer = true;
+
+        std::thread::spawn(|| block_on(iouring::run(cfg.iouring_config, metrics, receiver)));
         storage
     }
 }
@@ -352,7 +359,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
-                ring_config: Default::default(),
+                iouring_config: Default::default(),
             },
             &mut Registry::default(),
         );
