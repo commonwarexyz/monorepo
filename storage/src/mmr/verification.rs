@@ -110,26 +110,7 @@ pub struct Proof<D: Digest> {
     pub digests: Vec<D>,
 }
 
-/// A proof for multiple non-contiguous elements in the MMR that avoids duplicating digests.
-///
-/// The `MultiProof` combines multiple independent proofs for the same MMR state (same size),
-/// deduplicating any shared digests between them. This is more efficient than separate proofs
-/// when proving multiple non-contiguous elements or ranges.
-#[derive(Clone, Debug, Eq)]
-pub struct MultiProof<D: Digest> {
-    /// The total number of nodes in the MMR.
-    pub size: u64,
-    /// The deduplicated digests necessary for proving all elements.
-    pub digests: Vec<D>,
-}
-
 impl<D: Digest> PartialEq for Proof<D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.size == other.size && self.digests == other.digests
-    }
-}
-
-impl<D: Digest> PartialEq for MultiProof<D> {
     fn eq(&self, other: &Self) -> bool {
         self.size == other.size && self.digests == other.digests
     }
@@ -163,194 +144,6 @@ impl<D: Digest> Read for Proof<D> {
         let range = ..=max_len;
         let digests = Vec::<D>::read_range(buf, range)?;
         Ok(Proof { size, digests })
-    }
-}
-
-impl<D: Digest> EncodeSize for MultiProof<D> {
-    fn encode_size(&self) -> usize {
-        UInt(self.size).encode_size() + self.digests.encode_size()
-    }
-}
-
-impl<D: Digest> Write for MultiProof<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        // Write the number of nodes in the MMR as a varint
-        UInt(self.size).write(buf);
-
-        // Write the digests
-        self.digests.write(buf);
-    }
-}
-
-impl<D: Digest> Read for MultiProof<D> {
-    /// The maximum number of digests in the proof.
-    type Cfg = usize;
-
-    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        // Read the number of nodes in the MMR
-        let size = UInt::<u64>::read(buf)?.into();
-
-        // Read the digests
-        let range = ..=max_len;
-        let digests = Vec::<D>::read_range(buf, range)?;
-        Ok(MultiProof { size, digests })
-    }
-}
-
-impl<D: Digest> MultiProof<D> {
-    /// Combine multiple single-element proofs for the same MMR state into a single proof
-    /// that avoids duplicating digests.
-    ///
-    /// All proofs must be for the same MMR size, otherwise returns an error.
-    pub fn combine(proofs: Vec<(Proof<D>, u64)>) -> Result<Self, Error> {
-        if proofs.is_empty() {
-            return Ok(MultiProof {
-                size: 0,
-                digests: vec![],
-            });
-        }
-
-        // Verify all proofs are for the same MMR size
-        let size = proofs[0].0.size;
-        for (proof, _) in &proofs {
-            if proof.size != size {
-                return Err(Error::InvalidSize(proof.size));
-            }
-        }
-
-        // Collect all positions being proven and sort them
-        let mut all_positions: Vec<u64> = proofs.iter().map(|(_, pos)| *pos).collect();
-        all_positions.sort_unstable();
-        all_positions.dedup();
-
-        // Collect all required node positions for all proofs
-        let mut all_required_positions = Vec::new();
-        for pos in &all_positions {
-            let required = Proof::<D>::nodes_required_for_range_proof(size, *pos, *pos);
-            all_required_positions.extend(required);
-        }
-
-        // Deduplicate required positions while preserving order
-        let mut seen_positions = std::collections::HashSet::new();
-        let mut deduplicated_positions = Vec::new();
-        for pos in all_required_positions {
-            if seen_positions.insert(pos) {
-                deduplicated_positions.push(pos);
-            }
-        }
-
-        // Map positions to digests from the original proofs
-        let mut position_to_digest = HashMap::new();
-        for (proof, position) in &proofs {
-            let required = Proof::<D>::nodes_required_for_range_proof(size, *position, *position);
-            for (pos, digest) in required.iter().zip(proof.digests.iter()) {
-                position_to_digest.insert(*pos, *digest);
-            }
-        }
-
-        // Build the deduplicated digest vector in the order needed
-        let mut digests = Vec::new();
-        for pos in &deduplicated_positions {
-            if let Some(digest) = position_to_digest.get(pos) {
-                digests.push(*digest);
-            } else {
-                return Err(Error::MissingDigest(*pos));
-            }
-        }
-
-        Ok(MultiProof { size, digests })
-    }
-
-    /// Verify that all elements at their respective positions are included in the MMR
-    /// with the given root digest.
-    ///
-    /// The elements_with_positions vector must contain (element, position) pairs.
-    /// Positions must be provided in sorted order.
-    pub fn verify<I, H, E>(&self, hasher: &mut H, elements_with_positions: &[(E, u64)], root: &D) -> bool
-    where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
-        E: AsRef<[u8]>,
-    {
-        if elements_with_positions.is_empty() {
-            return self.size == 0 && *root == hasher.root(0, std::iter::empty());
-        }
-
-        // Extract positions and verify they are sorted
-        let positions: Vec<u64> = elements_with_positions.iter().map(|(_, pos)| *pos).collect();
-        for i in 1..positions.len() {
-            if positions[i] <= positions[i - 1] {
-                return false; // Positions not in sorted order
-            }
-        }
-
-        // Get all required positions for verifying all elements
-        let mut all_required_positions = Vec::new();
-        for pos in &positions {
-            let required = Proof::<D>::nodes_required_for_range_proof(self.size, *pos, *pos);
-            all_required_positions.extend(required);
-        }
-
-        // Deduplicate while preserving order
-        let mut seen = std::collections::HashSet::new();
-        let mut deduplicated_positions = Vec::new();
-        for pos in all_required_positions {
-            if seen.insert(pos) {
-                deduplicated_positions.push(pos);
-            }
-        }
-
-        // Map the deduplicated positions to digests from our proof
-        let mut position_to_digest = HashMap::new();
-        let mut digest_iter = self.digests.iter();
-
-        for pos in &deduplicated_positions {
-            if let Some(digest) = digest_iter.next() {
-                position_to_digest.insert(*pos, *digest);
-            } else {
-                return false;
-            }
-        }
-
-        // Verify we used all digests
-        if digest_iter.next().is_some() {
-            return false;
-        }
-
-        // Verify each element independently
-        for (element, pos) in elements_with_positions {
-            // Create a temporary proof for this single element
-            let temp_proof = self.create_single_proof(*pos, &position_to_digest);
-
-            // Verify this element against the root
-            if !temp_proof.verify_element_inclusion(hasher, element.as_ref(), *pos, root) {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    /// Create a single element proof from the combined proof's digest map
-    fn create_single_proof(
-        &self,
-        element_pos: u64,
-        position_to_digest: &HashMap<u64, D>,
-    ) -> Proof<D> {
-        let required =
-            Proof::<D>::nodes_required_for_range_proof(self.size, element_pos, element_pos);
-        let mut digests = Vec::new();
-
-        for pos in required {
-            if let Some(digest) = position_to_digest.get(&pos) {
-                digests.push(*digest);
-            }
-        }
-
-        Proof {
-            size: self.size,
-            digests,
-        }
     }
 }
 
@@ -668,6 +461,150 @@ impl<D: Digest> Proof<D> {
         }
 
         Ok(Proof { size, digests })
+    }
+
+    /// Generate an inclusion proof for multiple non-contiguous elements in the MMR.
+    /// This is more efficient than separate proofs as it deduplicates shared digests.
+    ///
+    /// The positions array must contain the element positions to prove, in any order
+    /// (they will be sorted internally).
+    pub async fn multi_proof<S: Storage<D>>(
+        mmr: &S,
+        positions: &[u64],
+    ) -> Result<Proof<D>, Error> {
+        if positions.is_empty() {
+            return Ok(Proof {
+                size: mmr.size(),
+                digests: vec![],
+            });
+        }
+
+        let size = mmr.size();
+
+        // Sort and deduplicate positions
+        let mut sorted_positions = positions.to_vec();
+        sorted_positions.sort_unstable();
+        sorted_positions.dedup();
+
+        // Collect all required node positions for all elements
+        let mut all_required_positions = Vec::new();
+        for pos in &sorted_positions {
+            let required = Self::nodes_required_for_range_proof(size, *pos, *pos);
+            all_required_positions.extend(required);
+        }
+
+        // Deduplicate required positions while preserving order
+        let mut seen_positions = std::collections::HashSet::new();
+        let mut deduplicated_positions = Vec::new();
+        for pos in all_required_positions {
+            if seen_positions.insert(pos) {
+                deduplicated_positions.push(pos);
+            }
+        }
+
+        // Fetch all required digests
+        let node_futures = deduplicated_positions.iter().map(|pos| mmr.get_node(*pos));
+        let hash_results = try_join_all(node_futures).await?;
+
+        let mut digests = Vec::new();
+        for (i, hash_result) in hash_results.into_iter().enumerate() {
+            match hash_result {
+                Some(hash) => digests.push(hash),
+                None => return Err(Error::ElementPruned(deduplicated_positions[i])),
+            };
+        }
+
+        Ok(Proof { size, digests })
+    }
+
+    /// Verify that multiple elements at their respective positions are included in the MMR
+    /// with the given root digest.
+    ///
+    /// The elements_with_positions vector must contain (element, position) pairs.
+    /// Positions must be provided in sorted order.
+    pub fn verify_multi_inclusion<I, H, E>(
+        &self,
+        hasher: &mut H,
+        elements_with_positions: &[(E, u64)],
+        root: &D,
+    ) -> bool
+    where
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: AsRef<[u8]>,
+    {
+        if elements_with_positions.is_empty() {
+            return self.size == 0 && *root == hasher.root(0, std::iter::empty());
+        }
+
+        // Extract positions and verify they are sorted
+        let positions: Vec<u64> = elements_with_positions.iter().map(|(_, pos)| *pos).collect();
+        for i in 1..positions.len() {
+            if positions[i] <= positions[i - 1] {
+                return false; // Positions not in sorted order
+            }
+        }
+
+        // Get all required positions for verifying all elements
+        let mut all_required_positions = Vec::new();
+        for pos in &positions {
+            let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
+            all_required_positions.extend(required);
+        }
+
+        // Deduplicate while preserving order
+        let mut seen = std::collections::HashSet::new();
+        let mut deduplicated_positions = Vec::new();
+        for pos in all_required_positions {
+            if seen.insert(pos) {
+                deduplicated_positions.push(pos);
+            }
+        }
+
+        // Map the deduplicated positions to digests from our proof
+        let mut position_to_digest = HashMap::new();
+        let mut digest_iter = self.digests.iter();
+
+        for pos in &deduplicated_positions {
+            if let Some(digest) = digest_iter.next() {
+                position_to_digest.insert(*pos, *digest);
+            } else {
+                return false;
+            }
+        }
+
+        // Verify we used all digests
+        if digest_iter.next().is_some() {
+            return false;
+        }
+
+        // Verify each element independently
+        for (element, pos) in elements_with_positions {
+            // Get required positions for this element
+            let required = Self::nodes_required_for_range_proof(self.size, *pos, *pos);
+            let mut element_digests = Vec::new();
+
+            for req_pos in required {
+                if let Some(digest) = position_to_digest.get(&req_pos) {
+                    element_digests.push(*digest);
+                } else {
+                    return false;
+                }
+            }
+
+            // Create a temporary proof for this single element
+            let temp_proof = Proof {
+                size: self.size,
+                digests: element_digests,
+            };
+
+            // Verify this element against the root
+            if !temp_proof.verify_element_inclusion(hasher, element.as_ref(), *pos, root) {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Extract the hashes of all nodes that should be pinned at the given pruning boundary
@@ -1635,7 +1572,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_multi_proof_combine_and_verify() {
+    fn test_multi_proof_generation_and_verify() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Create an MMR with multiple elements
@@ -1651,22 +1588,18 @@ mod tests {
 
             let root = mmr.root(&mut hasher);
 
-            // Test 1: Combine proofs for non-contiguous single elements
-            let proof1 = mmr.proof(positions[0]).await.unwrap();
-            let proof2 = mmr.proof(positions[5]).await.unwrap();
-            let proof3 = mmr.proof(positions[10]).await.unwrap();
-
-            let multi_proof = MultiProof::combine(vec![
-                (proof1, positions[0]),
-                (proof2, positions[5]),
-                (proof3, positions[10]),
-            ])
+            // Test 1: Generate proof for non-contiguous single elements
+            let multi_proof = Proof::multi_proof(
+                &mmr,
+                &[positions[0], positions[5], positions[10]],
+            )
+            .await
             .unwrap();
 
             assert_eq!(multi_proof.size, mmr.size());
 
             // Verify the multi-proof
-            assert!(multi_proof.verify(
+            assert!(multi_proof.verify_multi_inclusion(
                 &mut hasher,
                 &[
                     (elements[0], positions[0]),
@@ -1683,7 +1616,7 @@ mod tests {
                 vec![252u8, 251u8, 250u8],
                 vec![249u8, 248u8, 247u8],
             ];
-            let wrong_verification = multi_proof.verify(
+            let wrong_verification = multi_proof.verify_multi_inclusion(
                 &mut hasher,
                 &[
                     (wrong_elements[0].as_slice(), positions[0]),
@@ -1694,21 +1627,15 @@ mod tests {
             );
             assert!(!wrong_verification, "Should fail with wrong elements");
 
-            // Test 3: Verify that we can combine many individual proofs efficiently
-            let proof2_0 = mmr.proof(positions[2]).await.unwrap();
-            let proof2_1 = mmr.proof(positions[4]).await.unwrap();
-            let proof2_2 = mmr.proof(positions[15]).await.unwrap();
-            let proof2_3 = mmr.proof(positions[17]).await.unwrap();
-
-            let multi_proof2 = MultiProof::combine(vec![
-                (proof2_0, positions[2]),
-                (proof2_1, positions[4]),
-                (proof2_2, positions[15]),
-                (proof2_3, positions[17]),
-            ])
+            // Test 3: Verify that we can generate proof for many elements efficiently
+            let multi_proof2 = Proof::multi_proof(
+                &mmr,
+                &[positions[2], positions[4], positions[15], positions[17]],
+            )
+            .await
             .unwrap();
             
-            assert!(multi_proof2.verify(
+            assert!(multi_proof2.verify_multi_inclusion(
                 &mut hasher,
                 &[
                     (elements[2], positions[2]),
@@ -1721,7 +1648,7 @@ mod tests {
 
             // Verify with wrong root should fail
             let wrong_root = test_digest(99);
-            assert!(!multi_proof.verify(
+            assert!(!multi_proof.verify_multi_inclusion(
                 &mut hasher,
                 &[
                     (elements[0], positions[0]),
@@ -1731,14 +1658,15 @@ mod tests {
                 &wrong_root
             ));
 
-            // Test 3: Empty multi-proof
-            let empty_multi = MultiProof::<Digest>::combine(vec![]).unwrap();
-            assert_eq!(empty_multi.size, 0);
+            // Test 4: Empty multi-proof
+            let empty_multi = Proof::multi_proof(&mmr, &[]).await.unwrap();
+            assert_eq!(empty_multi.size, mmr.size());
             assert!(empty_multi.digests.is_empty());
 
             let empty_mmr = Mmr::new();
             let empty_root = empty_mmr.root(&mut hasher);
-            assert!(empty_multi.verify(&mut hasher, &[] as &[(Digest, u64)], &empty_root));
+            let empty_proof = Proof::multi_proof(&empty_mmr, &[]).await.unwrap();
+            assert!(empty_proof.verify_multi_inclusion(&mut hasher, &[] as &[(Digest, u64)], &empty_root));
         });
     }
 
@@ -1756,31 +1684,27 @@ mod tests {
                 positions.push(mmr.add(&mut hasher, &elements[i as usize]));
             }
 
-            // Create and combine multiple proofs
-            let proof1 = mmr.proof(positions[1]).await.unwrap();
-            let proof2 = mmr.proof(positions[7]).await.unwrap();
-            let proof3 = mmr.proof(positions[12]).await.unwrap();
-
-            let multi_proof = MultiProof::combine(vec![
-                (proof1, positions[1]),
-                (proof2, positions[7]),
-                (proof3, positions[12]),
-            ])
+            // Create multi-proof
+            let multi_proof = Proof::multi_proof(
+                &mmr,
+                &[positions[1], positions[7], positions[12]],
+            )
+            .await
             .unwrap();
 
-            // Test serialization/deserialization
+            // Test serialization/deserialization (using existing Proof serialization)
             let expected_size = multi_proof.encode_size();
             let serialized = multi_proof.encode().freeze();
             assert_eq!(serialized.len(), expected_size);
 
             let max_len = multi_proof.digests.len();
-            let deserialized = MultiProof::<Digest>::decode_cfg(serialized, &max_len).unwrap();
+            let deserialized = Proof::<Digest>::decode_cfg(serialized, &max_len).unwrap();
 
             assert_eq!(multi_proof, deserialized);
 
             // Verify deserialized proof still works
             let root = mmr.root(&mut hasher);
-            assert!(deserialized.verify(
+            assert!(deserialized.verify_multi_inclusion(
                 &mut hasher,
                 &[
                     (elements[1], positions[1]),
@@ -1807,16 +1731,18 @@ mod tests {
                 positions.push(mmr.add(&mut hasher, &elements[i as usize]));
             }
 
-            // Get proofs that will share some digests (elements in same subtree)
+            // Get individual proofs that will share some digests (elements in same subtree)
             let proof1 = mmr.proof(positions[0]).await.unwrap();
             let proof2 = mmr.proof(positions[1]).await.unwrap();
 
             let total_digests_separate = proof1.digests.len() + proof2.digests.len();
 
-            let multi_proof = MultiProof::combine(vec![
-                (proof1, positions[0]),
-                (proof2, positions[1]),
-            ])
+            // Generate multi-proof for the same positions
+            let multi_proof = Proof::multi_proof(
+                &mmr,
+                &[positions[0], positions[1]],
+            )
+            .await
             .unwrap();
 
             // The combined proof should have fewer digests due to deduplication
@@ -1824,36 +1750,11 @@ mod tests {
 
             // Verify it still works
             let root = mmr.root(&mut hasher);
-            assert!(multi_proof.verify(
+            assert!(multi_proof.verify_multi_inclusion(
                 &mut hasher,
                 &[(elements[0], positions[0]), (elements[1], positions[1])],
                 &root
             ));
-        });
-    }
-
-    #[test_traced]
-    fn test_multi_proof_invalid_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut mmr1 = Mmr::new();
-            let mut mmr2 = Mmr::new();
-            let mut hasher: Standard<Sha256> = Standard::new();
-
-            let elem = test_digest(0);
-            let pos1 = mmr1.add(&mut hasher, &elem);
-            mmr1.add(&mut hasher, &elem);
-
-            let pos2 = mmr2.add(&mut hasher, &elem);
-
-            let proof1 = mmr1.proof(pos1).await.unwrap();
-            let proof2 = mmr2.proof(pos2).await.unwrap();
-
-            // Should fail to combine proofs from different MMR sizes
-            let result =
-                MultiProof::<Digest>::combine(vec![(proof1, pos1), (proof2, pos2)]);
-
-            assert!(matches!(result, Err(Error::InvalidSize(_))));
         });
     }
 
@@ -1874,32 +1775,27 @@ mod tests {
 
             let root = mmr.root(&mut hasher);
 
-            // Test combining many single element proofs
+            // Test generating proof for many single elements
             let indices = vec![3, 7, 15, 31, 63, 95];
-            let mut proofs = Vec::new();
-            let mut selected_elements = Vec::new();
+            let selected_positions: Vec<u64> = indices.iter().map(|&idx| positions[idx]).collect();
 
-            for &idx in &indices {
-                let proof = mmr.proof(positions[idx]).await.unwrap();
-                proofs.push((proof, positions[idx]));
-                selected_elements.push(elements[idx]);
-            }
-
-            let multi_proof = MultiProof::combine(proofs).unwrap();
+            let multi_proof = Proof::multi_proof(&mmr, &selected_positions)
+                .await
+                .unwrap();
 
             // Verify the combined proof
             let elements_with_positions: Vec<(Digest, u64)> = indices
                 .iter()
                 .map(|&idx| (elements[idx], positions[idx]))
                 .collect();
-            assert!(multi_proof.verify(&mut hasher, &elements_with_positions, &root));
+            assert!(multi_proof.verify_multi_inclusion(&mut hasher, &elements_with_positions, &root));
 
             // Test that verification fails with elements in wrong order
             let mut wrong_order = elements_with_positions.clone();
             wrong_order.swap(0, 1);
-            assert!(!multi_proof.verify(&mut hasher, &wrong_order, &root));
+            assert!(!multi_proof.verify_multi_inclusion(&mut hasher, &wrong_order, &root));
 
-            // Test combining a single range proof first to isolate the issue
+            // Test that range proofs still work normally
             let range_proof = mmr.range_proof(positions[10], positions[12]).await.unwrap();
             
             // First verify the range proof works normally
@@ -1910,16 +1806,12 @@ mod tests {
                 &root
             ), "Range proof should verify");
 
-            // Now try combining individual element proofs
-            let proof10 = mmr.proof(positions[10]).await.unwrap();
-            let proof12 = mmr.proof(positions[12]).await.unwrap();
-            let proof50 = mmr.proof(positions[50]).await.unwrap();
-            
-            let combined = MultiProof::combine(vec![
-                (proof10, positions[10]),
-                (proof12, positions[12]),
-                (proof50, positions[50]),
-            ])
+            // Now test multi-proof with different elements
+            let multi_proof_mixed = Proof::multi_proof(
+                &mmr,
+                &[positions[10], positions[12], positions[50]],
+            )
+            .await
             .unwrap();
 
             // Verify with just these individual elements
@@ -1929,8 +1821,8 @@ mod tests {
                 (elements[50], positions[50]),
             ];
 
-            assert!(combined.verify(&mut hasher, &verify_elements, &root), 
-                    "Combined individual proofs should verify");
+            assert!(multi_proof_mixed.verify_multi_inclusion(&mut hasher, &verify_elements, &root), 
+                    "Multi-proof should verify");
         });
     }
 
