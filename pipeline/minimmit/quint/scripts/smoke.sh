@@ -3,16 +3,14 @@
 # Script to run quint tests in parallel tmux sessions
 # Usage: ./smoke.sh
 
-SESSION_NAMES=("quint-r1" "quint-r2" "quint-verify" "quint-inv-1"  "quint-inv-2" "quint-ver-1")
+SESSION_NAMES=("quint-run" "quint-verify" "quint-script-invariant" "quint-script-verify")
 
 # Commands to run in each session
 COMMANDS=(
-    "quint run --invariant=safe main_n6f1.qnt --max-samples 10000 --max-steps 100"
-    "quint run --invariant=safe main_n6f0.qnt --max-samples 10000 --max-steps 100"
-    "quint verify --invariant=safe main_n6f0.qnt --max-steps 7"
-    "./scripts/invariant.sh run ./main_n6f0.qnt 10 --random-transitions"
+    "JVM_ARGS=-Xmx40G quint run --invariant=safe main_n6f0.qnt --max-samples 20000 --max-steps 50"
+    "JVM_ARGS=-Xmx40G quint verify --invariant=safe main_n6f0.qnt --max-steps 7"
     "./scripts/invariant.sh run ./main_n6f1.qnt 15 --random-transitions"
-    "./scripts/verify.sh run ./main_n6f1.qnt 10 --random-transitions"
+    "./scripts/verify.sh random ./main_n6f1.qnt safe 10 1 10"
 )
 
 # Kill existing sessions if they exist
