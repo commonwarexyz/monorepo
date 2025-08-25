@@ -118,3 +118,42 @@ where
     
     Proof::multi_proof(proof_store, &positions).await
 }
+
+/// Verify a multi-inclusion proof for operations at specific locations.
+/// This handles the conversion from locations to MMR positions internally.
+///
+/// # Arguments
+/// * `hasher` - The hasher to use for verification
+/// * `proof` - The multi-inclusion proof
+/// * `operations` - The operations paired with their locations
+/// * `target_root` - The expected root hash
+pub fn verify_multi_proof<Op, H, D>(
+    hasher: &mut Standard<H>,
+    proof: &Proof<D>,
+    operations: &[(u64, Op)],
+    target_root: &D,
+) -> bool
+where
+    Op: Encode,
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    // Build the list of (element, position) pairs for verification
+    let elements: Vec<(Vec<u8>, u64)> = operations
+        .iter()
+        .map(|(loc, op)| {
+            // Convert location to MMR position
+            let pos = leaf_num_to_pos(*loc);
+            (op.encode().to_vec(), pos)
+        })
+        .collect();
+    
+    // Convert to references for verify_multi_inclusion
+    let element_refs: Vec<(&[u8], u64)> = elements
+        .iter()
+        .map(|(bytes, pos)| (bytes.as_slice(), *pos))
+        .collect();
+    
+    // Verify using multi-proof verification
+    proof.verify_multi_inclusion(hasher, &element_refs, target_root)
+}
