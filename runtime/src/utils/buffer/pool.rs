@@ -48,9 +48,6 @@ pub struct Pool {
     /// The Clock replacement policy's clock hand index into `cache`.
     clock: usize,
 
-    /// The next id to assign to a blob that will be managed by this pool.
-    next_id: AtomicU64,
-
     /// The maximum number of pages that will be cached.
     capacity: usize,
 
@@ -78,6 +75,9 @@ pub struct PoolRef {
     /// The size of each page in the buffer pool.
     pub(super) page_size: usize,
 
+    /// The next id to assign to a blob that will be managed by this pool.
+    next_id: Arc<AtomicU64>,
+
     /// Shareable reference to the buffer pool.
     pool: Arc<RwLock<Pool>>,
 }
@@ -87,14 +87,14 @@ impl PoolRef {
     pub fn new(page_size: NonZeroUsize, capacity: NonZeroUsize) -> Self {
         Self {
             page_size: page_size.get(),
+            next_id: Arc::new(AtomicU64::new(0)),
             pool: Arc::new(RwLock::new(Pool::new(capacity.get()))),
         }
     }
 
     /// Returns a unique id for the next blob that will use this buffer pool.
     pub async fn next_id(&self) -> u64 {
-        let pool = self.pool.read().await;
-        pool.next_id()
+        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
@@ -269,15 +269,9 @@ impl Pool {
             index: HashMap::new(),
             cache: Vec::new(),
             clock: 0,
-            next_id: AtomicU64::new(0),
             capacity,
             page_fetches: HashMap::new(),
         }
-    }
-
-    /// Assign and return the next unique blob id.
-    pub(super) fn next_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
@@ -377,8 +371,6 @@ mod tests {
     #[test_traced]
     fn test_pool_basic() {
         let mut pool: Pool = Pool::new(10);
-        assert_eq!(pool.next_id(), 0);
-        assert_eq!(pool.next_id(), 1);
 
         let mut buf = vec![0; PAGE_SIZE];
         let bytes_read = pool.read_at(PAGE_SIZE, 0, &mut buf, 0);
@@ -436,6 +428,8 @@ mod tests {
 
             // Fill the buffer pool with the blob's data.
             let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
+            assert_eq!(pool_ref.next_id().await, 0);
+            assert_eq!(pool_ref.next_id().await, 1);
             for i in 0..11 {
                 let mut buf = vec![0; PAGE_SIZE];
                 pool_ref
