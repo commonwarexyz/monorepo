@@ -164,8 +164,8 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound_ops,
-            upper_bound_ops,
+            lower_bound: lower_bound_ops,
+            upper_bound: upper_bound_ops,
         },
     };
 

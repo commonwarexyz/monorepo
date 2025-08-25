@@ -8,17 +8,17 @@ use commonware_cryptography::Digest;
 pub struct Target<D: Digest> {
     /// The root digest we're syncing to
     pub root: D,
-    /// Lower bound of operations to sync (inclusive)
-    pub lower_bound_ops: u64,
-    /// Upper bound of operations to sync (inclusive)
-    pub upper_bound_ops: u64,
+    /// Lower bound of data to sync (inclusive)
+    pub lower_bound: u64,
+    /// Upper bound of data to sync (inclusive)
+    pub upper_bound: u64,
 }
 
 impl<D: Digest> Write for Target<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
-        self.lower_bound_ops.write(buf);
-        self.upper_bound_ops.write(buf);
+        self.lower_bound.write(buf);
+        self.upper_bound.write(buf);
     }
 }
 
@@ -31,12 +31,12 @@ impl<D: Digest> Read for Target<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
-        let lower_bound_ops = u64::read(buf)?;
-        let upper_bound_ops = u64::read(buf)?;
+        let lower_bound = u64::read(buf)?;
+        let upper_bound = u64::read(buf)?;
         Ok(Self {
             root,
-            lower_bound_ops,
-            upper_bound_ops,
+            lower_bound,
+            upper_bound,
         })
     }
 }
@@ -51,15 +51,15 @@ where
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
-    if new_target.lower_bound_ops > new_target.upper_bound_ops {
+    if new_target.lower_bound > new_target.upper_bound {
         return Err(sync::Error::InvalidTarget {
-            lower_bound_pos: new_target.lower_bound_ops,
-            upper_bound_pos: new_target.upper_bound_ops,
+            lower_bound_pos: new_target.lower_bound,
+            upper_bound_pos: new_target.upper_bound,
         });
     }
 
-    if new_target.lower_bound_ops < old_target.lower_bound_ops
-        || new_target.upper_bound_ops < old_target.upper_bound_ops
+    if new_target.lower_bound < old_target.lower_bound
+        || new_target.upper_bound < old_target.upper_bound
     {
         return Err(sync::Error::SyncTargetMovedBackward {
             old: old_target.clone(),
@@ -86,8 +86,8 @@ mod tests {
     fn test_sync_target_serialization() {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
-            lower_bound_ops: 100,
-            upper_bound_ops: 500,
+            lower_bound: 100,
+            upper_bound: 500,
         };
 
         // Serialize
@@ -104,44 +104,44 @@ mod tests {
         // Verify
         assert_eq!(target, deserialized);
         assert_eq!(target.root, deserialized.root);
-        assert_eq!(target.lower_bound_ops, deserialized.lower_bound_ops);
-        assert_eq!(target.upper_bound_ops, deserialized.upper_bound_ops);
+        assert_eq!(target.lower_bound, deserialized.lower_bound);
+        assert_eq!(target.upper_bound, deserialized.upper_bound);
     }
 
     type TestError = sync::Error<std::io::Error, std::io::Error, sha256::Digest>;
 
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound: 0, upper_bound: 100 },
+        Target { root: sha256::Digest::from([1; 32]), lower_bound: 50, upper_bound: 200 },
         Ok(());
         "valid update"
     )]
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 200, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound: 0, upper_bound: 100 },
+        Target { root: sha256::Digest::from([1; 32]), lower_bound: 200, upper_bound: 100 },
         Err(TestError::InvalidTarget { lower_bound_pos: 200, upper_bound_pos: 100 });
         "invalid bounds - lower > upper"
     )]
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 50 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound: 0, upper_bound: 100 },
+        Target { root: sha256::Digest::from([1; 32]), lower_bound: 0, upper_bound: 50 },
         Err(TestError::SyncTargetMovedBackward {
             old: Target {
                 root: sha256::Digest::from([0; 32]),
-                lower_bound_ops: 0,
-                upper_bound_ops: 100,
+                lower_bound: 0,
+                upper_bound: 100,
             },
             new: Target {
                 root: sha256::Digest::from([1; 32]),
-                lower_bound_ops: 0,
-                upper_bound_ops: 50,
+                lower_bound: 0,
+                upper_bound: 50,
             },
         });
         "moves backward"
     )]
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound: 0, upper_bound: 100 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound: 50, upper_bound: 200 },
         Err(TestError::SyncTargetRootUnchanged);
         "same root"
     )]

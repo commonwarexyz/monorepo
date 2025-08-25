@@ -4,8 +4,9 @@ use std::future::Future;
 
 /// A database that can be synced
 pub trait Database: Sized {
-    type Op;
-    type Journal: Journal<Op = Self::Op>;
+    /// The increment of data synced by the [Database].
+    type Data;
+    type Journal: Journal<Data = Self::Data>;
     type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
     type Config;
     type Digest: Digest;

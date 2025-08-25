@@ -76,15 +76,15 @@ where
     D: Digest,
 {
     type Digest = D;
-    type Op = Op;
+    type Data = Op;
     type Error = crate::Error;
 
-    async fn get_operations(
+    async fn get_data(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<sync::resolver::FetchResult<Self::Op, Self::Digest>, Self::Error> {
+    ) -> Result<sync::resolver::FetchResult<Self::Data, Self::Digest>, Self::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
             request_id,
@@ -117,7 +117,7 @@ where
         let (tx, _rx) = oneshot::channel();
         Ok(sync::resolver::FetchResult {
             proof,
-            operations,
+            data: operations,
             success_tx: tx,
         })
     }

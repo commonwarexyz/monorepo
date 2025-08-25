@@ -15,14 +15,14 @@ where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
     Op: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize + Send + 'static,
 {
-    type Op = Op;
+    type Data = Op;
     type Error = Error;
 
     async fn size(&self) -> Result<u64, Self::Error> {
         fixed::Journal::size(self).await
     }
 
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
+    async fn append(&mut self, op: Self::Data) -> Result<(), Self::Error> {
         fixed::Journal::append(self, op).await.map(|_| ())
     }
 

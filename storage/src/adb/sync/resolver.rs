@@ -11,21 +11,21 @@ use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
-/// Result from a fetch operation
-pub struct FetchResult<Op, D: Digest> {
-    /// The proof for the operations
+/// Result of a data fetch
+pub struct FetchResult<Data, D: Digest> {
+    /// The proof for the data
     pub proof: Proof<D>,
-    /// The operations that were fetched
-    pub operations: Vec<Op>,
+    /// The data that was fetched
+    pub data: Vec<Data>,
     /// Channel to report success/failure back to resolver
     pub success_tx: oneshot::Sender<bool>,
 }
 
-impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
+impl<Data: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Data, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FetchResult")
             .field("proof", &self.proof)
-            .field("operations", &self.operations)
+            .field("data", &self.data)
             .field("success_tx", &"<callback>")
             .finish()
     }
@@ -36,22 +36,22 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     /// The digest type used in proofs returned by the resolver
     type Digest: Digest;
 
-    /// The type of operations returned by the resolver
-    type Op;
+    /// The type of data returned by the resolver
+    type Data;
 
     /// The error type returned by the resolver
     type Error: std::error::Error + Send + 'static;
 
-    /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
-    /// Returns the operations and a proof that they were present in the database when it had
-    /// `size` operations.
+    /// Get the data starting at `start_loc` in the database, up to `max_data` data items.
+    /// Returns the data and a proof that they were present in the database when it had
+    /// `size` data items.
     #[allow(clippy::type_complexity)]
-    fn get_operations<'a>(
+    fn get_data<'a>(
         &'a self,
         size: u64,
         start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
+        max_data: NonZeroU64,
+    ) -> impl Future<Output = Result<FetchResult<Self::Data, Self::Digest>, Self::Error>> + Send + 'a;
 }
 
 impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
@@ -64,20 +64,20 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Fixed<K, V>;
+    type Data = Fixed<K, V>;
     type Error = adb::Error;
 
-    async fn get_operations(
+    async fn get_data(
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(size, start_loc, max_ops.get())
+        max_data: NonZeroU64,
+    ) -> Result<FetchResult<Self::Data, Self::Digest>, Self::Error> {
+        self.historical_proof(size, start_loc, max_data.get())
             .await
-            .map(|(proof, operations)| FetchResult {
+            .map(|(proof, data)| FetchResult {
                 proof,
-                operations,
+                data,
                 // Result of proof verification isn't used by this implementation.
                 success_tx: oneshot::channel().0,
             })
@@ -96,21 +96,21 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Fixed<K, V>;
+    type Data = Fixed<K, V>;
     type Error = adb::Error;
 
-    async fn get_operations(
+    async fn get_data(
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, adb::Error> {
+        max_data: NonZeroU64,
+    ) -> Result<FetchResult<Self::Data, Self::Digest>, adb::Error> {
         let db = self.read().await;
-        db.historical_proof(size, start_loc, max_ops.get())
+        db.historical_proof(size, start_loc, max_data.get())
             .await
-            .map(|(proof, operations)| FetchResult {
+            .map(|(proof, data)| FetchResult {
                 proof,
-                operations,
+                data,
                 // Result of proof verification isn't used by this implementation.
                 success_tx: oneshot::channel().0,
             })
@@ -127,20 +127,20 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Variable<K, V>;
+    type Data = Variable<K, V>;
     type Error = crate::adb::Error;
 
-    async fn get_operations(
+    async fn get_data(
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(size, start_loc, max_ops.get())
+        max_data: NonZeroU64,
+    ) -> Result<FetchResult<Self::Data, Self::Digest>, Self::Error> {
+        self.historical_proof(size, start_loc, max_data.get())
             .await
-            .map(|(proof, operations)| FetchResult {
+            .map(|(proof, data)| FetchResult {
                 proof,
-                operations,
+                data,
                 // Result of proof verification isn't used by this implementation.
                 success_tx: oneshot::channel().0,
             })
@@ -159,21 +159,21 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Variable<K, V>;
+    type Data = Variable<K, V>;
     type Error = crate::adb::Error;
 
-    async fn get_operations(
+    async fn get_data(
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        max_data: NonZeroU64,
+    ) -> Result<FetchResult<Self::Data, Self::Digest>, Self::Error> {
         let db = self.read().await;
-        db.historical_proof(size, start_loc, max_ops.get())
+        db.historical_proof(size, start_loc, max_data.get())
             .await
-            .map(|(proof, operations)| FetchResult {
+            .map(|(proof, data)| FetchResult {
                 proof,
-                operations,
+                data,
                 // Result of proof verification isn't used by this implementation.
                 success_tx: oneshot::channel().0,
             })
@@ -199,15 +199,15 @@ pub(crate) mod tests {
         V: CodecFixed<Cfg = ()> + Clone + Send + Sync + 'static,
     {
         type Digest = D;
-        type Op = Fixed<K, V>;
+        type Data = Fixed<K, V>;
         type Error = adb::Error;
 
-        async fn get_operations(
+        async fn get_data(
             &self,
             _size: u64,
             _start_loc: u64,
-            _max_ops: NonZeroU64,
-        ) -> Result<FetchResult<Self::Op, Self::Digest>, adb::Error> {
+            _max_data: NonZeroU64,
+        ) -> Result<FetchResult<Self::Data, Self::Digest>, adb::Error> {
             Err(adb::Error::KeyNotFound) // Arbitrary dummy error
         }
     }

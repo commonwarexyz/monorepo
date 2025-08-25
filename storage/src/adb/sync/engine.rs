@@ -34,30 +34,30 @@ pub(crate) enum NextStep<C, D> {
 
 /// Events that can occur during synchronization
 #[derive(Debug)]
-enum Event<Op, D: Digest, E> {
+enum Event<Data, D: Digest, E> {
     /// A target update was received
     TargetUpdate(Target<D>),
-    /// A batch of operations was received
-    BatchReceived(IndexedFetchResult<Op, D, E>),
+    /// A batch of data was received
+    BatchReceived(IndexedFetchResult<Data, D, E>),
     /// The target update channel was closed
     UpdateChannelClosed,
 }
 
-/// Result from a fetch operation with its starting location
+/// Result of a fetch and its starting location
 #[derive(Debug)]
-pub(super) struct IndexedFetchResult<Op, D: Digest, E> {
-    /// The location of the first operation in the batch
+pub(super) struct IndexedFetchResult<Data, D: Digest, E> {
+    /// The location of the first data item in the batch
     pub start_loc: u64,
-    /// The result of the fetch operation
-    pub result: Result<FetchResult<Op, D>, E>,
+    /// The result of the fetch
+    pub result: Result<FetchResult<Data, D>, E>,
 }
 
 /// Wait for the next synchronization event from either target updates or fetch results.
 /// Returns `None` if the sync is stalled (there are no outstanding requests).
-async fn wait_for_event<Op, D: Digest, E>(
+async fn wait_for_event<Data, D: Digest, E>(
     update_receiver: &mut Option<mpsc::Receiver<Target<D>>>,
-    outstanding_requests: &mut Requests<Op, D, E>,
-) -> Option<Event<Op, D, E>> {
+    outstanding_requests: &mut Requests<Data, D, E>,
+) -> Option<Event<Data, D, E>> {
     let target_update_fut = match update_receiver {
         Some(update_rx) => Either::Left(update_rx.next()),
         None => Either::Right(futures::future::pending()),
@@ -80,58 +80,58 @@ async fn wait_for_event<Op, D: Digest, E>(
 pub struct Config<DB, R>
 where
     DB: Database,
-    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
-    DB::Op: Encode,
+    R: Resolver<Data = DB::Data, Digest = DB::Digest>,
+    DB::Data: Encode,
 {
     /// Runtime context for creating database components
     pub context: DB::Context,
-    /// Network resolver for fetching operations and proofs
+    /// Network resolver for fetching data and proofs
     pub resolver: R,
-    /// Sync target (root digest and operation bounds)
+    /// Sync target (root digest and bounds)
     pub target: Target<DB::Digest>,
-    /// Maximum number of outstanding requests for operation batches
+    /// Maximum number of outstanding requests for data batches
     pub max_outstanding_requests: usize,
-    /// Maximum operations to fetch per batch
+    /// Maximum data items to fetch per batch
     pub fetch_batch_size: NonZeroU64,
-    /// Number of operations to apply in a single batch
+    /// Number of data items to apply in a single batch
     pub apply_batch_size: usize,
     /// Database-specific configuration
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
     pub update_rx: Option<mpsc::Receiver<Target<DB::Digest>>>,
 }
-/// A shared sync engine that manages the core synchronization state and operations.
+/// A shared sync engine that manages the core synchronization state.
 pub(crate) struct Engine<DB, R>
 where
     DB: Database,
-    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
-    DB::Op: Encode,
+    R: Resolver<Data = DB::Data, Digest = DB::Digest>,
+    DB::Data: Encode,
 {
     /// Tracks outstanding fetch requests and their futures
-    outstanding_requests: Requests<DB::Op, DB::Digest, R::Error>,
+    outstanding_requests: Requests<DB::Data, DB::Digest, R::Error>,
 
-    /// Operations that have been fetched but not yet applied to the log
-    fetched_operations: BTreeMap<u64, Vec<DB::Op>>,
+    /// Data that has been fetched but not yet applied to the log
+    fetched_data: BTreeMap<u64, Vec<DB::Data>>,
 
     /// Pinned MMR nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
 
-    /// The current sync target (root digest and operation bounds)
+    /// The current sync target (root digest and data bounds)
     target: Target<DB::Digest>,
 
     /// Maximum number of parallel outstanding requests
     max_outstanding_requests: usize,
 
-    /// Maximum operations to fetch in a single batch
+    /// Maximum data items to fetch in a single batch
     fetch_batch_size: NonZeroU64,
 
-    /// Number of operations to apply in a single batch
+    /// Number of data items to apply in a single batch
     apply_batch_size: usize,
 
-    /// Journal that operations are applied to during sync
+    /// Journal that data is applied to during sync
     journal: DB::Journal,
 
-    /// Resolver for fetching operations and proofs from the sync source
+    /// Resolver for fetching data and proofs from the sync source
     resolver: R,
 
     /// Hasher used for proof verification
@@ -151,8 +151,8 @@ where
 impl<DB, R> Engine<DB, R>
 where
     DB: Database,
-    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
-    DB::Op: Encode,
+    R: Resolver<Data = DB::Data, Digest = DB::Digest>,
+    DB::Data: Encode,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
         &self.journal
@@ -162,15 +162,15 @@ where
 impl<DB, R> Engine<DB, R>
 where
     DB: Database,
-    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
-    DB::Op: Encode,
+    R: Resolver<Data = DB::Data, Digest = DB::Digest>,
+    DB::Data: Encode,
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, EngineError<DB, R>> {
-        if config.target.lower_bound_ops > config.target.upper_bound_ops {
+        if config.target.lower_bound > config.target.upper_bound {
             return Err(Error::InvalidTarget {
-                lower_bound_pos: config.target.lower_bound_ops,
-                upper_bound_pos: config.target.upper_bound_ops,
+                lower_bound_pos: config.target.lower_bound,
+                upper_bound_pos: config.target.upper_bound,
             });
         }
 
@@ -178,15 +178,15 @@ where
         let journal = DB::create_journal(
             config.context.clone(),
             &config.db_config,
-            config.target.lower_bound_ops,
-            config.target.upper_bound_ops,
+            config.target.lower_bound,
+            config.target.upper_bound,
         )
         .await
         .map_err(Error::database)?;
 
         let mut engine = Self {
             outstanding_requests: Requests::new(),
-            fetched_operations: BTreeMap::new(),
+            fetched_data: BTreeMap::new(),
             pinned_nodes: None,
             target: config.target.clone(),
             max_outstanding_requests: config.max_outstanding_requests,
@@ -203,21 +203,19 @@ where
         Ok(engine)
     }
 
-    /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
+    /// Schedule new fetch requests for data in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), EngineError<DB, R>> {
-        let target_size = self.target.upper_bound_ops + 1;
+        let target_size = self.target.upper_bound + 1;
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
         if self.pinned_nodes.is_none() {
-            let start_loc = self.target.lower_bound_ops;
+            let start_loc = self.target.lower_bound;
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
                 start_loc,
                 Box::pin(async move {
-                    let result = resolver
-                        .get_operations(target_size, start_loc, NZU64!(1))
-                        .await;
+                    let result = resolver.get_data(target_size, start_loc, NZU64!(1)).await;
                     IndexedFetchResult { start_loc, result }
                 }),
             );
@@ -231,18 +229,18 @@ where
         let log_size = self.journal.size().await.map_err(Error::database)?;
 
         for _ in 0..num_requests {
-            // Convert fetched operations to operation counts for shared gap detection
-            let operation_counts: BTreeMap<u64, u64> = self
-                .fetched_operations
+            // Convert fetched data to counts for shared gap detection
+            let data_counts: BTreeMap<u64, u64> = self
+                .fetched_data
                 .iter()
-                .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
+                .map(|(&start_loc, data)| (start_loc, data.len() as u64))
                 .collect();
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next(
                 log_size,
-                self.target.upper_bound_ops,
-                &operation_counts,
+                self.target.upper_bound,
+                &data_counts,
                 self.outstanding_requests.locations(),
                 self.fetch_batch_size.get(),
             ) else {
@@ -258,9 +256,7 @@ where
             self.outstanding_requests.add(
                 start_loc,
                 Box::pin(async move {
-                    let result = resolver
-                        .get_operations(target_size, start_loc, batch_size)
-                        .await;
+                    let result = resolver.get_data(target_size, start_loc, batch_size).await;
                     IndexedFetchResult { start_loc, result }
                 }),
             );
@@ -278,15 +274,15 @@ where
             self.journal,
             self.context.clone(),
             &self.config,
-            new_target.lower_bound_ops,
-            new_target.upper_bound_ops,
+            new_target.lower_bound,
+            new_target.upper_bound,
         )
         .await
         .map_err(Error::database)?;
 
         Ok(Self {
             outstanding_requests: Requests::new(),
-            fetched_operations: BTreeMap::new(),
+            fetched_data: BTreeMap::new(),
             pinned_nodes: None,
             target: new_target,
             max_outstanding_requests: self.max_outstanding_requests,
@@ -301,68 +297,68 @@ where
         })
     }
 
-    /// Store a batch of fetched operations
-    pub fn store_operations(&mut self, start_loc: u64, operations: Vec<DB::Op>) {
-        self.fetched_operations.insert(start_loc, operations);
+    /// Store a batch of fetched data
+    pub fn store_data(&mut self, start_loc: u64, data: Vec<DB::Data>) {
+        self.fetched_data.insert(start_loc, data);
     }
 
-    /// Apply fetched operations to the journal if we have them.
+    /// Apply fetched data to the journal if we have it.
     ///
-    /// This method finds operations that are contiguous with the current journal tip
+    /// This method finds data that is contiguous with the current journal tip
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
-    pub async fn apply_operations(&mut self) -> Result<(), EngineError<DB, R>> {
+    pub async fn apply_data(&mut self) -> Result<(), EngineError<DB, R>> {
         let mut next_loc = self.journal.size().await.map_err(Error::database)?;
 
-        // Remove any batches of operations with stale data.
-        // That is, those whose last operation is before `next_loc`.
-        self.fetched_operations.retain(|&start_loc, operations| {
-            let end_loc = start_loc + operations.len() as u64 - 1;
+        // Remove any batches of data with stale data.
+        // That is, those whose last data item is before `next_loc`.
+        self.fetched_data.retain(|&start_loc, data| {
+            let end_loc = start_loc + data.len() as u64 - 1;
             end_loc >= next_loc
         });
 
         loop {
-            // See if we have the next operation to apply (i.e. at the journal tip).
+            // See if we have the next data item to apply (i.e. at the journal tip).
             // Find the index of the range that contains the next location.
-            let range_start_loc =
-                self.fetched_operations
-                    .iter()
-                    .find_map(|(range_start, range_ops)| {
-                        let range_end = range_start + range_ops.len() as u64 - 1;
-                        if *range_start <= next_loc && next_loc <= range_end {
-                            Some(*range_start)
-                        } else {
-                            None
-                        }
-                    });
+            let range_start_loc = self
+                .fetched_data
+                .iter()
+                .find_map(|(range_start, range_data)| {
+                    let range_end = range_start + range_data.len() as u64 - 1;
+                    if *range_start <= next_loc && next_loc <= range_end {
+                        Some(*range_start)
+                    } else {
+                        None
+                    }
+                });
 
             let Some(range_start_loc) = range_start_loc else {
-                // We don't have the next operation to apply (i.e. at the journal tip)
+                // We don't have the next data item to apply (i.e. at the journal tip)
                 break;
             };
 
-            // Remove the batch of operations that contains the next operation to apply.
-            let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
-            // Skip operations that are before the next location.
+            // Remove the batch of data that contains the next data item to apply.
+            let data = self.fetched_data.remove(&range_start_loc).unwrap();
+            // Skip data items that are before the next location.
             let skip_count = (next_loc - range_start_loc) as usize;
-            let operations_count = operations.len() - skip_count;
-            let remaining_operations = operations.into_iter().skip(skip_count);
-            next_loc += operations_count as u64;
-            self.apply_operations_batch(remaining_operations).await?;
+            let data_count = data.len() - skip_count;
+            let remaining_data = data.into_iter().skip(skip_count);
+            next_loc += data_count as u64;
+            self.apply_data_batch(remaining_data).await?;
         }
 
         Ok(())
     }
 
-    /// Apply a batch of operations to the journal
-    async fn apply_operations_batch<I>(&mut self, operations: I) -> Result<(), EngineError<DB, R>>
+    /// Apply a batch of data to the journal
+    async fn apply_data_batch<I>(&mut self, data: I) -> Result<(), EngineError<DB, R>>
     where
-        I: IntoIterator<Item = DB::Op>,
+        I: IntoIterator<Item = DB::Data>,
     {
-        for op in operations {
-            self.journal.append(op).await.map_err(Error::database)?;
+        for item in data {
+            self.journal.append(item).await.map_err(Error::database)?;
             // No need to sync here -- the journal will periodically sync its storage
-            // and we will also sync when we're done applying all operations.
+            // and we will also sync when we're done applying all data.
         }
         Ok(())
     }
@@ -372,7 +368,7 @@ where
         let journal_size = self.journal.size().await.map_err(Error::database)?;
 
         // Calculate the target journal size (upper bound is inclusive)
-        let target_journal_size = self.target.upper_bound_ops + 1;
+        let target_journal_size = self.target.upper_bound + 1;
 
         // Check if we've completed sync
         if journal_size >= target_journal_size {
@@ -386,17 +382,17 @@ where
         Ok(false)
     }
 
-    /// Handle the result of a fetch operation.
+    /// Handle the result of a data fetch.
     ///
     /// This method processes incoming fetch results by:
     /// 1. Removing the request from outstanding requests
     /// 2. Validating batch size
     /// 3. Verifying proofs using the configured verifier
     /// 4. Extracting pinned nodes if needed
-    /// 5. Storing valid operations for later application
+    /// 5. Storing valid data for later application
     fn handle_fetch_result(
         &mut self,
-        fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
+        fetch_result: IndexedFetchResult<DB::Data, DB::Digest, R::Error>,
     ) -> Result<(), EngineError<DB, R>> {
         // Mark request as complete
         self.outstanding_requests.remove(fetch_result.start_loc);
@@ -404,15 +400,15 @@ where
         let start_loc = fetch_result.start_loc;
         let FetchResult {
             proof,
-            operations,
+            data,
             success_tx,
         } = fetch_result.result.map_err(Error::Resolver)?;
 
         // Validate batch size
-        let operations_len = operations.len() as u64;
-        if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
+        let data_len = data.len() as u64;
+        if data_len == 0 || data_len > self.fetch_batch_size.get() {
             // Invalid batch size - notify resolver of failure.
-            // We will request these operations again when we scan for unfetched operations.
+            // We will request these data again when we scan for unfetched data.
             let _ = success_tx.send(false);
             return Ok(());
         }
@@ -422,7 +418,7 @@ where
             &mut self.hasher,
             &proof,
             start_loc,
-            &operations,
+            &data,
             &self.target.root,
         );
 
@@ -431,16 +427,14 @@ where
 
         if proof_valid {
             // Extract pinned nodes if we don't have them and this is the first batch
-            if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound_ops {
-                if let Ok(nodes) =
-                    crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
-                {
+            if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound {
+                if let Ok(nodes) = crate::adb::extract_pinned_nodes(&proof, start_loc, data_len) {
                     self.pinned_nodes = Some(nodes);
                 }
             }
 
-            // Store operations for later application
-            self.store_operations(start_loc, operations);
+            // Store data for later application
+            self.store_data(start_loc, data);
         }
 
         Ok(())
@@ -452,7 +446,7 @@ where
     /// 1. Checks if sync is complete
     /// 2. Waits for the next synchronization event
     /// 3. Handles different event types (target updates, fetch results)
-    /// 4. Coordinates request scheduling and operation application
+    /// 4. Coordinates request scheduling and data application
     ///
     /// Returns `StepResult::Complete(database)` when sync is finished, or
     /// `StepResult::Continue(self)` when more work remains.
@@ -465,8 +459,8 @@ where
                 self.config,
                 self.journal,
                 self.pinned_nodes,
-                self.target.lower_bound_ops,
-                self.target.upper_bound_ops,
+                self.target.lower_bound,
+                self.target.upper_bound,
                 self.apply_batch_size,
             )
             .await
@@ -509,11 +503,11 @@ where
                 // Process the fetch result
                 self.handle_fetch_result(fetch_result)?;
 
-                // Request operations in the sync range
+                // Request data in the sync range
                 self.schedule_requests().await?;
 
-                // Apply operations that are now contiguous with the current journal
-                self.apply_operations().await?;
+                // Apply data that is now contiguous with the current journal
+                self.apply_data().await?;
             }
         }
 
@@ -556,7 +550,7 @@ mod tests {
                         size: 0,
                         digests: vec![],
                     },
-                    operations: vec![],
+                    data: vec![],
                     success_tx: oneshot::channel().0,
                 }),
             }

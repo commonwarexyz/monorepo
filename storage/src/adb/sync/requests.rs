@@ -6,16 +6,16 @@ use futures::stream::FuturesUnordered;
 use std::{collections::BTreeSet, future::Future, pin::Pin};
 
 /// Manages outstanding fetch requests
-pub(super) struct Requests<Op, D: Digest, E> {
-    /// Futures that will resolve to batches of operations
+pub(super) struct Requests<Data, D: Digest, E> {
+    /// Futures that will resolve to batches of data
     #[allow(clippy::type_complexity)]
-    futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>,
+    futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Data, D, E>> + Send>>>,
     /// Start locations of outstanding requests
     /// Each element corresponds to an element in `futures` and vice versa
     locations: BTreeSet<u64>,
 }
 
-impl<Op, D: Digest, E> Requests<Op, D, E> {
+impl<Data, D: Digest, E> Requests<Data, D, E> {
     /// Create a new empty set of outstanding requests
     pub fn new() -> Self {
         Self {
@@ -28,7 +28,7 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     pub fn add(
         &mut self,
         start_loc: u64,
-        future: Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>,
+        future: Pin<Box<dyn Future<Output = IndexedFetchResult<Data, D, E>> + Send>>,
     ) {
         self.locations.insert(start_loc);
         self.futures.push(future);
@@ -49,7 +49,7 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     #[allow(clippy::type_complexity)]
     pub fn futures_mut(
         &mut self,
-    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>
+    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Data, D, E>> + Send>>>
     {
         &mut self.futures
     }
@@ -60,7 +60,7 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     }
 }
 
-impl<Op, D: Digest, E> Default for Requests<Op, D, E> {
+impl<Data, D: Digest, E> Default for Requests<Data, D, E> {
     fn default() -> Self {
         Self::new()
     }
