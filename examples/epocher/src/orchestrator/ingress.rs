@@ -1,8 +1,16 @@
 use commonware_consensus::{types::Epoch, Reporter};
+use commonware_cryptography::sha256::Digest as Sha256Digest;
 use futures::{channel::mpsc, SinkExt};
 
+/// Epoch transition update including selection seed.
+#[derive(Clone, Copy, Debug)]
+pub struct EpochUpdate {
+    pub epoch: Epoch,
+    pub seed: Sha256Digest,
+}
+
 pub enum Message {
-    EnterEpoch { epoch: Epoch },
+    EnterEpoch { epoch: Epoch, seed: Sha256Digest },
 }
 
 /// Mailbox for the orchestrator.
@@ -18,11 +26,14 @@ impl Mailbox {
 }
 
 impl Reporter for Mailbox {
-    type Activity = Epoch;
+    type Activity = EpochUpdate;
 
     async fn report(&mut self, activity: Self::Activity) {
         self.sender
-            .send(Message::EnterEpoch { epoch: activity })
+            .send(Message::EnterEpoch {
+                epoch: activity.epoch,
+                seed: activity.seed,
+            })
             .await
             .expect("Failed to send enter epoch");
     }
