@@ -51,8 +51,8 @@ use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Runner};
-use commonware_utils::{union, NZU32};
+use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
+use commonware_utils::{union, NZUsize, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -202,8 +202,8 @@ fn main() {
             partition: String::from("log"),
             compression: Some(3),
             mailbox_size: 1024,
-            replay_buffer: 1024 * 1024,
-            write_buffer: 1024 * 1024,
+            replay_buffer: NZUsize!(1024 * 1024),
+            write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_secs(1),
             notarization_timeout: Duration::from_secs(2),
             nullify_retry: Duration::from_secs(10),
@@ -214,6 +214,7 @@ fn main() {
             max_participants: participants.len(),
             fetch_concurrent: 2,
             fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+            buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 

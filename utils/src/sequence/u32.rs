@@ -25,10 +25,6 @@ impl U32 {
     pub fn new(value: u32) -> Self {
         Self(value.to_be_bytes())
     }
-
-    pub fn to_u32(&self) -> u32 {
-        u32::from_be_bytes(self.0)
-    }
 }
 
 impl Write for U32 {
@@ -62,6 +58,18 @@ impl From<[u8; U32::SIZE]> for U32 {
 impl From<u32> for U32 {
     fn from(value: u32) -> Self {
         Self(value.to_be_bytes())
+    }
+}
+
+impl From<U32> for u32 {
+    fn from(value: U32) -> Self {
+        u32::from_be_bytes(value.0)
+    }
+}
+
+impl From<&U32> for u32 {
+    fn from(value: &U32) -> Self {
+        u32::from_be_bytes(value.0)
     }
 }
 
@@ -99,11 +107,11 @@ mod tests {
     fn test_u32() {
         let value = 42u32;
         let array = U32::new(value);
-        assert_eq!(value, U32::decode(array.as_ref()).unwrap().to_u32());
-        assert_eq!(value, U32::from(array.0).to_u32());
+        assert_eq!(value, U32::decode(array.as_ref()).unwrap().into());
+        assert_eq!(value, U32::from(array.0).into());
 
         let vec = array.to_vec();
-        assert_eq!(value, U32::decode(vec.as_ref()).unwrap().to_u32());
+        assert_eq!(value, U32::decode(vec.as_ref()).unwrap().into());
     }
 
     #[test]

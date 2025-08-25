@@ -4,14 +4,15 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
-    adb::any::{
-        sync::{self, resolver::Resolver},
-        Any, Config,
+    adb::{
+        any::fixed::{Any, Config},
+        sync,
     },
     mmr::hasher::Standard,
+    store::operation::Fixed,
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 
@@ -41,40 +42,45 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
-        mmr_items_per_blob: 3,
-        mmr_write_buffer: 1024,
+        mmr_items_per_blob: NZU64!(3),
+        mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: format!("{test_name}_log"),
-        log_items_per_blob: 3,
-        log_write_buffer: 1024,
+        log_items_per_blob: NZU64!(3),
+        log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        buffer_pool: PoolRef::new(PAGE_SIZE, 1),
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(1)),
         pruning_delay: (pruning_delay % 1000) + 1,
     }
 }
 
-async fn test_sync<R: Resolver<Digest = commonware_cryptography::sha256::Digest>>(
+async fn test_sync<
+    R: sync::resolver::Resolver<
+        Digest = commonware_cryptography::sha256::Digest,
+        Op = Fixed<Key, Value>,
+    >,
+>(
     context: deterministic::Context,
     resolver: R,
-    target: sync::SyncTarget<commonware_cryptography::sha256::Digest>,
+    target: sync::Target<commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
     pruning_delay: u64,
 ) -> bool {
-    let config = test_config(test_name, pruning_delay);
+    let db_config = test_config(test_name, pruning_delay);
     let expected_root = target.root;
 
-    let sync_config = sync::client::Config {
-        context,
-        update_receiver: None,
-        db_config: config,
-        fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
-        target,
-        resolver,
-        hasher: Standard::<Sha256>::new(),
-        apply_batch_size: 100,
-        max_outstanding_requests: 10,
-    };
+    let sync_config: sync::engine::Config<Any<_, Key, Value, Sha256, TwoCap>, R> =
+        sync::engine::Config {
+            context,
+            update_rx: None,
+            db_config,
+            fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
+            target,
+            resolver,
+            apply_batch_size: 100,
+            max_outstanding_requests: 10,
+        };
 
     if let Ok(synced) = sync::sync(sync_config).await {
         let mut hasher = Standard::<Sha256>::new();
@@ -130,7 +136,7 @@ fn fuzz(input: FuzzInput) {
                         .expect("Commit before sync should not fail");
 
                     let mut hasher = Standard::<Sha256>::new();
-                    let target = sync::SyncTarget {
+                    let target = sync::Target {
                         root: src.root(&mut hasher),
                         lower_bound_ops: src.inactivity_floor_loc(),
                         upper_bound_ops: src.op_count() - 1,

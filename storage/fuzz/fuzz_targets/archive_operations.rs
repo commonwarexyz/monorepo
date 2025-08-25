@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     archive::{
         prunable::{Archive, Config},
@@ -9,8 +9,9 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroUsize;
 
 type Key = FixedBytes<16>;
 type Value = FixedBytes<32>;
@@ -39,18 +40,22 @@ struct FuzzInput {
     operations: Vec<ArchiveOperation>,
 }
 
+const PAGE_SIZE: NonZeroUsize = NZUsize!(555);
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(100);
+
 fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
         let cfg = Config {
             partition: "test".into(),
-            items_per_section: 1024,
-            write_buffer: 1024,
+            items_per_section: NZU64!(1024),
+            write_buffer: NZUsize!(1024),
             translator: EightCap,
-            replay_buffer: 1024*1024,
+            replay_buffer: NZUsize!(1024*1024),
             compression: None,
             codec_config: (),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
         let mut archive = Archive::<_, _, Key, Value>::init(context.clone(), cfg.clone()).await.expect("init failed");
@@ -185,7 +190,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::Prune(min) => {
-                    let min = min - min % cfg.items_per_section;
+                    let min = min - min % cfg.items_per_section.get();
                     archive.prune(min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {

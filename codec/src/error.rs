@@ -69,6 +69,9 @@ pub enum Error {
     /// - The boxed [std::error::Error] is the original source error.
     ///
     /// Allows propagating custom errors through the codec reading process.
-    #[error("Wrapped Error: Context({0}), Source({1})")]
-    Wrapped(&'static str, Box<dyn std::error::Error + Send + Sync>),
+    #[error("Wrapped Error: Context({0})")]
+    Wrapped(
+        &'static str,
+        #[source] Box<dyn std::error::Error + Send + Sync>,
+    ),
 }

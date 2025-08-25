@@ -10,6 +10,7 @@ use std::{
     fs::File,
     net::IpAddr,
     path::PathBuf,
+    slice,
 };
 use tokio::process::Command;
 use tracing::info;
@@ -312,10 +313,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         )
         .await?[0]
             .clone();
-        monitoring_ip =
-            wait_for_instances_running(monitoring_ec2_client, &[monitoring_instance_id.clone()])
-                .await?[0]
-                .clone();
+        monitoring_ip = wait_for_instances_running(
+            monitoring_ec2_client,
+            slice::from_ref(&monitoring_instance_id),
+        )
+        .await?[0]
+            .clone();
         monitoring_private_ip =
             get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
     }
@@ -374,8 +377,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
             .await?[0]
                 .clone();
-            let ip =
-                wait_for_instances_running(ec2_client, &[instance_id.clone()]).await?[0].clone();
+            let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id)).await?
+                [0]
+            .clone();
             info!(
                 ip = ip.as_str(),
                 instance = instance.name.as_str(),
@@ -583,7 +587,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     for deployment in &deployments {
         let tag_directory = tag_directory.clone();
         let instance = deployment.instance.clone();
-        wait_for_instances_ready(&ec2_clients[&instance.region], &[deployment.id.clone()]).await?;
+        wait_for_instances_ready(
+            &ec2_clients[&instance.region],
+            slice::from_ref(&deployment.id),
+        )
+        .await?;
         let ip = deployment.ip.clone();
         let monitoring_private_ip = monitoring_private_ip.clone();
         let hosts_path = hosts_path.clone();

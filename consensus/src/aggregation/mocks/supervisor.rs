@@ -1,31 +1,30 @@
 use crate::{aggregation::types::Epoch, Supervisor as S, ThresholdSupervisor as TS};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::Share,
-        poly::{self, Public},
-        variant::Variant,
+    bls12381::{
+        dkg::ops::evaluate_all,
+        primitives::{group::Share, poly, variant::Variant},
     },
     PublicKey,
 };
-use std::{collections::HashMap, marker::PhantomData};
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct Supervisor<P: PublicKey, V: Variant> {
+    identity: V::Public,
     shares: HashMap<Epoch, Share>,
-    polynomials: HashMap<Epoch, Public<V>>,
+    polynomials: HashMap<Epoch, Vec<V::Public>>,
     validators: HashMap<Epoch, Vec<P>>,
     validators_maps: HashMap<Epoch, HashMap<P, u32>>,
-    _phantom: PhantomData<(P, V)>,
 }
 
-impl<P: PublicKey, V: Variant> Default for Supervisor<P, V> {
-    fn default() -> Self {
+impl<P: PublicKey, V: Variant> Supervisor<P, V> {
+    pub fn new(identity: V::Public) -> Self {
         Self {
+            identity,
             shares: HashMap::new(),
             polynomials: HashMap::new(),
             validators: HashMap::new(),
             validators_maps: HashMap::new(),
-            _phantom: PhantomData,
         }
     }
 }
@@ -35,7 +34,7 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
         &mut self,
         epoch: Epoch,
         share: Share,
-        polynomial: Public<V>,
+        polynomial: poly::Public<V>,
         mut validators: Vec<P>,
     ) {
         // Setup validators
@@ -45,6 +44,12 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
             validators_map.insert(validator.clone(), index as u32);
         }
 
+        // Evaluate the polynomial
+        let identity = *poly::public::<V>(&polynomial);
+        assert_eq!(identity, self.identity);
+        let polynomial = evaluate_all::<V>(&polynomial, validators.len() as u32);
+
+        // Store artifacts
         self.shares.insert(epoch, share);
         self.polynomials.insert(epoch, polynomial);
         self.validators.insert(epoch, validators);
@@ -70,17 +75,13 @@ impl<P: PublicKey, V: Variant> S for Supervisor<P, V> {
 }
 
 impl<P: PublicKey, V: Variant> TS for Supervisor<P, V> {
-    type Identity = poly::Public<V>;
+    type Identity = V::Public;
     type Seed = V::Signature;
-    type Polynomial = Public<V>;
+    type Polynomial = Vec<V::Public>;
     type Share = Share;
 
     fn identity(&self) -> &Self::Identity {
-        // Return the identity from the first available polynomial
-        self.polynomials
-            .values()
-            .next()
-            .expect("No polynomials available")
+        &self.identity
     }
 
     fn leader(&self, _: Self::Index, _: Self::Seed) -> Option<Self::PublicKey> {

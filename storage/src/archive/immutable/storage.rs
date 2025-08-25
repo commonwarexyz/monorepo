@@ -129,6 +129,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
                 journal_compression: cfg.freezer_journal_compression,
                 journal_write_buffer: cfg.write_buffer,
                 journal_target_size: cfg.freezer_journal_target_size,
+                journal_buffer_pool: cfg.freezer_journal_buffer_pool,
                 table_partition: cfg.freezer_table_partition,
                 table_initial_size: cfg.freezer_table_initial_size,
                 table_resize_frequency: cfg.freezer_table_resize_frequency,
@@ -148,7 +149,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             let bits = metadata.get(section).unwrap().ordinal();
 
             // Get section
-            let section = section.to_u64();
+            let section = section.value();
             section_bits.insert(section, bits);
         }
 
@@ -176,7 +177,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         context.register("syncs", "Number of syncs called", syncs.clone());
 
         Ok(Self {
-            items_per_section: cfg.items_per_section,
+            items_per_section: cfg.items_per_section.get(),
             metadata,
             freezer,
             ordinal,

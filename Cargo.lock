@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-bridge"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "clap",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "chrono",
  "clap",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "paste",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-fuzz"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1069,18 +1069,17 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding-fuzz"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "arbitrary",
  "commonware-coding",
  "commonware-cryptography",
  "libfuzzer-sys",
- "rand 0.8.5",
 ]
 
 [[package]]
 name = "commonware-collector"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1101,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1126,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "blake3",
  "blst",
@@ -1146,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography-fuzz"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -1162,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1181,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-estimator"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "clap",
@@ -1204,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1226,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "chrono",
@@ -1251,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "futures",
  "futures-timer",
@@ -1264,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1286,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bimap",
  "bytes",
@@ -1308,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "async-lock",
  "axum",
@@ -1329,6 +1328,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "sha2 0.10.8",
+ "sysinfo",
  "thiserror 2.0.12",
  "tokio",
  "tracing",
@@ -1337,8 +1337,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-runtime-fuzz"
+version = "0.0.59"
+dependencies = [
+ "arbitrary",
+ "commonware-runtime",
+ "commonware-utils",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-storage"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1362,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage-fuzz"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1376,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1396,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream-fuzz"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "arbitrary",
  "chacha20poly1305",
@@ -1411,7 +1421,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-sync"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "clap",
@@ -1433,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1446,18 +1456,20 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils-fuzz"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "arbitrary",
  "bytes",
  "commonware-codec",
  "commonware-utils",
+ "futures",
  "libfuzzer-sys",
+ "rand 0.8.5",
 ]
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.57"
+version = "0.0.59"
 dependencies = [
  "bytes",
  "clap",
@@ -2484,7 +2496,7 @@ dependencies = [
  "iana-time-zone-haiku",
  "js-sys",
  "wasm-bindgen",
- "windows-core",
+ "windows-core 0.52.0",
 ]
 
 [[package]]
@@ -2917,6 +2929,15 @@ name = "nonzero_ext"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
+
+[[package]]
+name = "ntapi"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8a3895c6391c39d7fe7ebc444a87eb2991b2a0bc718fdabd071eec617fc68e4"
+dependencies = [
+ "winapi",
+]
 
 [[package]]
 name = "nu-ansi-term"
@@ -4264,6 +4285,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysinfo"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fc858248ea01b66f19d8e8a6d55f41deaf91e9d495246fd01368d99935c6c01"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+ "memchr",
+ "ntapi",
+ "rayon",
+ "windows",
+]
+
+[[package]]
 name = "system-configuration"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4996,6 +5031,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
+name = "windows"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12342cb4d8e3b046f3d80effd474a7a02447231330ef77d71daa6fbc40681143"
+dependencies = [
+ "windows-core 0.57.0",
+ "windows-targets 0.52.6",
+]
+
+[[package]]
 name = "windows-core"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5005,13 +5050,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-core"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2ed2439a290666cd67ecce2b0ffaad89c2a56b976b736e6ece670297897832d"
+dependencies = [
+ "windows-implement",
+ "windows-interface",
+ "windows-result 0.1.2",
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-implement"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
+]
+
+[[package]]
+name = "windows-interface"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29bee4b38ea3cde66011baa44dba677c432a78593e202392d1e9070cf2a7fca7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
+]
+
+[[package]]
 name = "windows-registry"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e400001bb720a623c1c69032f8e3e4cf09984deec740f007dd2b03ec864804b0"
 dependencies = [
- "windows-result",
+ "windows-result 0.2.0",
  "windows-strings",
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e383302e8ec8515204254685643de10811af0ed97ea37210dc26fb0032647f8"
+dependencies = [
  "windows-targets 0.52.6",
 ]
 
@@ -5030,7 +5118,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cd9b125c486025df0eabcb585e62173c6c9eddcec5d117d3b6e8c30e2ee4d10"
 dependencies = [
- "windows-result",
+ "windows-result 0.2.0",
  "windows-targets 0.52.6",
 ]
 

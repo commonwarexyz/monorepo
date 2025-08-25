@@ -1,18 +1,22 @@
 //! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::adb::any::Any] database.
+//! [commonware_storage::adb::any::fixed::Any] database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_runtime::{
-    tokio as tokio_runtime, Clock, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
+    tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
+    Storage, StreamOf,
 };
-use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
+use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, Database, Error, ErrorCode,
-    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetSyncTargetRequest,
-    GetSyncTargetResponse, Message, Operation, MAX_MESSAGE_SIZE,
+    any::{self},
+    crate_version,
+    databases::{DatabaseType, Syncable},
+    immutable::{self},
+    net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
+    Error, Key,
 };
 use commonware_utils::parse_duration;
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -32,8 +36,10 @@ const MAX_BATCH_SIZE: u64 = 100;
 const RESPONSE_BUFFER_SIZE: usize = 64;
 
 /// Server configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Config {
+    /// Database type to use.
+    database_type: DatabaseType,
     /// Port to listen on.
     port: u16,
     /// Number of initial operations to create.
@@ -49,12 +55,9 @@ struct Config {
 }
 
 /// Server state containing the database and metrics.
-struct State<E>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
+struct State<DB> {
     /// The database wrapped in async mutex.
-    database: Arc<RwLock<Database<E>>>,
+    database: RwLock<DB>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -62,20 +65,20 @@ where
     /// Counter for operations added.
     ops_counter: Counter,
     /// Last time we added operations.
-    last_operation_time: Arc<RwLock<SystemTime>>,
+    last_operation_time: RwLock<SystemTime>,
 }
 
-impl<E> State<E>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    fn new(context: E, database: Database<E>) -> Self {
+impl<DB> State<DB> {
+    fn new<E>(context: E, database: DB) -> Self
+    where
+        E: Metrics,
+    {
         let state = Self {
-            database: Arc::new(RwLock::new(database)),
+            database: RwLock::new(database),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
-            last_operation_time: Arc::new(RwLock::new(SystemTime::now())),
+            last_operation_time: RwLock::new(SystemTime::now()),
         };
         context.register(
             "requests",
@@ -90,88 +93,60 @@ where
         );
         state
     }
-
-    /// Add operations to the database if the configured interval has passed.
-    async fn maybe_add_operations(
-        &self,
-        context: &mut E,
-        config: &Config,
-    ) -> Result<(), Box<dyn std::error::Error>>
-    where
-        E: commonware_runtime::Clock + RngCore,
-    {
-        let mut last_time = self.last_operation_time.write().await;
-        let now = context.current();
-
-        if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
-            *last_time = now;
-
-            // Generate new operations
-            let new_operations =
-                create_test_operations(config.ops_per_interval, context.next_u64());
-
-            // Add operations to database and get the new root
-            let root = {
-                let mut database = self.database.write().await;
-                for operation in new_operations.iter() {
-                    let result = match operation {
-                        Operation::Update(key, value) => {
-                            database.update(*key, *value).await.map(|_| ())
-                        }
-                        Operation::Deleted(key) => database.delete(*key).await.map(|_| ()),
-                        Operation::Commit(_) => database.commit().await.map(|_| ()),
-                    };
-
-                    if let Err(e) = result {
-                        error!(error = %e, "failed to add operations to database");
-                    }
-                }
-                database.root(&mut Standard::new())
-            };
-
-            self.ops_counter.inc_by(new_operations.len() as u64);
-            info!(
-                operations_added = new_operations.len(),
-                root = %root,
-                "added operations"
-            );
-        }
-
-        Ok(())
-    }
 }
 
-/// Add the given `operations` to the `database`.
-async fn add_operations<E>(
-    database: &mut Database<E>,
-    operations: Vec<Operation>,
-) -> Result<(), commonware_storage::adb::Error>
+/// Add operations to the database if the configured interval has passed.
+async fn maybe_add_operations<DB, E>(
+    state: &State<DB>,
+    context: &mut E,
+    config: &Config,
+) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    DB: Syncable,
+    E: Storage + Clock + Metrics + RngCore,
 {
-    for operation in operations {
-        match operation {
-            Operation::Update(key, value) => {
-                database.update(key, value).await?;
+    let mut last_time = state.last_operation_time.write().await;
+    let now = context.current();
+
+    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
+        *last_time = now;
+
+        // Generate new operations
+        let new_operations =
+            DB::create_test_operations(config.ops_per_interval, context.next_u64());
+
+        // Add operations to database and get the new root
+        let root = {
+            let mut database = state.database.write().await;
+            if let Err(e) = DB::add_operations(&mut *database, new_operations.clone()).await {
+                error!(error = %e, "failed to add operations to database");
             }
-            Operation::Deleted(key) => {
-                database.delete(key).await?;
-            }
-            Operation::Commit(_) => {
-                database.commit().await?;
-            }
-        }
+            DB::root(&*database, &mut Standard::new())
+        };
+
+        state.ops_counter.inc_by(new_operations.len() as u64);
+        let root_hex = root
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        info!(
+            operations_added = new_operations.len(),
+            root = %root_hex,
+            "added operations"
+        );
     }
+
     Ok(())
 }
 
 /// Handle a request for sync target.
-async fn handle_get_sync_target<E>(
-    state: &State<E>,
-    request: GetSyncTargetRequest,
-) -> Result<GetSyncTargetResponse, Error>
+async fn handle_get_sync_target<DB>(
+    state: &State<DB>,
+    request: wire::GetSyncTargetRequest,
+) -> Result<wire::GetSyncTargetResponse<Key>, Error>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    DB: Syncable,
 {
     state.request_counter.inc();
 
@@ -181,13 +156,13 @@ where
         let database = state.database.read().await;
         (
             database.root(&mut hasher),
-            database.inactivity_floor_loc(),
+            database.lower_bound_ops(),
             database.op_count().saturating_sub(1),
         )
     };
-    let response = GetSyncTargetResponse {
+    let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
-        target: SyncTarget {
+        target: Target {
             root,
             lower_bound_ops,
             upper_bound_ops,
@@ -199,12 +174,12 @@ where
 }
 
 /// Handle a GetOperationsRequest and return operations with proof.
-async fn handle_get_operations<E>(
-    state: &State<E>,
-    request: GetOperationsRequest,
-) -> Result<GetOperationsResponse, Error>
+async fn handle_get_operations<DB>(
+    state: &State<DB>,
+    request: wire::GetOperationsRequest,
+) -> Result<wire::GetOperationsResponse<DB::Operation, Key>, Error>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    DB: Syncable,
 {
     state.request_counter.inc();
     request.validate()?;
@@ -251,7 +226,7 @@ where
         "sending operations and proof"
     );
 
-    Ok(GetOperationsResponse {
+    Ok(wire::GetOperationsResponse::<DB::Operation, Key> {
         request_id: request.request_id,
         proof,
         operations,
@@ -259,18 +234,21 @@ where
 }
 
 /// Handle a message from a client and return the appropriate response.
-async fn handle_message<E>(state: Arc<State<E>>, message: Message) -> Message
+async fn handle_message<DB>(
+    state: &State<DB>,
+    message: wire::Message<DB::Operation, Key>,
+) -> wire::Message<DB::Operation, Key>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    DB: Syncable,
 {
     let request_id = message.request_id();
     match message {
-        Message::GetOperationsRequest(request) => {
-            match handle_get_operations(&state, request).await {
-                Ok(response) => Message::GetOperationsResponse(response),
+        wire::Message::GetOperationsRequest(request) => {
+            match handle_get_operations::<DB>(state, request).await {
+                Ok(response) => wire::Message::GetOperationsResponse(response),
                 Err(e) => {
                     state.error_counter.inc();
-                    Message::Error(ErrorResponse {
+                    wire::Message::Error(ErrorResponse {
                         request_id,
                         error_code: e.to_error_code(),
                         message: e.to_string(),
@@ -279,12 +257,12 @@ where
             }
         }
 
-        Message::GetSyncTargetRequest(request) => {
-            match handle_get_sync_target(&state, request).await {
-                Ok(response) => Message::GetSyncTargetResponse(response),
+        wire::Message::GetSyncTargetRequest(request) => {
+            match handle_get_sync_target::<DB>(state, request).await {
+                Ok(response) => wire::Message::GetSyncTargetResponse(response),
                 Err(e) => {
                     state.error_counter.inc();
-                    Message::Error(ErrorResponse {
+                    wire::Message::Error(ErrorResponse {
                         request_id,
                         error_code: e.to_error_code(),
                         message: e.to_string(),
@@ -295,7 +273,7 @@ where
 
         _ => {
             state.error_counter.inc();
-            Message::Error(ErrorResponse {
+            wire::Message::Error(ErrorResponse {
                 request_id,
                 error_code: ErrorCode::InvalidRequest,
                 message: "unexpected message type".to_string(),
@@ -305,32 +283,29 @@ where
 }
 
 /// Handle a client connection with concurrent request processing.
-async fn handle_client<E>(
+async fn handle_client<DB, E>(
     context: E,
-    state: Arc<State<E>>,
-    mut sink: commonware_runtime::SinkOf<E>,
-    mut stream: commonware_runtime::StreamOf<E>,
+    state: Arc<State<DB>>,
+    mut sink: SinkOf<E>,
+    mut stream: StreamOf<E>,
     client_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + Clone,
+    DB: Syncable + Send + Sync + 'static,
+    E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
 
     // Wait until we receive a message from the client or we have a response to send.
-    let (response_sender, mut response_receiver) = mpsc::channel::<Message>(RESPONSE_BUFFER_SIZE);
+    let (response_sender, mut response_receiver) =
+        mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
     loop {
         select! {
             incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
                 match incoming {
                     Ok(message_data) => {
                         // Parse the message.
-                        let message: Message = match Message::decode(&message_data[..]) {
+                        let message = match wire::Message::decode(&message_data[..]) {
                             Ok(msg) => msg,
                             Err(e) => {
                                 warn!(client_addr = %client_addr, error = %e, "failed to parse message");
@@ -345,7 +320,7 @@ where
                             let state = state.clone();
                             let mut response_sender = response_sender.clone();
                             move |_| async move {
-                                let response = handle_message(state, message).await;
+                                let response = handle_message::<DB>(&state, message).await;
                                 if let Err(e) = response_sender.send(response).await {
                                     warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
                                 }
@@ -378,11 +353,142 @@ where
     }
 }
 
-fn main() {
+/// Initialize and display database state with initial operations.
+async fn initialize_database<DB, E>(
+    database: &mut DB,
+    config: &Config,
+    context: &mut E,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    DB: Syncable,
+    E: RngCore,
+{
+    info!("starting {} database", DB::name());
+
+    // Create and initialize database
+    let initial_ops = DB::create_test_operations(config.initial_ops, context.next_u64());
+    info!(
+        operations_len = initial_ops.len(),
+        "creating initial operations"
+    );
+    DB::add_operations(database, initial_ops).await?;
+
+    // Commit the database to ensure operations are persisted
+    database.commit().await?;
+
+    // Display database state
+    let mut hasher = Standard::new();
+    let root = database.root(&mut hasher);
+    let root_hex = root
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    info!(
+        op_count = database.op_count(),
+        root = %root_hex,
+        "{} database ready",
+        DB::name()
+    );
+
+    Ok(())
+}
+
+/// Run a generic server with the given database.
+async fn run_helper<DB, E>(
+    mut context: E,
+    config: Config,
+    mut database: DB,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    DB: Syncable + Send + Sync + 'static,
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    info!("starting {} database server", DB::name());
+
+    initialize_database(&mut database, &config, &mut context).await?;
+
+    // Create listener to accept connections
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
+    let mut listener = context.with_label("listener").bind(addr).await?;
+    info!(
+        addr = %addr,
+        op_interval = ?config.op_interval,
+        ops_per_interval = config.ops_per_interval,
+        "{} server listening and continuously adding operations",
+        DB::name()
+    );
+
+    let state = Arc::new(State::new(context.with_label("server"), database));
+    let mut next_op_time = context.current() + config.op_interval;
+    loop {
+        select! {
+            _ = context.sleep_until(next_op_time) => {
+                // Add operations to the database
+                if let Err(e) = maybe_add_operations(&state, &mut context, &config).await {
+                    warn!(error = %e, "failed to add additional operations");
+                }
+                next_op_time = context.current() + config.op_interval;
+            },
+            client_result = listener.accept() => {
+                match client_result {
+                    Ok((client_addr, sink, stream)) => {
+                        let state = state.clone();
+                        let context = context.clone();
+                        context.with_label("client").spawn(move|context|async move {
+                            if let Err(e) =
+                                handle_client::<DB, _>(context, state.clone(), sink, stream, client_addr).await
+                            {
+                                error!(client_addr = %client_addr, error = %e, "❌ error handling client");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!(error = %e, "❌ failed to accept client");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Run the Any database server.
+async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    // Create and initialize database
+    let db_config = any::create_config();
+    let database = any::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
+/// Run the Immutable database server.
+async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    // Create and initialize database
+    let db_config = immutable::create_config();
+    let database = immutable::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
+/// Parse command line arguments and return configuration.
+fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     // Parse command line arguments
     let matches = Command::new("Sync Server")
         .version(crate_version())
         .about("Serves database operations and proofs to sync clients")
+        .arg(
+            Arg::new("db")
+                .long("db")
+                .value_name("any|immutable")
+                .help("Database type to use. Must be `any` or `immutable`.")
+                .default_value("any"),
+        )
         .arg(
             Arg::new("port")
                 .short('p')
@@ -433,23 +539,23 @@ fn main() {
         )
         .get_matches();
 
-    let config = Config {
+    let database_type = matches
+        .get_one::<String>("db")
+        .unwrap()
+        .parse::<DatabaseType>()?;
+
+    Ok(Config {
+        database_type,
         port: matches
             .get_one::<String>("port")
             .unwrap()
             .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid port: {e}");
-                std::process::exit(1);
-            }),
+            .map_err(|e| format!("Invalid port: {e}"))?,
         initial_ops: matches
             .get_one::<String>("initial-ops")
             .unwrap()
             .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid initial operations count: {e}");
-                std::process::exit(1);
-            }),
+            .map_err(|e| format!("Invalid initial operations count: {e}"))?,
         storage_dir: {
             let storage_dir = matches
                 .get_one::<String>("storage-dir")
@@ -467,25 +573,24 @@ fn main() {
             .get_one::<String>("metrics-port")
             .unwrap()
             .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid metrics port: {e}");
-                std::process::exit(1);
-            }),
+            .map_err(|e| format!("Invalid metrics port: {e}"))?,
         op_interval: parse_duration(matches.get_one::<String>("op-interval").unwrap())
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid operation interval: {e}");
-                std::process::exit(1);
-            }),
+            .map_err(|e| format!("Invalid operation interval: {e}"))?,
         ops_per_interval: matches
             .get_one::<String>("ops-per-interval")
             .unwrap()
             .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid ops per interval: {e}");
-                std::process::exit(1);
-            }),
-    };
+            .map_err(|e| format!("Invalid ops per interval: {e}"))?,
+    })
+}
+
+fn main() {
+    let config = parse_config().unwrap_or_else(|e| {
+        eprintln!("❌ {e}");
+        std::process::exit(1);
+    });
     info!(
+        database_type = %config.database_type.as_str(),
         port = config.port,
         initial_ops = config.initial_ops,
         storage_dir = %config.storage_dir,
@@ -498,7 +603,7 @@ fn main() {
     let executor_config =
         tokio_runtime::Config::default().with_storage_directory(config.storage_dir.clone());
     let executor = tokio_runtime::Runner::new(executor_config);
-    executor.start(|mut context| async move {
+    executor.start(|context| async move {
         tokio_runtime::telemetry::init(
             context.with_label("telemetry"),
             tokio_runtime::telemetry::Logging {
@@ -509,91 +614,14 @@ fn main() {
             None,
         );
 
-        // Create and initialize database
-        info!("initializing database");
-        let db_config = create_adb_config();
-        let mut database = match Database::init(context.with_label("database"), db_config).await {
-            Ok(db) => db,
-            Err(e) => {
-                error!(error = %e, "❌ failed to initialize database");
-                return;
-            }
+        // Run the appropriate server based on database type
+        let result = match config.database_type {
+            DatabaseType::Any => run_any(context, config).await,
+            DatabaseType::Immutable => run_immutable(context, config).await,
         };
 
-        // Create and add initial operations
-        let initial_ops = create_test_operations(config.initial_ops, context.next_u64());
-        info!(operations_len = initial_ops.len(), "creating initial operations");
-        if let Err(e) = add_operations(&mut database, initial_ops).await {
-            error!(error = %e, "❌ failed to add initial operations");
-            return;
-        }
-
-        // Commit the database to ensure operations are persisted
-        if let Err(e) = database.commit().await {
-            error!(error = %e, "❌ failed to commit database");
-            return;
-        }
-
-        // Display database state
-        let mut hasher = Standard::new();
-        let root = database.root(&mut hasher);
-        let root_hex = root
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-        info!(
-            op_count = database.op_count(),
-            root = %root_hex,
-            "database ready"
-        );
-
-        // Create listener to accept connections
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
-        let mut listener = match context.with_label("listener").bind(addr).await {
-            Ok(listener) => listener,
-            Err(e) => {
-                error!(addr = %addr, error = %e, "❌ failed to bind");
-                return;
-            }
-        };
-        info!(
-            addr = %addr,
-            op_interval = ?config.op_interval,
-            ops_per_interval = config.ops_per_interval,
-            "server listening and continuously adding operations"
-        );
-
-        let state = Arc::new(State::new(context.with_label("server"), database));
-        let mut next_op_time = context.current() + config.op_interval;
-        loop {
-            select! {
-                _ = context.sleep_until(next_op_time) => {
-                    // Add operations to the database
-                    if let Err(e) = state.maybe_add_operations(&mut context, &config).await {
-                        warn!(error = %e, "failed to add additional operations");
-                    }
-                    next_op_time = context.current() + config.op_interval;
-                },
-                client_result = listener.accept() => {
-                    match client_result {
-                        Ok((client_addr, sink, stream)) => {
-                            let state = state.clone();
-                            let context = context.clone();
-                            context.with_label("client").spawn(move|context|async move {
-                                if let Err(e) =
-                                    handle_client(context,state.clone(), sink, stream, client_addr).await
-                                {
-                                    error!(client_addr = %client_addr, error = %e, "❌ error handling client");
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            error!(error = %e, "❌ failed to accept client");
-                        }
-                    }
-                }
-            }
+        if let Err(e) = result {
+            error!(error = %e, "❌ server failed");
         }
     });
 }

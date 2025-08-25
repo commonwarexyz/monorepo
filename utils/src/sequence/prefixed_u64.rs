@@ -32,12 +32,12 @@ impl U64 {
         Self(arr)
     }
 
-    pub fn to_u64(&self) -> u64 {
-        u64::from_be_bytes(self.0[1..].try_into().unwrap())
-    }
-
     pub fn prefix(&self) -> u8 {
         self.0[0]
+    }
+
+    pub fn value(&self) -> u64 {
+        u64::from_be_bytes(self.0[1..].try_into().unwrap())
     }
 }
 
@@ -110,15 +110,15 @@ mod tests {
         let value = 42u64;
         let array = U64::new(prefix, value);
         let decoded = U64::decode(array.as_ref()).unwrap();
-        assert_eq!(value, decoded.to_u64());
+        assert_eq!(value, decoded.value());
         assert_eq!(prefix, decoded.prefix());
         let from = U64::from(array.0);
-        assert_eq!(value, from.to_u64());
+        assert_eq!(value, from.value());
         assert_eq!(prefix, from.prefix());
 
         let vec = array.to_vec();
         let from_vec = U64::decode(vec.as_ref()).unwrap();
-        assert_eq!(value, from_vec.to_u64());
+        assert_eq!(value, from_vec.value());
         assert_eq!(prefix, from_vec.prefix());
     }
 

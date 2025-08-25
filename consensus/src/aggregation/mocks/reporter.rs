@@ -1,10 +1,13 @@
 use crate::{
-    aggregation::types::{Ack, Activity, Epoch, Index, Item},
+    aggregation::types::{Ack, Activity, Certificate, Epoch, Index},
     Reporter as Z,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{poly, variant::Variant},
+    bls12381::{
+        dkg::ops::evaluate_all,
+        primitives::{poly, variant::Variant},
+    },
     Digest,
 };
 use futures::{
@@ -16,7 +19,7 @@ use std::collections::{btree_map::Entry, BTreeMap, HashSet};
 #[allow(clippy::large_enum_variant)]
 enum Message<V: Variant, D: Digest> {
     Ack(Ack<V, D>),
-    Recovered(Item<D>, V::Signature),
+    Certified(Certificate<V, D>),
     Tip(Index),
     GetTip(oneshot::Sender<Option<(Index, Epoch)>>),
     GetContiguousTip(oneshot::Sender<Option<Index>>),
@@ -29,8 +32,11 @@ pub struct Reporter<V: Variant, D: Digest> {
     // Application namespace
     namespace: Vec<u8>,
 
+    // Identity public key
+    identity: V::Public,
+
     // Polynomial public key of the group
-    public: poly::Public<V>,
+    polynomial: Vec<V::Public>,
 
     // Received acks (for validation)
     acks: HashSet<(Index, Epoch)>,
@@ -49,13 +55,20 @@ pub struct Reporter<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> Reporter<V, D> {
-    pub fn new(namespace: &[u8], public: poly::Public<V>) -> (Self, Mailbox<V, D>) {
+    pub fn new(
+        namespace: &[u8],
+        participants: u32,
+        polynomial: poly::Public<V>,
+    ) -> (Self, Mailbox<V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
+        let identity = *poly::public::<V>(&polynomial);
+        let polynomial = evaluate_all::<V>(&polynomial, participants);
         (
             Reporter {
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
-                public,
+                identity,
+                polynomial,
                 acks: HashSet::new(),
                 digests: BTreeMap::new(),
                 contiguous: None,
@@ -71,9 +84,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
             match msg {
                 Message::Ack(ack) => {
                     // Verify properly constructed (not needed in production)
-                    if !ack.verify(&self.namespace, &self.public) {
-                        panic!("Invalid ack signature");
-                    }
+                    assert!(ack.verify(&self.namespace, &self.polynomial));
 
                     // Test encoding/decoding
                     let encoded = ack.encode();
@@ -85,58 +96,35 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     // Store the ack
                     self.acks.insert((ack.item.index, ack.epoch));
                 }
-                Message::Recovered(item, signature) => {
-                    tracing::debug!(
-                        index = item.index,
-                        current_epoch = self.current_epoch,
-                        "Reporter received Recovered activity"
-                    );
+                Message::Certified(certificate) => {
                     // Verify threshold signature
-                    use commonware_cryptography::bls12381::primitives::{ops, poly};
-                    let mut ack_namespace = self.namespace.clone();
-                    ack_namespace.extend_from_slice(b"_AGG_ACK");
-                    let threshold_public = poly::public::<V>(&self.public);
-                    let verification_result = ops::verify_message::<V>(
-                        threshold_public,
-                        Some(&ack_namespace),
-                        &item.encode(),
-                        &signature,
-                    );
-                    if verification_result.is_err() {
-                        panic!(
-                            "Invalid threshold signature for item at index {}: {:?}",
-                            item.index,
-                            verification_result.err()
-                        );
-                    }
+                    assert!(certificate.verify(&self.namespace, &self.identity));
 
                     // Test encoding/decoding
-                    let encoded = item.encode();
-                    Item::<D>::decode(encoded).unwrap();
-                    let encoded = signature.encode();
-                    V::Signature::decode(encoded).unwrap();
+                    let encoded = certificate.encode();
+                    Certificate::<V, D>::decode(encoded).unwrap();
 
                     // Update the reporter
-                    let entry = self.digests.entry(item.index);
+                    let entry = self.digests.entry(certificate.item.index);
                     match entry {
                         Entry::Occupied(mut entry) => {
                             // It should never be possible to get a conflicting payload
                             let (existing_payload, _existing_epoch) = entry.get();
-                            assert_eq!(*existing_payload, item.digest);
+                            assert_eq!(*existing_payload, certificate.item.digest);
 
                             // We may hear about a commitment again, however, this should
                             // only occur if the epoch has changed.
                             // For now, we'll allow the same epoch to be overwritten
-                            entry.insert((item.digest, self.current_epoch));
+                            entry.insert((certificate.item.digest, self.current_epoch));
                         }
                         Entry::Vacant(entry) => {
-                            entry.insert((item.digest, self.current_epoch));
+                            entry.insert((certificate.item.digest, self.current_epoch));
                         }
                     }
 
                     // Update the highest height
-                    if self.highest.is_none_or(|(h, _)| item.index > h) {
-                        self.highest = Some((item.index, self.current_epoch));
+                    if self.highest.is_none_or(|(h, _)| certificate.item.index > h) {
+                        self.highest = Some((certificate.item.index, self.current_epoch));
                     }
 
                     // Update the highest contiguous height
@@ -149,16 +137,8 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     }
                 }
                 Message::Tip(index) => {
-                    // Update our view of the tip
                     if self.highest.is_none_or(|(h, _)| index > h) {
                         self.highest = Some((index, self.current_epoch));
-                    }
-
-                    // Update the contiguous tip if necessary;
-                    // An individual validator may have missed constructing a signature, but a
-                    // majority of the rest of the network has constructed a signature.
-                    if self.contiguous.is_none_or(|c| index > c) {
-                        self.contiguous = Some(index);
                     }
                 }
                 Message::GetTip(sender) => {
@@ -192,11 +172,11 @@ impl<V: Variant, D: Digest> Z for Mailbox<V, D> {
                     .await
                     .expect("Failed to send ack");
             }
-            Activity::Recovered(item, signature) => {
+            Activity::Certified(certificate) => {
                 self.sender
-                    .send(Message::Recovered(item, signature))
+                    .send(Message::Certified(certificate))
                     .await
-                    .expect("Failed to send recovered signature");
+                    .expect("Failed to send certified signature");
             }
             Activity::Tip(index) => {
                 self.sender

@@ -1,16 +1,17 @@
-//! This client demonstrates how to use the [commonware_storage::adb::any::sync] functionality
-//! to synchronize to the server's state. It uses the [Resolver] to fetch operations and sync
-//! target updates from the server, and continuously syncs to demonstrate that sync works
+//! This client binary creates or opens an [commonware_storage::adb::any] database and
+//! synchronizes it to a remote server's state. It uses the [Resolver] to fetch operations and
+//! sync target updates from the server, and continuously syncs to demonstrate that sync works
 //! with both empty and already-initialized databases.
 
 use clap::{Arg, Command};
-use commonware_cryptography::sha256::Digest;
-use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
-use commonware_storage::{
-    adb::any::sync::{self, client::Config as SyncConfig, SyncTarget},
-    mmr::hasher::Standard,
+use commonware_codec::{Encode, Read};
+use commonware_runtime::{
+    tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_sync::{crate_version, create_adb_config, Error, Resolver};
+use commonware_storage::{adb::sync, mmr::hasher};
+use commonware_sync::{
+    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
+};
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
 use rand::Rng;
@@ -33,10 +34,12 @@ const UPDATE_CHANNEL_SIZE: usize = 16;
 /// Client configuration.
 #[derive(Debug)]
 struct Config {
+    /// Database type to use.
+    database_type: DatabaseType,
     /// Server address to connect to.
     server: SocketAddr,
     /// Batch size for fetching operations.
-    batch_size: u64,
+    batch_size: NonZeroU64,
     /// Storage directory.
     storage_dir: String,
     /// Port on which metrics are exposed.
@@ -49,36 +52,33 @@ struct Config {
     max_outstanding_requests: usize,
 }
 
-/// Periodically request target updates from server and send them to sync client
-/// on `update_sender`.
-async fn target_update_task<E>(
+/// Every `interval_duration`, use `resolver` to request an updated sync target and send it on
+/// `update_tx`.
+async fn target_update_task<E, Op, D>(
     context: E,
-    resolver: Resolver<E>,
-    update_sender: mpsc::Sender<SyncTarget<Digest>>,
+    resolver: Resolver<Op, D>,
+    update_tx: mpsc::Sender<sync::Target<D>>,
     interval_duration: Duration,
-    initial_target: SyncTarget<Digest>,
+    initial_target: sync::Target<D>,
 ) -> Result<(), Error>
 where
-    E: commonware_runtime::Network + commonware_runtime::Clock + commonware_runtime::Spawner,
+    E: Clock,
+    Op: Read<Cfg = ()> + Encode + Send + Sync,
+    D: commonware_cryptography::Digest,
 {
     let mut current_target = initial_target;
 
     loop {
         context.sleep(interval_duration).await;
 
-        // Request sync target from server
         match resolver.get_sync_target().await {
             Ok(new_target) => {
                 // Check if target has changed
                 if new_target.root != current_target.root {
-                    // Send new target to sync client
-                    match update_sender.clone().try_send(new_target.clone()) {
+                    // Send new target to the sync client
+                    match update_tx.clone().try_send(new_target.clone()) {
                         Ok(()) => {
-                            info!(
-                                old_target = ?current_target,
-                                new_target = ?new_target,
-                                "target updated"
-                            );
+                            info!(old_target = ?current_target, new_target = ?new_target, "target updated");
                             current_target = new_target;
                         }
                         Err(e) if e.is_disconnected() => {
@@ -98,130 +98,139 @@ where
             }
             Err(e) => {
                 warn!(error = %e, "failed to get sync target from server");
-                // Continue trying on next interval
             }
         }
     }
 }
 
-/// Perform a single sync by opening the database, syncing, and closing it.
-async fn sync<E>(context: &E, config: &Config, sync_iteration: u32) -> Result<(), Error>
+/// Repeatedly sync an Any database to the server's state.
+async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + Clone,
+    E: Storage + Clock + Metrics + Network + Spawner,
 {
-    // Get initial sync target
-    let resolver = Resolver::new(context.clone(), config.server);
-    let initial_target = resolver.get_sync_target().await?;
-    info!(
-        sync_iteration,
-        target = ?initial_target,
-        server = %config.server,
-        batch_size = config.batch_size,
-        target = ?initial_target,
-        target_update_interval = ?config.target_update_interval,
-        "starting sync"
-    );
-
-    // Create database configuration
-    let db_config = create_adb_config();
-
-    // Create channel for target updates
-    let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
-
-    // Start target update task
-    let target_update_interval = config.target_update_interval;
-    let initial_target_clone = initial_target.clone();
-    let resolver_clone = resolver.clone();
-    let target_update_handle = context.with_label("target-update").spawn(move |context| {
-        target_update_task(
-            context,
-            resolver_clone,
-            update_sender,
-            target_update_interval,
-            initial_target_clone,
-        )
-    });
-
-    // Create sync configuration
-    let sync_config = SyncConfig::<
-        E,
-        commonware_sync::Key,
-        commonware_sync::Value,
-        commonware_sync::Hasher,
-        commonware_sync::Translator,
-        Resolver<E>,
-    > {
-        context: context.clone(),
-        db_config,
-        fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
-        target: initial_target,
-        resolver,
-        hasher: Standard::new(),
-        apply_batch_size: 1024,
-        max_outstanding_requests: config.max_outstanding_requests,
-        update_receiver: Some(update_receiver),
-    };
-
-    // Sync to the server's state
-    let database = sync::sync(sync_config).await?;
-
-    // Cancel the target update task since sync is complete
-    target_update_handle.abort();
-
-    // Get the root digest of the synced database
-    let got_root = database.root(&mut Standard::new());
-    info!(
-        sync_iteration,
-        database_ops = database.op_count(),
-        root = %got_root,
-        sync_interval = ?config.sync_interval,
-        "✅ sync completed successfully"
-    );
-
-    // Close the database so it can be reopened on next iteration
-    debug!(
-        sync_iteration,
-        "Database state before close: ops={}, root={:?}",
-        database.op_count(),
-        got_root
-    );
-    database.close().await?;
-
-    Ok(())
-}
-
-/// Continuously sync the database to the server's state.
-async fn run<E>(context: E, config: Config) -> Result<(), Error>
-where
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + Clone,
-{
-    info!("starting continuous sync process");
-
-    let mut sync_iteration = 1;
+    info!("starting Any database sync process");
+    let mut iteration = 0u32;
     loop {
-        sync(&context, &config, sync_iteration).await?;
+        let resolver =
+            Resolver::<any::Operation, Digest>::connect(context.clone(), config.server).await?;
 
-        // Wait before next sync
+        let initial_target = resolver.get_sync_target().await?;
+
+        let db_config = any::create_config();
+        let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
+
+        let target_update_handle = {
+            let resolver = resolver.clone();
+            let initial_target_clone = initial_target.clone();
+            let target_update_interval = config.target_update_interval;
+            context.with_label("target-update").spawn(move |context| {
+                target_update_task(
+                    context,
+                    resolver,
+                    update_sender,
+                    target_update_interval,
+                    initial_target_clone,
+                )
+            })
+        };
+
+        let sync_config =
+            sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
+                context: context.clone(),
+                db_config,
+                fetch_batch_size: config.batch_size,
+                target: initial_target,
+                resolver,
+                apply_batch_size: 1024,
+                max_outstanding_requests: config.max_outstanding_requests,
+                update_rx: Some(update_receiver),
+            };
+
+        let database: any::Database<_> = sync::sync(sync_config).await?;
+        let got_root = database.root(&mut hasher::Standard::new());
+        info!(
+            sync_iteration = iteration,
+            root = %got_root,
+            sync_interval = ?config.sync_interval,
+            "✅ Any sync completed successfully"
+        );
+        database.close().await?;
+        target_update_handle.abort();
         context.sleep(config.sync_interval).await;
-        sync_iteration += 1;
+        iteration += 1;
     }
 }
 
-fn main() {
+/// Repeatedly sync an Immutable database to the server's state.
+async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: Storage + Clock + Metrics + Network + Spawner,
+{
+    info!("starting Immutable database sync process");
+    let mut iteration = 0u32;
+    loop {
+        let resolver =
+            Resolver::<immutable::Operation, Key>::connect(context.clone(), config.server).await?;
+
+        let initial_target = resolver.get_sync_target().await?;
+
+        let db_config = immutable::create_config();
+        let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
+
+        let target_update_handle = {
+            let resolver = resolver.clone();
+            let initial_target_clone = initial_target.clone();
+            let target_update_interval = config.target_update_interval;
+            context.with_label("target-update").spawn(move |context| {
+                target_update_task(
+                    context,
+                    resolver,
+                    update_sender,
+                    target_update_interval,
+                    initial_target_clone,
+                )
+            })
+        };
+
+        let sync_config =
+            sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
+                context: context.clone(),
+                db_config,
+                fetch_batch_size: config.batch_size,
+                target: initial_target,
+                resolver,
+                apply_batch_size: 1024,
+                max_outstanding_requests: config.max_outstanding_requests,
+                update_rx: Some(update_receiver),
+            };
+
+        let database: immutable::Database<_> = sync::sync(sync_config).await?;
+        let got_root = database.root(&mut hasher::Standard::new());
+        info!(
+            sync_iteration = iteration,
+            root = %got_root,
+            sync_interval = ?config.sync_interval,
+            "✅ Immutable sync completed successfully"
+        );
+        database.close().await?;
+        target_update_handle.abort();
+        context.sleep(config.sync_interval).await;
+        iteration += 1;
+    }
+}
+
+fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     // Parse command line arguments
     let matches = Command::new("Sync Client")
         .version(crate_version())
         .about("Continuously syncs a database to a server's database state")
+        .arg(
+            Arg::new("db")
+                .long("db")
+                .value_name("any|immutable")
+                .help("Database type to use. Must be `any` or `immutable`.")
+                .default_value("any"),
+        )
         .arg(
             Arg::new("server")
                 .short('s')
@@ -280,66 +289,76 @@ fn main() {
         )
         .get_matches();
 
-    let config = Config {
-        server: matches
-            .get_one::<String>("server")
+    let database_type = matches
+        .get_one::<String>("db")
+        .unwrap()
+        .parse::<DatabaseType>()
+        .map_err(|e| format!("Invalid database type: {e}"))?;
+
+    let server = matches
+        .get_one::<String>("server")
+        .unwrap()
+        .parse()
+        .map_err(|e| format!("Invalid server address: {e}"))?;
+
+    let batch_size = matches
+        .get_one::<String>("batch-size")
+        .unwrap()
+        .parse()
+        .map_err(|e| format!("Invalid batch size: {e}"))?;
+
+    let storage_dir = {
+        let storage_dir = matches
+            .get_one::<String>("storage-dir")
             .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid server address: {e}");
-                std::process::exit(1);
-            }),
-        batch_size: matches
-            .get_one::<String>("batch-size")
-            .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid batch size: {e}");
-                std::process::exit(1);
-            }),
-        storage_dir: {
-            let storage_dir = matches
-                .get_one::<String>("storage-dir")
-                .unwrap()
-                .to_string();
-            // Only add suffix if using the default value
-            if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
-                let suffix: u64 = rand::thread_rng().gen();
-                format!("{storage_dir}-{suffix}")
-            } else {
-                storage_dir
-            }
-        },
-        metrics_port: matches
-            .get_one::<String>("metrics-port")
-            .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid metrics port: {e}");
-                std::process::exit(1);
-            }),
-        target_update_interval: parse_duration(
-            matches.get_one::<String>("target-update-interval").unwrap(),
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("❌ Invalid target update interval: {e}");
-            std::process::exit(1);
-        }),
-        sync_interval: parse_duration(matches.get_one::<String>("sync-interval").unwrap())
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid sync interval: {e}");
-                std::process::exit(1);
-            }),
-        max_outstanding_requests: matches
-            .get_one::<String>("max-outstanding-requests")
-            .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid max outstanding requests: {e}");
-                std::process::exit(1);
-            }),
+            .to_string();
+        // Only add suffix if using the default value
+        if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
+            let suffix: u64 = rand::thread_rng().gen();
+            format!("{storage_dir}-{suffix}")
+        } else {
+            storage_dir
+        }
     };
+
+    let metrics_port = matches
+        .get_one::<String>("metrics-port")
+        .unwrap()
+        .parse()
+        .map_err(|e| format!("Invalid metrics port: {e}"))?;
+
+    let target_update_interval =
+        parse_duration(matches.get_one::<String>("target-update-interval").unwrap())
+            .map_err(|e| format!("Invalid target update interval: {e}"))?;
+
+    let sync_interval = parse_duration(matches.get_one::<String>("sync-interval").unwrap())
+        .map_err(|e| format!("Invalid sync interval: {e}"))?;
+
+    let max_outstanding_requests = matches
+        .get_one::<String>("max-outstanding-requests")
+        .unwrap()
+        .parse()
+        .map_err(|e| format!("Invalid max outstanding requests: {e}"))?;
+
+    Ok(Config {
+        database_type,
+        server,
+        batch_size,
+        storage_dir,
+        metrics_port,
+        target_update_interval,
+        sync_interval,
+        max_outstanding_requests,
+    })
+}
+
+fn main() {
+    let config = parse_config().unwrap_or_else(|e| {
+        eprintln!("❌ Configuration error: {e}");
+        std::process::exit(1);
+    });
     info!(
+        database_type = %config.database_type.as_str(),
         server = %config.server,
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
@@ -364,8 +383,13 @@ fn main() {
             None,
         );
 
-        // Continuously sync to the server's state
-        if let Err(e) = run(context.with_label("sync"), config).await {
+        // Dispatch based on database type
+        let result = match config.database_type {
+            DatabaseType::Any => run_any(context.with_label("sync"), config).await,
+            DatabaseType::Immutable => run_immutable(context.with_label("sync"), config).await,
+        };
+
+        if let Err(e) = result {
             error!(error = %e, "❌ continuous sync failed");
             std::process::exit(1);
         }

@@ -8,7 +8,7 @@ use commonware_storage::{
     mmr::hasher::{Hasher, Standard},
     translator::TwoCap,
 };
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -46,14 +46,14 @@ fn fuzz(data: FuzzInput) {
         let cfg = Config {
             mmr_journal_partition: "fuzz_current_mmr_journal".into(),
             mmr_metadata_partition: "fuzz_current_mmr_metadata".into(),
-            mmr_items_per_blob: 11,
-            mmr_write_buffer: 1024,
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: "fuzz_current_log_journal".into(),
-            log_items_per_blob: 7,
-            log_write_buffer: 1024,
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
             bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
             translator: TwoCap,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,
             pruning_delay: 10,
         };
@@ -73,22 +73,11 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    let update_result = db.update(k, v).await.expect("Update should not fail");
+                    db.update(k, v).await.expect("Update should not fail");
+                    expected_state.insert(*key, Some(*value));
+                    all_keys.insert(*key);
+                    uncommitted_ops += 1;
 
-                    match update_result {
-                        commonware_storage::adb::any::UpdateResult::Inserted(_) => {
-                            expected_state.insert(*key, Some(*value));
-                            all_keys.insert(*key);
-                            uncommitted_ops += 1;
-                        }
-                        commonware_storage::adb::any::UpdateResult::Updated(..) => {
-                            expected_state.insert(*key, Some(*value));
-                            all_keys.insert(*key);
-                            uncommitted_ops += 1;
-                        }
-                        commonware_storage::adb::any::UpdateResult::NoOp => {
-                        }
-                    }
                 }
 
                 CurrentOperation::Delete { key } => {

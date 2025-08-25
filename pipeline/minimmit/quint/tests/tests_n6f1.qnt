@@ -3,13 +3,20 @@ module tests {
     import defs.* from "../defs"
     import option.* from "../option"
     import replica(
+        N = 6,
+        F = 1,
         CORRECT = Set("n0", "n1", "n2", "n3", "n4"),
         FAULTY = Set("n5"),
-        WEIGHTS = Map("n0"->1, "n1"->1, "n2"->1, "n3"->1, "n4"->1, "n5"->1),
         VIEWS = 0.to(8),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set("inv_b3")
     ).* from "../replica"
+
+    run asuumptionsValidTest = all {
+        Q == 5,
+        L == 3,
+        assumptions_valid
+    }
 
     run contradictionTest = {
         pure val proposal_from_n0 = {

@@ -2,10 +2,13 @@
 
 use arbitrary::Arbitrary;
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, max_faults, modulo, quorum, union, union_unique, NZUsize,
-    NZU32, NZU64,
+    from_hex, from_hex_formatted, hex, max_faults, modulo, quorum, quorum_from_slice, union,
+    union_unique, NZUsize, NonZeroDuration, NZU32, NZU64,
 };
 use libfuzzer_sys::fuzz_target;
+use std::time::Duration;
+
+const NANOS_PER_SEC: u32 = 1_000_000_000;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
@@ -14,12 +17,14 @@ enum FuzzInput {
     FromHexFormatted { hex_str: String },
     MaxFaults { n: u32 },
     Quorum { n: u32 },
+    QuorumFromSlice { a: Vec<u8> },
     Union { a: Vec<u8>, b: Vec<u8> },
     UnionUnique { namespace: Vec<u8>, msg: Vec<u8> },
     Modulo { bytes: Vec<u8>, n: u64 },
     NZUsize { v: usize },
     NZU32 { v: u32 },
     NZU64 { v: u64 },
+    NonZeroDuration { secs: u64, nanos: u32 },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -40,6 +45,22 @@ fn fuzz(input: FuzzInput) {
             if v != 0 {
                 let _ = NZU64!(v).get() == v;
             }
+        }
+
+        FuzzInput::NonZeroDuration { secs, nanos } => {
+            let duration = safe_duration_new(secs, nanos).clamp(Duration::new(0, 1), Duration::MAX);
+
+            let nz_duration = NonZeroDuration::new(duration);
+            assert!(nz_duration.is_some());
+
+            let nz_duration = nz_duration.unwrap();
+            assert_eq!(nz_duration.get(), duration);
+
+            let converted: Duration = nz_duration.into();
+            assert_eq!(converted, duration);
+
+            let nz_duration = NonZeroDuration::new_panic(duration);
+            assert_eq!(nz_duration.get(), duration);
         }
 
         FuzzInput::Hex { data } => {
@@ -89,6 +110,15 @@ fn fuzz(input: FuzzInput) {
             let faults = max_faults(n);
 
             assert_eq!(q, n - faults);
+        }
+
+        FuzzInput::QuorumFromSlice { a } => {
+            let l = a.len() as u32;
+            if l == 0 {
+                return;
+            }
+            let q = quorum_from_slice(a.as_slice());
+            assert_eq!(q, quorum(l));
         }
 
         FuzzInput::Union { a, b } => {
@@ -144,6 +174,20 @@ fn fuzz(input: FuzzInput) {
 
             let zeros = vec![0u8; bytes.len()];
             assert_eq!(modulo(&zeros, n), 0);
+        }
+    }
+}
+
+fn safe_duration_new(secs: u64, nanos: u32) -> Duration {
+    if nanos < NANOS_PER_SEC {
+        Duration::new(secs, nanos)
+    } else {
+        let extra_secs = (nanos / NANOS_PER_SEC) as u64;
+        if let Some(total_secs) = secs.checked_add(extra_secs) {
+            let remaining_nanos = nanos % NANOS_PER_SEC;
+            Duration::new(total_secs, remaining_nanos)
+        } else {
+            Duration::MAX
         }
     }
 }

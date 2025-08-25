@@ -23,6 +23,7 @@ use commonware_p2p::{
     Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    buffer::PoolRef,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
@@ -39,6 +40,7 @@ use futures::{
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, info, warn};
@@ -140,10 +142,10 @@ pub struct Engine<
     journal_heights_per_section: u64,
 
     // The number of bytes to buffer when replaying a journal.
-    journal_replay_buffer: usize,
+    journal_replay_buffer: NonZeroUsize,
 
     // The size of the write buffer to use for each blob in the journal.
-    journal_write_buffer: usize,
+    journal_write_buffer: NonZeroUsize,
 
     // A prefix for the journal names.
     // The rest of the name is the hex-encoded public keys of the relevant sequencer.
@@ -151,6 +153,9 @@ pub struct Engine<
 
     // Compression level for the journal.
     journal_compression: Option<u8>,
+
+    // Buffer pool for the journal.
+    journal_buffer_pool: PoolRef,
 
     // A map of sequencer public keys to their journals.
     #[allow(clippy::type_complexity)]
@@ -242,6 +247,7 @@ impl<
             journal_write_buffer: cfg.journal_write_buffer,
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
+            journal_buffer_pool: cfg.journal_buffer_pool,
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C::PublicKey, V, D>::new(),
             ack_manager: AckManager::<C::PublicKey, V, D>::new(),
@@ -962,6 +968,7 @@ impl<
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: (),
+            buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
         let journal =

@@ -6,8 +6,7 @@
 
 use crate::{
     adb::{
-        any::{Any, Config as AConfig, UpdateResult},
-        operation::Fixed,
+        any::fixed::{Any, Config as AConfig},
         Error,
     },
     index::Index,
@@ -18,13 +17,15 @@ use crate::{
         storage::Grafting as GStorage,
         verification::Proof,
     },
+    store::operation::Fixed,
     translator::Translator,
 };
-use commonware_codec::{Encode as _, FixedSize};
+use commonware_codec::{CodecFixed, Encode as _, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::future::try_join_all;
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
@@ -34,10 +35,10 @@ pub struct Config<T: Translator> {
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: u64,
+    pub mmr_items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: usize,
+    pub mmr_write_buffer: NonZeroUsize,
 
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
@@ -46,10 +47,10 @@ pub struct Config<T: Translator> {
     pub log_journal_partition: String,
 
     /// The items per blob configuration value used by the log journal.
-    pub log_items_per_blob: u64,
+    pub log_items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: usize,
+    pub log_write_buffer: NonZeroUsize,
 
     /// The name of the [RStorage] partition used for the bitmap metadata.
     pub bitmap_metadata_partition: String,
@@ -76,7 +77,7 @@ pub struct Config<T: Translator> {
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Array,
+    V: CodecFixed<Cfg = ()> + Clone,
     H: CHasher,
     T: Translator,
     const N: usize,
@@ -113,7 +114,7 @@ pub struct KeyValueProofInfo<K, V, const N: usize> {
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Array,
+        V: CodecFixed<Cfg = ()> + Clone,
         H: CHasher,
         T: Translator,
         const N: usize,
@@ -122,7 +123,7 @@ impl<
     // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal with
     // respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over the structure.
     const _CHUNK_SIZE_ASSERT: () = assert!(
-        N % H::Digest::SIZE == 0,
+        N.is_multiple_of(H::Digest::SIZE),
         "chunk size must be some multiple of the digest size",
     );
 
@@ -228,7 +229,7 @@ impl<
         }
 
         let any = Any {
-            ops: mmr,
+            mmr,
             log,
             snapshot,
             inactivity_floor_loc,
@@ -261,6 +262,13 @@ impl<
         self.any.get(key).await
     }
 
+    /// Get the value of the operation with location `loc` in the db. Returns
+    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// otherwise assumed valid.
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+        self.any.get_loc(loc).await
+    }
+
     /// Get the level of the base MMR into which we are grafting.
     ///
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
@@ -272,18 +280,14 @@ impl<
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
-        let update_result = self.any.update(key, value).await?;
-        match update_result {
-            UpdateResult::NoOp => return Ok(update_result),
-            UpdateResult::Inserted(_) => (),
-            UpdateResult::Updated(old_loc, _) => {
-                self.status.set_bit(old_loc, false);
-            }
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        let update_result = self.any.update_return_loc(key, value).await?;
+        if let Some(old_loc) = update_result {
+            self.status.set_bit(old_loc, false);
         }
         self.status.append(true);
 
-        Ok(update_result)
+        Ok(())
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
@@ -336,7 +340,7 @@ impl<
         }
 
         self.any
-            .apply_op(Fixed::Commit(self.any.inactivity_floor_loc))
+            .apply_op(Fixed::CommitFloor(self.any.inactivity_floor_loc))
             .await?;
         self.status.append(false);
 
@@ -356,7 +360,7 @@ impl<
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
 
@@ -389,7 +393,7 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing root"
         );
-        let ops = &self.any.ops;
+        let ops = &self.any.mmr;
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, ops, height);
         let mmr_root = grafted_mmr.root(hasher).await?;
@@ -435,7 +439,7 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
-        let mmr = &self.any.ops;
+        let mmr = &self.any.mmr;
         let start_pos = leaf_num_to_pos(start_loc);
         let end_pos_last = mmr.last_leaf_pos().unwrap();
         let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
@@ -563,13 +567,13 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
-        let op = self.any.get_with_loc(&key).await?;
+        let op = self.any.get_key_loc(&key).await?;
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound);
         };
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
+        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
@@ -668,6 +672,10 @@ impl<
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
+        // Clean up bitmap metadata partition.
+        Bitmap::<H, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+
+        // Clean up Any components (MMR and log).
         self.any.destroy().await
     }
 
@@ -682,7 +690,7 @@ impl<
 
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
+        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
@@ -720,7 +728,7 @@ impl<
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self
@@ -746,6 +754,7 @@ pub mod test {
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::{NZUsize, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     const PAGE_SIZE: usize = 88;
@@ -755,15 +764,15 @@ pub mod test {
         Config {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
             mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
-            mmr_items_per_blob: 11,
-            mmr_write_buffer: 1024,
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("{partition_prefix}_partition_prefix"),
-            log_items_per_blob: 7,
-            log_write_buffer: 1024,
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 10,
         }
     }
@@ -808,14 +817,6 @@ pub mod test {
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
             assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
 
-            // Repeated update should be no-op.
-            assert!(matches!(
-                db.update(k1, v1).await.unwrap(),
-                UpdateResult::NoOp
-            ));
-            assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
-            assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
-
             // Delete that one key.
             db.delete(k1).await.unwrap();
             db.commit().await.unwrap();
@@ -852,7 +853,7 @@ pub mod test {
             db.update(k, v1).await.unwrap();
             db.commit().await.unwrap();
 
-            let op = db.any.get_with_loc(&k).await.unwrap().unwrap();
+            let op = db.any.get_key_loc(&k).await.unwrap().unwrap();
             let proof = db
                 .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
@@ -919,7 +920,7 @@ pub mod test {
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
             // inclusion of the operation itself, and not just the chunk.
-            let (_, active_loc) = db.any.get_with_loc(&info.key).await.unwrap().unwrap();
+            let (_, active_loc) = db.any.get_key_loc(&info.key).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
@@ -1014,7 +1015,7 @@ pub mod test {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.op_count();
-            let start_pos = db.any.ops.pruned_to_pos();
+            let start_pos = db.any.mmr.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
 
             for i in start_loc..end_loc {
@@ -1054,9 +1055,9 @@ pub mod test {
                 }
                 // Found an active operation! Create a proof for its active current key/value.
                 let op = db.any.log.read(i).await.unwrap();
-                let key = op.to_key().unwrap();
+                let key = op.key().unwrap();
                 let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
-                assert_eq!(info.value, *op.to_value().unwrap());
+                assert_eq!(info.value, *op.value().unwrap());
                 // Proof should validate against the current value and correct root.
                 assert!(CurrentTest::verify_key_value_proof(
                     hasher.inner(),
@@ -1323,7 +1324,7 @@ pub mod test {
             // Final commit to establish the inactivity floor
             db.commit().await.unwrap();
 
-            // Get the root hash
+            // Get the root digest
             let original_root = db.root(&mut hasher).await.unwrap();
 
             // Verify the pruning boundary is correct

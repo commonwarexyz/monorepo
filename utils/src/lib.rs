@@ -1,5 +1,10 @@
 //! Leverage common functionality across multiple primitives.
 
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+
 use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
 use std::time::Duration;
@@ -8,6 +13,7 @@ pub mod sequence;
 pub use sequence::{Array, Span};
 mod bitvec;
 pub use bitvec::{BitIterator, BitVec};
+pub mod channels;
 mod time;
 pub use time::{parse_duration, SystemTimeExt};
 mod priority_set;
@@ -27,7 +33,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Converts a hexadecimal string to bytes.
 pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
 
@@ -61,6 +67,19 @@ pub fn max_faults(n: u32) -> u32 {
 pub fn quorum(n: u32) -> u32 {
     assert!(n > 0, "n must not be zero");
     n - max_faults(n)
+}
+
+/// Compute the quorum size for a given slice.
+///
+/// # Panics
+///
+/// Panics if the slice length is greater than [u32::MAX].
+pub fn quorum_from_slice<T>(slice: &[T]) -> u32 {
+    let n: u32 = slice
+        .len()
+        .try_into()
+        .expect("slice length must be less than u32::MAX");
+    quorum(n)
 }
 
 /// Computes the union of two byte slices.

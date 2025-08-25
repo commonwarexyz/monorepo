@@ -15,6 +15,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   FUZZ_VERSION: 0.12.0
+  NIGHTLY_VERSION: nightly-2025-08-10
 
 jobs:
   Tests:
@@ -70,7 +71,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Install nightly Rust toolchain
-      run: rustup toolchain install nightly
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Test benchmarks
@@ -84,15 +85,15 @@ jobs:
     timeout-minutes: 180
     strategy:
       matrix:
-        fuzz_dir: [codec/fuzz, coding/fuzz, cryptography/fuzz, storage/fuzz, stream/fuzz, utils/fuzz]
+        fuzz_dir: [codec/fuzz, coding/fuzz, cryptography/fuzz, runtime/fuzz, storage/fuzz, stream/fuzz, utils/fuzz]
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Install nightly Rust toolchain
-      run: rustup toolchain install nightly
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Get Rust version
       id: rust-version
-      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+      run: echo "rust_version=$(rustc +${{ env.NIGHTLY_VERSION }} --version)" >> "$GITHUB_OUTPUT"
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Cache cargo-fuzz
@@ -103,9 +104,9 @@ jobs:
         key: ${{ runner.os }}-${{ env.FUZZ_VERSION }}-cargo-fuzz-${{ steps.rust-version.outputs.rust_version }}
     - name: Install cargo-fuzz
       if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
-      run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
+      run: cargo +${{ env.NIGHTLY_VERSION }} install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
     - name: Test all targets
       run: |
-        for target in $(cargo +nightly fuzz list --fuzz-dir ${{ matrix.fuzz_dir }}); do
-          cargo +nightly fuzz run $target --fuzz-dir ${{ matrix.fuzz_dir }} -- -max_total_time=60
+        for target in $(cargo +${{ env.NIGHTLY_VERSION }} fuzz list --fuzz-dir ${{ matrix.fuzz_dir }}); do
+          cargo +${{ env.NIGHTLY_VERSION }} fuzz run $target --fuzz-dir ${{ matrix.fuzz_dir }} -- -max_total_time=60
         done

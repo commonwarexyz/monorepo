@@ -1,12 +1,12 @@
 use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{hex, Array, BitVec};
+use commonware_utils::{hex, BitVec};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -18,34 +18,34 @@ use tracing::{debug, warn};
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
-struct Record<V: Array> {
+struct Record<V: CodecFixed<Cfg = ()>> {
     value: V,
     crc: u32,
 }
 
-impl<V: Array> Record<V> {
+impl<V: CodecFixed<Cfg = ()>> Record<V> {
     fn new(value: V) -> Self {
-        let crc = crc32fast::hash(value.as_ref());
+        let crc = crc32fast::hash(&value.encode());
         Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(self.value.as_ref())
+        self.crc == crc32fast::hash(&self.value.encode())
     }
 }
 
-impl<V: Array> FixedSize for Record<V> {
+impl<V: CodecFixed<Cfg = ()>> FixedSize for Record<V> {
     const SIZE: usize = V::SIZE + u32::SIZE;
 }
 
-impl<V: Array> CodecWrite for Record<V> {
+impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.value.write(buf);
         self.crc.write(buf);
     }
 }
 
-impl<V: Array> Read for Record<V> {
+impl<V: CodecFixed<Cfg = ()>> Read for Record<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -57,7 +57,7 @@ impl<V: Array> Read for Record<V> {
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
+pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -81,7 +81,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await
@@ -158,9 +158,10 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
 
             // Iterate over all records in the blob
             let mut offset = 0;
+            let items_per_blob = config.items_per_blob.get();
             while offset < size {
                 // Calculate index for this record
-                let index = section * config.items_per_blob + (offset / Record::<V>::SIZE as u64);
+                let index = section * items_per_blob + (offset / Record::<V>::SIZE as u64);
 
                 // If bits are provided, skip if not set
                 let mut must_exist = false;
@@ -185,15 +186,16 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 replay_blob
                     .read_exact(&mut record_buf, Record::<V>::SIZE)
                     .await?;
-                let record = Record::<V>::read(&mut record_buf.as_slice())?;
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals
-                if record.is_valid() {
-                    items += 1;
-                    intervals.insert(index);
-                    continue;
-                }
+                if let Ok(record) = Record::<V>::read(&mut record_buf.as_slice()) {
+                    if record.is_valid() {
+                        items += 1;
+                        intervals.insert(index);
+                        continue;
+                    }
+                };
 
                 // If record is invalid, it may either be empty or corrupted. We only care
                 // which is which if the provided bits indicate that the record must exist.
@@ -240,7 +242,8 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         self.puts.inc();
 
         // Check if blob exists
-        let section = index / self.config.items_per_blob;
+        let items_per_blob = self.config.items_per_blob.get();
+        let section = index / items_per_blob;
         if let Entry::Vacant(entry) = self.blobs.entry(section) {
             let (blob, len) = self
                 .context
@@ -252,7 +255,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
 
         // Write the value to the blob
         let blob = self.blobs.get(&section).unwrap();
-        let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
         blob.write_at(record.encode(), offset).await?;
         self.pending.insert(section);
@@ -273,9 +276,10 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         }
 
         // Read from disk
-        let section = index / self.config.items_per_blob;
+        let items_per_blob = self.config.items_per_blob.get();
+        let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
-        let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let read_buf = vec![0u8; Record::<V>::SIZE];
         let read_buf = blob.read_at(read_buf, offset).await?;
         let record = Record::<V>::read(&mut read_buf.as_ref())?;
@@ -300,13 +304,19 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         self.intervals.next_gap(index)
     }
 
+    /// Get up to the next `max` missing items after `start`.
+    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
+        self.intervals.missing_items(start, max)
+    }
+
     /// Prune indices older than `min` by removing entire blobs.
     ///
     /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
     /// all possible indices in that blob are less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Collect sections to remove
-        let min_section = min / self.config.items_per_blob;
+        let items_per_blob = self.config.items_per_blob.get();
+        let min_section = min / items_per_blob;
         let sections_to_remove: Vec<u64> = self
             .blobs
             .keys()
@@ -323,8 +333,8 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                     .await?;
 
                 // Remove the corresponding index range from intervals
-                let start_index = section * self.config.items_per_blob;
-                let end_index = (section + 1) * self.config.items_per_blob - 1;
+                let start_index = section * items_per_blob;
+                let end_index = (section + 1) * items_per_blob - 1;
                 self.intervals.remove(start_index, end_index);
                 debug!(section, start_index, end_index, "pruned blob");
             }

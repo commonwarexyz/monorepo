@@ -411,10 +411,10 @@ impl crate::Runner for Runner {
                         }
                     }
                 }
-                if skip.is_some() {
+                if let Some(skip_time) = skip {
                     {
                         let mut time = executor.time.lock().unwrap();
-                        *time = skip.unwrap();
+                        *time = skip_time;
                         current = *time;
                     }
                     trace!(now = current.epoch_millis(), "time skipped");

@@ -17,6 +17,11 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
 use std::{
@@ -39,6 +44,7 @@ cfg_if::cfg_if! {
     }
 }
 mod network;
+mod process;
 mod storage;
 pub mod telemetry;
 mod utils;
@@ -1978,6 +1984,37 @@ mod tests {
     fn test_tokio_metrics_label() {
         let executor = tokio::Runner::default();
         test_metrics_label(executor);
+    }
+
+    #[test]
+    fn test_tokio_process_rss_metric() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            loop {
+                // Wait for RSS metric to be available
+                let metrics = context.encode();
+                if !metrics.contains("runtime_process_rss") {
+                    context.sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+
+                // Verify the RSS value is eventually populated (greater than 0)
+                for line in metrics.lines() {
+                    if line.starts_with("runtime_process_rss")
+                        && !line.starts_with("runtime_process_rss{")
+                    {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            let rss_value: i64 =
+                                parts[1].parse().expect("Failed to parse RSS value");
+                            if rss_value > 0 {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     #[test]

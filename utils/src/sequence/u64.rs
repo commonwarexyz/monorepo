@@ -25,10 +25,6 @@ impl U64 {
     pub fn new(value: u64) -> Self {
         Self(value.to_be_bytes())
     }
-
-    pub fn to_u64(&self) -> u64 {
-        u64::from_be_bytes(self.0)
-    }
 }
 
 impl Write for U64 {
@@ -62,6 +58,18 @@ impl From<[u8; U64::SIZE]> for U64 {
 impl From<u64> for U64 {
     fn from(value: u64) -> Self {
         Self(value.to_be_bytes())
+    }
+}
+
+impl From<U64> for u64 {
+    fn from(value: U64) -> Self {
+        u64::from_be_bytes(value.0)
+    }
+}
+
+impl From<&U64> for u64 {
+    fn from(value: &U64) -> Self {
+        u64::from_be_bytes(value.0)
     }
 }
 
@@ -99,11 +107,11 @@ mod tests {
     fn test_u64() {
         let value = 42u64;
         let array = U64::new(value);
-        assert_eq!(value, U64::decode(array.as_ref()).unwrap().to_u64());
-        assert_eq!(value, U64::from(array.0).to_u64());
+        assert_eq!(value, U64::decode(array.as_ref()).unwrap().into());
+        assert_eq!(value, U64::from(array.0).into());
 
         let vec = array.to_vec();
-        assert_eq!(value, U64::decode(vec.as_ref()).unwrap().to_u64());
+        assert_eq!(value, U64::decode(vec.as_ref()).unwrap().into());
     }
 
     #[test]

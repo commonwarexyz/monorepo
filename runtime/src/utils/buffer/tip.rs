@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 /// A buffer for caching data written to the tip of a blob.
 ///
 /// The buffer always represents data at the "tip" of the logical blob, starting at `offset` and
@@ -18,11 +20,11 @@ pub(super) struct Buffer {
 
 impl Buffer {
     /// Creates a new buffer with the provided `size` and `capacity`.
-    pub(super) fn new(size: u64, capacity: usize) -> Self {
+    pub(super) fn new(size: u64, capacity: NonZeroUsize) -> Self {
         Self {
-            data: Vec::with_capacity(capacity),
+            data: Vec::with_capacity(capacity.get()),
             offset: size,
-            capacity,
+            capacity: capacity.get(),
         }
     }
 
@@ -96,8 +98,11 @@ impl Buffer {
     ///
     /// Panics if the end offset of the requested data falls outside the range of the logical blob.
     pub(super) fn extract(&self, buf: &mut [u8], offset: u64) -> usize {
-        assert!(offset + buf.len() as u64 <= self.size());
-        if offset + buf.len() as u64 <= self.offset {
+        let end_offset = offset
+            .checked_add(buf.len() as u64)
+            .expect("end_offset overflow");
+        assert!(end_offset <= self.size());
+        if end_offset <= self.offset {
             // Range does not overlap with the buffer.
             return buf.len();
         }
@@ -126,7 +131,9 @@ impl Buffer {
     /// may result are filled with zeros. Returns `true` if the merge was performed, otherwise the
     /// caller is responsible for continuing to manage the data.
     pub(super) fn merge(&mut self, data: &[u8], offset: u64) -> bool {
-        let end_offset = offset + data.len() as u64;
+        let end_offset = offset
+            .checked_add(data.len() as u64)
+            .expect("end_offset overflow");
         let can_merge_into_buffer =
             offset >= self.offset && end_offset <= self.offset + self.capacity as u64;
         if !can_merge_into_buffer {
@@ -158,10 +165,11 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::NZUsize;
 
     #[test]
     fn test_tip_append() {
-        let mut buffer = Buffer::new(50, 100);
+        let mut buffer = Buffer::new(50, NZUsize!(100));
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
         assert_eq!(buffer.take(), None);
@@ -190,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_tip_resize() {
-        let mut buffer = Buffer::new(50, 100);
+        let mut buffer = Buffer::new(50, NZUsize!(100));
         buffer.append(&[1, 2, 3]);
         assert_eq!(buffer.size(), 53);
 

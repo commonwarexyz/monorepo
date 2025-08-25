@@ -6,9 +6,9 @@ use super::{
     types::{Ack, Activity, Epoch, Error, Index, Item, TipAck},
     Config,
 };
-use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
+use crate::{aggregation::types::Certificate, Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{group, ops::threshold_signature_recover, poly, variant::Variant},
+    bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant},
     Digest, PublicKey,
 };
 use commonware_macros::select;
@@ -17,6 +17,7 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    buffer::PoolRef,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
@@ -24,27 +25,27 @@ use commonware_runtime::{
     Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, PrioritySet};
+use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
 };
 use std::{
     cmp::max,
-    collections::{BTreeMap, HashMap},
-    marker::PhantomData,
+    collections::BTreeMap,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// An entry for an index that does not yet have a threshold signature.
 enum Pending<V: Variant, D: Digest> {
     /// The automaton has not yet provided the digest for this index.
     /// The signatures may have arbitrary digests.
-    Unverified(HashMap<Epoch, HashMap<u32, Ack<V, D>>>),
+    Unverified(BTreeMap<Epoch, BTreeMap<u32, Ack<V, D>>>),
 
     /// Verified by the automaton. Now stores the digest.
-    Verified(D, HashMap<Epoch, HashMap<u32, Ack<V, D>>>),
+    Verified(D, BTreeMap<Epoch, BTreeMap<u32, Ack<V, D>>>),
 }
 
 /// The type returned by the `pending` pool, used by the application to return which digest is
@@ -73,11 +74,9 @@ pub struct Engine<
     TSu: ThresholdSupervisor<
         Index = Epoch,
         PublicKey = P,
+        Polynomial = Vec<V::Public>,
         Share = group::Share,
-        Identity = poly::Public<V>,
     >,
-    NetS: Sender<PublicKey = P>,
-    NetR: Receiver<PublicKey = P>,
 > {
     // ---------- Interfaces ----------
     context: E,
@@ -104,6 +103,9 @@ pub struct Engine<
     /// The concurrent number of chunks to process.
     window: u64,
 
+    /// Number of indices to track below the tip when collecting acks and/or pruning.
+    activity_timeout: u64,
+
     // Messaging
     /// Pool of pending futures to request a digest from the automaton.
     digest_requests: FuturesPool<DigestRequest<D, E>>,
@@ -124,7 +126,7 @@ pub struct Engine<
     pending: BTreeMap<Index, Pending<V, D>>,
 
     /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.
-    confirmed: BTreeMap<Index, (D, V::Signature)>,
+    confirmed: BTreeMap<Index, Certificate<V, D>>,
 
     // ---------- Rebroadcasting ----------
     /// The frequency at which to rebroadcast pending indices.
@@ -137,17 +139,15 @@ pub struct Engine<
     /// Journal for storing acks signed by this node.
     journal: Option<Journal<E, Activity<V, D>>>,
     journal_partition: String,
-    journal_write_buffer: usize,
-    journal_replay_buffer: usize,
+    journal_write_buffer: NonZeroUsize,
+    journal_replay_buffer: NonZeroUsize,
     journal_heights_per_section: u64,
     journal_compression: Option<u8>,
+    journal_buffer_pool: PoolRef,
 
     // ---------- Network ----------
     /// Whether to send acks as priority messages.
     priority_acks: bool,
-
-    /// The network sender and receiver types.
-    _phantom: PhantomData<(NetS, NetR)>,
 
     // ---------- Metrics ----------
     /// Metrics
@@ -166,12 +166,10 @@ impl<
         TSu: ThresholdSupervisor<
             Index = Epoch,
             PublicKey = P,
+            Polynomial = Vec<V::Public>,
             Share = group::Share,
-            Identity = poly::Public<V>,
         >,
-        NetS: Sender<PublicKey = P>,
-        NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, V, D, A, Z, M, B, TSu, NetS, NetR>
+    > Engine<E, P, V, D, A, Z, M, B, TSu>
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, B, TSu>) -> Self {
@@ -187,6 +185,7 @@ impl<
             namespace: cfg.namespace,
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window.into(),
+            activity_timeout: cfg.activity_timeout,
             epoch: 0,
             tip: 0,
             safe_tip: SafeTip::default(),
@@ -197,12 +196,12 @@ impl<
             rebroadcast_deadlines: PrioritySet::new(),
             journal: None,
             journal_partition: cfg.journal_partition,
-            journal_write_buffer: cfg.journal_write_buffer.into(),
-            journal_replay_buffer: cfg.journal_replay_buffer.into(),
+            journal_write_buffer: cfg.journal_write_buffer,
+            journal_replay_buffer: cfg.journal_replay_buffer,
             journal_heights_per_section: cfg.journal_heights_per_section.into(),
             journal_compression: cfg.journal_compression,
+            journal_buffer_pool: cfg.journal_buffer_pool,
             priority_acks: cfg.priority_acks,
-            _phantom: PhantomData,
             metrics,
         }
     }
@@ -216,13 +215,16 @@ impl<
     ///   - Rebroadcasting Acks
     /// - Messages from the network:
     ///   - Acks from other validators
-    pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
+    pub fn start(
+        mut self,
+        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+    ) -> Handle<()> {
         self.context.spawn_ref()(self.run(network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, (net_sender, net_receiver): (NetS, NetR)) {
-        let (mut net_sender, mut net_receiver) = wrap((), net_sender, net_receiver);
+    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
         let mut shutdown = self.context.stopped();
 
         // Initialize the epoch
@@ -234,6 +236,7 @@ impl<
             partition: self.journal_partition.clone(),
             compression: self.journal_compression,
             codec_config: (),
+            buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::init(self.context.with_label("journal"), journal_cfg)
@@ -316,8 +319,8 @@ impl<
                             self.metrics.digest.inc(Status::Dropped);
                         }
                         Ok(digest) => {
-                            if let Err(err) = self.handle_digest(index, digest, &mut net_sender).await {
-                                warn!(?err, ?index, "handle_digest failed");
+                            if let Err(err) = self.handle_digest(index, digest, &mut sender).await {
+                                debug!(?err, ?index, "handle_digest failed");
                                 continue;
                             }
                         }
@@ -325,7 +328,7 @@ impl<
                 },
 
                 // Handle incoming acks
-                msg = net_receiver.recv() => {
+                msg = receiver.recv() => {
                     // Error handling
                     let (sender, msg) = match msg {
                         Ok(r) => r,
@@ -366,7 +369,7 @@ impl<
 
                     // Handle the ack
                     if let Err(err) = self.handle_ack(&ack).await {
-                        warn!(?err, ?sender, "ack handle failed");
+                        debug!(?err, ?sender, "ack handle failed");
                         guard.set(Status::Failure);
                         continue;
                     }
@@ -381,7 +384,7 @@ impl<
                     // Get the next index to rebroadcast
                     let (index, _) = self.rebroadcast_deadlines.pop().expect("no rebroadcast deadline");
                     trace!("rebroadcasting: index {}", index);
-                    if let Err(err) = self.handle_rebroadcast(index, &mut net_sender).await {
+                    if let Err(err) = self.handle_rebroadcast(index, &mut sender).await {
                         warn!(?err, ?index, "rebroadcast failed");
                     };
                 }
@@ -404,7 +407,7 @@ impl<
         &mut self,
         index: Index,
         digest: D,
-        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
+        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
     ) -> Result<(), Error> {
         // Entry must be `Pending::Unverified`, or return early
         if !matches!(self.pending.get(&index), Some(Pending::Unverified(_))) {
@@ -416,13 +419,20 @@ impl<
             panic!("Pending::Unverified entry not found");
         };
         self.pending
-            .insert(index, Pending::Verified(digest, HashMap::new()));
+            .insert(index, Pending::Verified(digest, BTreeMap::new()));
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
         // the new map, and may form a threshold signature if enough acks are present.
+        // Only process acks that match the verified digest.
         for epoch_acks in acks.values() {
             for epoch_ack in epoch_acks.values() {
-                let _ = self.handle_ack(epoch_ack).await; // Ignore any errors (e.g. invalid signature)
+                // Drop acks that don't match the verified digest
+                if epoch_ack.item.digest != digest {
+                    continue;
+                }
+
+                // Handle the ack
+                let _ = self.handle_ack(epoch_ack).await;
             }
             // Break early if a threshold signature was formed
             if self.confirmed.contains_key(&index) {
@@ -434,10 +444,11 @@ impl<
         let ack = self.sign_ack(index, digest).await?;
 
         // Set the rebroadcast deadline for this index
-        self.set_rebroadcast_deadline(index);
+        self.rebroadcast_deadlines
+            .put(index, self.context.current() + self.rebroadcast_timeout);
 
         // Handle ack as if it was received over the network
-        let _ = self.handle_ack(&ack).await; // Ignore any errors (e.g. threshold already exists)
+        let _ = self.handle_ack(&ack).await;
 
         // Send ack over the network.
         self.broadcast(ack, sender).await?;
@@ -451,9 +462,12 @@ impl<
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<V, D>) -> Result<(), Error> {
         // Get the quorum
-        let quorum = self.validators.identity().required();
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownEpoch(ack.epoch));
+        };
+        let quorum = quorum_from_slice(polynomial);
 
-        // Get the acks
+        // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {
             None => {
                 // If the index is not in the pending pool, it may be confirmed
@@ -461,22 +475,30 @@ impl<
                 return Err(Error::AckIndex(ack.item.index));
             }
             Some(Pending::Unverified(acks)) => acks,
-            Some(Pending::Verified(_, acks)) => acks,
+            Some(Pending::Verified(digest, acks)) => {
+                // If we have a verified digest, ensure the ack matches it
+                if ack.item.digest != *digest {
+                    return Err(Error::AckDigest(ack.item.index));
+                }
+                acks
+            }
         };
 
-        // We already checked that we don't have the ack
-
-        // Add the partial signature
+        // Add the partial signature (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
         if acks.contains_key(&ack.signature.index) {
             return Ok(());
         }
         acks.insert(ack.signature.index, ack.clone());
 
-        // If a new threshold is formed, handle it
-        if acks.len() >= (quorum as usize) {
+        // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a threshold signature
+        let partials = acks
+            .values()
+            .filter(|a| a.item.digest == ack.item.digest)
+            .map(|ack| &ack.signature)
+            .collect::<Vec<_>>();
+        if partials.len() >= (quorum as usize) {
             let item = ack.item.clone();
-            let partials = acks.values().map(|ack| &ack.signature);
             let threshold = threshold_signature_recover::<V, _>(quorum, partials)
                 .expect("Failed to recover threshold signature");
             self.metrics.threshold.inc();
@@ -495,13 +517,17 @@ impl<
         }
 
         // Store the threshold
-        self.confirmed.insert(index, (item.digest, threshold));
+        let certificate = Certificate {
+            item,
+            signature: threshold,
+        };
+        self.confirmed.insert(index, certificate.clone());
 
         // Journal and notify the automaton
-        let recovered = Activity::Recovered(item, threshold);
-        self.record(recovered.clone()).await;
+        let certified = Activity::Certified(certificate);
+        self.record(certified.clone()).await;
         self.sync(index).await;
-        self.reporter.report(recovered).await;
+        self.reporter.report(certified).await;
 
         // Increase the tip if needed
         if index == self.tip {
@@ -522,7 +548,7 @@ impl<
     async fn handle_rebroadcast(
         &mut self,
         index: Index,
-        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
+        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
     ) -> Result<(), Error> {
         let Some(Pending::Verified(digest, acks)) = self.pending.get(&index) else {
             // The index may already be confirmed; continue silently if so
@@ -542,7 +568,8 @@ impl<
         };
 
         // Reinsert the index with a new deadline
-        self.set_rebroadcast_deadline(index);
+        self.rebroadcast_deadlines
+            .put(index, self.context.current() + self.rebroadcast_timeout);
 
         // Broadcast the ack to all peers
         self.broadcast(ack, sender).await
@@ -573,10 +600,13 @@ impl<
             return Err(Error::PeerMismatch);
         }
 
-        // Validate height
-        if ack.item.index < self.tip {
+        // Collect acks below the tip (if we don't yet have a threshold signature)
+        let activity_threshold = self.tip.saturating_sub(self.activity_timeout);
+        if ack.item.index < activity_threshold {
             return Err(Error::AckThresholded(ack.item.index));
         }
+
+        // If the index is above the tip (and the window), ignore for now
         if ack.item.index >= self.tip + self.window {
             return Err(Error::AckIndex(ack.item.index));
         }
@@ -590,16 +620,26 @@ impl<
             Some(Pending::Unverified(epoch_map)) => epoch_map
                 .get(&ack.epoch)
                 .is_some_and(|acks| acks.contains_key(&ack.signature.index)),
-            Some(Pending::Verified(_, epoch_map)) => epoch_map
-                .get(&ack.epoch)
-                .is_some_and(|acks| acks.contains_key(&ack.signature.index)),
+            Some(Pending::Verified(digest, epoch_map)) => {
+                // While we check this in the `handle_ack` function, checking early here avoids an
+                // unnecessary signature check.
+                if ack.item.digest != *digest {
+                    return Err(Error::AckDigest(ack.item.index));
+                }
+                epoch_map
+                    .get(&ack.epoch)
+                    .is_some_and(|acks| acks.contains_key(&ack.signature.index))
+            }
         };
         if have_ack {
             return Err(Error::AckDuplicate(sender.to_string(), ack.item.index));
         }
 
         // Validate partial signature
-        if !ack.verify(&self.namespace, self.validators.identity()) {
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownEpoch(ack.epoch));
+        };
+        if !ack.verify(&self.namespace, polynomial) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -612,7 +652,7 @@ impl<
     fn get_digest(&mut self, index: Index) {
         assert!(self
             .pending
-            .insert(index, Pending::Unverified(HashMap::new()))
+            .insert(index, Pending::Unverified(BTreeMap::new()))
             .is_none());
 
         let mut automaton = self.automaton.clone();
@@ -626,12 +666,6 @@ impl<
                 timer,
             }
         });
-    }
-
-    // Sets the rebroadcast deadline for the given `index`.
-    fn set_rebroadcast_deadline(&mut self, index: Index) {
-        self.rebroadcast_deadlines
-            .put(index, self.context.current() + self.rebroadcast_timeout);
     }
 
     /// Signs an ack for the given index, and digest. Stores the ack in the journal and returns it.
@@ -658,7 +692,7 @@ impl<
     async fn broadcast(
         &mut self,
         ack: Ack<V, D>,
-        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
+        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
     ) -> Result<(), Error> {
         sender
             .send(
@@ -698,17 +732,19 @@ impl<
     async fn fast_forward_tip(&mut self, tip: Index) {
         assert!(tip > self.tip);
 
-        // Prune data structures
-        self.pending.retain(|index, _| *index >= tip);
-        self.confirmed.retain(|index, _| *index >= tip);
+        // Prune data structures with buffer to prevent losing certificates
+        let activity_threshold = tip.saturating_sub(self.activity_timeout);
+        self.pending.retain(|index, _| *index >= activity_threshold);
+        self.confirmed
+            .retain(|index, _| *index >= activity_threshold);
 
         // Add tip to journal
         self.record(Activity::Tip(tip)).await;
         self.sync(tip).await;
         self.reporter.report(Activity::Tip(tip)).await;
 
-        // Prune journal, ignoring errors
-        let section = self.get_journal_section(tip);
+        // Prune journal with buffer, ignoring errors
+        let section = self.get_journal_section(activity_threshold);
         let journal = self.journal.as_mut().expect("journal must be initialized");
         let _ = journal.prune(section).await;
 
@@ -726,7 +762,7 @@ impl<
     /// Replays the journal, updating the state of the engine.
     async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) {
         let mut tip = Index::default();
-        let mut recovered = Vec::new();
+        let mut certified = Vec::new();
         let mut acks = Vec::new();
         let stream = journal
             .replay(self.journal_replay_buffer)
@@ -738,52 +774,93 @@ impl<
             match activity {
                 Activity::Tip(index) => {
                     tip = max(tip, index);
+                    self.reporter.report(Activity::Tip(index)).await;
                 }
-                Activity::Recovered(item, signature) => {
-                    recovered.push((item, signature));
+                Activity::Certified(certificate) => {
+                    certified.push(certificate.clone());
+                    self.reporter.report(Activity::Certified(certificate)).await;
                 }
                 Activity::Ack(ack) => {
-                    acks.push(ack);
+                    acks.push(ack.clone());
+                    self.reporter.report(Activity::Ack(ack)).await;
                 }
             }
         }
+
         // Update the tip to the highest index in the journal
         self.tip = tip;
-        // Add recovered signatures
-        recovered
+        let activity_threshold = tip.saturating_sub(self.activity_timeout);
+
+        // Add certified items
+        certified
             .iter()
-            .filter(|(item, _)| item.index >= tip)
-            .for_each(|(item, signature)| {
-                self.confirmed.insert(item.index, (item.digest, *signature));
+            .filter(|certificate| certificate.item.index >= activity_threshold)
+            .for_each(|certificate| {
+                self.confirmed
+                    .insert(certificate.item.index, certificate.clone());
             });
-        // Add any acks that haven't resulted in a threshold signature
-        acks = acks
-            .into_iter()
-            .filter(|ack| ack.item.index >= tip && !self.confirmed.contains_key(&ack.item.index))
-            .collect::<Vec<_>>();
-        acks.iter().for_each(|ack| {
-            assert!(self
-                .pending
-                .insert(
-                    ack.item.index,
-                    Pending::Verified(
-                        ack.item.digest,
-                        HashMap::from([(
-                            ack.epoch,
-                            HashMap::from([(ack.signature.index, ack.clone())]),
-                        )]),
-                    ),
-                )
-                .is_none());
-            self.set_rebroadcast_deadline(ack.item.index);
-        });
+
+        // Group acks by index
+        let mut acks_by_index: BTreeMap<Index, Vec<Ack<V, D>>> = BTreeMap::new();
+        for ack in acks {
+            if ack.item.index >= activity_threshold && !self.confirmed.contains_key(&ack.item.index)
+            {
+                acks_by_index.entry(ack.item.index).or_default().push(ack);
+            }
+        }
+
+        // Process each index's acks
+        for (index, mut acks_group) in acks_by_index {
+            // Check if we have our own ack (which means we've verified the digest)
+            let our_share = self.validators.share(self.epoch);
+            let our_digest = if let Some(share) = our_share {
+                acks_group
+                    .iter()
+                    .find(|ack| ack.epoch == self.epoch && ack.signature.index == share.index)
+                    .map(|ack| ack.item.digest)
+            } else {
+                None
+            };
+
+            // If our_digest exists, delete everything from acks_group that doesn't match it
+            if let Some(digest) = our_digest {
+                acks_group.retain(|other| other.item.digest == digest);
+            }
+
+            // Create a new epoch map
+            let mut epoch_map = BTreeMap::new();
+            for ack in acks_group {
+                epoch_map
+                    .entry(ack.epoch)
+                    .or_insert_with(BTreeMap::new)
+                    .insert(ack.signature.index, ack);
+            }
+
+            // Insert as Verified if we have our own ack (meaning we verified the digest),
+            // otherwise as Unverified
+            match our_digest {
+                Some(digest) => {
+                    self.pending
+                        .insert(index, Pending::Verified(digest, epoch_map));
+
+                    // If we've already generated an ack and it isn't yet confirmed, mark for immediate rebroadcast
+                    self.rebroadcast_deadlines
+                        .put(index, self.context.current());
+                }
+                None => {
+                    self.pending.insert(index, Pending::Unverified(epoch_map));
+                }
+            }
+        }
+
+        info!(self.tip, next = self.next(), "replayed journal");
     }
 
     /// Appends an activity to the journal.
     async fn record(&mut self, activity: Activity<V, D>) {
         let index = match activity {
             Activity::Ack(ref ack) => ack.item.index,
-            Activity::Recovered(ref item, _) => item.index,
+            Activity::Certified(ref certificate) => certificate.item.index,
             Activity::Tip(index) => index,
         };
         let section = self.get_journal_section(index);

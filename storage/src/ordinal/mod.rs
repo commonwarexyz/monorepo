@@ -61,16 +61,16 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::ordinal::{Ordinal, Config};
-//! use commonware_utils::sequence::FixedBytes;
+//! use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a store for 32-byte values
 //!     let cfg = Config {
 //!         partition: "ordinal_store".into(),
-//!         items_per_blob: 10000,
-//!         write_buffer: 4096,
-//!         replay_buffer: 1024 * 1024,
+//!         items_per_blob: NZU64!(10000),
+//!         write_buffer: NZUsize!(4096),
+//!         replay_buffer: NZUsize!(1024 * 1024),
 //!     };
 //!     let mut store = Ordinal::<_, FixedBytes<32>>::init(context, cfg).await.unwrap();
 //!
@@ -95,6 +95,7 @@
 
 mod storage;
 
+use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Ordinal;
 use thiserror::Error;
 
@@ -120,21 +121,23 @@ pub struct Config {
     pub partition: String,
 
     /// The maximum number of items to store in each index blob.
-    pub items_per_blob: u64,
+    pub items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use when writing to the index.
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 
     /// The size of the read buffer to use on restart.
-    pub replay_buffer: usize,
+    pub replay_buffer: NonZeroUsize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::{Buf, BufMut};
+    use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, BitVec};
+    use commonware_utils::{sequence::FixedBytes, BitVec, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
@@ -150,9 +153,9 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -209,9 +212,9 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -256,9 +259,9 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100, // Smaller blobs for testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100), // Smaller blobs for testing
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -307,9 +310,9 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -349,15 +352,94 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_missing_items() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the store
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Test 1: Empty store - should return no items
+            assert_eq!(store.missing_items(0, 5), Vec::<u64>::new());
+            assert_eq!(store.missing_items(100, 10), Vec::<u64>::new());
+
+            // Test 2: Insert values with gaps
+            store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
+            store.put(2, FixedBytes::new([2u8; 32])).await.unwrap();
+            store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+            store.put(6, FixedBytes::new([6u8; 32])).await.unwrap();
+            store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+
+            // Test 3: Find missing items from the beginning
+            assert_eq!(store.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(store.missing_items(0, 6), vec![0, 3, 4, 7, 8, 9]);
+            assert_eq!(store.missing_items(0, 7), vec![0, 3, 4, 7, 8, 9]);
+
+            // Test 4: Find missing items from within a gap
+            assert_eq!(store.missing_items(3, 3), vec![3, 4, 7]);
+            assert_eq!(store.missing_items(4, 2), vec![4, 7]);
+
+            // Test 5: Find missing items from within a range
+            assert_eq!(store.missing_items(1, 3), vec![3, 4, 7]);
+            assert_eq!(store.missing_items(2, 4), vec![3, 4, 7, 8]);
+            assert_eq!(store.missing_items(5, 2), vec![7, 8]);
+
+            // Test 6: Find missing items after the last range (no more gaps)
+            assert_eq!(store.missing_items(11, 5), Vec::<u64>::new());
+            assert_eq!(store.missing_items(100, 10), Vec::<u64>::new());
+
+            // Test 7: Large gap scenario
+            store.put(1000, FixedBytes::new([100u8; 32])).await.unwrap();
+
+            // Gap between 10 and 1000
+            let items = store.missing_items(11, 10);
+            assert_eq!(items, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+
+            // Request more items than available in gap
+            let items = store.missing_items(990, 15);
+            assert_eq!(
+                items,
+                vec![990, 991, 992, 993, 994, 995, 996, 997, 998, 999]
+            );
+
+            // Test 8: After syncing (data should remain consistent)
+            store.sync().await.unwrap();
+            assert_eq!(store.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(store.missing_items(3, 3), vec![3, 4, 7]);
+
+            // Test 9: Cross-blob boundary scenario
+            store.put(9999, FixedBytes::new([99u8; 32])).await.unwrap();
+            store
+                .put(10001, FixedBytes::new([101u8; 32]))
+                .await
+                .unwrap();
+
+            // Find missing items across blob boundary (10000 is the boundary)
+            let items = store.missing_items(9998, 5);
+            assert_eq!(items, vec![9998, 10000]);
+
+            store.close().await.expect("Failed to close store");
+        });
+    }
+
+    #[test_traced]
     fn test_restart() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Insert data and close
@@ -418,9 +500,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -471,9 +553,9 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -495,9 +577,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -541,9 +623,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -608,9 +690,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -669,9 +751,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 10, // Small blob size for testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(10), // Small blob size for testing
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data across multiple blobs
@@ -739,9 +821,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -813,9 +895,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create blob with zero-filled space
@@ -865,9 +947,9 @@ mod tests {
         executor.start(|mut context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100, // Smaller blobs to test multiple blob handling
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100), // Smaller blobs to test multiple blob handling
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Initialize the store
@@ -971,9 +1053,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100, // Small blobs to test multiple blob handling
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100), // Small blobs to test multiple blob handling
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1050,9 +1132,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1102,9 +1184,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1143,9 +1225,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1168,9 +1250,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store and add data
@@ -1232,9 +1314,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 50, // Smaller blobs for more granular testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(50), // Smaller blobs for more granular testing
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1289,9 +1371,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1340,9 +1422,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1402,9 +1484,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(100),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -1454,9 +1536,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 10, // Small blob size for testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(10), // Small blob size for testing
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data across multiple sections
@@ -1523,9 +1605,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 10,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(10),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -1567,9 +1649,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 10,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(10),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data in multiple sections
@@ -1663,9 +1745,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 5,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(5),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with all records in a section
@@ -1716,9 +1798,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 5,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(5),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with missing record in a section
@@ -1762,9 +1844,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 5,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(5),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data in multiple sections
@@ -1849,9 +1931,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 5,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_blob: NZU64!(5),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data and corrupt one record
@@ -1899,6 +1981,97 @@ mod tests {
                 )
                 .await
                 .expect("Failed to initialize store with bits");
+            }
+        });
+    }
+
+    /// A dummy value that will fail parsing if the value is 0.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct DummyValue {
+        pub value: u64,
+    }
+
+    impl Write for DummyValue {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.value.write(buf);
+        }
+    }
+
+    impl Read for DummyValue {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            let value = u64::read(buf)?;
+            if value == 0 {
+                return Err(commonware_codec::Error::Invalid(
+                    "DummyValue",
+                    "value must be non-zero",
+                ));
+            }
+            Ok(Self { value })
+        }
+    }
+
+    impl FixedSize for DummyValue {
+        const SIZE: usize = u64::SIZE;
+    }
+
+    #[test_traced]
+    fn test_init_skip_unparseable_record() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: NZU64!(1),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with valid records
+            {
+                let mut store = Ordinal::<_, DummyValue>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Add records at indices 1, 2, 4
+                store.put(1, DummyValue { value: 1 }).await.unwrap();
+                store.put(2, DummyValue { value: 0 }).await.unwrap(); // will fail parsing
+                store.put(4, DummyValue { value: 4 }).await.unwrap();
+
+                store.close().await.unwrap();
+            }
+
+            // Reinitialize - should skip the unparseable record but continue processing
+            {
+                let store = Ordinal::<_, DummyValue>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Record 0 should be available
+                assert!(store.has(1), "Record 1 should be available");
+                assert_eq!(
+                    store.get(1).await.unwrap().unwrap(),
+                    DummyValue { value: 1 },
+                    "Record 0 should have correct value"
+                );
+
+                // Record 2 should NOT be available (unparseable)
+                assert!(
+                    !store.has(2),
+                    "Record 2 should not be available (unparseable)"
+                );
+
+                // This tests that we didn't exit early when encountering the unparseable record
+                assert!(
+                    store.has(4),
+                    "Record 4 should be available - we should not exit early on unparseable record"
+                );
+                assert_eq!(
+                    store.get(4).await.unwrap().unwrap(),
+                    DummyValue { value: 4 },
+                    "Record 4 should have correct value"
+                );
             }
         });
     }

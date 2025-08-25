@@ -138,9 +138,9 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_storage::freezer::{Freezer, Config, Identifier};
-//! use commonware_utils::sequence::FixedBytes;
+//! use commonware_utils::{sequence::FixedBytes, NZUsize};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -148,13 +148,14 @@
 //!     let cfg = Config {
 //!         journal_partition: "freezer_journal".into(),
 //!         journal_compression: Some(3),
-//!         journal_write_buffer: 1024 * 1024, // 1MB
+//!         journal_write_buffer: NZUsize!(1024 * 1024), // 1MB
 //!         journal_target_size: 100 * 1024 * 1024, // 100MB
+//!         journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!         table_partition: "freezer_table".into(),
 //!         table_initial_size: 65_536, // ~3MB initial table size
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
 //!         table_resize_chunk_size: 16_384, // ~1MB of table entries rewritten per sync
-//!         table_replay_buffer: 1024 * 1024, // 1MB
+//!         table_replay_buffer: NZUsize!(1024 * 1024), // 1MB
 //!         codec_config: (),
 //!     };
 //!     let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
@@ -176,7 +177,9 @@
 //! ```
 
 mod storage;
+use commonware_runtime::buffer::PoolRef;
 use commonware_utils::Array;
+use std::num::NonZeroUsize;
 pub use storage::{Checkpoint, Cursor, Freezer};
 use thiserror::Error;
 
@@ -207,10 +210,13 @@ pub struct Config<C> {
     pub journal_compression: Option<u8>,
 
     /// The size of the write buffer to use for the journal.
-    pub journal_write_buffer: usize,
+    pub journal_write_buffer: NonZeroUsize,
 
     /// The target size of each journal before creating a new one.
     pub journal_target_size: u64,
+
+    /// The buffer pool to use for the journal.
+    pub journal_buffer_pool: PoolRef,
 
     /// The [commonware_runtime::Storage] partition to use for storing the table.
     pub table_partition: String,
@@ -226,7 +232,7 @@ pub struct Config<C> {
     pub table_resize_chunk_size: u32,
 
     /// The size of the read buffer to use when scanning the table (e.g., during recovery or resize).
-    pub table_replay_buffer: usize,
+    pub table_replay_buffer: NonZeroUsize,
 
     /// The codec configuration to use for the value stored in the freezer.
     pub codec_config: C,
@@ -238,7 +244,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::sequence::FixedBytes;
+    use commonware_utils::{sequence::FixedBytes, NZUsize};
     use rand::{Rng, RngCore};
 
     const DEFAULT_JOURNAL_WRITE_BUFFER: usize = 1024;
@@ -247,6 +253,8 @@ mod tests {
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -264,13 +272,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: compression,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -331,13 +340,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -381,13 +391,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -441,13 +452,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
 
@@ -510,13 +522,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
 
@@ -608,13 +621,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
             {
@@ -666,13 +680,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
             let checkpoint = {
@@ -723,13 +738,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
 
@@ -786,13 +802,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
 
@@ -860,13 +877,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per entry
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -928,13 +946,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 1, // Process one at a time
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -995,13 +1014,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 1, // Process one at a time
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
 
@@ -1056,13 +1076,14 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: 128, // Force multiple journal sections
+                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 table_partition: "test_table".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
-                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
             let mut freezer =

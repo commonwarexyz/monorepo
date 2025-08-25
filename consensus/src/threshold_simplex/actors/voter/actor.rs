@@ -26,11 +26,12 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    buffer::PoolRef,
     telemetry::metrics::histogram::{self, Buckets},
     Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::quorum;
+use commonware_utils::{quorum, quorum_from_slice};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -43,18 +44,13 @@ use prometheus_client::metrics::{
 use rand::Rng;
 use std::{
     collections::BTreeMap,
+    num::NonZeroUsize,
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
 
 const GENESIS_VIEW: View = 0;
-
-/// Compute the quorum for a given polynomial.
-fn polynomial_quorum<P>(polynomial: &[P]) -> u32 {
-    let n = polynomial.len() as u32;
-    quorum(n)
-}
 
 /// Action to take after processing a message.
 enum Action {
@@ -449,8 +445,9 @@ pub struct Actor<
 
     partition: String,
     compression: Option<u8>,
-    replay_buffer: usize,
-    write_buffer: usize,
+    replay_buffer: NonZeroUsize,
+    write_buffer: NonZeroUsize,
+    buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<V, D>>>,
 
     genesis: Option<D>,
@@ -558,6 +555,7 @@ impl<
                 compression: cfg.compression,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
+                buffer_pool: cfg.buffer_pool,
                 journal: None,
 
                 genesis: None,
@@ -596,7 +594,7 @@ impl<
         }
         let proposal = round.proposal.as_ref()?;
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         if round.notarizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -612,7 +610,7 @@ impl<
             Some(polynomial) => polynomial,
             None => return false,
         };
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
@@ -623,7 +621,7 @@ impl<
         }
         let proposal = round.proposal.as_ref()?;
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         if round.finalizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -1350,7 +1348,7 @@ impl<
 
         // Attempt to construct notarization
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         round.notarizable(threshold, force).await
     }
 
@@ -1364,7 +1362,7 @@ impl<
 
         // Attempt to construct nullification
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         round.nullifiable(threshold, force).await
     }
 
@@ -1402,7 +1400,7 @@ impl<
 
         // Attempt to construct finalization
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         round.finalizable(threshold, force).await
     }
 
@@ -1672,6 +1670,7 @@ impl<
                 partition: self.partition.clone(),
                 compression: self.compression,
                 codec_config: (),
+                buffer_pool: self.buffer_pool.clone(),
                 write_buffer: self.write_buffer,
             },
         )
@@ -1697,7 +1696,8 @@ impl<
                             [public_key_index as usize]
                             == self.crypto.public_key();
                         let proposal = notarize.proposal.clone();
-                        self.handle_notarize(notarize).await;
+                        self.handle_notarize(notarize.clone()).await;
+                        self.reporter.report(Activity::Notarize(notarize)).await;
 
                         // Update round info
                         if me {
@@ -1711,7 +1711,10 @@ impl<
                     }
                     Voter::Notarization(notarization) => {
                         // Handle notarization
-                        self.handle_notarization(notarization).await;
+                        self.handle_notarization(notarization.clone()).await;
+                        self.reporter
+                            .report(Activity::Notarization(notarization))
+                            .await;
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
@@ -1723,7 +1726,8 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_nullify(nullify).await;
+                        self.handle_nullify(nullify.clone()).await;
+                        self.reporter.report(Activity::Nullify(nullify)).await;
 
                         // Update round info
                         if me {
@@ -1733,7 +1737,10 @@ impl<
                     }
                     Voter::Nullification(nullification) => {
                         // Handle nullification
-                        self.handle_nullification(nullification).await;
+                        self.handle_nullification(nullification.clone()).await;
+                        self.reporter
+                            .report(Activity::Nullification(nullification))
+                            .await;
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
@@ -1745,7 +1752,8 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_finalize(finalize).await;
+                        self.handle_finalize(finalize.clone()).await;
+                        self.reporter.report(Activity::Finalize(finalize)).await;
 
                         // Update round info
                         //
@@ -1757,7 +1765,10 @@ impl<
                     }
                     Voter::Finalization(finalization) => {
                         // Handle finalization
-                        self.handle_finalization(finalization).await;
+                        self.handle_finalization(finalization.clone()).await;
+                        self.reporter
+                            .report(Activity::Finalization(finalization))
+                            .await;
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");

@@ -77,8 +77,9 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_storage::journal::variable::{Journal, Config};
+//! use commonware_utils::NZUsize;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -87,7 +88,8 @@
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
-//!         write_buffer: 1024 * 1024,
+//!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
 //!     // Append data to the journal
@@ -102,7 +104,7 @@ use super::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
 use commonware_runtime::{
-    buffer::{Read, Write},
+    buffer::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
@@ -112,6 +114,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap},
     io::Cursor,
     marker::PhantomData,
+    num::NonZeroUsize,
 };
 use tracing::{debug, trace, warn};
 use zstd::{bulk::compress, decode_all};
@@ -129,11 +132,14 @@ pub struct Config<C> {
     /// The codec configuration to use for encoding and decoding items.
     pub codec_config: C,
 
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: PoolRef,
+
     /// The size of the write buffer to use for each blob.
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 }
 
-const ITEM_ALIGNMENT: u64 = 16;
+pub(crate) const ITEM_ALIGNMENT: u64 = 16;
 
 /// Computes the next offset for an item using the underlying `u64`
 /// offset of `Blob`.
@@ -150,18 +156,18 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
-    context: E,
-    cfg: Config<V::Cfg>,
+    pub(crate) context: E,
+    pub(crate) cfg: Config<V::Cfg>,
 
-    oldest_allowed: Option<u64>,
+    pub(crate) oldest_allowed: Option<u64>,
 
-    blobs: BTreeMap<u64, Write<E::Blob>>,
+    pub(crate) blobs: BTreeMap<u64, Append<E::Blob>>,
 
-    tracked: Gauge,
-    synced: Counter,
-    pruned: Counter,
+    pub(crate) tracked: Gauge,
+    pub(crate) synced: Counter,
+    pub(crate) pruned: Counter,
 
-    _phantom: PhantomData<V>,
+    pub(crate) _phantom: PhantomData<V>,
 }
 
 impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
@@ -186,7 +192,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
             debug!(section, blob = hex_name, size, "loaded section");
-            let blob = Write::new(blob, size, cfg.write_buffer);
+            let blob = Append::new(blob, size, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
             blobs.insert(section, blob);
         }
 
@@ -226,10 +232,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(
+    pub(crate) async fn read(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &Write<E::Blob>,
+        blob: &Append<E::Blob>,
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
         // Read item size
@@ -277,7 +283,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Helper function to read an item from a [Read].
     async fn read_buffered(
-        reader: &mut Read<Write<E::Blob>>,
+        reader: &mut Read<Append<E::Blob>>,
         offset: u32,
         cfg: &V::Cfg,
         compressed: bool,
@@ -338,7 +344,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     async fn read_exact(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &Write<E::Blob>,
+        blob: &Append<E::Blob>,
         offset: u32,
         len: u32,
     ) -> Result<V, Error> {
@@ -388,7 +394,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// truncated to the last valid item).
     pub async fn replay(
         &self,
-        buffer: usize,
+        buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let codec_config = self.cfg.codec_config.clone();
@@ -548,25 +554,44 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
                 let (blob, size) = self.context.open(&self.cfg.partition, &name).await?;
-                let blob = Write::new(blob, size, self.cfg.write_buffer);
+                let blob = Append::new(
+                    blob,
+                    size,
+                    self.cfg.write_buffer,
+                    self.cfg.buffer_pool.clone(),
+                )
+                .await?;
                 self.tracked.inc();
                 entry.insert(blob)
             }
         };
 
-        // Populate buffer
-        let mut buf = Vec::with_capacity(entry_len);
-        buf.put_u32(item_len);
-        buf.put_slice(&encoded);
-        let checksum = crc32fast::hash(&buf);
-        buf.put_u32(checksum);
-        assert_eq!(buf.len(), entry_len);
-
-        // Append item to blob
+        // Calculate alignment
         let cursor = blob.size().await;
         let offset = compute_next_offset(cursor)?;
         let aligned_cursor = offset as u64 * ITEM_ALIGNMENT;
-        blob.write_at(buf, aligned_cursor).await?;
+        let padding = (aligned_cursor - cursor) as usize;
+
+        // Populate buffer
+        let mut buf = Vec::with_capacity(padding + entry_len);
+
+        // Add padding bytes if necessary
+        if padding > 0 {
+            buf.resize(padding, 0);
+        }
+
+        // Add entry data
+        let entry_start = buf.len();
+        buf.put_u32(item_len);
+        buf.put_slice(&encoded);
+
+        // Calculate checksum only for the entry data (without padding)
+        let checksum = crc32fast::hash(&buf[entry_start..]);
+        buf.put_u32(checksum);
+        assert_eq!(buf[entry_start..].len(), entry_len);
+
+        // Append item to blob
+        blob.append(buf).await?;
         trace!(blob = section, offset, "appended item");
         Ok((offset, item_len))
     }
@@ -646,7 +671,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             ))
             .map(|(&section, _)| section)
             .collect();
-        for index in &trailing {
+        for index in trailing.iter().rev() {
             // Remove the underlying blob from storage.
             let blob = self.blobs.remove(index).unwrap();
 
@@ -716,9 +741,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Check if we already ran this prune
-        self.prune_guard(min, true)?;
-
         // Prune any blobs that are smaller than the minimum
         while let Some((&section, _)) = self.blobs.first_key_value() {
             // Stop pruning if we reach the minimum
@@ -783,9 +805,12 @@ mod tests {
     use commonware_cryptography::hash;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
-    use commonware_utils::StableBuf;
+    use commonware_utils::{NZUsize, StableBuf};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
+
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     #[test_traced]
     fn test_journal_append_and_read() {
@@ -799,7 +824,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
             let index = 1u64;
             let data = 10;
@@ -825,7 +851,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
                 .await
@@ -833,7 +860,10 @@ mod tests {
 
             // Replay the journal and collect items
             let mut items = Vec::new();
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -865,7 +895,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -899,7 +930,10 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -935,7 +969,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -963,15 +998,12 @@ mod tests {
             // Prune blobs with indices less than 3
             journal.prune(3).await.expect("Failed to prune blobs");
 
-            // Prune again with a section less than the previous one
-            let result = journal.prune(2).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
-
-            // Prune again with the same section
-            let result = journal.prune(3).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
-
             // Check metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 2"));
+
+            // Prune again with a section less than the previous one, should be a no-op
+            journal.prune(2).await.expect("Failed to no-op prune");
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 2"));
 
@@ -986,7 +1018,10 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1033,7 +1068,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with an invalid name (not 8 bytes)
@@ -1064,7 +1100,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with incomplete size data
@@ -1088,7 +1125,10 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1113,7 +1153,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with missing item data
@@ -1141,7 +1182,10 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1166,7 +1210,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with missing checksum
@@ -1204,7 +1249,10 @@ mod tests {
             // Attempt to replay the journal
             //
             // This will truncate the leftover bytes from our manual write.
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1229,7 +1277,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with incorrect checksum
@@ -1272,7 +1321,10 @@ mod tests {
 
             // Attempt to replay the journal
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 let mut items = Vec::<(u64, u64)>::new();
                 while let Some(result) = stream.next().await {
@@ -1306,7 +1358,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -1348,7 +1401,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1383,7 +1439,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1432,7 +1491,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1467,7 +1529,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -1509,7 +1572,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1558,7 +1624,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1594,7 +1663,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -1635,7 +1705,10 @@ mod tests {
 
             // Attempt to replay the journal
             let mut items = Vec::<(u64, i32)>::new();
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -1728,7 +1801,8 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
@@ -1755,7 +1829,8 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
@@ -1779,7 +1854,8 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
 
@@ -1833,7 +1909,8 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
 
@@ -1890,7 +1967,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal

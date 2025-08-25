@@ -2,8 +2,8 @@ use crate::{
     buffer::{tip::Buffer, PoolRef},
     Blob, Error, RwLock,
 };
-use commonware_utils::StableBuf;
-use std::sync::Arc;
+use commonware_utils::{NZUsize, StableBuf};
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// A [Blob] wrapper that supports appending new data that is both read and write cached, and
 /// provides buffer-pool managed read caching of older data.
@@ -20,14 +20,14 @@ pub struct Append<B: Blob> {
 
     /// The buffer containing the data yet to be appended to the tip of the underlying blob, as well
     /// as up to the final page_size-1 bytes from the underlying blob (to ensure the buffer's offset
-    /// is always at a page boundary).
+    /// is always at a page boundary), paired with the actual size of the underlying blob on disk.
     ///
     /// # Invariants
     ///
     /// - The buffer's `offset` into the blob is always page aligned.
     /// - The range of bytes in this buffer never overlaps with any page buffered by `pool`. (See
     ///   the warning in [Self::resize] for one uncommon exception.)
-    buffer: Arc<RwLock<Buffer>>,
+    buffer: Arc<RwLock<(Buffer, u64)>>,
 }
 
 impl<B: Blob> Append<B> {
@@ -36,20 +36,21 @@ impl<B: Blob> Append<B> {
     pub async fn new(
         blob: B,
         size: u64,
-        mut buffer_size: usize,
+        buffer_size: NonZeroUsize,
         pool_ref: PoolRef,
     ) -> Result<Self, Error> {
         // Set a floor on the write buffer size to make sure we always write at least 1 page of new
         // data with each flush. We multiply page_size by two here since we could be storing up to
         // page_size-1 bytes of already written data in the append buffer to maintain page
         // alignment.
+        let mut buffer_size = buffer_size.get();
         buffer_size = buffer_size.max(pool_ref.page_size * 2);
 
         // Initialize the append buffer to contain the last non-full page of bytes from the blob to
         // ensure its offset into the blob is always page aligned.
         let leftover_size = size % pool_ref.page_size as u64;
         let page_aligned_size = size - leftover_size;
-        let mut buffer = Buffer::new(page_aligned_size, buffer_size);
+        let mut buffer = Buffer::new(page_aligned_size, NZUsize!(buffer_size));
         if leftover_size != 0 {
             let page_buf = vec![0; leftover_size as usize];
             let buf = blob.read_at(page_buf, page_aligned_size).await?;
@@ -60,7 +61,7 @@ impl<B: Blob> Append<B> {
             blob,
             id: pool_ref.next_id().await,
             pool_ref,
-            buffer: Arc::new(RwLock::new(buffer)),
+            buffer: Arc::new(RwLock::new((buffer, size))),
         })
     }
 
@@ -69,8 +70,8 @@ impl<B: Blob> Append<B> {
         // Prepare `buf` to be written.
         let buf = buf.into();
 
-        // Acquire a write lock on the buffer.
-        let mut buffer = self.buffer.write().await;
+        // Acquire a write lock on the buffer and blob_size.
+        let (buffer, blob_size) = &mut *self.buffer.write().await;
 
         // Ensure the write doesn't overflow.
         buffer
@@ -80,7 +81,7 @@ impl<B: Blob> Append<B> {
 
         if buffer.append(buf.as_ref()) {
             // Buffer is over capacity, flush it to the underlying blob.
-            return self.flush(&mut buffer).await;
+            return self.flush(buffer, blob_size).await;
         }
 
         Ok(())
@@ -91,15 +92,14 @@ impl<B: Blob> Append<B> {
     /// This represents the total size of data that would be present after flushing.
     #[allow(clippy::len_without_is_empty)]
     pub async fn size(&self) -> u64 {
-        let buffer = self.buffer.read().await;
-        buffer.size()
+        self.buffer.read().await.0.size()
     }
 
     /// Flush the append buffer to the underlying blob, caching each page worth of written data in
     /// the buffer pool.
-    async fn flush(&self, buffer: &mut Buffer) -> Result<(), Error> {
+    async fn flush(&self, buffer: &mut Buffer, blob_size: &mut u64) -> Result<(), Error> {
         // Take the buffered data, if any.
-        let Some((buf, offset)) = buffer.take() else {
+        let Some((mut buf, offset)) = buffer.take() else {
             return Ok(());
         };
 
@@ -116,11 +116,20 @@ impl<B: Blob> Append<B> {
             buffer.data.extend_from_slice(&buf[buf.len() - remaining..])
         }
 
-        // Write the data buffer to the underlying blob.
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1218): The implementation will
-        // unnecessarily rewrite the last (blob_size % page_size) "trailing bytes" of the underlying
-        // blob since the write's starting offset is always page aligned.
-        self.blob.write_at(buf, offset).await?;
+        // Calculate where new data starts in the buffer to skip already-written trailing bytes.
+        let new_data_start = blob_size.saturating_sub(offset) as usize;
+
+        // Early exit if there's no new data to write.
+        if new_data_start >= buf.len() {
+            return Ok(());
+        }
+
+        if new_data_start > 0 {
+            buf.drain(0..new_data_start);
+        }
+        let new_data_len = buf.len() as u64;
+        self.blob.write_at(buf, *blob_size).await?;
+        *blob_size += new_data_len;
 
         Ok(())
     }
@@ -146,7 +155,7 @@ impl<B: Blob> Blob for Append<B> {
             .ok_or(Error::OffsetOverflow)?;
 
         // Acquire a read lock on the buffer.
-        let buffer = self.buffer.read().await;
+        let (buffer, _) = &*self.buffer.read().await;
 
         // If the data required is beyond the size of the blob, return an error.
         if end_offset > buffer.size() {
@@ -176,8 +185,8 @@ impl<B: Blob> Blob for Append<B> {
 
     async fn sync(&self) -> Result<(), Error> {
         {
-            let mut buffer = self.buffer.write().await;
-            self.flush(&mut buffer).await?;
+            let (buffer, blob_size) = &mut *self.buffer.write().await;
+            self.flush(buffer, blob_size).await?;
         }
         self.blob.sync().await
     }
@@ -191,14 +200,17 @@ impl<B: Blob> Blob for Append<B> {
         // page, if any old data hasn't expired naturally by then.
 
         // Acquire a write lock on the buffer.
-        let mut buffer = self.buffer.write().await;
+        let (buffer, blob_size) = &mut *self.buffer.write().await;
 
         // Flush any buffered bytes to the underlying blob. (Note that a fancier implementation
         // might avoid flushing those bytes that are backed up over by the next step, if any.)
-        self.flush(&mut buffer).await?;
+        self.flush(buffer, blob_size).await?;
 
         // Resize the underlying blob.
         self.blob.resize(size).await?;
+
+        // Update the physical blob size.
+        *blob_size = size;
 
         // Reset the append buffer to the new size, ensuring its page alignment.
         let leftover_size = size % self.pool_ref.page_size as u64;
@@ -219,6 +231,7 @@ mod tests {
     use super::*;
     use crate::{deterministic, Runner, Storage as _};
     use commonware_macros::test_traced;
+    use commonware_utils::NZUsize;
 
     const PAGE_SIZE: usize = 1024;
     const BUFFER_SIZE: usize = PAGE_SIZE * 2;
@@ -234,8 +247,8 @@ mod tests {
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
-            let pool_ref = PoolRef::new(PAGE_SIZE, 10);
-            let blob = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(blob.size().await, 0);
@@ -256,8 +269,8 @@ mod tests {
             assert_eq!(size, 0);
 
             // Wrap the blob, then append 11 consecutive pages of data.
-            let pool_ref = PoolRef::new(PAGE_SIZE, 10);
-            let blob = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();
             for i in 0..11 {
@@ -290,8 +303,8 @@ mod tests {
                 .expect("Failed to open blob");
             assert_eq!(size, 0);
 
-            let pool_ref = PoolRef::new(PAGE_SIZE, 10);
-            let blob = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();
 
@@ -372,6 +385,68 @@ mod tests {
             }
 
             blob.sync().await.expect("Failed to sync blob");
+        });
+    }
+
+    #[test_traced]
+    fn test_append_blob_tracks_physical_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context
+                .open("test", "blob".as_bytes())
+                .await
+                .expect("Failed to open blob");
+
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
+                .await
+                .unwrap();
+
+            // Initially blob_size should be 0.
+            assert_eq!(blob.buffer.read().await.1, 0);
+
+            // Write 100 bytes and sync.
+            blob.append(vec![1u8; 100]).await.unwrap();
+            blob.sync().await.unwrap();
+            assert_eq!(blob.buffer.read().await.1, 100);
+
+            // Append more data but don't sync yet, blob_size shouldn't change.
+            blob.append(vec![2u8; 200]).await.unwrap();
+            assert_eq!(blob.buffer.read().await.1, 100);
+
+            // Force a flush by exceeding buffer.
+            blob.append(vec![3u8; BUFFER_SIZE]).await.unwrap();
+            assert_eq!(blob.buffer.read().await.1, 100 + 200 + BUFFER_SIZE as u64);
+
+            // Test resize down and up.
+            blob.resize(50).await.unwrap();
+            assert_eq!(blob.buffer.read().await.1, 50);
+
+            blob.resize(150).await.unwrap();
+            assert_eq!(blob.buffer.read().await.1, 150);
+
+            // Append after resize and sync.
+            blob.append(vec![4u8; 100]).await.unwrap();
+            blob.sync().await.unwrap();
+            assert_eq!(blob.buffer.read().await.1, 250);
+
+            // Close and reopen.
+            let (blob, size) = context
+                .open("test", "blob".as_bytes())
+                .await
+                .expect("Failed to reopen blob");
+
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
+                .await
+                .unwrap();
+            assert_eq!(blob.buffer.read().await.1, 250);
+
+            // Verify data integrity after all operations.
+            let mut buf = vec![0u8; 250];
+            buf = blob.read_at(buf, 0).await.unwrap().into();
+            assert_eq!(&buf[0..50], &vec![1u8; 50][..]);
+            assert_eq!(&buf[50..150], &vec![0u8; 100][..]); // Zeros from resize up to 150
+            assert_eq!(&buf[150..250], &vec![4u8; 100][..]);
         });
     }
 }

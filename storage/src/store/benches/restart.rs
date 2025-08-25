@@ -9,27 +9,31 @@ use commonware_storage::{
     store::{Config as SConfig, Store},
     translator::EightCap,
 };
+use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::time::Instant;
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Instant,
+};
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
 const COMMIT_FREQUENCY: u32 = 10_000;
 const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
-const ITEMS_PER_BLOB: u64 = 500_000;
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(500_000);
 const PARTITION_SUFFIX: &str = "store_bench_partition";
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: usize = 16384;
+const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
 
 /// The number of pages to cache in the buffer pool.
-const PAGE_CACHE_SIZE: usize = 10_000;
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
 fn store_cfg() -> SConfig<EightCap, ()> {
     SConfig::<EightCap, ()> {
         log_journal_partition: format!("log_{PARTITION_SUFFIX}"),
-        log_write_buffer: 64 * 1024,
+        log_write_buffer: NZUsize!(64 * 1024),
         log_compression: None,
         log_codec_config: (),
         log_items_per_section: ITEMS_PER_BLOB,
@@ -52,6 +56,7 @@ fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
         let mut db = Store::<_, _, _, EightCap>::init(ctx, store_cfg)
             .await
             .unwrap();
+        let metadata = Sha256::fill(0);
 
         // Insert a random value for every possible element into the db.
         let mut rng = StdRng::seed_from_u64(42);
@@ -71,10 +76,10 @@ fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
             let v = hash(&rng.next_u32().to_be_bytes());
             db.update(rand_key, v).await.unwrap();
             if rng.next_u32() % COMMIT_FREQUENCY == 0 {
-                db.commit().await.unwrap();
+                db.commit(Some(metadata)).await.unwrap();
             }
         }
-        db.commit().await.unwrap();
+        db.commit(Some(metadata)).await.unwrap();
         db.close().await.unwrap();
     });
 }

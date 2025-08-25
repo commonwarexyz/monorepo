@@ -58,7 +58,7 @@
 //!       Hash(5, Hash(3, element_2), Hash(4, element_4))
 //!     )
 //!     Hash(13,
-//!       Hash(9, Hash(7, element_0), Hash(8, element_8)),
+//!       Hash(9, Hash(7, element_7), Hash(8, element_8)),
 //!       Hash(12, Hash(10, element_10), Hash(11, element_11))
 //!     )
 //!   )
@@ -115,10 +115,12 @@ pub enum Error {
     InvalidProofLength,
     #[error("proof missing digest at position: {0}")]
     MissingDigest(u64),
-    #[error("given historical size >= database size: ({0}) >= ({1})")]
-    HistoricalSizeTooLarge(u64, u64),
-    #[error("given historical size <= start location: ({0}) <= ({1})")]
-    HistoricalSizeTooSmall(u64, u64),
     #[error("invalid size: {0}")]
     InvalidSize(u64),
+    #[error("root mismatch")]
+    RootMismatch,
+    #[error("invalid proof")]
+    InvalidProof,
+    #[error("runtime error: {0}")]
+    Runtime(#[from] commonware_runtime::Error),
 }

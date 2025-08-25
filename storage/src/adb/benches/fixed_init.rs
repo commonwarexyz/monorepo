@@ -7,9 +7,10 @@ use commonware_runtime::{
     Runner as _, ThreadPool,
 };
 use commonware_storage::{
-    adb::any::{Any, Config as AConfig},
+    adb::any::fixed::{Any, Config as AConfig},
     translator::EightCap,
 };
+use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::Instant;
@@ -37,14 +38,14 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     AConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
-        mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: 1024,
+        mmr_items_per_blob: NZU64!(ITEMS_PER_BLOB),
+        mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
-        log_items_per_blob: ITEMS_PER_BLOB,
-        log_write_buffer: 1024,
+        log_items_per_blob: NZU64!(ITEMS_PER_BLOB),
+        log_write_buffer: NZUsize!(1024),
         translator: EightCap,
         thread_pool: Some(pool),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         pruning_delay: 10,
     }
 }
@@ -98,13 +99,13 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 
 /// Benchmark the initialization of a large randomly generated any db.
-fn bench_any_init(c: &mut Criterion) {
+fn bench_fixed_init(c: &mut Criterion) {
     tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "benchmarking any init",);
+            info!(elements, operations, "benchmarking fixed::Any init",);
             gen_random_any(cfg.clone(), elements, operations);
 
             c.bench_function(
@@ -147,5 +148,5 @@ fn bench_any_init(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_any_init
+    targets = bench_fixed_init
 }

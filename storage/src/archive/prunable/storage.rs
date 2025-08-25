@@ -101,6 +101,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
+                buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
             },
         )
@@ -159,7 +160,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Return populated archive
         Ok(Self {
-            items_per_section: cfg.items_per_section,
+            items_per_section: cfg.items_per_section.get(),
             journal,
             pending: BTreeSet::new(),
             oldest_allowed: None,

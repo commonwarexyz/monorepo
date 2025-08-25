@@ -1,7 +1,8 @@
 use super::types::{Activity, Context, Epoch};
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Signer};
-use std::time::Duration;
+use commonware_runtime::buffer::PoolRef;
+use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
@@ -75,11 +76,14 @@ pub struct Config<
     pub journal_heights_per_section: u64,
 
     /// The number of bytes to buffer when replaying a journal.
-    pub journal_replay_buffer: usize,
+    pub journal_replay_buffer: NonZeroUsize,
 
     /// The size of the write buffer to use for each blob in the journal.
-    pub journal_write_buffer: usize,
+    pub journal_write_buffer: NonZeroUsize,
 
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
+
+    /// Buffer pool for the journal.
+    pub journal_buffer_pool: PoolRef,
 }

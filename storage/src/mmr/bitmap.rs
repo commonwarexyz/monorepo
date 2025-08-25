@@ -311,7 +311,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// - Assumes self.next_bit is currently byte aligned, and panics otherwise.
     pub fn append_byte_unchecked(&mut self, byte: u8) {
         assert!(
-            self.next_bit % 8 == 0,
+            self.next_bit.is_multiple_of(8),
             "cannot add byte when not byte aligned"
         );
 
@@ -636,6 +636,20 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_digest);
 
         reconstructed_root == *root
+    }
+
+    /// Destroy the bitmap metadata from disk.
+    pub async fn destroy<C: RStorage + Metrics + Clock>(
+        context: C,
+        partition: &str,
+    ) -> Result<(), Error> {
+        let metadata_cfg = MConfig {
+            partition: partition.to_string(),
+            codec_config: ((0..).into(), ()),
+        };
+        let metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
+        metadata.destroy().await.map_err(MetadataError)
     }
 }
 

@@ -5,12 +5,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::Share,
-        ops,
-        poly::{self, PartialSignature},
-        variant::Variant,
-    },
+    bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
     Digest,
 };
 use commonware_utils::union;
@@ -55,12 +50,18 @@ pub enum Error {
     /// The acknowledgment's height is outside the accepted bounds
     #[error("Non-useful ack index {0}")]
     AckIndex(u64),
+    /// The acknowledgment's digest is incorrect
+    #[error("Invalid ack digest {0}")]
+    AckDigest(u64),
     /// Duplicate acknowledgment for the same index
     #[error("Duplicate ack from sender {0} for index {1}")]
     AckDuplicate(String, u64),
     /// The acknowledgement is for an index that already has a threshold
     #[error("Ack for index {0} already has a threshold")]
     AckThresholded(u64),
+    /// The epoch is unknown
+    #[error("Unknown epoch {0}")]
+    UnknownEpoch(u64),
 }
 
 impl Error {
@@ -141,12 +142,15 @@ impl<V: Variant, D: Digest> Ack<V, D> {
     ///
     /// Returns `true` if the signature is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, namespace: &[u8], identity: &poly::Public<V>) -> bool {
-        ops::partial_verify_message::<V>(
-            identity,
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
+        let Some(public) = polynomial.get(self.signature.index as usize) else {
+            return false;
+        };
+        ops::verify_message::<V>(
+            public,
             Some(ack_namespace(namespace).as_ref()),
             self.item.encode().as_ref(),
-            &self.signature,
+            &self.signature.value,
         )
         .is_ok()
     }
@@ -236,6 +240,54 @@ impl<V: Variant, D: Digest> EncodeSize for TipAck<V, D> {
     }
 }
 
+/// A recovered signature for some [Item].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Certificate<V: Variant, D: Digest> {
+    /// The item that was recovered.
+    pub item: Item<D>,
+    /// The recovered signature.
+    pub signature: V::Signature,
+}
+
+impl<V: Variant, D: Digest> Write for Certificate<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.item.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Variant, D: Digest> Read for Certificate<V, D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let item = Item::read(reader)?;
+        let signature = V::Signature::read(reader)?;
+        Ok(Self { item, signature })
+    }
+}
+
+impl<V: Variant, D: Digest> EncodeSize for Certificate<V, D> {
+    fn encode_size(&self) -> usize {
+        self.item.encode_size() + self.signature.encode_size()
+    }
+}
+
+impl<V: Variant, D: Digest> Certificate<V, D> {
+    /// Verifies the signature on this certificate.
+    ///
+    /// Returns `true` if the signature is valid for the given namespace and public key.
+    /// Domain separation is automatically applied to prevent signature reuse.
+    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
+        ops::verify_message::<V>(
+            identity,
+            Some(ack_namespace(namespace).as_ref()),
+            self.item.encode().as_ref(),
+            &self.signature,
+        )
+        .is_ok()
+    }
+}
+
 /// Used as [Reporter::Activity](crate::Reporter::Activity) to report activities that occur during
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
@@ -244,8 +296,8 @@ pub enum Activity<V: Variant, D: Digest> {
     /// Received an ack from a participant.
     Ack(Ack<V, D>),
 
-    /// Recovered a threshold signature.
-    Recovered(Item<D>, V::Signature),
+    /// Certified an [Item].
+    Certified(Certificate<V, D>),
 
     /// Moved the tip to a new index.
     Tip(Index),
@@ -258,10 +310,9 @@ impl<V: Variant, D: Digest> Write for Activity<V, D> {
                 0u8.write(writer);
                 ack.write(writer);
             }
-            Activity::Recovered(item, signature) => {
+            Activity::Certified(certificate) => {
                 1u8.write(writer);
-                item.write(writer);
-                signature.write(writer);
+                certificate.write(writer);
             }
             Activity::Tip(index) => {
                 2u8.write(writer);
@@ -277,10 +328,7 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Ack(Ack::read(reader)?)),
-            1 => Ok(Activity::Recovered(
-                Item::read(reader)?,
-                V::Signature::read(reader)?,
-            )),
+            1 => Ok(Activity::Certified(Certificate::read(reader)?)),
             2 => Ok(Activity::Tip(UInt::read(reader)?.into())),
             _ => Err(CodecError::Invalid(
                 "consensus::aggregation::Activity",
@@ -294,7 +342,7 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Ack(ack) => ack.encode_size(),
-            Activity::Recovered(item, signature) => item.encode_size() + signature.encode_size(),
+            Activity::Certified(certificate) => certificate.encode_size(),
             Activity::Tip(index) => UInt(*index).encode_size(),
         }
     }
@@ -307,7 +355,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg::ops::{self, evaluate_all},
             primitives::{ops::sign_message, variant::MinSig},
         },
         sha256,
@@ -326,6 +374,7 @@ mod tests {
         let namespace = b"test";
         let mut context = deterministic::Context::default();
         let (public, shares) = ops::generate_shares::<_, MinSig>(&mut context, None, 4, 3);
+        let polynomial = evaluate_all::<MinSig>(&public, 4);
         let item = Item {
             index: 100,
             digest: sha256::hash(b"test_item"),
@@ -337,8 +386,8 @@ mod tests {
 
         // Test Ack creation, signing, verification, and codec
         let ack: Ack<MinSig, _> = Ack::sign(namespace, 1, &shares[0], item.clone());
-        assert!(ack.verify(namespace, &public));
-        assert!(!ack.verify(b"wrong", &public));
+        assert!(ack.verify(namespace, &polynomial));
+        assert!(!ack.verify(b"wrong", &polynomial));
 
         let restored_ack: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
         assert_eq!(ack, restored_ack);
@@ -354,12 +403,12 @@ mod tests {
             Activity::decode(activity_ack.encode()).unwrap();
         assert_eq!(activity_ack, restored_activity_ack);
 
-        // Test Activity codec - Recovered variant
+        // Test Activity codec - Certified variant
         let signature = sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
-        let activity_recovered = Activity::Recovered(item, signature);
-        let restored_activity_recovered: Activity<MinSig, sha256::Digest> =
-            Activity::decode(activity_recovered.encode()).unwrap();
-        assert_eq!(activity_recovered, restored_activity_recovered);
+        let activity_certified = Activity::Certified(Certificate { item, signature });
+        let restored_activity_certified: Activity<MinSig, sha256::Digest> =
+            Activity::decode(activity_certified.encode()).unwrap();
+        assert_eq!(activity_certified, restored_activity_certified);
 
         // Test Activity codec - Tip variant
         let activity_tip = Activity::Tip(123);
