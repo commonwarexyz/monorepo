@@ -1,5 +1,6 @@
 //! Types used in [crate::ordered_broadcast].
 
+use crate::types::Epoch;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
@@ -162,14 +163,6 @@ pub fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
 pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
-
-/// Used as the [crate::Supervisor::Index] type for monitoring epochs.
-/// Defines the current set of sequencers and validators.
-///
-/// This is not a single "View" in the sense of a consensus protocol, but rather a continuous
-/// sequence of views in which the set of sequencers and validators is constant. When the set
-/// of participants changes, the epoch increments.
-pub type Epoch = u64;
 
 /// Used as the [crate::Automaton::Context] type.
 ///
