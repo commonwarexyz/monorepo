@@ -478,28 +478,25 @@ impl<D: Digest> Proof<D> {
 
         // Collect all required node positions
         let size = mmr.size();
-        let mut node_positions = BTreeSet::new();
-        for pos in positions {
-            let required = Self::nodes_required_for_range_proof(size, *pos, *pos);
-            for req_pos in required {
-                node_positions.insert(req_pos);
-            }
-        }
+        let node_positions: BTreeSet<_> = positions
+            .iter()
+            .flat_map(|pos| Self::nodes_required_for_range_proof(size, *pos, *pos))
+            .collect();
 
-        // Fetch all required digests in parallel
-        let mut node_futures = Vec::with_capacity(node_positions.len());
-        for pos in &node_positions {
-            node_futures.push(mmr.get_node(*pos));
-        }
+        // Fetch all required digests in parallel and collect with positions
+        let node_futures: Vec<_> = node_positions
+            .iter()
+            .map(|&pos| async move { mmr.get_node(pos).await.map(|digest| (pos, digest)) })
+            .collect();
         let results = try_join_all(node_futures).await?;
 
-        // Build the proof
+        // Build the proof, returning error with correct position on pruned nodes
         let mut digests = Vec::with_capacity(results.len());
-        for (i, hash_result) in results.into_iter().enumerate() {
-            match hash_result {
-                Some(hash) => digests.push(hash),
-                None => return Err(Error::ElementPruned(*node_positions.iter().nth(i).unwrap())),
-            };
+        for (pos, digest) in results {
+            match digest {
+                Some(digest) => digests.push(digest),
+                None => return Err(Error::ElementPruned(pos)),
+            }
         }
 
         Ok(Proof { size, digests })
