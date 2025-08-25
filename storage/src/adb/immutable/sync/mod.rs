@@ -1,11 +1,12 @@
 use crate::{
     adb::{
+        self,
         any::variable::sync::init_journal,
         immutable,
         sync::{self, Journal as _},
     },
     journal::variable,
-    mmr::hasher::Standard,
+    mmr::{self, hasher::Standard},
     store::operation::Variable,
     translator::Translator,
 };
@@ -72,6 +73,7 @@ where
     T: Translator,
 {
     type Data = Variable<K, V>;
+    type Proof = mmr::verification::Proof<H::Digest>;
     type Journal = journal::Journal<E, K, V>;
     type Hasher = H;
     type Error = crate::adb::Error;
@@ -201,6 +203,16 @@ where
                 size,
             ))
         }
+    }
+
+    fn verify_proof(
+        proof: &Self::Proof,
+        data: &[Self::Data],
+        start_loc: u64,
+        root: Self::Digest,
+    ) -> bool {
+        let mut hasher = Standard::<H>::new();
+        adb::verify_proof(&mut hasher, proof, start_loc, data, &root)
     }
 }
 

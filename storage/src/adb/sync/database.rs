@@ -6,6 +6,7 @@ use std::future::Future;
 pub trait Database: Sized {
     /// The increment of data synced by the [Database].
     type Data;
+    type Proof;
     type Journal: Journal<Data = Self::Data>;
     type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
     type Config;
@@ -57,4 +58,13 @@ pub trait Database: Sized {
         lower_bound: u64,
         upper_bound: u64,
     ) -> impl Future<Output = Result<Self::Journal, Self::Error>>;
+
+    /// Verify a proof that the given data is in the database with the given root
+    /// starting at the given location.
+    fn verify_proof(
+        proof: &Self::Proof,
+        data: &[Self::Data],
+        start_loc: u64,
+        root: Self::Digest,
+    ) -> bool;
 }

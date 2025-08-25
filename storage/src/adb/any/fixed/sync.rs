@@ -3,6 +3,7 @@ use crate::{
     index::Index,
     journal::fixed,
     mmr::{
+        self,
         hasher::{self, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
     },
@@ -27,6 +28,7 @@ where
 {
     type Context = E;
     type Data = Fixed<K, V>;
+    type Proof = mmr::verification::Proof<H::Digest>;
     type Journal = fixed::Journal<E, Fixed<K, V>>;
     type Hasher = H;
     type Error = adb::Error;
@@ -152,6 +154,16 @@ where
             journal.prune(lower_bound).await.map_err(adb::Error::from)?;
             Ok(journal)
         }
+    }
+
+    fn verify_proof(
+        proof: &Self::Proof,
+        data: &[Self::Data],
+        start_loc: u64,
+        root: Self::Digest,
+    ) -> bool {
+        let mut hasher = Standard::<H>::new();
+        adb::verify_proof(&mut hasher, proof, start_loc, data, &root)
     }
 }
 
