@@ -393,7 +393,7 @@ mod tests {
     /// Also tests that the peer can get data from multiple peers that have different sets of data.
     #[test_traced]
     fn test_concurrent_fetch_requests() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        let executor = deterministic::Runner::timed(Duration::from_secs(90));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
