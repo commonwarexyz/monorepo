@@ -1,4 +1,8 @@
-use crate::mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof};
+use crate::mmr::{
+    hasher::Standard, 
+    iterator::leaf_num_to_pos, 
+    verification::{Proof, ProofStore}
+};
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 
@@ -64,4 +68,53 @@ pub fn digests_required_for_proof<D: Digest>(size: u64, start_loc: u64, end_loc:
 pub fn construct_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
     let size = leaf_num_to_pos(size);
     Proof::<D> { size, digests }
+}
+
+/// Convert an event proof to a ProofStore by verifying it and extracting all digests.
+/// This ProofStore can then be used to generate multi-proofs for filtered listeners.
+pub async fn create_proof_store<Op, H, D>(
+    hasher: &mut Standard<H>,
+    proof: &Proof<D>,
+    start_loc: u64,
+    operations: &[Op],
+    root: &D,
+) -> Result<ProofStore<D>, crate::mmr::Error>
+where
+    Op: Encode,
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    // Convert operation location to MMR position
+    let start_pos = leaf_num_to_pos(start_loc);
+    
+    // Encode operations for verification
+    let elements: Vec<Vec<u8>> = operations
+        .iter()
+        .map(|op| op.encode().to_vec())
+        .collect();
+    
+    // Create ProofStore by verifying the proof and extracting all digests
+    ProofStore::new(hasher, proof, &elements, start_pos, root)
+}
+
+/// Generate a multi-proof for specific operation locations from a ProofStore.
+/// This is used to create proofs for filtered listeners who only care about certain operations.
+/// 
+/// # Arguments
+/// * `proof_store` - The ProofStore containing all digests from the original proof
+/// * `locations` - The operation locations (indices) to include in the filtered proof
+pub async fn generate_filtered_proof<D>(
+    proof_store: &ProofStore<D>,
+    locations: &[u64],
+) -> Result<Proof<D>, crate::mmr::Error>
+where
+    D: Digest,
+{
+    // Convert locations to MMR positions
+    let positions: Vec<u64> = locations
+        .iter()
+        .map(|&loc| leaf_num_to_pos(loc))
+        .collect();
+    
+    Proof::multi_proof(proof_store, &positions).await
 }
