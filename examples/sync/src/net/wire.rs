@@ -10,24 +10,24 @@ use std::num::NonZeroU64;
 /// Maximum number of digests in a proof.
 pub const MAX_DIGESTS: usize = 10_000;
 
-/// Request for operations from the server.
+/// Request for data from the server.
 #[derive(Debug)]
-pub struct GetOperationsRequest {
+pub struct GetDataRequest {
     pub request_id: RequestId,
     pub size: u64,
     pub start_loc: u64,
-    pub max_ops: NonZeroU64,
+    pub max_data: NonZeroU64,
 }
 
-/// Response with operations and proof.
+/// Response with data and proof.
 #[derive(Debug)]
-pub struct GetOperationsResponse<Op, D>
+pub struct GetDataResponse<Data, D>
 where
     D: Digest,
 {
     pub request_id: RequestId,
     pub proof: Proof<D>,
-    pub operations: Vec<Op>,
+    pub data: Vec<Data>,
 }
 
 /// Request for sync target from server.
@@ -48,25 +48,25 @@ where
 
 /// Messages that can be sent over the wire.
 #[derive(Debug)]
-pub enum Message<Op, D>
+pub enum Message<Data, D>
 where
     D: Digest,
 {
-    GetOperationsRequest(GetOperationsRequest),
-    GetOperationsResponse(GetOperationsResponse<Op, D>),
+    GetDataRequest(GetDataRequest),
+    GetDataResponse(GetDataResponse<Data, D>),
     GetSyncTargetRequest(GetSyncTargetRequest),
     GetSyncTargetResponse(GetSyncTargetResponse<D>),
     Error(ErrorResponse),
 }
 
-impl<Op, D> Message<Op, D>
+impl<Data, D> Message<Data, D>
 where
     D: Digest,
 {
     pub fn request_id(&self) -> RequestId {
         match self {
-            Message::GetOperationsRequest(r) => r.request_id,
-            Message::GetOperationsResponse(r) => r.request_id,
+            Message::GetDataRequest(r) => r.request_id,
+            Message::GetDataResponse(r) => r.request_id,
             Message::GetSyncTargetRequest(r) => r.request_id,
             Message::GetSyncTargetResponse(r) => r.request_id,
             Message::Error(e) => e.request_id,
@@ -74,9 +74,9 @@ where
     }
 }
 
-impl<Op, D> super::Message for Message<Op, D>
+impl<Data, D> super::Message for Message<Data, D>
 where
-    Op: Encode + DecodeExt<()> + Send + Sync + 'static,
+    Data: Encode + DecodeExt<()> + Send + Sync + 'static,
     D: Digest,
 {
     fn request_id(&self) -> RequestId {
@@ -84,18 +84,18 @@ where
     }
 }
 
-impl<Op, D> Write for Message<Op, D>
+impl<Data, D> Write for Message<Data, D>
 where
-    Op: Write,
+    Data: Write,
     D: Digest,
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Message::GetOperationsRequest(req) => {
+            Message::GetDataRequest(req) => {
                 0u8.write(buf);
                 req.write(buf);
             }
-            Message::GetOperationsResponse(resp) => {
+            Message::GetDataResponse(resp) => {
                 1u8.write(buf);
                 resp.write(buf);
             }
@@ -115,15 +115,15 @@ where
     }
 }
 
-impl<Op, D> EncodeSize for Message<Op, D>
+impl<Data, D> EncodeSize for Message<Data, D>
 where
-    Op: EncodeSize,
+    Data: EncodeSize,
     D: Digest,
 {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Message::GetOperationsRequest(req) => req.encode_size(),
-            Message::GetOperationsResponse(resp) => resp.encode_size(),
+            Message::GetDataRequest(req) => req.encode_size(),
+            Message::GetDataResponse(resp) => resp.encode_size(),
             Message::GetSyncTargetRequest(req) => req.encode_size(),
             Message::GetSyncTargetResponse(resp) => resp.encode_size(),
             Message::Error(err) => err.encode_size(),
@@ -131,21 +131,17 @@ where
     }
 }
 
-impl<Op, D> Read for Message<Op, D>
+impl<Data, D> Read for Message<Data, D>
 where
-    Op: Read<Cfg = ()>,
+    Data: Read<Cfg = ()>,
     D: Digest,
 {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let tag = u8::read(buf)?;
         match tag {
-            0 => Ok(Message::GetOperationsRequest(GetOperationsRequest::read(
-                buf,
-            )?)),
-            1 => Ok(Message::GetOperationsResponse(GetOperationsResponse::read(
-                buf,
-            )?)),
+            0 => Ok(Message::GetDataRequest(GetDataRequest::read(buf)?)),
+            1 => Ok(Message::GetDataResponse(GetDataResponse::read(buf)?)),
             2 => Ok(Message::GetSyncTargetRequest(GetSyncTargetRequest::read(
                 buf,
             )?)),
@@ -158,43 +154,43 @@ where
     }
 }
 
-impl Write for GetOperationsRequest {
+impl Write for GetDataRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
         self.size.write(buf);
         self.start_loc.write(buf);
-        self.max_ops.get().write(buf);
+        self.max_data.get().write(buf);
     }
 }
 
-impl EncodeSize for GetOperationsRequest {
+impl EncodeSize for GetDataRequest {
     fn encode_size(&self) -> usize {
         self.request_id.encode_size()
             + self.size.encode_size()
             + self.start_loc.encode_size()
-            + self.max_ops.get().encode_size()
+            + self.max_data.get().encode_size()
     }
 }
 
-impl Read for GetOperationsRequest {
+impl Read for GetDataRequest {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
         let size = u64::read(buf)?;
         let start_loc = u64::read(buf)?;
-        let max_ops_raw = u64::read(buf)?;
-        let max_ops = NonZeroU64::new(max_ops_raw)
-            .ok_or_else(|| CodecError::Invalid("GetOperationsRequest", "max_ops cannot be zero"))?;
+        let max_data_raw = u64::read(buf)?;
+        let max_data = NonZeroU64::new(max_data_raw)
+            .ok_or_else(|| CodecError::Invalid("GetDataRequest", "max_data cannot be zero"))?;
         Ok(Self {
             request_id,
             size,
             start_loc,
-            max_ops,
+            max_data,
         })
     }
 }
 
-impl GetOperationsRequest {
+impl GetDataRequest {
     pub fn validate(&self) -> Result<(), crate::Error> {
         if self.start_loc >= self.size {
             return Err(crate::Error::InvalidRequest(format!(
@@ -202,54 +198,54 @@ impl GetOperationsRequest {
                 self.start_loc, self.size
             )));
         }
-        if self.max_ops.get() == 0 {
+        if self.max_data.get() == 0 {
             return Err(crate::Error::InvalidRequest(
-                "max_ops cannot be zero".to_string(),
+                "max_data cannot be zero".to_string(),
             ));
         }
         Ok(())
     }
 }
 
-impl<Op, D> Write for GetOperationsResponse<Op, D>
+impl<Data, D> Write for GetDataResponse<Data, D>
 where
-    Op: Write,
+    Data: Write,
     D: Digest,
 {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
         self.proof.write(buf);
-        self.operations.write(buf);
+        self.data.write(buf);
     }
 }
 
-impl<Op, D> EncodeSize for GetOperationsResponse<Op, D>
+impl<Data, D> EncodeSize for GetDataResponse<Data, D>
 where
-    Op: EncodeSize,
+    Data: EncodeSize,
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.proof.encode_size() + self.operations.encode_size()
+        self.request_id.encode_size() + self.proof.encode_size() + self.data.encode_size()
     }
 }
 
-impl<Op, D> Read for GetOperationsResponse<Op, D>
+impl<Data, D> Read for GetDataResponse<Data, D>
 where
-    Op: Read<Cfg = ()>,
+    Data: Read<Cfg = ()>,
     D: Digest,
 {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
         let proof = Proof::<D>::read_cfg(buf, &MAX_DIGESTS)?;
-        let operations = {
+        let data = {
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
-            Vec::<Op>::read_cfg(buf, &(range_cfg, ()))?
+            Vec::<Data>::read_cfg(buf, &(range_cfg, ()))?
         };
         Ok(Self {
             request_id,
             proof,
-            operations,
+            data,
         })
     }
 }

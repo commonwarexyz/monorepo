@@ -4,8 +4,11 @@ use std::future::Future;
 
 /// A database that can be synced
 pub trait Database: Sized {
-    type Op;
-    type Journal: Journal<Op = Self::Op>;
+    /// The increment of data synced by the [Database].
+    type Data;
+    type Proof;
+    type PinnedNodes;
+    type Journal: Journal<Data = Self::Data>;
     type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
     type Config;
     type Digest: Digest;
@@ -33,7 +36,7 @@ pub trait Database: Sized {
         context: Self::Context,
         config: Self::Config,
         journal: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        pinned_nodes: Option<Self::PinnedNodes>,
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
@@ -56,4 +59,20 @@ pub trait Database: Sized {
         lower_bound: u64,
         upper_bound: u64,
     ) -> impl Future<Output = Result<Self::Journal, Self::Error>>;
+
+    /// Verify a proof that the given data is in the database with the given root
+    /// starting at the given location.
+    fn verify_proof(
+        proof: &Self::Proof,
+        data: &[Self::Data],
+        start_loc: u64,
+        root: Self::Digest,
+    ) -> bool;
+
+    /// Extract pinned nodes from a proof
+    fn extract_pinned_nodes(
+        proof: &Self::Proof,
+        start_loc: u64,
+        data_len: u64,
+    ) -> Result<Self::PinnedNodes, Self::Error>;
 }

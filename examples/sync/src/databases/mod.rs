@@ -43,37 +43,37 @@ impl DatabaseType {
 
 /// Helper trait for databases that can be synced.
 pub trait Syncable {
-    /// The type of operations in the database.
-    type Operation: Clone + Read<Cfg = ()> + Encode + Send + Sync + 'static;
+    /// The type of data in the database.
+    type Data: Clone + Read<Cfg = ()> + Encode + Send + Sync + 'static;
 
-    /// Create test operations with the given count and seed.
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
+    /// Create test data with the given count and seed.
+    fn create_test_data(count: usize, seed: u64) -> Vec<Self::Data>;
 
-    /// Add operations to the database.
-    fn add_operations(
+    /// Add data to the database.
+    fn add_data(
         database: &mut Self,
-        operations: Vec<Self::Operation>,
+        data: Vec<Self::Data>,
     ) -> impl Future<Output = Result<(), adb::Error>>;
 
-    /// Commit pending operations to the database.
+    /// Commit pending data to the database.
     fn commit(&mut self) -> impl Future<Output = Result<(), adb::Error>>;
 
     /// Get the database's root digest.
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;
 
-    /// Get the operation count of the database.
-    fn op_count(&self) -> u64;
+    /// Get the number of items in the database.
+    fn size(&self) -> u64;
 
-    /// Get the lower bound for operations (inactivity floor or oldest retained location).
-    fn lower_bound_ops(&self) -> u64;
+    /// Get the lower bound for data (inactivity floor or oldest retained location).
+    fn lower_bound_data(&self) -> u64;
 
-    /// Get historical proof and operations.
+    /// Get historical proof and data.
     fn historical_proof(
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send;
+        max_data: u64,
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Data>), adb::Error>> + Send;
 
     /// Get the database type name for logging.
     fn name() -> &'static str;

@@ -17,8 +17,8 @@ use std::future::Future;
 /// Database type alias.
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
-/// Operation type alias.
-pub type Operation = operation::Variable<Key, Value>;
+/// Data type alias.
+pub type Data = operation::Variable<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config() -> Config<Translator, ()> {
@@ -40,10 +40,10 @@ pub fn create_config() -> Config<Translator, ()> {
     }
 }
 
-/// Create deterministic test operations for demonstration purposes.
-/// Generates Set operations and periodic Commit operations.
-pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
-    let mut operations = Vec::new();
+/// Create deterministic test data for demonstration purposes.
+/// Generates Set data and periodic Commit data.
+pub fn create_test_data(count: usize, seed: u64) -> Vec<Data> {
+    let mut data = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
 
     for i in 0..count {
@@ -59,38 +59,38 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
             hasher.finalize()
         };
 
-        operations.push(Operation::Set(key, value));
+        data.push(Data::Set(key, value));
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(None));
+            data.push(Data::Commit(None));
         }
     }
 
     // Always end with a commit
-    operations.push(Operation::Commit(Some(Sha256::fill(1))));
-    operations
+    data.push(Data::Commit(Some(Sha256::fill(1))));
+    data
 }
 
 impl<E> super::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
-    type Operation = Operation;
+    type Data = Data;
 
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
-        create_test_operations(count, seed)
+    fn create_test_data(count: usize, seed: u64) -> Vec<Self::Data> {
+        create_test_data(count, seed)
     }
 
-    async fn add_operations(
+    async fn add_data(
         database: &mut Self,
-        operations: Vec<Self::Operation>,
+        data: Vec<Self::Data>,
     ) -> Result<(), commonware_storage::adb::Error> {
-        for operation in operations {
-            match operation {
-                Operation::Set(key, value) => {
+        for item in data {
+            match item {
+                Data::Set(key, value) => {
                     database.set(key, value).await?;
                 }
-                Operation::Commit(metadata) => {
+                Data::Commit(metadata) => {
                     database.commit(metadata).await?;
                 }
                 _ => {}
@@ -107,11 +107,11 @@ where
         self.root(hasher)
     }
 
-    fn op_count(&self) -> u64 {
+    fn size(&self) -> u64 {
         self.op_count()
     }
 
-    fn lower_bound_ops(&self) -> u64 {
+    fn lower_bound_data(&self) -> u64 {
         self.oldest_retained_loc().unwrap_or(0)
     }
 
@@ -119,9 +119,9 @@ where
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(size, start_loc, max_ops)
+        max_data: u64,
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Data>), adb::Error>> + Send {
+        self.historical_proof(size, start_loc, max_data)
     }
 
     fn name() -> &'static str {

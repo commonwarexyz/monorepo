@@ -3,7 +3,7 @@ use crate::net::request_id;
 use commonware_codec::{Encode, Read};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
-use commonware_storage::adb::sync;
+use commonware_storage::{adb::sync, mmr};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -76,21 +76,22 @@ where
     D: Digest,
 {
     type Digest = D;
-    type Op = Op;
+    type Data = Op;
+    type Proof = mmr::verification::Proof<D>;
     type Error = crate::Error;
 
-    async fn get_operations(
+    async fn get_data(
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<sync::resolver::FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        max_data: NonZeroU64,
+    ) -> Result<sync::resolver::FetchResult<Self::Data, Self::Proof>, Self::Error> {
         let request_id = self.request_id_generator.next();
-        let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
+        let request = wire::Message::GetDataRequest(wire::GetDataRequest {
             request_id,
             size,
             start_loc,
-            max_ops,
+            max_data,
         });
         let (tx, rx) = oneshot::channel();
         self.request_tx
@@ -104,8 +105,8 @@ where
         let response = rx
             .await
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
-        let (proof, operations) = match response {
-            wire::Message::GetOperationsResponse(r) => (r.proof, r.operations),
+        let (proof, data) = match response {
+            wire::Message::GetDataResponse(r) => (r.proof, r.data),
             wire::Message::Error(err) => {
                 return Err(crate::Error::Server {
                     code: err.error_code,
@@ -117,7 +118,7 @@ where
         let (tx, _rx) = oneshot::channel();
         Ok(sync::resolver::FetchResult {
             proof,
-            operations,
+            data,
             success_tx: tx,
         })
     }
