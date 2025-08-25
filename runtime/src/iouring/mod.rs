@@ -329,7 +329,8 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
 }
 
 /// Process `ring` completions until all pending operations are complete or
-/// until `timeout` fires. If `timeout` is None, wait indefinitely.
+/// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
+/// indefinitely.
 #[allow(clippy::type_complexity)]
 fn drain(
     ring: &mut IoUring,
@@ -362,7 +363,7 @@ fn drain(
 /// standard `submit_and_wait`.
 ///
 /// # Returns
-/// * `Ok(true)` - Successfully received the requested completions
+/// * `Ok(true)` - Successfully received `want` completions
 /// * `Ok(false)` - Timed out waiting for completions (only when timeout is set)
 /// * `Err(e)` - An error occurred during submission or waiting
 fn submit_and_wait(
