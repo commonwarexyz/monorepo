@@ -1150,7 +1150,6 @@ mod tests {
                 let mut sender_tx = sender_tx.clone();
                 let receiver = receiver.clone();
                 let msg = Bytes::from(vec![i; 500]);
-                let start = start.clone();
                 let handle = context.clone().spawn(move |context| async move {
                     sender_tx
                         .send(Recipients::One(receiver), msg, false)
