@@ -321,9 +321,9 @@ fn size_signed<S: SPrim>(value: S) -> usize {
 mod tests {
     use super::*;
     use crate::{error::Error, DecodeExt, Encode};
-    use bytes::Bytes;
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
+    use bytes::Bytes;
 
     #[test]
     fn test_end_of_buffer() {
