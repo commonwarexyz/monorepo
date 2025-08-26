@@ -128,9 +128,9 @@ pub enum Error {
     #[error(transparent)]
     Journal(#[from] crate::journal::Error),
 
-    /// The requested key was not found in the snapshot.
-    #[error("key not found")]
-    KeyNotFound,
+    /// The requested operation has been pruned.
+    #[error("operation pruned")]
+    OperationPruned(u64),
 }
 
 /// Configuration for initializing a [Store] database.
@@ -263,9 +263,9 @@ where
     ///
     /// If the key does not exist, returns `Ok(None)`.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        for location in self.snapshot.get(key) {
-            let Operation::Update(k, v) = self.get_op(*location).await? else {
-                panic!("location ({location}) does not reference set operation",);
+        for &loc in self.snapshot.get(key) {
+            let Operation::Update(k, v) = self.get_op(loc).await? else {
+                unreachable!("location ({loc}) does not reference update operation");
             };
 
             if &k == key {
@@ -276,17 +276,27 @@ where
         Ok(None)
     }
 
+    /// Get the value of the operation with location `loc` in the db. Returns
+    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// otherwise assumed valid.
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.log_size);
+        let op = self.get_op(loc).await?;
+
+        Ok(op.into_value())
+    }
+
     /// Updates the value associated with the given key in the store.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
     /// uncommitted until [Store::commit] is called. Uncommitted operations will be rolled back
     /// if the store is closed without committing.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let new_location = self.log_size;
-        if let Some(old_location) = self.get_loc(&key).await? {
-            Self::update_loc(&mut self.snapshot, &key, old_location, new_location);
+        let new_loc = self.log_size;
+        if let Some(old_loc) = self.get_key_loc(&key).await? {
+            Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
         } else {
-            self.snapshot.insert(&key, new_location);
+            self.snapshot.insert(&key, new_loc);
         };
 
         self.apply_op(Operation::Update(key, value))
@@ -297,7 +307,7 @@ where
     /// Deletes the value associated with the given key in the store. If the key has no value,
     /// the operation is a no-op.
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.get_loc(&key).await? else {
+        let Some(old_loc) = self.get_key_loc(&key).await? else {
             // Key does not exist, so this is a no-op.
             return Ok(());
         };
@@ -318,9 +328,9 @@ where
         self.prune_inactive().await
     }
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made or
-    /// there is no metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
         let mut last_commit = self.op_count() - self.uncommitted_ops;
         if last_commit == 0 {
             return Ok(None);
@@ -332,7 +342,7 @@ where
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(metadata)
+        Ok(Some((last_commit, metadata)))
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
@@ -448,7 +458,7 @@ where
 
                         match op {
                             Operation::Delete(key) => {
-                                let result = self.get_loc(&key).await?;
+                                let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
                                     uncommitted_ops.insert(key, (Some(old_loc), None));
                                 } else {
@@ -456,7 +466,7 @@ where
                                 }
                             }
                             Operation::Update(key, _) => {
-                                let result = self.get_loc(&key).await?;
+                                let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
                                     uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
                                 } else {
@@ -557,9 +567,9 @@ where
         Ok(offset)
     }
 
-    /// Gets the location of the most recent [Operation::Update] for the key, or [None] if
-    /// the key does not have a value.
-    async fn get_loc(&self, key: &K) -> Result<Option<u64>, Error> {
+    /// Gets the location of the most recent [Operation::Update] for the key, or [None] if the key
+    /// does not have a value.
+    async fn get_key_loc(&self, key: &K) -> Result<Option<u64>, Error> {
         for loc in self.snapshot.get(key) {
             match self.get_op(*loc).await {
                 Ok(Operation::Update(k, _)) => {
@@ -567,52 +577,61 @@ where
                         return Ok(Some(*loc));
                     }
                 }
-                Err(Error::KeyNotFound) => return Ok(None),
-                _ => continue,
+                Err(Error::OperationPruned(_)) => {
+                    unreachable!("invalid location in snapshot: loc={loc}")
+                }
+                _ => unreachable!("non-update operation referenced by snapshot: loc={loc}"),
             }
         }
 
         Ok(None)
     }
 
-    /// Gets a [Operation] from the log at the given location.
-    async fn get_op(&self, location: u64) -> Result<Operation<K, V>, Error> {
-        let section = location / self.log_items_per_section;
-        let offset = self.locations.read(location).await?.into();
+    /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
+    /// if the location precedes the oldest retained location. The location is otherwise assumed
+    /// valid.
+    async fn get_op(&self, loc: u64) -> Result<Operation<K, V>, Error> {
+        assert!(loc < self.log_size);
+        if loc < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        let section = loc / self.log_items_per_section;
+        let offset = self.locations.read(loc).await?.into();
 
         // Get the operation from the log at the specified section and offset.
         let Some(op) = self.log.get(section, offset).await? else {
-            return Err(Error::KeyNotFound);
+            panic!("invalid location {loc}");
         };
 
         Ok(op)
     }
 
     /// Updates the snapshot with the new operation location for the given key.
-    fn update_loc(snapshot: &mut Index<T, u64>, key: &K, old_location: u64, new_location: u64) {
+    fn update_loc(snapshot: &mut Index<T, u64>, key: &K, old_loc: u64, new_loc: u64) {
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return;
         };
 
         // Iterate over conflicts in the snapshot.
-        while let Some(location) = cursor.next() {
-            if *location == old_location {
+        while let Some(loc) = cursor.next() {
+            if *loc == old_loc {
                 // Update the cursor with the new location for this key.
-                cursor.update(new_location);
+                cursor.update(new_loc);
                 return;
             }
         }
     }
 
     /// Deletes items in the snapshot that point to the given location.
-    fn delete_loc(snapshot: &mut Index<T, u64>, key: &K, old_location: u64) {
+    fn delete_loc(snapshot: &mut Index<T, u64>, key: &K, old_loc: u64) {
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return;
         };
 
         // Iterate over conflicts in the snapshot.
-        while let Some(location) = cursor.next() {
-            if *location == old_location {
+        while let Some(loc) = cursor.next() {
+            if *loc == old_loc {
                 // Delete the element from the cursor.
                 cursor.delete();
                 return;
@@ -626,10 +645,10 @@ where
     async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
-        old_location: u64,
+        old_loc: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
-        let Some(key) = op.to_key() else {
+        let Some(key) = op.key() else {
             // `op` is not a key-related operation, so it is not active.
             return Ok(None);
         };
@@ -638,17 +657,17 @@ where
             return Ok(None);
         };
 
-        let new_location = self.log_size;
+        let new_loc = self.log_size;
 
         // Iterate over all conflicting keys in the snapshot.
-        while let Some(&location) = cursor.next() {
-            if location == old_location {
+        while let Some(&loc) = cursor.next() {
+            if loc == old_loc {
                 // Update the location of the operation in the snapshot.
-                cursor.update(new_location);
+                cursor.update(new_loc);
                 drop(cursor);
 
                 self.apply_op(op).await?;
-                return Ok(Some(old_location));
+                return Ok(Some(old_loc));
             }
         }
 
@@ -831,7 +850,10 @@ mod test {
             // Persist the changes
             let metadata = Some(vec![99, 100]);
             store.commit(metadata.clone()).await.unwrap();
-            assert_eq!(store.get_metadata().await.unwrap(), metadata);
+            assert_eq!(
+                store.get_metadata().await.unwrap(),
+                Some((3, metadata.clone()))
+            );
 
             // Even though the store was pruned, the inactivity floor was raised by 2, and
             // the old operations remain in the same blob as an active operation, so they're
@@ -863,10 +885,10 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 2);
 
             // Make sure we can still get metadata.
-            assert_eq!(store.get_metadata().await.unwrap(), metadata);
+            assert_eq!(store.get_metadata().await.unwrap(), Some((3, metadata)));
 
             store.commit(None).await.unwrap();
-            assert_eq!(store.get_metadata().await.unwrap(), None);
+            assert_eq!(store.get_metadata().await.unwrap(), Some((8, None)));
 
             assert_eq!(store.log_size, 9);
             assert_eq!(store.uncommitted_ops, 0);

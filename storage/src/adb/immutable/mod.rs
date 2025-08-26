@@ -456,6 +456,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(None)
     }
 
+    /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
+    /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.op_count());
+        if loc < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        let offset = self.locations.read(loc).await?.into();
+        let section = loc / self.log_items_per_section;
+        let op = self.log.get(section, offset).await?.expect("invalid loc");
+
+        Ok(op.into_value())
+    }
+
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
@@ -600,9 +615,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.sync().await
     }
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made or if
-    /// there is no metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
@@ -612,7 +627,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(metadata)
+        Ok(Some((last_commit, metadata)))
     }
 
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
@@ -819,7 +834,10 @@ pub(super) mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 2);
-            assert_eq!(db.get_metadata().await.unwrap(), metadata.clone());
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((1, metadata.clone()))
+            );
             // Set the second key.
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
@@ -827,12 +845,12 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 3);
 
             // Make sure we can still get metadata.
-            assert_eq!(db.get_metadata().await.unwrap(), metadata);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((1, metadata)));
 
             // Commit the second key.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 4);
-            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((3, None)));
 
             // Capture state.
             let root = db.root(&mut hasher);
@@ -850,7 +868,7 @@ pub(super) mod test {
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((3, None)));
 
             // Cleanup.
             db.destroy().await.unwrap();

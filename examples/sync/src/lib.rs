@@ -5,6 +5,11 @@
 //!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+
 pub mod error;
 pub use error::Error;
 pub mod databases;
