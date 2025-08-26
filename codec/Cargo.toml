@@ -10,6 +10,10 @@ homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/codec"
 documentation = "https://docs.rs/commonware-codec"
 
+[features]
+default = ["std"]
+std = ["thiserror/std", "bytes/std"]
+
 [dependencies]
 thiserror = { workspace = true }
 bytes = { workspace = true }

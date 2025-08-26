@@ -42,13 +42,17 @@
 //!   and [usize] (must fit within a [u32] for cross-platform compatibility).
 //! - Collections: [`Vec<T>`], [`Option<T>`]
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
-//! - Networking:
-//!   [std::net::Ipv4Addr],
-//!   [std::net::Ipv6Addr],
-//!   [std::net::SocketAddrV4],
-//!   [std::net::SocketAddrV6],
-//!   [std::net::SocketAddr]
 //! - Common External Types: [::bytes::Bytes]
+//!
+//! With the `std` feature (enabled by default):
+//! - Networking:
+//!   [`std::net::Ipv4Addr`],
+//!   [`std::net::Ipv6Addr`],
+//!   [`std::net::SocketAddrV4`],
+//!   [`std::net::SocketAddrV6`],
+//!   [`std::net::SocketAddr`]
+//! - Collections: [`std::collections::HashMap`], [`std::collections::BTreeMap`],
+//!   [`std::collections::HashSet`], [`std::collections::BTreeSet`]
 //!
 //! # Implementing for Custom Types
 //!
@@ -114,7 +118,7 @@
 //!     Decode, Encode, EncodeSize, Error, FixedSize, Read, ReadExt,
 //!     ReadRangeExt, Write, RangeCfg
 //! };
-//! use std::ops::RangeInclusive; // Example RangeCfg
+//! use core::ops::RangeInclusive; // Example RangeCfg
 //!
 //! // Define a simple configuration for reading Item
 //! // Here, it just specifies the maximum allowed metadata length.
@@ -188,6 +192,10 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
 
 pub mod codec;
 pub mod config;

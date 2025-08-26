@@ -32,7 +32,7 @@
 use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
 use sealed::{SPrim, UPrim};
-use std::fmt::Debug;
+use core::fmt::Debug;
 
 // ---------- Constants ----------
 
@@ -54,7 +54,7 @@ const CONTINUATION_BIT_MASK: u8 = 0x80;
 #[doc(hidden)]
 mod sealed {
     use super::*;
-    use std::ops::{BitOrAssign, Shl, ShrAssign};
+    use core::ops::{BitOrAssign, Shl, ShrAssign};
 
     /// A trait for unsigned integer primitives that can be varint encoded.
     pub trait UPrim:
@@ -111,7 +111,7 @@ mod sealed {
         /// the unsigned integer.
         #[doc(hidden)]
         const _COMMIT_OP_ASSERT: () =
-            assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Self::UnsignedEquivalent>());
+            assert!(core::mem::size_of::<Self>() == core::mem::size_of::<Self::UnsignedEquivalent>());
 
         /// Converts the signed integer to an unsigned integer using ZigZag encoding.
         fn as_zigzag(&self) -> Self::UnsignedEquivalent;
@@ -128,7 +128,7 @@ mod sealed {
 
                 #[inline]
                 fn as_zigzag(&self) -> $utype {
-                    let shr = std::mem::size_of::<$utype>() * 8 - 1;
+                    let shr = core::mem::size_of::<$utype>() * 8 - 1;
                     ((self << 1) ^ (self >> shr)) as $utype
                 }
                 #[inline]
@@ -296,7 +296,7 @@ fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
 
 /// Calculates the number of bytes needed to encode an unsigned integer as a varint.
 fn size<T: UPrim>(value: T) -> usize {
-    let total_bits = std::mem::size_of::<T>() * 8;
+    let total_bits = core::mem::size_of::<T>() * 8;
     let leading_zeros = value.leading_zeros() as usize;
     let data_bits = total_bits - leading_zeros;
     usize::max(1, data_bits.div_ceil(DATA_BITS_PER_BYTE))

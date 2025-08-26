@@ -3,6 +3,9 @@
 //! For portability and consistency between architectures,
 //! the length of the vector must fit within a [u32].
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use crate::{EncodeSize, Error, RangeCfg, Read, Write};
 use bytes::{Buf, BufMut};
 
