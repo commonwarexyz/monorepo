@@ -54,8 +54,6 @@ where
     Ok(())
 }
 
-// ---------- HashSet ----------
-
 impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
