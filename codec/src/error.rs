@@ -1,5 +1,7 @@
 //! Error types for codec operations.
 
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
 use thiserror::Error;
 
 /// Error type for codec operations
@@ -66,12 +68,12 @@ pub enum Error {
     /// and has been wrapped into a codec [enum@Error].
     ///
     /// - The `&'static str` provides context about the operation being performed.
-    /// - The boxed [std::error::Error] is the original source error.
+    /// - The boxed error is the original source error.
     ///
     /// Allows propagating custom errors through the codec reading process.
     #[error("Wrapped Error: Context({0})")]
     Wrapped(
         &'static str,
-        #[source] Box<dyn std::error::Error + Send + Sync>,
+        #[source] Box<dyn core::error::Error + Send + Sync>,
     ),
 }
