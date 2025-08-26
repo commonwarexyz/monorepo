@@ -910,10 +910,10 @@ mod tests {
             }
 
             // Link all peers to the main peer (peers[0]) with zero latency
-            for i in 1..=NUM_PEERS {
+            for peer in peers.iter().skip(1) {
                 oracle
                     .add_link(
-                        peers[i].clone(),
+                        peer.clone(),
                         peers[0].clone(),
                         Link {
                             latency: Duration::ZERO,
@@ -926,7 +926,7 @@ mod tests {
                 oracle
                     .add_link(
                         peers[0].clone(),
-                        peers[i].clone(),
+                        peer.clone(),
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
@@ -943,18 +943,16 @@ mod tests {
 
             // Send message to all peers concurrently
             // and wait for all sends to be acknowledged
-            join_all((1..=NUM_PEERS).map(|i| {
+            join_all(peers.iter().skip(1).map(|peer| {
                 let mut sender = senders[0].clone();
-                let recipient = peers[i].clone();
+                let recipient = peer.clone();
                 let msg = Bytes::from(vec![0u8; MESSAGE_SIZE]);
-                context
-                    .with_label(&format!("send_to_{}", i))
-                    .spawn(|_| async move {
-                        sender
-                            .send(Recipients::One(recipient), msg, true)
-                            .await
-                            .unwrap()
-                    })
+                context.clone().spawn(|_| async move {
+                    sender
+                        .send(Recipients::One(recipient), msg, true)
+                        .await
+                        .unwrap()
+                })
             }))
             .await;
 
@@ -973,8 +971,8 @@ mod tests {
             );
 
             // Verify all messages are received
-            for i in 1..=NUM_PEERS {
-                let (origin, received) = receivers[i].recv().await.unwrap();
+            for receiver in receivers.iter_mut().skip(1) {
+                let (origin, received) = receiver.recv().await.unwrap();
                 assert_eq!(origin, peers[0]);
                 assert_eq!(received.len(), MESSAGE_SIZE);
             }
@@ -984,18 +982,16 @@ mod tests {
 
             // Each peer sends a message to the main peer concurrently and we wait for all
             // sends to be acknowledged
-            join_all((1..=NUM_PEERS).map(|i| {
-                let mut sender = senders[i].clone();
+            join_all(senders.iter().skip(1).map(|sender| {
+                let mut sender = sender.clone();
                 let recipient = peers[0].clone();
                 let msg = Bytes::from(vec![0; MESSAGE_SIZE]);
-                context
-                    .with_label(&format!("send_from_{}", i))
-                    .spawn(|_| async move {
-                        sender
-                            .send(Recipients::One(recipient), msg, true)
-                            .await
-                            .unwrap()
-                    })
+                context.clone().spawn(|_| async move {
+                    sender
+                        .send(Recipients::One(recipient), msg, true)
+                        .await
+                        .unwrap()
+                })
             }))
             .await;
 
@@ -1026,8 +1022,8 @@ mod tests {
 
             // Verify we received from all peers
             assert_eq!(received_from.len(), NUM_PEERS);
-            for i in 1..=NUM_PEERS {
-                assert!(received_from.contains(&peers[i]));
+            for peer in peers.iter().skip(1) {
+                assert!(received_from.contains(peer));
             }
         });
     }
@@ -1088,5 +1084,135 @@ mod tests {
                 assert_eq!(received_msg, expected_msg);
             }
         })
+    }
+
+    #[test]
+    fn test_bandwidth_pipe_reservation_duration() {
+        // Test that bandwidth pipe is only reserved for transmission duration, not latency
+        // This means new messages can start transmitting while others are still in flight
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            // Create two peers
+            let sender = PrivateKey::from_seed(1).public_key();
+            let receiver = PrivateKey::from_seed(2).public_key();
+
+            let (sender_tx, _) = oracle.register(sender.clone(), 0).await.unwrap();
+            let (_, mut receiver_rx) = oracle.register(receiver.clone(), 0).await.unwrap();
+
+            // Set bandwidth: 1000 B/s (1 byte per millisecond)
+            oracle
+                .set_bandwidth(sender.clone(), 1000, usize::MAX)
+                .await
+                .unwrap();
+            oracle
+                .set_bandwidth(receiver.clone(), usize::MAX, 1000)
+                .await
+                .unwrap();
+
+            // Add link with significant latency (1 second)
+            oracle
+                .add_link(
+                    sender.clone(),
+                    receiver.clone(),
+                    Link {
+                        latency: Duration::from_secs(1), // 1 second latency
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Send 3 messages of 500 bytes each
+            // At 1000 B/s, each message takes 500ms to transmit
+            // With 1s latency, if pipe was reserved for tx+latency, total would be:
+            //   - Msg 1: 0-1500ms (500ms tx + 1000ms latency)
+            //   - Msg 2: 1500-3000ms (starts after msg 1 fully delivered)
+            //   - Msg 3: 3000-4500ms
+            // But if pipe is only reserved during tx (correct behavior):
+            //   - Msg 1: tx 0-500ms, delivered at 1500ms
+            //   - Msg 2: tx 500-1000ms, delivered at 2000ms
+            //   - Msg 3: tx 1000-1500ms, delivered at 2500ms
+
+            let start = context.current();
+
+            // Send all messages in quick succession
+            let mut handles = Vec::new();
+            for i in 0..3 {
+                let mut sender_tx2 = sender_tx.clone();
+                let receiver = receiver.clone();
+                let msg = Bytes::from(vec![i; 500]);
+                let handle = context.clone().spawn(|_| async move {
+                    sender_tx2
+                        .send(Recipients::One(receiver), msg, false)
+                        .await
+                        .unwrap();
+                });
+                handles.push(handle);
+
+                // Small delay between spawns to ensure ordering
+                context.sleep(Duration::from_nanos(1)).await;
+            }
+
+            // Wait for all sends to complete and record their completion times
+            let mut send_times = Vec::new();
+            for handle in handles {
+                handle.await.unwrap();
+                let time = context.current().duration_since(start).unwrap();
+                send_times.push(time);
+            }
+
+            // Verify that sends completed (were acknowledged) once transmission finished,
+            // not after delivery. The sends should complete at ~500ms, ~1000ms, ~1500ms
+            for (i, time) in send_times.iter().enumerate() {
+                // Each message takes 500ms to transmit, and they queue sequentially
+                let expected_min = i as u64 * 500;
+                let expected_max = expected_min + 600;
+
+                assert!(
+                    *time >= Duration::from_millis(expected_min)
+                        && *time <= Duration::from_millis(expected_max),
+                    "Send {} should be acknowledged at ~{}ms-{}ms, got {:?}",
+                    i + 1,
+                    expected_min,
+                    expected_max,
+                    time
+                );
+            }
+
+            // Wait for all receives to complete and record their completion times
+            let mut receive_times = Vec::new();
+            for i in 0..3 {
+                let (_, received) = receiver_rx.recv().await.unwrap();
+                receive_times.push(context.current().duration_since(start).unwrap());
+                assert_eq!(received[0], i);
+            }
+
+            // Messages should be received at:
+            // - Msg 1: ~1500ms (500ms transmission + 1000ms latency)
+            // - Msg 2: ~2000ms (500ms wait + 500ms transmission + 1000ms latency)
+            // - Msg 3: ~2500ms (1000ms wait + 500ms transmission + 1000ms latency)
+            for (i, time) in receive_times.iter().enumerate() {
+                let expected_min = (i as u64 * 500) + 1500;
+                let expected_max = expected_min + 100;
+
+                assert!(
+                    *time >= Duration::from_millis(expected_min)
+                        && *time < Duration::from_millis(expected_max),
+                    "Message {} should arrive at ~{}ms, got {:?}",
+                    i + 1,
+                    expected_min,
+                    time
+                );
+            }
+        });
     }
 }
