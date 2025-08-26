@@ -115,6 +115,7 @@ mod tests {
 
     #[test]
     fn test_process_metrics_init() {
+        // loop until it passes to handle parallel test interference
         while std::panic::catch_unwind(process_metrics_init).is_err() {}
     }
 }
