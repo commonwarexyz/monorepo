@@ -1361,6 +1361,20 @@ mod tests {
         });
     }
 
+    fn test_spawn_child_after_spawn_ref<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|mut context| async move {
+            let handle = context.spawn_ref();
+            let result = handle(async move { 42 }).await;
+            assert!(matches!(result, Ok(42)));
+
+            // this should panic
+            context.spawn_child(|_| async move { 43 });
+        });
+    }
+
     fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -1641,6 +1655,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "already spawned")]
+    fn test_deterministic_spawn_child_after_spawn_ref() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_after_spawn_ref(runner);
+    }
+
+    #[test]
     fn test_deterministic_spawn_blocking() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
@@ -1857,6 +1878,13 @@ mod tests {
     fn test_tokio_spawn_child_cascading_abort() {
         let runner = tokio::Runner::default();
         test_spawn_child_cascading_abort(runner);
+    }
+
+    #[test]
+    #[should_panic(expected = "already spawned")]
+    fn test_tokio_spawn_child_after_spawn_ref() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_after_spawn_ref(runner);
     }
 
     #[test]
