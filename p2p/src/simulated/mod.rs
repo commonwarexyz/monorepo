@@ -136,10 +136,10 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use futures::{channel::mpsc, future::join_all, SinkExt, StreamExt};
     use rand::Rng;
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::{BTreeMap, HashMap, HashSet},
         time::Duration,
     };
 
@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn test_bandwidth_contention() {
-        // Test that multiple senders to the same receiver cause queueing delays
+        // Test bandwidth contention with many peers (one-to-many and many-to-one scenarios)
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
@@ -882,102 +882,153 @@ mod tests {
             );
             network.start();
 
-            // Create three agents
-            let sender1 = PrivateKey::from_seed(1).public_key();
-            let sender2 = PrivateKey::from_seed(2).public_key();
-            let receiver = PrivateKey::from_seed(3).public_key();
+            // Configuration
+            const NUM_PEERS: usize = 100;
+            const MESSAGE_SIZE: usize = 1000; // 1KB per message
+            const EFFECTIVE_BPS: usize = 10_000; // 10KB/s egress/ingress per peer
 
-            let (mut sender1_tx, _) = oracle.register(sender1.clone(), 0).await.unwrap();
-            let (mut sender2_tx, _) = oracle.register(sender2.clone(), 0).await.unwrap();
-            let (_, mut receiver_rx) = oracle.register(receiver.clone(), 0).await.unwrap();
+            // Create peers
+            let mut peers = Vec::with_capacity(NUM_PEERS + 1);
+            let mut senders = Vec::with_capacity(NUM_PEERS + 1);
+            let mut receivers = Vec::with_capacity(NUM_PEERS + 1);
 
-            // Set bandwidth limits:
-            // senders with high egress (2000 B/s each),
-            // receiver with limited ingress (1000 B/s)
-            oracle
-                .set_bandwidth(sender1.clone(), 2000, usize::MAX)
-                .await
-                .unwrap();
-            oracle
-                .set_bandwidth(sender2.clone(), 2000, usize::MAX)
-                .await
-                .unwrap();
-            oracle
-                .set_bandwidth(receiver.clone(), usize::MAX, 1000)
-                .await
-                .unwrap();
+            // Create the main peer (index 0) and 100 other peers
+            for i in 0..=NUM_PEERS {
+                let pk = PrivateKey::from_seed(i as u64).public_key();
+                let (sender, receiver) = oracle.register(pk.clone(), 0).await.unwrap();
+                peers.push(pk);
+                senders.push(sender);
+                receivers.push(receiver);
+            }
 
-            // Link both senders to the receiver with no latency
-            oracle
-                .add_link(
-                    sender1.clone(),
-                    receiver.clone(),
-                    Link {
-                        latency: Duration::ZERO,
-                        jitter: Duration::ZERO,
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
-            oracle
-                .add_link(
-                    sender2.clone(),
-                    receiver.clone(),
-                    Link {
-                        latency: Duration::ZERO,
-                        jitter: Duration::ZERO,
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
-
-            // Both senders send 500-byte messages simultaneously
-            let msg1 = Bytes::from(vec![1u8; 500]);
-            let msg2 = Bytes::from(vec![1u8; 500]);
-            let receiver2 = receiver.clone();
-
-            // Spawn both sends concurrently
-            context.with_label("send1").spawn(|_| async move {
-                sender1_tx
-                    .send(Recipients::One(receiver), msg1, true)
+            // Set bandwidth limits for all peers
+            for pk in &peers {
+                oracle
+                    .set_bandwidth(pk.clone(), EFFECTIVE_BPS, EFFECTIVE_BPS)
                     .await
-                    .unwrap()
-            });
+                    .unwrap();
+            }
 
-            context.with_label("send2").spawn(|_| async move {
-                sender2_tx
-                    .send(Recipients::One(receiver2), msg2, true)
+            // Link all peers to the main peer (peers[0]) with zero latency
+            for i in 1..=NUM_PEERS {
+                oracle
+                    .add_link(
+                        peers[i].clone(),
+                        peers[0].clone(),
+                        Link {
+                            latency: Duration::ZERO,
+                            jitter: Duration::ZERO,
+                            success_rate: 1.0,
+                        },
+                    )
                     .await
-                    .unwrap()
-            });
+                    .unwrap();
+                oracle
+                    .add_link(
+                        peers[0].clone(),
+                        peers[i].clone(),
+                        Link {
+                            latency: Duration::ZERO,
+                            jitter: Duration::ZERO,
+                            success_rate: 1.0,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
 
-            // Start timing after dispatching sends
+            // One-to-many (main peer sends to all others). Verifies that bandwidth limits
+            // are properly enforced when sending to multiple recipients
             let start = context.current();
 
-            // Receive first message
-            let (origin1, _) = receiver_rx.recv().await.unwrap();
-            let time1 = context.current().duration_since(start).unwrap();
+            // Send message to all peers concurrently
+            // and wait for all sends to be acknowledged
+            join_all((1..=NUM_PEERS).map(|i| {
+                let mut sender = senders[0].clone();
+                let recipient = peers[i].clone();
+                let msg = Bytes::from(vec![0u8; MESSAGE_SIZE]);
+                context
+                    .with_label(&format!("send_to_{}", i))
+                    .spawn(|_| async move {
+                        sender
+                            .send(Recipients::One(recipient), msg, true)
+                            .await
+                            .unwrap()
+                    })
+            }))
+            .await;
 
-            // Receive second message
-            let (origin2, _) = receiver_rx.recv().await.unwrap();
-            let time2 = context.current().duration_since(start).unwrap();
+            let elapsed = context.current().duration_since(start).unwrap();
 
-            // Verify both messages arrived from different senders
-            assert_ne!(origin1, origin2, "Messages must be from different senders");
+            // Calculate expected time
+            let expected_ms = (NUM_PEERS * MESSAGE_SIZE * 1000) / EFFECTIVE_BPS;
 
-            // With bandwidth contention at the receiver (1000 B/s):
-            // - First 500-byte message should take ~500ms
-            // - Second 500-byte message should be delayed and arrive ~500ms later
             assert!(
-                time1 >= Duration::from_millis(500),
-                "First message arrived too quickly: {time1:?} (expected >= 500ms)"
+                elapsed >= Duration::from_millis(expected_ms as u64),
+                "One-to-many completed too quickly: {elapsed:?} (expected >= {expected_ms}ms)"
             );
             assert!(
-                time2 >= Duration::from_millis(1000),
-                "Second message arrived too quickly: {time2:?} (expected >= 1000ms)"
+                elapsed < Duration::from_millis((expected_ms as u64) + 500),
+                "One-to-many took too long: {elapsed:?} (expected ~{expected_ms}ms)"
             );
+
+            // Verify all messages are received
+            for i in 1..=NUM_PEERS {
+                let (origin, received) = receivers[i].recv().await.unwrap();
+                assert_eq!(origin, peers[0]);
+                assert_eq!(received.len(), MESSAGE_SIZE);
+            }
+
+            // Many-to-one (all peers send to the main peer)
+            let start = context.current();
+
+            // Each peer sends a message to the main peer concurrently and we wait for all
+            // sends to be acknowledged
+            join_all((1..=NUM_PEERS).map(|i| {
+                let mut sender = senders[i].clone();
+                let recipient = peers[0].clone();
+                let msg = Bytes::from(vec![0; MESSAGE_SIZE]);
+                context
+                    .with_label(&format!("send_from_{}", i))
+                    .spawn(|_| async move {
+                        sender
+                            .send(Recipients::One(recipient), msg, true)
+                            .await
+                            .unwrap()
+                    })
+            }))
+            .await;
+
+            // Collect all messages at the main peer
+            let mut received_from = HashSet::new();
+            for _ in 1..=NUM_PEERS {
+                let (origin, received) = receivers[0].recv().await.unwrap();
+                assert_eq!(received.len(), MESSAGE_SIZE);
+                assert!(
+                    received_from.insert(origin.clone()),
+                    "Received duplicate from {origin:?}"
+                );
+            }
+
+            let elapsed = context.current().duration_since(start).unwrap();
+
+            // Calculate expected time
+            let expected_ms = (NUM_PEERS * MESSAGE_SIZE * 1000) / EFFECTIVE_BPS;
+
+            assert!(
+                elapsed >= Duration::from_millis(expected_ms as u64),
+                "Many-to-one completed too quickly: {elapsed:?} (expected >= {expected_ms}ms)"
+            );
+            assert!(
+                elapsed < Duration::from_millis((expected_ms as u64) + 500),
+                "Many-to-one took too long: {elapsed:?} (expected ~{expected_ms}ms)"
+            );
+
+            // Verify we received from all peers
+            assert_eq!(received_from.len(), NUM_PEERS);
+            for i in 1..=NUM_PEERS {
+                assert!(received_from.contains(&peers[i]));
+            }
         });
     }
 
