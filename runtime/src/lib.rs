@@ -154,10 +154,10 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// # Context cloning and children
     ///
     /// When a context is cloned (via `Clone::clone`) or a new context is created (via methods
-    /// like `with_label`), the new context receives an empty children list. This means:
-    /// - Child tasks spawned from the cloned/new context will be tracked independently
-    /// - They will NOT be aborted when the original context's task completes
-    /// - Each context represents a new, independent scope for child task management
+    /// like `with_label`), you get another reference to the same context. However:
+    /// - Tasks spawned with `spawn` from any context (original or cloned) are always independent
+    /// - Only tasks spawned with `spawn_child` become children of the current task
+    /// - Child tasks are tied to the task that spawned them, not to the context itself
     ///
     /// # Note
     ///

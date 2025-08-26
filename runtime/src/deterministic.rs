@@ -775,7 +775,7 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Create child context with its own empty children list
+        // Create child context
         let child_context = self.clone();
 
         // Spawn the child
