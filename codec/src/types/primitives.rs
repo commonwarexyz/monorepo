@@ -180,6 +180,7 @@ mod tests {
     use crate::{Decode, DecodeExt, Encode, EncodeFixed};
     use bytes::{Bytes, BytesMut};
     use paste::paste;
+    use core::mem;
 
     // Float tests
     macro_rules! impl_num_test {
@@ -187,7 +188,7 @@ mod tests {
             paste! {
                 #[test]
                 fn [<test_ $type>]() {
-                    let expected_len = std::mem::size_of::<$type>();
+                    let expected_len = mem::size_of::<$type>();
                     let values: [$type; 5] =
                         [0 as $type, 1 as $type, 42 as $type, <$type>::MAX, <$type>::MIN];
                     for value in values.iter() {

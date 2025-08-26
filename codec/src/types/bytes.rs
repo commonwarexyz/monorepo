@@ -37,6 +37,8 @@ mod tests {
     use super::*;
     use crate::{Decode, Encode};
     use bytes::Bytes;
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
 
     #[test]
     fn test_bytes() {
