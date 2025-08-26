@@ -1361,6 +1361,162 @@ mod tests {
         });
     }
 
+    fn test_child_survives_sibling_completion<R: Runner>(runner: R, use_spawn_ref: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let (child_started_tx, child_started_rx) = oneshot::channel();
+            let (child_complete_tx, child_complete_rx) = oneshot::channel();
+            let (sibling_started_tx, sibling_started_rx) = oneshot::channel();
+            let (sibling_complete_tx, sibling_complete_rx) = oneshot::channel();
+            let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
+
+            let parent = context.spawn(move |mut context| async move {
+                // Spawn a child task
+                context.spawn_child(|_| async move {
+                    child_started_tx.send(()).unwrap();
+                    // Wait for signal to complete
+                    child_complete_rx.await.unwrap();
+                });
+
+                // Spawn an independent sibling task using spawn or spawn_ref based on parameter
+                let sibling_task = async move {
+                    sibling_started_tx.send(()).unwrap();
+                    // Wait for signal to complete
+                    sibling_complete_rx.await.unwrap();
+                };
+
+                if use_spawn_ref {
+                    context.spawn_ref()(sibling_task);
+                } else {
+                    context.spawn(|_| sibling_task);
+                }
+
+                // Wait for signal to complete
+                parent_complete_rx.await.unwrap();
+            });
+
+            // Wait for both to start
+            child_started_rx.await.unwrap();
+            sibling_started_rx.await.unwrap();
+
+            // Kill the sibling
+            sibling_complete_tx.send(()).unwrap();
+
+            // The child task should still be alive
+            child_complete_tx.send(()).unwrap();
+
+            // As well as the parent
+            parent_complete_tx.send(()).unwrap();
+
+            assert!(parent.await.is_ok());
+        });
+    }
+
+    fn test_spawn_child_after_spawn<R: Runner>(runner: R, use_spawn_ref: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let (sibling_started_tx, sibling_started_rx) = oneshot::channel();
+            let (sibling_complete_tx, sibling_complete_rx) = oneshot::channel();
+            let (child_started_tx, child_started_rx) = oneshot::channel();
+            let (child_complete_tx, child_complete_rx) = oneshot::channel();
+            let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
+
+            let parent = context.spawn(move |mut context| async move {
+                // First spawn an independent sibling task
+                let sibling_task = async move {
+                    sibling_started_tx.send(()).unwrap();
+                    // Wait for signal to complete
+                    sibling_complete_rx.await.unwrap();
+                };
+
+                if use_spawn_ref {
+                    context.spawn_ref()(sibling_task);
+                } else {
+                    // Clone context since spawn consumes it
+                    context.clone().spawn(|_| sibling_task);
+                }
+
+                // Then spawn a child task after the sibling
+                context.spawn_child(|_| async move {
+                    child_started_tx.send(()).unwrap();
+                    // Wait for signal to complete
+                    child_complete_rx.await.unwrap();
+                });
+
+                // Wait for signal to complete
+                parent_complete_rx.await.unwrap();
+            });
+
+            // Wait for both to start
+            sibling_started_rx.await.unwrap();
+            child_started_rx.await.unwrap();
+
+            // Complete sibling first
+            sibling_complete_tx.send(()).unwrap();
+
+            // Then complete child
+            child_complete_tx.send(()).unwrap();
+
+            // Finally complete parent
+            parent_complete_tx.send(()).unwrap();
+
+            assert!(parent.await.is_ok());
+        });
+    }
+
+    fn test_clone_context_no_child_inheritance<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let (child_started_tx, child_started_rx) = oneshot::channel();
+            let (child_complete_tx, child_complete_rx) = oneshot::channel();
+            let (cloned_task_started_tx, cloned_task_started_rx) = oneshot::channel();
+            let (cloned_task_complete_tx, cloned_task_complete_rx) = oneshot::channel();
+            let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
+
+            // Parent task that spawns a child using a cloned context
+            let cloned_context = context.clone();
+            let parent = cloned_context.spawn(move |context| async move {
+                // Spawn a child task
+                context.spawn_child(|_| async move {
+                    child_started_tx.send(()).unwrap();
+                    child_complete_rx.await.unwrap();
+                });
+
+                // Wait for parent to complete
+                parent_complete_rx.await.unwrap();
+            });
+
+            // Use the original context that was previously cloned and spawn a
+            // task. This task should NOT inherit the child relationship
+            context.spawn(move |_| async move {
+                cloned_task_started_tx.send(()).unwrap();
+                cloned_task_complete_rx.await.unwrap();
+            });
+
+            // Wait for both tasks to start
+            child_started_rx.await.unwrap();
+            cloned_task_started_rx.await.unwrap();
+
+            // Complete the cloned task, this should NOT affect the child in the
+            // other context
+            cloned_task_complete_tx.send(()).unwrap();
+
+            // The child should still be alive
+            child_complete_tx.send(()).unwrap();
+
+            // As well as the parent
+            parent_complete_tx.send(()).unwrap();
+
+            assert!(parent.await.is_ok());
+        });
+    }
+
     fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -1641,6 +1797,28 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_child_survives_sibling_completion() {
+        for use_spawn_ref in [false, true] {
+            let runner = deterministic::Runner::default();
+            test_child_survives_sibling_completion(runner, use_spawn_ref);
+        }
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_after_spawn() {
+        for use_spawn_ref in [false, true] {
+            let runner = deterministic::Runner::default();
+            test_spawn_child_after_spawn(runner, use_spawn_ref);
+        }
+    }
+
+    #[test]
+    fn test_deterministic_clone_context_no_child_inheritance() {
+        let runner = deterministic::Runner::default();
+        test_clone_context_no_child_inheritance(runner);
+    }
+
+    #[test]
     fn test_deterministic_spawn_blocking() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
@@ -1857,6 +2035,28 @@ mod tests {
     fn test_tokio_spawn_child_cascading_abort() {
         let runner = tokio::Runner::default();
         test_spawn_child_cascading_abort(runner);
+    }
+
+    #[test]
+    fn test_tokio_child_survives_sibling_completion() {
+        for use_spawn_ref in [false, true] {
+            let runner = tokio::Runner::default();
+            test_child_survives_sibling_completion(runner, use_spawn_ref);
+        }
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_after_spawn() {
+        for use_spawn_ref in [false, true] {
+            let runner = tokio::Runner::default();
+            test_spawn_child_after_spawn(runner, use_spawn_ref);
+        }
+    }
+
+    #[test]
+    fn test_tokio_clone_context_no_child_inheritance() {
+        let runner = tokio::Runner::default();
+        test_clone_context_no_child_inheritance(runner);
     }
 
     #[test]
