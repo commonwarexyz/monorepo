@@ -1,4 +1,4 @@
-//! Codec implementations for various map types.
+//! Codec implementations for HashMap (requires std).
 //!
 //! For portability and consistency between architectures,
 //! the size of the map must fit within a [u32].
@@ -9,13 +9,8 @@ use crate::{
     RangeCfg,
 };
 use bytes::{Buf, BufMut};
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, HashMap},
-    hash::Hash,
-};
+use std::{cmp::Ordering, collections::HashMap, hash::Hash};
 
-const BTREEMAP_TYPE: &str = "BTreeMap";
 const HASHMAP_TYPE: &str = "HashMap";
 
 /// Read keyed items from [Buf] in ascending order.
@@ -62,56 +57,6 @@ where
     }
 
     Ok(())
-}
-
-// ---------- BTreeMap ----------
-
-impl<K: Ord + Hash + Eq + Write, V: Write> Write for BTreeMap<K, V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.len().write(buf);
-
-        // Keys are already sorted in BTreeMap, so we can iterate directly
-        for (k, v) in self {
-            k.write(buf);
-            v.write(buf);
-        }
-    }
-}
-
-impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
-    fn encode_size(&self) -> usize {
-        // Start with the size of the length prefix
-        let mut size = self.len().encode_size();
-
-        // Add the encoded size of each key and value
-        for (k, v) in self {
-            size += k.encode_size();
-            size += v.encode_size();
-        }
-        size
-    }
-}
-
-impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for BTreeMap<K, V> {
-    type Cfg = (RangeCfg, (K::Cfg, V::Cfg));
-
-    fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
-        // Read and validate the length prefix
-        let len = usize::read_cfg(buf, range)?;
-        let mut map = BTreeMap::new();
-
-        // Read items in ascending order
-        read_ordered_map(
-            buf,
-            len,
-            k_cfg,
-            v_cfg,
-            |k, v| map.insert(k, v),
-            BTREEMAP_TYPE,
-        )?;
-
-        Ok(map)
-    }
 }
 
 // ---------- HashMap ----------
@@ -175,29 +120,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use std::fmt::Debug;
 
-    // Manual round trip test function for BTreeMap with non-default configs
-    fn round_trip_btree<K, V, KCfg, VCfg>(
-        map: &BTreeMap<K, V>,
-        range_cfg: RangeCfg,
-        k_cfg: KCfg,
-        v_cfg: VCfg,
-    ) where
-        K: Write + EncodeSize + Read<Cfg = KCfg> + Clone + Ord + Hash + Eq + PartialEq + Debug,
-        V: Write + EncodeSize + Read<Cfg = VCfg> + Clone + PartialEq + Debug,
-        BTreeMap<K, V>: Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
-            + Decode<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
-            + PartialEq
-            + Write
-            + EncodeSize,
-    {
-        let encoded = map.encode();
-        assert_eq!(encoded.len(), map.encode_size());
-        let config_tuple = (range_cfg, (k_cfg, v_cfg));
-        let decoded = BTreeMap::<K, V>::decode_cfg(encoded, &config_tuple)
-            .expect("decode_cfg failed for BTreeMap");
-        assert_eq!(map, &decoded);
-    }
-
+    // Manual round trip test function for HashMap with non-default configs
     fn round_trip_hash<K, V, KCfg, VCfg>(
         map: &HashMap<K, V>,
         range_cfg: RangeCfg,
@@ -220,311 +143,6 @@ mod tests {
         assert_eq!(map, &decoded);
     }
 
-    // Manual round trip test function for non-default configs
-    fn round_trip<K, V>(map: &HashMap<K, V>, range_cfg: RangeCfg, k_cfg: K::Cfg, v_cfg: V::Cfg)
-    where
-        K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + PartialEq + Debug,
-        V: Write + EncodeSize + Read + Clone + PartialEq + Debug,
-        HashMap<K, V>: Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))> + PartialEq + Write + EncodeSize,
-    {
-        let encoded = map.encode();
-        let config_tuple = (range_cfg, (k_cfg, v_cfg));
-        let decoded = HashMap::<K, V>::decode_cfg(encoded, &config_tuple)
-            .expect("decode_cfg failed for HashMap");
-        assert_eq!(map, &decoded);
-    }
-
-    // --- BTreeMap Tests ---
-
-    #[test]
-    fn test_empty_btreemap() {
-        let map = BTreeMap::<u32, u64>::new();
-        round_trip_btree(&map, (..).into(), (), ());
-        assert_eq!(map.encode_size(), 1); // varint 0
-        let encoded = map.encode();
-        assert_eq!(encoded, Bytes::from_static(&[0]));
-    }
-
-    #[test]
-    fn test_simple_btreemap_u32_u64() {
-        let mut map = BTreeMap::new();
-        map.insert(1u32, 100u64);
-        map.insert(5u32, 500u64);
-        map.insert(2u32, 200u64);
-        round_trip_btree(&map, (..).into(), (), ());
-        assert_eq!(map.encode_size(), 1 + 3 * (u32::SIZE + u64::SIZE));
-        // Check encoding order (BTreeMap guarantees sorted keys: 1, 2, 5)
-        let mut expected = BytesMut::new();
-        3usize.write(&mut expected); // Map length = 3
-        1u32.write(&mut expected);
-        100u64.write(&mut expected);
-        2u32.write(&mut expected);
-        200u64.write(&mut expected);
-        5u32.write(&mut expected);
-        500u64.write(&mut expected);
-        assert_eq!(map.encode(), expected.freeze());
-    }
-
-    #[test]
-    fn test_large_btreemap() {
-        // Fixed-size items
-        let mut map = BTreeMap::new();
-        for i in 0..1000 {
-            map.insert(i as u16, i as u64 * 2);
-        }
-        round_trip_btree(&map, (0..=1000).into(), (), ());
-
-        // Variable-size items
-        let mut map = BTreeMap::new();
-        for i in 0..1000usize {
-            map.insert(i, 1000usize + i);
-        }
-        round_trip_btree(
-            &map,
-            (0..=1000).into(),
-            (..=1000).into(),
-            (1000..=2000).into(),
-        );
-    }
-
-    #[test]
-    fn test_btreemap_with_variable_values() {
-        let mut map = BTreeMap::new();
-        map.insert(Bytes::from_static(b"apple"), vec![1, 2]);
-        map.insert(Bytes::from_static(b"banana"), vec![3, 4, 5]);
-        map.insert(Bytes::from_static(b"cherry"), vec![]);
-
-        let map_range = 0..=10;
-        let key_range = ..=10;
-        let val_range = 0..=100;
-
-        round_trip_btree(
-            &map,
-            map_range.into(),
-            key_range.into(),
-            (val_range.into(), ()),
-        );
-    }
-
-    #[test]
-    fn test_btreemap_decode_length_limit_exceeded() {
-        let mut map = BTreeMap::new();
-        map.insert(1u32, 100u64);
-        map.insert(5u32, 500u64);
-
-        let encoded = map.encode();
-        let config_tuple = ((0..=1).into(), ((), ()));
-
-        let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
-        assert!(matches!(result, Err(Error::InvalidLength(2))));
-    }
-
-    #[test]
-    fn test_btreemap_decode_value_length_limit_exceeded() {
-        let mut map = BTreeMap::new();
-        map.insert(Bytes::from_static(b"key1"), vec![1, 2, 3, 4, 5]);
-
-        let key_range = ..=10;
-        let map_range = 0..=10;
-        let restrictive_val_range = 0..=3;
-
-        let encoded = map.encode();
-        let config_tuple = (
-            map_range.into(),
-            (key_range.into(), (restrictive_val_range.into(), ())),
-        );
-        let result = BTreeMap::<Bytes, Vec<u8>>::decode_cfg(encoded, &config_tuple);
-
-        assert!(matches!(result, Err(Error::InvalidLength(5))));
-    }
-
-    #[test]
-    fn test_btreemap_decode_invalid_key_order() {
-        let mut encoded = BytesMut::new();
-        2usize.write(&mut encoded); // Map length = 2
-        5u32.write(&mut encoded); // Key 5
-        500u64.write(&mut encoded); // Value 500
-        2u32.write(&mut encoded); // Key 2 (out of order)
-        200u64.write(&mut encoded); // Value 200
-
-        let range = (..).into();
-        let config_tuple = (range, ((), ()));
-
-        let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
-        // Note: Error message uses HashMap currently, should ideally be BTreeMap
-        assert!(matches!(
-            result,
-            Err(Error::Invalid("BTreeMap", "Keys must ascend"))
-        ));
-    }
-
-    #[test]
-    fn test_btreemap_decode_duplicate_key() {
-        let mut encoded = BytesMut::new();
-        2usize.write(&mut encoded); // Map length = 2
-        1u32.write(&mut encoded); // Key 1
-        100u64.write(&mut encoded); // Value 100
-        1u32.write(&mut encoded); // Duplicate Key 1
-        200u64.write(&mut encoded); // Value 200
-
-        let range = (..).into();
-        let config_tuple = (range, ((), ()));
-
-        let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
-        // Note: Error message uses HashMap currently, should ideally be BTreeMap
-        assert!(matches!(
-            result,
-            Err(Error::Invalid("BTreeMap", "Duplicate key"))
-        ));
-    }
-
-    #[test]
-    fn test_btreemap_decode_end_of_buffer_key() {
-        let mut map = BTreeMap::new();
-        map.insert(1u32, 100u64);
-        map.insert(5u32, 500u64);
-
-        let mut encoded = map.encode();
-        encoded.truncate(map.encode_size() - 10); // Truncate during last key/value pair (key 5)
-
-        let range = (..).into();
-        let config_tuple = (range, ((), ()));
-        let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
-        assert!(matches!(result, Err(Error::EndOfBuffer)));
-    }
-
-    #[test]
-    fn test_btreemap_decode_end_of_buffer_value() {
-        let mut map = BTreeMap::new();
-        map.insert(1u32, 100u64);
-        map.insert(5u32, 500u64);
-
-        let mut encoded = map.encode();
-        encoded.truncate(map.encode_size() - 4); // Truncate during last value (for key 5)
-
-        let range = (..).into();
-        let config_tuple = (range, ((), ()));
-        let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
-        assert!(matches!(result, Err(Error::EndOfBuffer)));
-    }
-
-    #[test]
-    fn test_btreemap_decode_extra_data() {
-        let mut map = BTreeMap::new();
-        map.insert(1u32, 100u64);
-
-        let mut encoded = map.encode();
-        encoded.put_u8(0xFF); // Add extra byte
-
-        // Use decode_cfg which enforces buffer is fully consumed
-        let config_tuple = ((..).into(), ((), ()));
-        let result = BTreeMap::<u32, u64>::decode_cfg(encoded.clone(), &config_tuple);
-        assert!(matches!(result, Err(Error::ExtraData(1))));
-
-        // Verify that read_cfg would succeed (doesn't check for extra data)
-        let read_result = BTreeMap::<u32, u64>::read_cfg(&mut encoded.clone(), &config_tuple);
-        assert!(read_result.is_ok());
-        let decoded_map = read_result.unwrap();
-        assert_eq!(decoded_map.len(), 1);
-        assert_eq!(decoded_map.get(&1u32), Some(&100u64));
-    }
-
-    #[test]
-    fn test_btreemap_deterministic_encoding() {
-        // In-order
-        let mut map2 = BTreeMap::new();
-        (0..=1000u32).for_each(|i| {
-            map2.insert(i, i * 2);
-        });
-
-        // Reverse order
-        let mut map1 = BTreeMap::new();
-        (0..=1000u32).rev().for_each(|i| {
-            map1.insert(i, i * 2);
-        });
-
-        assert_eq!(map1.encode(), map2.encode());
-    }
-
-    #[test]
-    fn test_btreemap_conformity() {
-        // Case 1: Empty BTreeMap<u8, u16>
-        let map1 = BTreeMap::<u8, u16>::new();
-        let mut expected1 = BytesMut::new();
-        0usize.write(&mut expected1); // Length 0
-        assert_eq!(map1.encode(), expected1.freeze());
-        assert_eq!(map1.encode_size(), 1);
-
-        // Case 2: Simple BTreeMap<u8, u16>
-        // BTreeMap will store and encode keys in sorted order: 1, 2
-        let mut map2 = BTreeMap::<u8, u16>::new();
-        map2.insert(2u8, 0xBBBBu16); // Inserted out of order
-        map2.insert(1u8, 0xAAAAu16);
-
-        let mut expected2 = BytesMut::new();
-        2usize.write(&mut expected2); // Length 2
-        1u8.write(&mut expected2); // Key 1
-        0xAAAAu16.write(&mut expected2); // Value for key 1
-        2u8.write(&mut expected2); // Key 2
-        0xBBBBu16.write(&mut expected2); // Value for key 2
-        assert_eq!(map2.encode(), expected2.freeze());
-        // Expected size: 1 (len) + (1 (u8) + 2 (u16)) * 2 entries = 1 + 3*2 = 7
-        assert_eq!(map2.encode_size(), 1 + (u8::SIZE + u16::SIZE) * 2);
-
-        // Case 3: BTreeMap<u16, bool>
-        // BTreeMap will store and encode keys in sorted order: 0x0101, 0x0202, 0x0303
-        let mut map3 = BTreeMap::<u16, bool>::new();
-        map3.insert(0x0303u16, true);
-        map3.insert(0x0101u16, false);
-        map3.insert(0x0202u16, true);
-
-        let mut expected3 = BytesMut::new();
-        3usize.write(&mut expected3); // Length 3
-        0x0101u16.write(&mut expected3); // Key 0x0101
-        false.write(&mut expected3); // Value false (0x00)
-        0x0202u16.write(&mut expected3); // Key 0x0202
-        true.write(&mut expected3); // Value true (0x01)
-        0x0303u16.write(&mut expected3); // Key 0x0303
-        true.write(&mut expected3); // Value true (0x01)
-        assert_eq!(map3.encode(), expected3.freeze());
-        // Expected size: 1 (len) + (2 (u16) + 1 (bool)) * 3 entries = 1 + 3*3 = 10
-        assert_eq!(map3.encode_size(), 1 + (u16::SIZE + bool::SIZE) * 3);
-
-        // Case 4: BTreeMap with Bytes as key and Vec<u8> as value
-        // BTreeMap sorts keys: "a", "b"
-        let mut map4 = BTreeMap::<Bytes, Vec<u8>>::new();
-        map4.insert(Bytes::from_static(b"b"), vec![20u8, 21u8]);
-        map4.insert(Bytes::from_static(b"a"), vec![10u8]);
-
-        let mut expected4 = BytesMut::new();
-        2usize.write(&mut expected4); // Map length = 2
-
-        // Key "a" (length 1, 'a')
-        Bytes::from_static(b"a").write(&mut expected4);
-        // Value vec![10u8] (length 1, 10u8)
-        vec![10u8].write(&mut expected4);
-
-        // Key "b" (length 1, 'b')
-        Bytes::from_static(b"b").write(&mut expected4);
-        // Value vec![20u8, 21u8] (length 2, 20u8, 21u8)
-        vec![20u8, 21u8].write(&mut expected4);
-
-        assert_eq!(map4.encode(), expected4.freeze());
-        // Expected size:
-        // map_len_size = 1
-        // key_a_size = 1 (len) + 1 (char) = 2
-        // val_a_size = 1 (len) + 1 (byte) = 2
-        // key_b_size = 1 (len) + 1 (char) = 2
-        // val_b_size = 1 (len) + 2 (bytes) = 3
-        // total = 1 + 2 + 2 + 2 + 3 = 10
-        let expected_size = 1usize.encode_size()
-            + Bytes::from_static(b"a").encode_size()
-            + vec![10u8].encode_size()
-            + Bytes::from_static(b"b").encode_size()
-            + vec![20u8, 21u8].encode_size();
-        assert_eq!(map4.encode_size(), expected_size);
-    }
-
     // --- HashMap Tests ---
 
     #[test]
@@ -542,7 +160,7 @@ mod tests {
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
         map.insert(2u32, 200u64);
-        round_trip(&map, (..).into(), (), ());
+        round_trip_hash(&map, (..).into(), (), ());
         assert_eq!(map.encode_size(), 1 + 3 * (u32::SIZE + u64::SIZE));
     }
 

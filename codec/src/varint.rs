@@ -31,8 +31,8 @@
 
 use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
-use sealed::{SPrim, UPrim};
 use core::fmt::Debug;
+use sealed::{SPrim, UPrim};
 
 // ---------- Constants ----------
 
@@ -110,8 +110,9 @@ mod sealed {
         /// Compile-time assertion to ensure that the size of the signed integer is equal to the size of
         /// the unsigned integer.
         #[doc(hidden)]
-        const _COMMIT_OP_ASSERT: () =
-            assert!(core::mem::size_of::<Self>() == core::mem::size_of::<Self::UnsignedEquivalent>());
+        const _COMMIT_OP_ASSERT: () = assert!(
+            core::mem::size_of::<Self>() == core::mem::size_of::<Self::UnsignedEquivalent>()
+        );
 
         /// Converts the signed integer to an unsigned integer using ZigZag encoding.
         fn as_zigzag(&self) -> Self::UnsignedEquivalent;

@@ -2,7 +2,6 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
-
 use thiserror::Error;
 
 /// Error type for codec operations
