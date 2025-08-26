@@ -775,9 +775,6 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Create child context with its own empty children list
         let child_context = self.clone();
 
