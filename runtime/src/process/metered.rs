@@ -115,6 +115,6 @@ mod tests {
 
     #[test]
     fn test_process_metrics_init() {
-        while !std::panic::catch_unwind(|| process_metrics_init()).is_ok() {}
+        while std::panic::catch_unwind(process_metrics_init).is_err() {}
     }
 }
