@@ -23,7 +23,7 @@ use alloc::{
     collections::{BTreeSet, VecDeque},
     vec::Vec,
 };
-use thiserror_no_std::Error;
+use thiserror::Error;
 
 type Digest = [u8; 32];
 
