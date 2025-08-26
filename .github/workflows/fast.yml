@@ -148,8 +148,8 @@ jobs:
       uses: ./.github/actions/setup
     - name: Add minimal no_std target
       run: rustup target add thumbv7em-none-eabihf
-    - name: Build codec
-      run: cargo build -p commonware-codec --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_codec.rlib
+    - name: Build and test codec
+      run: cargo build -p commonware-codec --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_codec.rlib && cargo test -p commonware-codec --no-default-features --verbose
 
   Unsafe:
     runs-on: ubuntu-latest

@@ -321,6 +321,8 @@ fn size_signed<S: SPrim>(value: S) -> usize {
 mod tests {
     use super::*;
     use crate::{error::Error, DecodeExt, Encode};
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
     use bytes::Bytes;
 
     #[test]
@@ -578,7 +580,7 @@ mod tests {
     #[test]
     fn test_exact_bit_boundaries() {
         // Test values with exactly N bits set
-        fn test_exact_bits<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
+        fn test_exact_bits<T: UPrim + TryFrom<u128> + core::fmt::Display>() {
             for bits in 1..=128 {
                 // Create a value with exactly 'bits' bits
                 // e.g., bits=3 -> 0b111 = 7
@@ -619,7 +621,7 @@ mod tests {
     #[test]
     fn test_single_bit_boundaries() {
         // Test values with only a single bit set at different positions
-        fn test_single_bits<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
+        fn test_single_bits<T: UPrim + TryFrom<u128> + core::fmt::Display>() {
             for bit_pos in 0..128 {
                 // Create a value with only a single bit set at the given position
                 let val = 1u128 << bit_pos;
