@@ -28,21 +28,21 @@ cargo test
 ### Running the Server
 
 ```bash
-# Start server with default settings (port 8080, 100 initial data items)
+# Start server with default settings (port 8080, database size 100)
 cargo run --bin server
 
 # Start server with custom settings
-cargo run --bin server -- --port 8080 --initial-data 50 --storage-dir /tmp/my_server --metrics-port 9090 --data-interval 2s --data-per-interval 10
+cargo run --bin server -- --port 8080 --initial-db-size 50 --storage-dir /tmp/my_server --metrics-port 9090 --update-frequency 2s --update-size 10
 ```
 
 Server options:
 - `--db <any|immutable>`: Database type to use. Must be 'any' or 'immutable' (default: any)
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
-- `-i, --initial-data <COUNT>`: Number of initial data items to add to the database (default: 100)
+- `-i, --initial-db-size <COUNT>`: Number of initial data items to add to the database (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
-- `-t, --data-interval <DURATION>`: Interval for adding new data ('ms', 's', 'm', 'h') (default: 100ms)
-- `-o, --data-per-interval <COUNT>`: Number of data items to add each interval (default: 5)
+- `-u, --update-frequency <DURATION>`: Frequency at which new data is added ('ms', 's', 'm', 'h') (default: 100ms)
+- `-s, --update-size <COUNT>`: Number of data items to add each update (default: 5)
 
 ### Running the Client
 
@@ -51,7 +51,7 @@ Server options:
 cargo run --bin client
 
 # Connect with custom settings
-cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client --metrics-port 9091 --target-update-interval 3s --sync-interval 5s
+cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client --metrics-port 9091 --target-update-frequency 3s --sync-frequency 5s
 ```
 
 Client options:
@@ -60,8 +60,8 @@ Client options:
 - `-b, --batch-size <SIZE>`: Batch size for fetching data (default: 50)
 - `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client-{RANDOM_SUFFIX})
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
-- `-t, --target-update-interval <DURATION>`: Frequency at which sync target is updated ('ms', 's', 'm', 'h') (default: 1s)
-- `-i, --sync-interval <DURATION>`: Frequency at which database is re-synced ('ms', 's', 'm', 'h') (default: 10s)
+- `-t, --target-update-frequency <DURATION>`: Frequency at which sync target is updated ('ms', 's', 'm', 'h') (default: 1s)
+- `-f, --sync-frequency <DURATION>`: Frequency at which database is re-synced ('ms', 's', 'm', 'h') (default: 10s)
 
 _The client must use the same `--db` as the server it syncs from._
 
@@ -69,7 +69,7 @@ _The client must use the same `--db` as the server it syncs from._
 
 1. **Start the server:**
    ```bash
-   cargo run --bin server -- --initial-data 50 --data-interval 2s --data-per-interval 3
+   cargo run --bin server -- --initial-db-size 50 --update-frequency 2s --update-size 3
    ```
 
    You should see output like:
@@ -77,22 +77,22 @@ _The client must use the same `--db` as the server it syncs from._
    INFO initializing database
    INFO creating initial data data_len=56
    INFO database ready op_count=112 root=8837dd38704093f65b8c9ca4041daa57b3df20fac95474a86580f57bd6ee6bd9
-   INFO server listening and continuously adding data addr=127.0.0.1:8080 data_interval=2s data_per_interval=3
+   INFO server listening and continuously adding data addr=127.0.0.1:8080 update_frequency=2s update_size=3
    INFO added data data_added=4 root=c63b04a06ea36be9e7b82a2f70b28578fd940e8b8f5b8d616bfafa7471508514
    ```
 
 2. **In another terminal, run the client:**
    ```bash
-   cargo run --bin client -- --batch-size 25 --target-update-interval 3s --sync-interval 5s
+   cargo run --bin client -- --batch-size 25 --target-update-frequency 3s --sync-frequency 5s
    ```
 
    You should see output like:
    ```
    INFO starting continuous sync process
-   INFO starting sync sync_iteration=1 target=SyncTarget { root: 234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3, lower_bound: 74, upper_bound: 144 } server=127.0.0.1:8080 batch_size=25 target_update_interval=3s
-   INFO ✅ sync completed successfully sync_iteration=1 database_ops=145 root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3 sync_interval=5s
-   INFO starting sync sync_iteration=2 target=SyncTarget { root: a47d3c2e8b1f9c045e6d2b8a7c9f1e4d3a6b5c8e2f4a7d1e9c2b5a8f3e6d9c2b, lower_bound: 74, upper_bound: 162 } server=127.0.0.1:8080 batch_size=25 target_update_interval=3s
-   INFO ✅ sync completed successfully sync_iteration=2 database_ops=163 root=a47d3c2e8b1f9c045e6d2b8a7c9f1e4d3a6b5c8e2f4a7d1e9c2b5a8f3e6d9c2b sync_interval=5s
+   INFO starting sync sync_iteration=1 target=SyncTarget { root: 234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3, lower_bound: 74, upper_bound: 144 } server=127.0.0.1:8080 batch_size=25 target_update_frequency=3s
+   INFO ✅ sync completed successfully sync_iteration=1 database_ops=145 root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3 sync_frequency=5s
+   INFO starting sync sync_iteration=2 target=SyncTarget { root: a47d3c2e8b1f9c045e6d2b8a7c9f1e4d3a6b5c8e2f4a7d1e9c2b5a8f3e6d9c2b, lower_bound: 74, upper_bound: 162 } server=127.0.0.1:8080 batch_size=25 target_update_frequency=3s
+   INFO ✅ sync completed successfully sync_iteration=2 database_ops=163 root=a47d3c2e8b1f9c045e6d2b8a7c9f1e4d3a6b5c8e2f4a7d1e9c2b5a8f3e6d9c2b sync_frequency=5s
    ...
    ```
 

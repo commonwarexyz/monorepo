@@ -43,15 +43,15 @@ struct Config {
     /// Port to listen on.
     port: u16,
     /// Number of initial data items to create.
-    initial_data: usize,
+    initial_db_size: usize,
     /// Storage directory.
     storage_dir: String,
     /// Port on which metrics are exposed.
     metrics_port: u16,
     /// Interval for adding new data.
-    data_interval: Duration,
-    /// Number of data items to add each interval.
-    data_per_interval: usize,
+    update_frequency: Duration,
+    /// Number of data items to add each update.
+    update_size: usize,
 }
 
 /// Server state containing the database and metrics.
@@ -108,11 +108,11 @@ where
     let mut last_time = state.last_data_time.write().await;
     let now = context.current();
 
-    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.data_interval {
+    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.update_frequency {
         *last_time = now;
 
         // Generate new data
-        let new_data = DB::create_test_data(config.data_per_interval, context.next_u64());
+        let new_data = DB::create_test_data(config.update_size, context.next_u64());
 
         // Add data to database and get the new root
         let root = {
@@ -365,7 +365,7 @@ where
     info!("starting {} database", DB::name());
 
     // Create and initialize database
-    let initial_data = DB::create_test_data(config.initial_data, context.next_u64());
+    let initial_data = DB::create_test_data(config.initial_db_size, context.next_u64());
     info!(data_len = initial_data.len(), "creating initial data");
     DB::add_data(database, initial_data).await?;
 
@@ -409,14 +409,14 @@ where
     let mut listener = context.with_label("listener").bind(addr).await?;
     info!(
         addr = %addr,
-        data_interval = ?config.data_interval,
-        data_per_interval = config.data_per_interval,
+        update_frequency = ?config.update_frequency,
+        update_size = config.update_size,
         "{} server listening and continuously adding data",
         DB::name()
     );
 
     let state = Arc::new(State::new(context.with_label("server"), database));
-    let mut next_data_time = context.current() + config.data_interval;
+    let mut next_data_time = context.current() + config.update_frequency;
     loop {
         select! {
             _ = context.sleep_until(next_data_time) => {
@@ -424,7 +424,7 @@ where
                 if let Err(e) = maybe_add_data(&state, &mut context, &config).await {
                     warn!(error = %e, "failed to add additional data");
                 }
-                next_data_time = context.current() + config.data_interval;
+                next_data_time = context.current() + config.update_frequency;
             },
             client_result = listener.accept() => {
                 match client_result {
@@ -494,9 +494,9 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .default_value("8080"),
         )
         .arg(
-            Arg::new("initial-data")
+            Arg::new("initial-db-size")
                 .short('i')
-                .long("initial-data")
+                .long("initial-db-size")
                 .value_name("COUNT")
                 .help("Number of initial data items to add to the database")
                 .default_value("100"),
@@ -518,19 +518,19 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .default_value("9090"),
         )
         .arg(
-            Arg::new("data-interval")
-                .short('t')
-                .long("data-interval")
+            Arg::new("update-frequency")
+                .short('u')
+                .long("update-frequency")
                 .value_name("DURATION")
-                .help("Interval for adding new data ('ms', 's', 'm', 'h')")
+                .help("Frequency at which new data is added ('ms', 's', 'm', 'h')")
                 .default_value("100ms"),
         )
         .arg(
-            Arg::new("data-per-interval")
-                .short('o')
-                .long("data-per-interval")
+            Arg::new("update-size")
+                .short('s')
+                .long("update-size")
                 .value_name("COUNT")
-                .help("Number of data items to add each interval")
+                .help("Number of data items to add each update")
                 .default_value("5"),
         )
         .get_matches();
@@ -547,11 +547,11 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .unwrap()
             .parse()
             .map_err(|e| format!("Invalid port: {e}"))?,
-        initial_data: matches
-            .get_one::<String>("initial-data")
+        initial_db_size: matches
+            .get_one::<String>("initial-db-size")
             .unwrap()
             .parse()
-            .map_err(|e| format!("Invalid initial data count: {e}"))?,
+            .map_err(|e| format!("Invalid initial db size: {e}"))?,
         storage_dir: {
             let storage_dir = matches
                 .get_one::<String>("storage-dir")
@@ -570,13 +570,13 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .unwrap()
             .parse()
             .map_err(|e| format!("Invalid metrics port: {e}"))?,
-        data_interval: parse_duration(matches.get_one::<String>("data-interval").unwrap())
-            .map_err(|e| format!("Invalid data interval: {e}"))?,
-        data_per_interval: matches
-            .get_one::<String>("data-per-interval")
+        update_frequency: parse_duration(matches.get_one::<String>("update-frequency").unwrap())
+            .map_err(|e| format!("Invalid update frequency: {e}"))?,
+        update_size: matches
+            .get_one::<String>("update-size")
             .unwrap()
             .parse()
-            .map_err(|e| format!("Invalid data per interval: {e}"))?,
+            .map_err(|e| format!("Invalid update size: {e}"))?,
     })
 }
 
@@ -588,11 +588,11 @@ fn main() {
     info!(
         database_type = %config.database_type.as_str(),
         port = config.port,
-        initial_data = config.initial_data,
+        initial_db_size = config.initial_db_size,
         storage_dir = %config.storage_dir,
         metrics_port = config.metrics_port,
-        data_interval = ?config.data_interval,
-        data_per_interval = config.data_per_interval,
+        update_frequency = ?config.update_frequency,
+        update_size = config.update_size,
         "configuration"
     );
 

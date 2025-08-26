@@ -45,9 +45,9 @@ struct Config {
     /// Port on which metrics are exposed.
     metrics_port: u16,
     /// Interval for requesting target updates.
-    target_update_interval: Duration,
+    target_update_frequency: Duration,
     /// Interval between sync data.
-    sync_interval: Duration,
+    sync_frequency: Duration,
     /// Maximum number of outstanding requests.
     max_outstanding_requests: usize,
 }
@@ -122,13 +122,13 @@ where
         let target_update_handle = {
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
-            let target_update_interval = config.target_update_interval;
+            let target_update_frequency = config.target_update_frequency;
             context.with_label("target-update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
                     update_sender,
-                    target_update_interval,
+                    target_update_frequency,
                     initial_target_clone,
                 )
             })
@@ -150,12 +150,12 @@ where
         info!(
             sync_iteration = iteration,
             root = %got_root,
-            sync_interval = ?config.sync_interval,
+            sync_frequency = ?config.sync_frequency,
             "✅ Any sync completed successfully"
         );
         database.close().await?;
         target_update_handle.abort();
-        context.sleep(config.sync_interval).await;
+        context.sleep(config.sync_frequency).await;
         iteration += 1;
     }
 }
@@ -179,13 +179,13 @@ where
         let target_update_handle = {
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
-            let target_update_interval = config.target_update_interval;
+            let target_update_frequency = config.target_update_frequency;
             context.with_label("target-update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
                     update_sender,
-                    target_update_interval,
+                    target_update_frequency,
                     initial_target_clone,
                 )
             })
@@ -208,12 +208,12 @@ where
         info!(
             sync_iteration = iteration,
             root = %got_root,
-            sync_interval = ?config.sync_interval,
+            sync_frequency = ?config.sync_frequency,
             "✅ Immutable sync completed successfully"
         );
         database.close().await?;
         target_update_handle.abort();
-        context.sleep(config.sync_interval).await;
+        context.sleep(config.sync_frequency).await;
         iteration += 1;
     }
 }
@@ -263,17 +263,17 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .default_value("9091"),
         )
         .arg(
-            Arg::new("target-update-interval")
+            Arg::new("target-update-frequency")
                 .short('t')
-                .long("target-update-interval")
+                .long("target-update-frequency")
                 .value_name("DURATION")
                 .help("Frequency at which sync target is updated ('ms', 's', 'm', 'h')")
                 .default_value("1s"),
         )
         .arg(
-            Arg::new("sync-interval")
-                .short('i')
-                .long("sync-interval")
+            Arg::new("sync-frequency")
+                .short('f')
+                .long("sync-frequency")
                 .value_name("DURATION")
                 .help("Frequency at which database is re-synced ('ms', 's', 'm', 'h')")
                 .default_value("10s"),
@@ -326,12 +326,15 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("Invalid metrics port: {e}"))?;
 
-    let target_update_interval =
-        parse_duration(matches.get_one::<String>("target-update-interval").unwrap())
-            .map_err(|e| format!("Invalid target update interval: {e}"))?;
+    let target_update_frequency = parse_duration(
+        matches
+            .get_one::<String>("target-update-frequency")
+            .unwrap(),
+    )
+    .map_err(|e| format!("Invalid target update frequency: {e}"))?;
 
-    let sync_interval = parse_duration(matches.get_one::<String>("sync-interval").unwrap())
-        .map_err(|e| format!("Invalid sync interval: {e}"))?;
+    let sync_frequency = parse_duration(matches.get_one::<String>("sync-frequency").unwrap())
+        .map_err(|e| format!("Invalid sync frequency: {e}"))?;
 
     let max_outstanding_requests = matches
         .get_one::<String>("max-outstanding-requests")
@@ -345,8 +348,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         batch_size,
         storage_dir,
         metrics_port,
-        target_update_interval,
-        sync_interval,
+        target_update_frequency,
+        sync_frequency,
         max_outstanding_requests,
     })
 }
@@ -362,8 +365,8 @@ fn main() {
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
         metrics_port = config.metrics_port,
-        target_update_interval = ?config.target_update_interval,
-        sync_interval = ?config.sync_interval,
+        target_update_frequency = ?config.target_update_frequency,
+        sync_frequency = ?config.sync_frequency,
         max_outstanding_requests = config.max_outstanding_requests,
         "client starting with configuration"
     );
