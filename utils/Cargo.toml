@@ -13,7 +13,7 @@ documentation = "https://docs.rs/commonware-utils"
 [dependencies]
 commonware-codec = { workspace = true }
 bytes = { workspace = true }
-futures = { workspace = true }
+futures = { workspace = true, optional = true  }
 rand = { workspace = true }
 thiserror = { workspace = true }
 
@@ -23,7 +23,11 @@ version = "0.2.15"
 features = ["js"]
 
 [dev-dependencies]
-num-bigint = "0.4.6"
+num-bigint = { version = "0.4.6", default-features = false }
+
+[features]
+default = ["std"]
+std = ["rand/std", "thiserror/std", "bytes/std", "commonware-codec/std", "futures"]
 
 [lib]
 bench = false
