@@ -15,6 +15,7 @@ use crate::{
     utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
+use futures::future::AbortHandle;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -367,7 +368,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    children: Arc<Mutex<Vec<futures::future::AbortHandle>>>,
+    children: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
 impl Clone for Context {
@@ -443,14 +444,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Create child context with its own empty children list
-        let child_context = Self {
-            name: self.name.clone(),
-            spawned: false,
-            executor: self.executor.clone(),
-            storage: self.storage.clone(),
-            network: self.network.clone(),
-            children: Arc::new(Mutex::new(Vec::new())),
-        };
+        let child_context = self.clone();
 
         // Spawn the child
         let child_handle = child_context.spawn(f);

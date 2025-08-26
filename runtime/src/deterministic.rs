@@ -38,6 +38,7 @@ use crate::{
 use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
+    future::AbortHandle,
     task::{waker_ref, ArcWake},
     Future,
 };
@@ -577,7 +578,7 @@ pub struct Context {
     executor: Arc<Executor>,
     network: Arc<Network>,
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
-    children: Arc<Mutex<Vec<futures::future::AbortHandle>>>,
+    children: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
 impl Default for Context {
@@ -773,14 +774,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Create child context with its own empty children list
-        let child_context = Self {
-            name: self.name.clone(),
-            spawned: false,
-            executor: self.executor.clone(),
-            network: self.network.clone(),
-            storage: self.storage.clone(),
-            children: Arc::new(Mutex::new(Vec::new())),
-        };
+        let child_context = self.clone();
 
         // Spawn the child
         let child_handle = child_context.spawn(f);
