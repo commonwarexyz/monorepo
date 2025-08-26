@@ -38,7 +38,7 @@ pub use stable_buf::StableBuf;
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
     for byte in bytes.iter() {
-        let _ = write!(hex, "{byte:02x}");
+        write!(hex, "{byte:02x}").expect("writing to string should never fail");
     }
     hex
 }

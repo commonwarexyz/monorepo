@@ -150,7 +150,7 @@ jobs:
       run: rustup target add thumbv7em-none-eabihf
     - name: Build and test codec
       run: cargo build -p commonware-codec --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_codec.rlib && cargo test -p commonware-codec --no-default-features --verbose
-    - name: Build and test utils
+    - name: Build utils
       run: cargo build -p commonware-utils --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_utils.rlib
 
   Unsafe:
