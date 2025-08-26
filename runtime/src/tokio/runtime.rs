@@ -370,57 +370,6 @@ pub struct Context {
     children: Arc<Mutex<Vec<futures::future::AbortHandle>>>,
 }
 
-impl Context {
-    // Helper method for spawn_ref and spawn_child_ref
-    fn spawn_ref_internal<F, T>(&mut self, is_child: bool) -> impl FnOnce(F) -> Handle<T>
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (_, gauge) = spawn_metrics!(self, future);
-
-        // Set up the task
-        let executor = self.executor.clone();
-
-        // We only need to register this task with the parent if it's a child task
-        let parent_children = if is_child {
-            Some(self.children.clone())
-        } else {
-            None
-        };
-
-        let task_children = if is_child {
-            // Child task gets fresh children list
-            Arc::new(Mutex::new(Vec::new()))
-        } else {
-            // Regular task uses current context's children list
-            self.children.clone()
-        };
-
-        move |f: F| {
-            let (task, handle) =
-                Handle::init_future(f, gauge, executor.cfg.catch_panics, task_children);
-
-            // Spawn the task
-            executor.runtime.spawn(task);
-
-            // Register this child with the parent if needed
-            if let Some(parent_list) = parent_children {
-                if let Some(abort_handle) = handle.abort_handle() {
-                    parent_list.lock().unwrap().push(abort_handle);
-                }
-            }
-
-            handle
-        }
-    }
-}
-
 impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
@@ -429,7 +378,7 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            children: self.children.clone(),
+            children: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -464,15 +413,35 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        self.spawn_ref_internal(false)
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let (_, gauge) = spawn_metrics!(self, future);
+
+        // Set up the task
+        let executor = self.executor.clone();
+        let children = self.children.clone();
+
+        move |f: F| {
+            let (f, handle) = Handle::init_future(f, gauge, executor.cfg.catch_panics, children);
+
+            // Spawn the task
+            executor.runtime.spawn(f);
+            handle
+        }
     }
 
-    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
+    fn spawn_child<F, Fut, T>(&self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
         // Create child context with its own empty children list
         let child_context = Self {
             name: self.name.clone(),
@@ -483,7 +452,7 @@ impl crate::Spawner for Context {
             children: Arc::new(Mutex::new(Vec::new())),
         };
 
-        // Spawn the child normally
+        // Spawn the child
         let child_handle = child_context.spawn(f);
 
         // Register this child with the parent
@@ -492,14 +461,6 @@ impl crate::Spawner for Context {
         }
 
         child_handle
-    }
-
-    fn spawn_child_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        self.spawn_ref_internal(true)
     }
 
     fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
@@ -600,7 +561,7 @@ impl crate::Metrics for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            children: self.children.clone(),
+            children: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
