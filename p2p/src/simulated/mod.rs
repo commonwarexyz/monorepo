@@ -1147,26 +1147,29 @@ mod tests {
             // Send all messages in quick succession
             let mut handles = Vec::new();
             for i in 0..3 {
-                let mut sender_tx2 = sender_tx.clone();
+                let mut sender_tx = sender_tx.clone();
                 let receiver = receiver.clone();
                 let msg = Bytes::from(vec![i; 500]);
-                let handle = context.clone().spawn(|_| async move {
-                    sender_tx2
+                let start = start.clone();
+                let handle = context.clone().spawn(move |context| async move {
+                    sender_tx
                         .send(Recipients::One(receiver), msg, false)
                         .await
                         .unwrap();
+
+                    // Record time when send completes (is acknowledged)
+                    context.current().duration_since(start).unwrap()
                 });
                 handles.push(handle);
 
                 // Small delay between spawns to ensure ordering
-                context.sleep(Duration::from_nanos(1)).await;
+                context.sleep(Duration::from_millis(1)).await;
             }
 
-            // Wait for all sends to complete and record their completion times
+            // Wait for all sends to complete and collect their completion times
             let mut send_times = Vec::new();
             for handle in handles {
-                handle.await.unwrap();
-                let time = context.current().duration_since(start).unwrap();
+                let time = handle.await.unwrap();
                 send_times.push(time);
             }
 
