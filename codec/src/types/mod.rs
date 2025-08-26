@@ -1,12 +1,12 @@
 //! Codec implementations for common types
 
-pub mod btreemap;
-pub mod btreeset;
+pub mod btree_map;
+pub mod btree_set;
 pub mod bytes;
 #[cfg(feature = "std")]
-pub mod hashmap;
+pub mod hash_map;
 #[cfg(feature = "std")]
-pub mod hashset;
+pub mod hash_set;
 #[cfg(feature = "std")]
 pub mod net;
 pub mod primitives;
