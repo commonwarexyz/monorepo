@@ -4,18 +4,26 @@ use std::future::Future;
 
 /// A database that can be synced
 pub trait Database: Sized {
-    /// The increment of data synced by the [Database].
+    /// The increment of data synced by the [Database]
     type Data;
+    /// A proof over Data received from the Resolver
     type Proof;
+    /// Pinned nodes derived from the Data received from the Resolver
     type PinnedNodes;
+    /// The underlying storage of the Database populated by the sync engine
     type Journal: Journal<Data = Self::Data>;
+    /// Error type returned by the [Database]
     type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
+    /// Configuration options for the [Database]
     type Config;
-    type Digest: Digest;
+    /// Runtime context required for the [Database]
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
         + Clone;
+    /// Digest type for MMR nodes
+    type Digest: Digest;
+    /// Used to hash MMR nodes and data
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Create/open a journal for syncing range [lower_bound, upper_bound].
