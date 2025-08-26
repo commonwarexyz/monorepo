@@ -725,7 +725,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_verification_empty_proof() {
+    fn test_proving_proof() {
         // Test that an empty proof authenticates an empty MMR.
         let mmr = Mmr::new();
         let mut hasher: Standard<Sha256> = Standard::new();
@@ -745,7 +745,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_verification_verify_element() {
+    fn test_proving_verify_element() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create an 11 element MMR over which we'll test single-element inclusion proofs
@@ -838,7 +838,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_verification_verify_range() {
+    fn test_proving_verify_range() {
         let executor = deterministic::Runner::default();
 
         executor.start(|_| async move {
@@ -986,7 +986,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_verification_retained_nodes_provable_after_pruning() {
+    fn test_proving_retained_nodes_provable_after_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
@@ -1024,7 +1024,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_verification_ranges_provable_after_pruning() {
+    fn test_proving_ranges_provable_after_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
@@ -1099,7 +1099,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_verification_proof_serialization() {
+    fn test_proving_proof_serialization() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount of elements
@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_pinned_nodes() {
+    fn test_proving_extract_pinned_nodes() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test for every number of elements from 1 to 255
@@ -1250,7 +1250,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_historical_range_proof_basic() {
+    fn test_proving_historical_range_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Create an MMR with 5 elements
@@ -1328,7 +1328,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_historical_range_proof_large() {
+    fn test_proving_historical_range_proof_large() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Simulate a sync scenario: server has 1000 operations, client syncs 600-799
@@ -1378,7 +1378,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_historical_range_proof_singleton() {
+    fn test_proving_historical_range_proof_singleton() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
@@ -1403,7 +1403,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_verification_digests_from_range() {
+    fn test_proving_digests_from_range() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
@@ -1525,7 +1525,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_multi_proof_generation_and_verify() {
+    fn test_proving_multi_proof_generation_and_verify() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Create an MMR with multiple elements
@@ -1640,7 +1640,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_multi_proof_deduplication() {
+    fn test_proving_multi_proof_deduplication() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
