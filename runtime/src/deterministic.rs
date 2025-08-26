@@ -710,13 +710,13 @@ impl Clone for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
-            children: Arc::new(Mutex::new(Vec::new())),
+            children: self.children.clone(),
         }
     }
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
@@ -730,7 +730,11 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
-        let children = self.children.clone();
+
+        // Give spawned task its own empty children list
+        let children = Arc::new(Mutex::new(Vec::new()));
+        self.children = children.clone();
+
         let future = f(self);
         let (f, handle) = Handle::init_future(future, gauge, false, children);
 
@@ -753,10 +757,11 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
-        let children = self.children.clone();
 
         move |f: F| {
-            let (f, handle) = Handle::init_future(f, gauge, false, children);
+            // Give spawned task its own empty children list
+            let (f, handle) =
+                Handle::init_future(f, gauge, false, Arc::new(Mutex::new(Vec::new())));
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -883,7 +888,7 @@ impl crate::Metrics for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
-            children: Arc::new(Mutex::new(Vec::new())),
+            children: self.children.clone(),
         }
     }
 
