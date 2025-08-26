@@ -31,8 +31,7 @@
 
 use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
-use core::fmt::Debug;
-use core::mem::size_of;
+use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
 
 // ---------- Constants ----------
