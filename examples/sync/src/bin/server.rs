@@ -42,7 +42,7 @@ struct Config {
     database_type: DatabaseType,
     /// Port to listen on.
     port: u16,
-    /// Number of initial data items to create.
+    /// Elements in database added on initialization.
     initial_db_size: usize,
     /// Storage directory.
     storage_dir: String,
@@ -155,7 +155,7 @@ where
         let database = state.database.read().await;
         (
             database.root(&mut hasher),
-            database.lower_bound_data(),
+            database.lower_bound(),
             database.size().saturating_sub(1),
         )
     };

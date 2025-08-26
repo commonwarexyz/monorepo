@@ -65,7 +65,7 @@ pub trait Syncable {
     fn size(&self) -> u64;
 
     /// Get the lower bound for data (inactivity floor or oldest retained location).
-    fn lower_bound_data(&self) -> u64;
+    fn lower_bound(&self) -> u64;
 
     /// Get historical proof and data.
     fn historical_proof(

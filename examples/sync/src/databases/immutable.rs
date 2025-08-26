@@ -111,7 +111,7 @@ where
         self.op_count()
     }
 
-    fn lower_bound_data(&self) -> u64 {
+    fn lower_bound(&self) -> u64 {
         self.oldest_retained_loc().unwrap_or(0)
     }
 
