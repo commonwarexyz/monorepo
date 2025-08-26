@@ -40,7 +40,7 @@
 //!   [i8], [i16], [i32], [i64], [i128],
 //!   [f32], [f64], [u8; N],
 //!   and [usize] (must fit within a [u32] for cross-platform compatibility).
-//! - Collections: [`Vec`], [`Option`], BTreeMap (via `types::map_nostd`), BTreeSet (via `types::set_nostd`)
+//! - Collections: [`Vec`], [`Option`], `BTreeMap`, `BTreeSet`
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
 //! - Common External Types: [::bytes::Bytes]
 //!
