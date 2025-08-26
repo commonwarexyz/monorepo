@@ -443,21 +443,21 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn spawn_child<F, Fut, T>(&self, f: F) -> Handle<T>
+    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Create child context
-        let child_context = self.clone();
+        // Store parent's children list
+        let parent_children = self.children.clone();
 
         // Spawn the child
-        let child_handle = child_context.spawn(f);
+        let child_handle = self.spawn(f);
 
         // Register this child with the parent
         if let Some(abort_handle) = child_handle.abort_handle() {
-            self.children.lock().unwrap().push(abort_handle);
+            parent_children.lock().unwrap().push(abort_handle);
         }
 
         child_handle

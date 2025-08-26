@@ -136,8 +136,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// # Warning
     ///
-    /// If this function is used to spawn multiple tasks from the same context, the runtime will panic
-    /// to prevent accidental misuse.
+    /// If this function is used to spawn multiple tasks from the same context (including child
+    /// tasks), the runtime will panic to prevent accidental misuse.
     fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
     where
         F: Future<Output = T> + Send + 'static,
@@ -146,10 +146,9 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Enqueue a child task to be executed that will be automatically aborted when the
     /// parent task completes or is aborted.
     ///
-    /// Unlike [Spawner::spawn], this method takes `&self` and allows spawning multiple
-    /// child tasks from the same context. The spawned tasks will be tracked as children
-    /// of the current task. When the parent task completes (either successfully or via
-    /// abort), all child tasks will be automatically aborted.
+    /// The spawned task will be tracked as a child of the current task. When
+    /// the parent task completes (either successfully or via abort), all child
+    /// tasks will be automatically aborted.
     ///
     /// # Context cloning and children
     ///
@@ -163,7 +162,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// Only async tasks can be spawned as children, since blocking tasks cannot be
     /// aborted and therefore can't support parent-child relationships.
-    fn spawn_child<F, Fut, T>(&self, f: F) -> Handle<T>
+    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
@@ -1322,9 +1321,9 @@ mod tests {
                     for _ in 0..3 {
                         let handles2 = handles.clone();
                         let mut initialized_tx2 = initialized_tx.clone();
-                        let handle = context.spawn_child(move |context| async move {
+                        let handle = context.clone().spawn_child(move |context| async move {
                             for _ in 0..2 {
-                                let handle = context.spawn_child(|_| async {
+                                let handle = context.clone().spawn_child(|_| async {
                                     pending::<()>().await;
                                 });
                                 handles2.lock().unwrap().push(handle);
@@ -1374,7 +1373,7 @@ mod tests {
 
             let parent = context.spawn(move |mut context| async move {
                 // Spawn a child task
-                context.spawn_child(|_| async move {
+                context.clone().spawn_child(|_| async move {
                     child_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     child_complete_rx.await.unwrap();
@@ -1408,60 +1407,6 @@ mod tests {
             child_complete_tx.send(()).unwrap();
 
             // As well as the parent
-            parent_complete_tx.send(()).unwrap();
-
-            assert!(parent.await.is_ok());
-        });
-    }
-
-    fn test_spawn_child_after_spawn<R: Runner>(runner: R, use_spawn_ref: bool)
-    where
-        R::Context: Spawner + Clock,
-    {
-        runner.start(|context| async move {
-            let (sibling_started_tx, sibling_started_rx) = oneshot::channel();
-            let (sibling_complete_tx, sibling_complete_rx) = oneshot::channel();
-            let (child_started_tx, child_started_rx) = oneshot::channel();
-            let (child_complete_tx, child_complete_rx) = oneshot::channel();
-            let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
-
-            let parent = context.spawn(move |mut context| async move {
-                // First spawn an independent sibling task
-                let sibling_task = async move {
-                    sibling_started_tx.send(()).unwrap();
-                    // Wait for signal to complete
-                    sibling_complete_rx.await.unwrap();
-                };
-
-                if use_spawn_ref {
-                    context.spawn_ref()(sibling_task);
-                } else {
-                    // Clone context since spawn consumes it
-                    context.clone().spawn(|_| sibling_task);
-                }
-
-                // Then spawn a child task after the sibling
-                context.spawn_child(|_| async move {
-                    child_started_tx.send(()).unwrap();
-                    // Wait for signal to complete
-                    child_complete_rx.await.unwrap();
-                });
-
-                // Wait for signal to complete
-                parent_complete_rx.await.unwrap();
-            });
-
-            // Wait for both to start
-            sibling_started_rx.await.unwrap();
-            child_started_rx.await.unwrap();
-
-            // Complete sibling first
-            sibling_complete_tx.send(()).unwrap();
-
-            // Then complete child
-            child_complete_tx.send(()).unwrap();
-
-            // Finally complete parent
             parent_complete_tx.send(()).unwrap();
 
             assert!(parent.await.is_ok());
@@ -1805,14 +1750,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_spawn_child_after_spawn() {
-        for use_spawn_ref in [false, true] {
-            let runner = deterministic::Runner::default();
-            test_spawn_child_after_spawn(runner, use_spawn_ref);
-        }
-    }
-
-    #[test]
     fn test_deterministic_clone_context_no_child_inheritance() {
         let runner = deterministic::Runner::default();
         test_clone_context_no_child_inheritance(runner);
@@ -2042,14 +1979,6 @@ mod tests {
         for use_spawn_ref in [false, true] {
             let runner = tokio::Runner::default();
             test_child_survives_sibling_completion(runner, use_spawn_ref);
-        }
-    }
-
-    #[test]
-    fn test_tokio_spawn_child_after_spawn() {
-        for use_spawn_ref in [false, true] {
-            let runner = tokio::Runner::default();
-            test_spawn_child_after_spawn(runner, use_spawn_ref);
         }
     }
 
