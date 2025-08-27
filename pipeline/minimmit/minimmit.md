@@ -23,14 +23,14 @@ _There exists `≥ 1` honest replica in any `M`-set and `L`-set intersection._
 
 ## 4. Message Types
 
-| Message | Purpose                                                                                           |
-|---------|---------------------------------------------------------------------------------------------------|
-| `genesis` | The genesis block. Considered finalized at view `⊥ < 0`.                                          |
-| `propose(r, c, v, (c', v'))` | Leader `r`'s proposal `c` for view `v` with parent `c'` in view `v'`.                             |
-| `notarize(c, v)` | Vote to finalize block `c` in view `v`.                                                           |
-| `nullify(v)` | Vote to advance to view `v + 1`.                                                                  |
-| `notarization(c, v)` | Certificate of ≥ `M` `notarize(c, v)` messages for `(c, v)`.                                      |
-| `nullification(v)` | Certificate of ≥ `M` `nullify(v)` messages for view `v`.                                          |
+| Message | Purpose |
+|---------|---------|
+| `genesis` | The genesis block. Considered finalized at view `⊥ < 0`. |
+| `propose(r, c, v, (c', v'))` | Leader `r`'s proposal `c` for view `v` with parent `c'` in view `v'`. |
+| `notarize(c, v)` | Vote to finalize block `c` in view `v`. |
+| `nullify(v)` | Vote to advance to view `v + 1`. |
+| `notarization(c, v)` | Certificate of ≥ `M` `notarize(c, v)` messages for `(c, v)`. |
+| `nullification(v)` | Certificate of ≥ `M` `nullify(v)` messages for view `v`. |
 | `proof(v)` | Either a `notarization(c, v)` certificate for some block `c` or a `nullification(v)` certificate. |
 
 ## 5. Initial Replica State
@@ -183,7 +183,7 @@ _After `M` messages, create and broadcast a `nullification(v)` certificate._
 
 1. On receiving `nullify(v)` from replica `r'`:
    1. If `!record_message(r, r', nullify(v))`, return.
-1. On observing `≥ M` `nullify(v)` messages (or a single `nullification(v)` message) with `r.view == v`:
+1. On observing `≥ M` `nullify(v)` messages (or a single `nullification(v)` message):
    1. Assemble `nullification(v)`.
    1. Add `nullification(v)` to `r.proofs[v]`.
    1. Broadcast `nullification(v)`.
