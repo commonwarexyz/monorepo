@@ -2,8 +2,10 @@
 //!
 //! This code is inspired by [tokio-uring](https://github.com/tokio-rs/tokio-uring>) at commit 7761222.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bytes::Bytes;
-use std::ops::Index;
+use core::ops::Index;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A buffer whose memory is stable as long as its not reallocated.
@@ -90,7 +92,7 @@ impl StableBuf {
     pub fn put_slice(&mut self, src: &[u8]) {
         let dst = self.as_mut_ptr();
         unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+            core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
         }
     }
 

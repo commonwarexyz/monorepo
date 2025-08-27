@@ -12,10 +12,10 @@ documentation = "https://docs.rs/commonware-cryptography"
 
 [dependencies]
 commonware-codec = { workspace = true }
-commonware-utils = { workspace = true }
+commonware-utils = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 thiserror = { workspace = true }
-rand = { workspace = true }
+rand = { workspace = true, features = ["std_rng"] }
 sha2 = { workspace = true }
 blake3 = { workspace = true }
 rayon = { workspace = true }

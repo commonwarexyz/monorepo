@@ -10,12 +10,14 @@
 //! used over more performant types like [usize] or [u64]. Such types would result in more
 //! complex encoding and decoding logic.
 
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
-use std::{
-    fmt::{self, Write as _},
+use core::{
+    fmt::{self, Formatter, Write as _},
     ops::{BitAnd, BitOr, BitXor, Index},
 };
 
@@ -23,7 +25,7 @@ use std::{
 type Block = u8;
 
 /// Number of bits in a [Block].
-const BITS_PER_BLOCK: usize = std::mem::size_of::<Block>() * 8;
+const BITS_PER_BLOCK: usize = Block::BITS as usize;
 
 /// Empty block of bits (all bits set to 0).
 const EMPTY_BLOCK: Block = 0;
@@ -438,13 +440,13 @@ impl From<BitVec> for Vec<bool> {
 // ---------- Debug ----------
 
 impl fmt::Debug for BitVec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         // For very large BitVecs, only show a preview
         const MAX_DISPLAY: usize = 64;
         const HALF_DISPLAY: usize = MAX_DISPLAY / 2;
 
         // Closure for writing a bit
-        let write_bit = |formatter: &mut fmt::Formatter<'_>, index: usize| -> fmt::Result {
+        let write_bit = |formatter: &mut Formatter<'_>, index: usize| -> core::fmt::Result {
             formatter.write_char(if self.get_bit_unchecked(index) {
                 '1'
             } else {
