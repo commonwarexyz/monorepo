@@ -140,7 +140,6 @@ ingester:
     dir: /loki/wal
 "#;
 
-
 /// Systemd service file content for Tempo
 pub const TEMPO_SERVICE: &str = r#"
 [Unit]
@@ -497,4 +496,3 @@ StandardError=append:/var/log/binary.log
 [Install]
 WantedBy=multi-user.target
 "#;
-
