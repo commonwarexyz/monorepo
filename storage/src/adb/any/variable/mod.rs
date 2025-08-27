@@ -300,14 +300,29 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
         let mut current_index = self.oldest_retained_loc().unwrap_or(0);
+        let mut first_section = Some(current_index / self.log_items_per_section);
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations, and any log operations that need to be re-added to the MMR & locations.
+
         {
             let stream = self.log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 let (section, offset, _size, op) = result.map_err(Error::Journal)?;
+
+                if let Some(got_first_section) = first_section {
+                    if section < got_first_section {
+                        // There is data in the log before the first section given by the oldest
+                        // retained location given in metadata. In commit(), we write the oldest
+                        // retained location to metadata before actually pruning the log and MMR.
+                        // We must have written the oldest retained location to metadata but not
+                        // actually pruned the log and MMR. Ignore the oldest_retained_loc in metadata
+                        // and start from the first section in the log.
+                        current_index = got_first_section * self.log_items_per_section;
+                        first_section = None; // Only reset once
+                    }
+                }
 
                 if current_index < self.inactivity_floor_loc {
                     // Don't include operations before the inactivity floor.
@@ -661,12 +676,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             .await?;
         self.uncommitted_ops = 0;
 
+        // Persist the oldest retained location that we will prune to before actually pruning
+        // the MMR and operations log. If we crash after writing this but before pruning, we will
+        // recover on restart by recognizing that the actual oldest retained location we find in
+        // the log is in a different section than the one we persisted here.
+        let target_prune_loc = self.target_prune_loc();
+        write_oldest_retained_loc(&mut self.metadata, target_prune_loc);
+        self.metadata.sync().await?;
+
+        self.sync().await?;
+
         // TODO: Make the frequency with which we prune known inactive items configurable in case
         // this turns out to be a significant part of commit overhead, or the user wants to ensure
         // the log is backed up externally before discarding.
         self.prune_inactive().await?;
 
-        self.sync().await?;
         debug!(log_size = self.log_size, "commit complete");
         Ok(())
     }
@@ -691,9 +715,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
     /// parallelized if a thread pool is provided.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
-        // Update the metadata with the current oldest_retained_loc.
-        write_oldest_retained_loc(&mut self.metadata, self.oldest_retained_loc);
-
         let section = self.current_section();
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
@@ -769,6 +790,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
+    /// Return the location of the start of the section that we will prune to.
+    fn target_prune_loc(&self) -> u64 {
+        let target_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_delay);
+        let target_section = target_loc / self.log_items_per_section;
+        target_section * self.log_items_per_section
+    }
+
     /// Prune historical operations that are > `pruning_delay` steps behind the inactivity floor.
     /// This does not affect the db's root or current snapshot.
     pub(super) async fn prune_inactive(&mut self) -> Result<(), Error> {
@@ -777,8 +805,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         };
 
         // Calculate the target pruning position
-        let target_prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_delay);
+        let target_prune_loc = self.target_prune_loc();
         let ops_to_prune = target_prune_loc.saturating_sub(oldest_retained_loc);
+
         if ops_to_prune == 0 {
             return Ok(());
         }
