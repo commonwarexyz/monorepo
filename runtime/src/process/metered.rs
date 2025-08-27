@@ -89,28 +89,18 @@ mod tests {
 
         // Update metrics
         metrics.update();
-
-        // Check that RSS is reasonable (> 1MB for a running process)
         let rss = metrics.rss.get();
-        assert!(rss > 0);
-
-        // Check that virtual memory is >= RSS
+        assert!(rss > 1024 * 1024); // 1MB
         let virt = metrics.virtual_memory.get();
-        assert!(virt > 0);
-
-        // Allocate some memory
-        let mut vec = vec![0; 10 * 1024 * 1024]; // 10MB
-        vec.push(1);
+        assert!(virt >= rss);
 
         // Update metrics
         metrics.update();
-
-        // Check that the metrics are updated
         let new_rss = metrics.rss.get();
-        assert!(new_rss > 0);
-
-        // Check that virtual memory is updated
+        assert!(new_rss > 1024 * 1024); // 1MB
         let new_virt = metrics.virtual_memory.get();
-        assert!(new_virt > 0);
+        assert!(new_virt >= new_rss);
+
+        // Because tests may be run in parallel, we can't assert anything about the value of the metrics.
     }
 }
