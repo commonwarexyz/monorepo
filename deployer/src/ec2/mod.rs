@@ -22,9 +22,9 @@
 //!               |  - Monitoring Instance            |
 //!               |    - Prometheus                   |
 //!               |    - Loki                         |
+//!               |    - Pyroscope                    |
 //!               |    - Tempo                        |
 //!               |    - Grafana                      |
-//!               |    - Pyroscope                    |
 //!               |  - Security Group                 |
 //!               |    - All: Deployer IP             |
 //!               |    - 3100: Binary VPCs            |
