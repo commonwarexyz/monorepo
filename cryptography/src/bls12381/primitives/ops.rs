@@ -712,6 +712,31 @@ where
     V::verify(public, &hm_sum, signature)
 }
 
+// no_std version of aggregate_verify_multiple_messages which ignores the concurrency parameter and
+// runs in current thread.
+#[cfg(not(feature = "std"))]
+pub fn aggregate_verify_multiple_messages<'a, V, I>(
+    public: &V::Public,
+    messages: I,
+    signature: &V::Signature,
+    _concurrency: usize,
+) -> Result<(), Error>
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
+{
+    let mut hm_sum = V::Signature::zero();
+    for (namespace, msg) in messages {
+        let hm = match namespace {
+            Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+            None => hash_message::<V>(V::MESSAGE, msg),
+        };
+        hm_sum.add(&hm);
+    }
+    // Verify the signature
+    V::verify(public, &hm_sum, signature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
