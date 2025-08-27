@@ -25,11 +25,11 @@ impl std::str::FromStr for DatabaseType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "fixed" => Ok(DatabaseType::Fixed),
-            "variable" => Ok(DatabaseType::Variable),
+            "any::fixed" => Ok(DatabaseType::Fixed),
+            "any::variable" => Ok(DatabaseType::Variable),
             "immutable" => Ok(DatabaseType::Immutable),
             _ => Err(format!(
-                "Invalid database type: '{s}'. Must be 'fixed', 'variable', or 'immutable'",
+                "Invalid database type: '{s}'. Must be 'any::fixed', 'any::variable', or 'immutable'",
             )),
         }
     }
@@ -38,8 +38,8 @@ impl std::str::FromStr for DatabaseType {
 impl DatabaseType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            DatabaseType::Fixed => "fixed",
-            DatabaseType::Variable => "variable",
+            DatabaseType::Fixed => "any::fixed",
+            DatabaseType::Variable => "any::variable",
             DatabaseType::Immutable => "immutable",
         }
     }

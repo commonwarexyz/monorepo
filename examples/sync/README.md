@@ -36,7 +36,7 @@ cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_ser
 ```
 
 Server options:
-- `--db <fixed|variable|immutable>`: Database type to use. Must be 'fixed', 'variable', or 'immutable' (default: fixed)
+- `--db <any::fixed|any::variable|immutable>`: Database type to use. Must be 'any::fixed', 'any::variable', or 'immutable' (default: any::fixed)
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
@@ -55,7 +55,7 @@ cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir 
 ```
 
 Client options:
-- `--db <fixed|variable|immutable>`: Database type to use. Must be 'fixed', 'variable', or 'immutable' (default: fixed)
+- `--db <any::fixed|any::variable|immutable>`: Database type to use. Must be 'any::fixed', 'any::variable', or 'immutable' (default: any::fixed)
 - `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
 - `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client-{RANDOM_SUFFIX})
@@ -67,11 +67,11 @@ _The client must use the same `--db` as the server it syncs from._
 
 ## Database Types
 
-The sync example supports three database types:
+The sync example supports three authenticated database (adb) types:
 
-- [adb::any::fixed::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/fixed/struct.Any.html) - database with fixed value size
-- [adb::any::variable::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/variable/struct.Any.html) - database with variable value size
-- [adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html) - database that doesn't allow updates or deletions of previously set keys
+- **`any::fixed`**: [adb::any::fixed::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/fixed/struct.Any.html) with fixed value size
+- **`any::variable`**: [adb::any::variable::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/variable/struct.Any.html) with variable value size
+- **`immutable`**: [adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html) with variable value size and no updates of previously set keys
 
 ## Example Session
 

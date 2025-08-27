@@ -114,7 +114,7 @@ where
     }
 
     fn name() -> &'static str {
-        "fixed"
+        "any::fixed"
     }
 }
 

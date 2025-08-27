@@ -287,9 +287,11 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("fixed|variable|immutable")
-                .help("Database type to use. Must be `fixed`, `variable`, or `immutable`.")
-                .default_value("fixed"),
+                .value_name("any::fixed|any::variable|immutable")
+                .help(
+                    "Database type to use. Must be `any::fixed`, `any::variable`, or `immutable`.",
+                )
+                .default_value("any::fixed"),
         )
         .arg(
             Arg::new("server")

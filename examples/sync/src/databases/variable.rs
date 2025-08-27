@@ -125,6 +125,6 @@ where
     }
 
     fn name() -> &'static str {
-        "variable"
+        "any::variable"
     }
 }
