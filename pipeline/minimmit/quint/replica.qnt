@@ -5,18 +5,18 @@ module replica {
 
     // Total number of replicas.
     const N: int
-    // Maximum number of faulty replicas.
+    // Maximum number of byzantine(faulty) replicas.
     const F: int
     // Identities of the correct replicas.
     const CORRECT: Set[ReplicaId]
-    // Identities of the faulty replicas.
-    const FAULTY: Set[ReplicaId]
+    // Identities of the byzantine replicas.
+    const BYZANTINE: Set[ReplicaId]
     // The set of all views.
     const VIEWS: Set[ViewNumber]
     // the set of all blocks
     const VALID_BLOCKS: Set[Block]
     // All replicas.
-    pure val Replicas = CORRECT.union(FAULTY)
+    pure val Replicas = CORRECT.union(BYZANTINE)
     
     // Quorums:
     pure val L = N - F;
@@ -33,11 +33,11 @@ module replica {
     // the leader function from the view to the replicas identities
     var leader: ViewNumber -> ReplicaId
 
-    // proposals sent by the replicas, correct and faulty
+    // proposals sent by the replicas, correct and byzantine
     var sent_proposal: Set[Proposal]
-    // notarize and nullify votes sent by the replicas, correct and faulty
+    // notarize and nullify votes sent by the replicas, correct and byzantine
     var sent_vote: Set[Vote]
-    // `notarization` and `nullification` messages sent by the replicas, correct and faulty
+    // `notarization` and `nullification` messages sent by the replicas, correct and byzantine
     var sent_certificate: Set[Certificate]
 
     // notarize and nullify votes received by the correct replicas
@@ -250,7 +250,7 @@ module replica {
         leader'       = l
     }
 
-    // A step by a correct or faulty replica.
+    // A step by a correct or byzantine replica.
     action step = {
         any {
             {
@@ -624,14 +624,14 @@ module replica {
     // -------------------------------------------------
 
     action faulty_step: bool = all {
-        FAULTY != Set(),
+        BYZANTINE != Set(),
 
         // Adversary may inject arbitrary well-typed vote messages.
         all {
-            nondet senders = FAULTY.powerset().oneOf()
+            nondet senders = BYZANTINE.powerset().oneOf()
             nondet view = VIEWS.oneOf()
             nondet block = AllBlocks.union(Set(DUMMY_BLOCK)).oneOf()
-            nondet sig = oneOf(FAULTY)
+            nondet sig = oneOf(BYZANTINE)
             nondet k = oneOf(Set(NotarizeKind, NullifyKind))
             val votes = senders.map(s => {
                 view: view,
@@ -643,8 +643,8 @@ module replica {
         },
         // Adversary may inject arbitrary certificates.
         all {
-            nondet sender = FAULTY.oneOf()
-            nondet senders = FAULTY.powerset().oneOf()
+            nondet sender = BYZANTINE.oneOf()
+            nondet senders = BYZANTINE.powerset().oneOf()
             nondet view = VIEWS.oneOf()
             nondet block = AllBlocks.oneOf()
             nondet kind = oneOf(Set(NotarizeKind, NullifyKind))
@@ -653,7 +653,7 @@ module replica {
                 v.block == block,
                 v.kind == kind
             })
-            nondet agg_sig = votes.map(v => v.sig).union(FAULTY).powerset().oneOf()
+            nondet agg_sig = votes.map(v => v.sig).union(BYZANTINE).powerset().oneOf()
             val cert_kind = if (kind == NullifyKind) {
                 NullificationKind
             } else if (votes.size()>= L) FinalizationKind else NotarizationKind
@@ -670,7 +670,7 @@ module replica {
         all {
             nondet view_parent = VIEWS.oneOf()
             nondet view = VIEWS.oneOf()
-            nondet sig = oneOf(FAULTY)
+            nondet sig = oneOf(BYZANTINE)
             nondet block = AllBlocks.oneOf()
             nondet block_parent = AllBlocks.oneOf()
             val proposal = {
@@ -700,8 +700,8 @@ module replica {
 
     // Assumptions and thresholds.
     val assumptions_valid = all {
-        CORRECT.size() + FAULTY.size() == N,
-        CORRECT.intersect(FAULTY) == Set(),
+        CORRECT.size() + BYZANTINE.size() == N,
+        CORRECT.intersect(BYZANTINE) == Set(),
         N >= 5*F+1,
         2*M <= L + 1, // Liveness guard, prevents equivocation stall.
         M + L > N + F, // Every M-quorum and every L-quorum share at least one honest replica.
@@ -746,7 +746,7 @@ module replica {
     // No equivocation.
     val no_proposal_equivocation = tuples(sent_proposal, sent_proposal).forall(((m1, m2)) => or {
         not(m1.view == m2.view and m1.sig == m2.sig),
-        FAULTY.contains(m1.sig),
+        BYZANTINE.contains(m1.sig),
         m1.block == m2.block,
     })
 

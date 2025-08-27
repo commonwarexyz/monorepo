@@ -6,7 +6,7 @@ module tests {
         N = 6,
         F = 1,
         CORRECT = Set("n0", "n1", "n2", "n3", "n4"),
-        FAULTY = Set("n5"),
+        BYZANTINE = Set("n5"),
         VIEWS = 0.to(8),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set("inv_b3")

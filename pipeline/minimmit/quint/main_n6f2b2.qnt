@@ -2,12 +2,12 @@
 
 /// A few handy small models that are good for debugging and inspection
 module main {
-    // A specification instance for n=6 and f=0
+    // A specification instance for n=6 and f=2
     import replica(
         N = 6,
-        F = 1,
-        CORRECT = Set("n0", "n1", "n2", "n3", "n4", "n5"),
-        FAULTY = Set(),
+        F = 2,
+        CORRECT = Set("n0", "n1", "n2", "n3"),
+        BYZANTINE = Set("n4", "n5"),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set("inval_0", "inval_1"),
         VIEWS = 0.to(6),

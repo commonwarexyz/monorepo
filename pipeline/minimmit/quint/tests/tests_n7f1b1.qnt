@@ -4,7 +4,7 @@ module tests {
     import option.* from "../option"
     import replica(
         CORRECT = Set("n0", "n1", "n2", "n3", "n4", "n5"),
-        FAULTY = Set("n6"),
+        BYZANTINE = Set("n6"),
         N = 7,
         F = 1,
         VIEWS = 0.to(2),
