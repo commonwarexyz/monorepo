@@ -549,12 +549,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             PROMETHEUS_VERSION,
             GRAFANA_VERSION,
             LOKI_VERSION,
+            PYROSCOPE_VERSION,
             TEMPO_VERSION,
         ),
     )
     .await?;
     poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_active(private_key, &monitoring_ip, "loki").await?;
+    poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
     poll_service_active(private_key, &monitoring_ip, "tempo").await?;
     poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
     info!("configured monitoring instance");
@@ -594,6 +596,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let promtail_service_path = promtail_service_path.clone();
         let node_exporter_service_path = node_exporter_service_path.clone();
         let binary_service_path = binary_service_path.clone();
+        let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
+        let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
         let future = async move {
             rsync_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
             rsync_file(
@@ -656,6 +660,38 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "/home/ubuntu/logrotate.conf",
             )
             .await?;
+            rsync_file(
+                private_key,
+                pyroscope_agent_service_path.to_str().unwrap(),
+                &ip,
+                "/home/ubuntu/pyroscope-agent.service",
+            )
+            .await?;
+            let pyroscope_agent_script_path =
+                tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
+            std::fs::write(
+                &pyroscope_agent_script_path,
+                generate_pyroscope_script(
+                    &monitoring_private_ip,
+                    &instance.name,
+                    &ip,
+                    &instance.region,
+                ),
+            )?;
+            rsync_file(
+                private_key,
+                pyroscope_agent_script_path.to_str().unwrap(),
+                &ip,
+                "/home/ubuntu/pyroscope-agent.sh",
+            )
+            .await?;
+            rsync_file(
+                private_key,
+                pyroscope_agent_timer_path.to_str().unwrap(),
+                &ip,
+                "/home/ubuntu/pyroscope-agent.timer",
+            )
+            .await?;
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
             ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
             poll_service_active(private_key, &ip, "promtail").await?;
@@ -666,7 +702,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
             .await?;
             poll_service_active(private_key, &ip, "node_exporter").await?;
-            ssh_execute(private_key, &ip, &install_binary_cmd()).await?;
+            ssh_execute(private_key, &ip, &install_binary_cmd(instance.profiling)).await?;
             poll_service_active(private_key, &ip, "binary").await?;
             info!(
                 ip = ip.as_str(),
