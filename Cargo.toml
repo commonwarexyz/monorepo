@@ -48,8 +48,8 @@ commonware-runtime = { version = "0.0.59", path = "runtime" }
 commonware-storage = { version = "0.0.59", path = "storage" }
 commonware-stream = { version = "0.0.59", path = "stream" }
 commonware-utils = { version = "0.0.59", path = "utils" }
-thiserror = "2.0.12"
-bytes = "1.7.1"
+thiserror = { version = "2.0.12", default-features = false }
+bytes = { version = "1.7.1", default-features = false }
 sha2 = "0.10.8"
 blake3 = "1.8.2"
 rand = "0.8.5"
