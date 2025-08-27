@@ -56,14 +56,14 @@ impl<P: PublicKey> Info<P> {
             recipient,
             ephemeral_public_key,
             timestamp,
-            continuation_tag: Some(Sha256::new().update(data).finalize()),
+            continuation_tag: Some(Sha256::hash(data)),
         }
     }
 
     pub fn check_tag(&self, data: &[u8]) -> Result<(), Error> {
         if self
             .continuation_tag
-            .is_some_and(|tag| tag == Sha256::new().update(data).finalize())
+            .is_some_and(|tag| tag == Sha256::hash(data))
         {
             Ok(())
         } else {
