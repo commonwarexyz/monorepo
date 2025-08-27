@@ -469,7 +469,6 @@ where
 ///
 /// This function assumes that each partial signature is unique and that
 /// each set of partial signatures has the same indices.
-#[cfg(feature = "std")]
 pub fn threshold_signature_recover_multiple<'a, V, I>(
     threshold: u32,
     mut many_evals: Vec<I>,
@@ -504,77 +503,61 @@ where
         .collect::<Vec<_>>();
     let weights = compute_weights(indices)?;
 
-    // If concurrency is not required, recover signatures sequentially
-    let concurrency = core::cmp::min(concurrency, prepared_evals.len());
-    if concurrency == 1 {
-        return prepared_evals
-            .iter()
-            .map(|evals| {
-                threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
-            })
-            .collect();
-    }
-
-    // Build a thread pool with the specified concurrency
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(concurrency)
-        .build()
-        .expect("Unable to build thread pool");
-
-    // Recover signatures
-    pool.install(move || {
-        prepared_evals
-            .par_iter()
-            .map(|evals| {
-                threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
-            })
-            .collect()
-    })
+    recover_signatures::<V>(&weights, prepared_evals, concurrency)
 }
 
-// no_std version of `threshold_signature_recover_multiple` that does not use concurrency.
-#[cfg(not(feature = "std"))]
-pub fn threshold_signature_recover_multiple<'a, V, I>(
-    threshold: u32,
-    mut many_evals: Vec<I>,
-    _concurrency: usize,
+#[allow(unused_variables)] // for no_std which ignores concurrency
+fn recover_signatures<'a, V>(
+    weights: &BTreeMap<u32, Weight>,
+    prepared_evals: Vec<Vec<&Eval<V::Signature>>>,
+    concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
 where
     V: Variant,
-    I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
-    // Process first set of evaluations
-    let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
-    let evals = prepare_evaluations(threshold, evals)?;
-    let mut prepared_evals = vec![evals];
-
-    // Prepare other evaluations and ensure they have the same indices
-    for evals in many_evals {
-        let evals = evals.into_iter().collect::<Vec<_>>();
-        let evals = prepare_evaluations(threshold, evals)?;
-        for (i, e) in prepared_evals[0].iter().enumerate() {
-            if e.index != evals[i].index {
-                return Err(Error::InvalidIndex);
-            }
-        }
-        prepared_evals.push(evals);
-    }
-
-    // Compute weights
-    let indices = prepared_evals[0]
-        .iter()
-        .map(|e| e.index)
-        .collect::<Vec<_>>();
-    let weights = compute_weights(indices)?;
-
-    // Recover signatures
+    #[cfg(not(feature = "std"))]
     return prepared_evals
-        .iter()
+        .into_iter()
         .map(|evals| {
             threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
         })
         .collect();
+
+    #[cfg(feature = "std")]
+    {
+        let concurrency = core::cmp::min(concurrency, prepared_evals.len());
+        if concurrency == 1 {
+            return prepared_evals
+                .into_iter()
+                .map(|evals| {
+                    threshold_signature_recover_with_weights::<V, _>(
+                        &weights,
+                        evals.iter().cloned(),
+                    )
+                })
+                .collect();
+        }
+
+        // Build a thread pool with the specified concurrency
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .expect("Unable to build thread pool");
+
+        // Recover signatures
+        pool.install(move || {
+            prepared_evals
+                .par_iter()
+                .map(|evals| {
+                    threshold_signature_recover_with_weights::<V, _>(
+                        &weights,
+                        evals.iter().cloned(),
+                    )
+                })
+                .collect()
+        })
+    }
 }
 
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
