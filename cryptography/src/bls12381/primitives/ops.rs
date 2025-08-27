@@ -503,12 +503,12 @@ where
         .collect::<Vec<_>>();
     let weights = compute_weights(indices)?;
 
-    recover_signatures::<V>(&weights, prepared_evals, concurrency)
+    recover_signatures::<V>(weights, prepared_evals, concurrency)
 }
 
 #[allow(unused_variables)] // for no_std which ignores concurrency
 fn recover_signatures<'a, V>(
-    weights: &BTreeMap<u32, Weight>,
+    weights: BTreeMap<u32, Weight>,
     prepared_evals: Vec<Vec<&Eval<V::Signature>>>,
     concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
