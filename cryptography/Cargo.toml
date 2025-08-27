@@ -21,7 +21,7 @@ blake3 = { workspace = true }
 rayon = { workspace = true, optional = true }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 ed25519-consensus = { version = "2.1.0", default-features = false }
-blst = { workspace = true }
+blst = { workspace = true, features = [ "no-threads"] }
 p256 = { workspace = true, features = ["ecdsa"] }
 rand_chacha = { version = "0.3", default-features = false }
 cfg-if = { workspace = true }

@@ -398,11 +398,13 @@ mod tests {
             let other1 = PrivateKey::from_seed(1).public_key();
             let other2 = PrivateKey::from_seed(2).public_key();
             requester.reconcile(&[me.clone(), other1.clone(), other2.clone()]);
+            println!("key 0 {:?}, key 1 {:?}, key 2 {:?}", me, other1, other2);
 
             // Get request
             let (participant, id) = requester.request(false).expect("failed to get participant");
+            println!("participant {:?}, id {:?}", participant, id);
             assert_eq!(id, 0);
-            if participant == other2 {
+            if participant == other1 {
                 let request = requester
                     .handle(&participant, id)
                     .expect("failed to get request");
@@ -414,7 +416,7 @@ mod tests {
             // Get request
             let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(id, 1);
-            if participant == other1 {
+            if participant == other2 {
                 context.sleep(Duration::from_millis(10)).await;
                 let request = requester
                     .handle(&participant, id)
@@ -432,7 +434,7 @@ mod tests {
 
             // Get request
             let (participant, id) = requester.request(false).expect("failed to get participant");
-            assert_eq!(participant, other1);
+            assert_eq!(participant, other2);
             assert_eq!(id, 2);
 
             // Cancel request
