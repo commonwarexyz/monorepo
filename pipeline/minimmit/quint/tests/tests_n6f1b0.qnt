@@ -1058,6 +1058,14 @@ module tests {
                 unchanged_all,
             })
             .expect(all_invariants)
+
+            // replicas can receive old votes
+            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n3"))
+            .then(replica_receives_notarize_vote("n3", "val_b0", 0, "n4"))
+            .then(replica_receives_notarize_vote("n4", "val_b0", 0, "n5"))
+            .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n0"))
     }
 
     // Two blocks happy path test - but notarization and finalizations are processed in different views

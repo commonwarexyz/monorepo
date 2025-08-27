@@ -436,6 +436,8 @@ module replica {
         all {
             votes != Set(),
             votes.forall(v => and {
+                // Note, `view` is not the current view of the replica,
+                // it is `view` from the input needed to be able pass the concrete view parameter into underlying functions, e.g., `is_view_finalized`.
                 v.view == view, v.kind == NotarizeKind, v.block == block,
             }),
             val new_store = store_vote.get(id).union(votes)
