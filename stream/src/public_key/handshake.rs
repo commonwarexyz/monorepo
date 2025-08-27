@@ -52,26 +52,22 @@ impl<P: PublicKey> Info<P> {
         timestamp: u64,
         data: &[u8],
     ) -> Self {
-        let mut sha = Sha256::new();
-        sha.update(data);
         Self {
             recipient,
             ephemeral_public_key,
             timestamp,
-            continuation_tag: Some(sha.finalize()),
+            continuation_tag: Some(Sha256::new().update(data).finalize()),
         }
     }
 
-    /// Check that the tag in this message matches a piece of information.
     pub fn check_tag(&self, data: &[u8]) -> Result<(), Error> {
-        let ok = |tag| {
-            let mut sha = Sha256::new();
-            sha.update(data);
-            sha.finalize() == tag
-        };
-        match self.continuation_tag {
-            Some(x) if ok(x) => Ok(()),
-            _ => Err(Error::InvalidInfoContinuationTag),
+        if self
+            .continuation_tag
+            .is_some_and(|tag| tag == Sha256::new().update(data).finalize())
+        {
+            Ok(())
+        } else {
+            Err(Error::InvalidInfoContinuationTag)
         }
     }
 }
