@@ -94,8 +94,8 @@ mod tests {
             },
         },
         ed25519::{PrivateKey, PublicKey},
-        sha256::{self, Digest as Sha256Digest},
-        Digestible, PrivateKeyExt as _, Signer as _,
+        sha256::{Digest as Sha256Digest, Sha256},
+        Digestible, Hasher as _, PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
@@ -345,9 +345,9 @@ mod tests {
 
             // Generate blocks, skipping the genesis block.
             let mut blocks = Vec::<B>::new();
-            let mut parent = sha256::hash(b"");
+            let mut parent = Sha256::hash(b"");
             for i in 1..=NUM_BLOCKS {
-                let block = B::new::<sha256::Sha256>(parent, i, i);
+                let block = B::new::<Sha256>(parent, i, i);
                 parent = block.digest();
                 blocks.push(block);
             }
@@ -445,8 +445,8 @@ mod tests {
             };
             setup_network_links(&mut oracle, &peers, link).await;
 
-            let parent = sha256::hash(b"");
-            let block = B::new::<sha256::Sha256>(parent, 1, 1);
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
             let commitment = block.digest();
 
             let subscription_rx = actor.subscribe(Some(1), commitment).await;
@@ -499,9 +499,9 @@ mod tests {
             };
             setup_network_links(&mut oracle, &peers, link).await;
 
-            let parent = sha256::hash(b"");
-            let block1 = B::new::<sha256::Sha256>(parent, 1, 1);
-            let block2 = B::new::<sha256::Sha256>(block1.digest(), 2, 2);
+            let parent = Sha256::hash(b"");
+            let block1 = B::new::<Sha256>(parent, 1, 1);
+            let block2 = B::new::<Sha256>(block1.digest(), 2, 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
@@ -567,9 +567,9 @@ mod tests {
             };
             setup_network_links(&mut oracle, &peers, link).await;
 
-            let parent = sha256::hash(b"");
-            let block1 = B::new::<sha256::Sha256>(parent, 1, 1);
-            let block2 = B::new::<sha256::Sha256>(block1.digest(), 2, 2);
+            let parent = Sha256::hash(b"");
+            let block1 = B::new::<Sha256>(parent, 1, 1);
+            let block2 = B::new::<Sha256>(block1.digest(), 2, 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
@@ -629,12 +629,12 @@ mod tests {
             };
             setup_network_links(&mut oracle, &peers, link).await;
 
-            let parent = sha256::hash(b"");
-            let block1 = B::new::<sha256::Sha256>(parent, 1, 1);
-            let block2 = B::new::<sha256::Sha256>(block1.digest(), 2, 2);
-            let block3 = B::new::<sha256::Sha256>(block2.digest(), 3, 3);
-            let block4 = B::new::<sha256::Sha256>(block3.digest(), 4, 4);
-            let block5 = B::new::<sha256::Sha256>(block4.digest(), 5, 5);
+            let parent = Sha256::hash(b"");
+            let block1 = B::new::<Sha256>(parent, 1, 1);
+            let block2 = B::new::<Sha256>(block1.digest(), 2, 2);
+            let block3 = B::new::<Sha256>(block2.digest(), 3, 3);
+            let block4 = B::new::<Sha256>(block3.digest(), 4, 4);
+            let block5 = B::new::<Sha256>(block4.digest(), 5, 5);
 
             let sub1_rx = actor.subscribe(Some(1), block1.digest()).await;
             let sub2_rx = actor.subscribe(Some(2), block2.digest()).await;

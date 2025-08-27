@@ -358,7 +358,8 @@ mod tests {
             dkg::ops::{self, evaluate_all},
             primitives::{ops::sign_message, variant::MinSig},
         },
-        sha256,
+        sha256::Sha256,
+        Hasher,
     };
     use commonware_runtime::deterministic;
 
@@ -377,7 +378,7 @@ mod tests {
         let polynomial = evaluate_all::<MinSig>(&public, 4);
         let item = Item {
             index: 100,
-            digest: sha256::hash(b"test_item"),
+            digest: Sha256::hash(b"test_item"),
         };
 
         // Test Item codec
@@ -389,30 +390,32 @@ mod tests {
         assert!(ack.verify(namespace, &polynomial));
         assert!(!ack.verify(b"wrong", &polynomial));
 
-        let restored_ack: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
+        let restored_ack: Ack<MinSig, <Sha256 as Hasher>::Digest> =
+            Ack::decode(ack.encode()).unwrap();
         assert_eq!(ack, restored_ack);
 
         // Test TipAck codec
         let tip_ack = TipAck { ack, tip: 42 };
-        let restored: TipAck<MinSig, sha256::Digest> = TipAck::decode(tip_ack.encode()).unwrap();
+        let restored: TipAck<MinSig, <Sha256 as Hasher>::Digest> =
+            TipAck::decode(tip_ack.encode()).unwrap();
         assert_eq!(tip_ack, restored);
 
         // Test Activity codec - Ack variant
         let activity_ack = Activity::Ack(Ack::sign(namespace, 1, &shares[0], item.clone()));
-        let restored_activity_ack: Activity<MinSig, sha256::Digest> =
+        let restored_activity_ack: Activity<MinSig, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_ack.encode()).unwrap();
         assert_eq!(activity_ack, restored_activity_ack);
 
         // Test Activity codec - Certified variant
         let signature = sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
         let activity_certified = Activity::Certified(Certificate { item, signature });
-        let restored_activity_certified: Activity<MinSig, sha256::Digest> =
+        let restored_activity_certified: Activity<MinSig, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_certified.encode()).unwrap();
         assert_eq!(activity_certified, restored_activity_certified);
 
         // Test Activity codec - Tip variant
         let activity_tip = Activity::Tip(123);
-        let restored_activity_tip: Activity<MinSig, sha256::Digest> =
+        let restored_activity_tip: Activity<MinSig, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_tip.encode()).unwrap();
         assert_eq!(activity_tip, restored_activity_tip);
     }
@@ -422,7 +425,7 @@ mod tests {
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 
-        let result = Activity::<MinSig, sha256::Digest>::decode(&buf[..]);
+        let result = Activity::<MinSig, <Sha256 as Hasher>::Digest>::decode(&buf[..]);
         assert!(matches!(
             result,
             Err(CodecError::Invalid(

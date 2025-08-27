@@ -37,11 +37,6 @@ pub type CoreSha256 = ISha256;
 
 const DIGEST_LENGTH: usize = 32;
 
-/// Generate a SHA-256 digest from a message.
-pub fn hash(message: &[u8]) -> Digest {
-    Sha256::hash(message)
-}
-
 /// SHA-256 hasher.
 #[derive(Debug)]
 pub struct Sha256 {
@@ -198,7 +193,7 @@ mod tests {
         assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
 
         // Test simple hasher
-        let hash = hash(msg);
+        let hash = Sha256::hash(msg);
         assert_eq!(hex(hash.as_ref()), HELLO_DIGEST);
     }
 

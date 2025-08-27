@@ -60,7 +60,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519::{PrivateKey, PublicKey, Signature},
-        sha256::{self, Digest},
+        sha256::{Digest, Sha256},
     };
     use rand::SeedableRng;
 
@@ -69,7 +69,7 @@ mod tests {
         use super::*;
         use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::{DecodeExt, FixedSize};
-        use commonware_cryptography::{PrivateKeyExt as _, Signer as _};
+        use commonware_cryptography::{Hasher as _, PrivateKeyExt as _, Signer as _};
 
         /// Creates a dummy link for testing.
         pub fn create_dummy_node<V: Variant>(
@@ -82,7 +82,7 @@ mod tests {
                 Signature::decode(&mut data).unwrap()
             };
             Node::new(
-                Chunk::new(sequencer, height, sha256::hash(payload.as_bytes())),
+                Chunk::new(sequencer, height, Sha256::hash(payload.as_bytes())),
                 signature,
                 None,
             )

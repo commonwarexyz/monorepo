@@ -1,6 +1,9 @@
 //! An implementation of a [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 
-use crate::{hash, sha256::Digest};
+use crate::{
+    sha256::{Digest, Sha256},
+    Hasher,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     codec::{Read, Write},
@@ -40,7 +43,7 @@ impl BloomFilter {
     /// Generate `num_hashers` bit indices for a given item.
     fn indices(&self, item: &[u8], bits: usize) -> impl Iterator<Item = usize> {
         // Extract two 128-bit hash values from the SHA256 digest of the item
-        let digest = hash(item);
+        let digest = Sha256::hash(item);
         let mut h1_bytes = [0u8; HALF_DIGEST_LEN];
         h1_bytes.copy_from_slice(&digest[0..HALF_DIGEST_LEN]);
         let h1 = u128::from_be_bytes(h1_bytes);

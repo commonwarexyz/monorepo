@@ -17,7 +17,7 @@ use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 pub mod bls12381;
 pub mod ed25519;
 pub mod sha256;
-pub use sha256::{hash, CoreSha256, Sha256};
+pub use sha256::{CoreSha256, Sha256};
 pub mod blake3;
 pub use blake3::{Blake3, CoreBlake3};
 pub mod bloomfilter;
