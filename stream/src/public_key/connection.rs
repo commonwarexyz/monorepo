@@ -55,6 +55,7 @@ impl<C: Signer, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
             &config.namespace,
             config.synchrony_bound,
             config.max_handshake_age,
+            None,
         )?;
         Ok(Self {
             config,
@@ -179,6 +180,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             &config.namespace,
             config.synchrony_bound,
             config.max_handshake_age,
+            Some(&hello_msg),
         )?;
 
         // Ensure we connected to the right peer
@@ -261,7 +263,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let hello = handshake::Hello::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::new(incoming.peer_public_key, listener_ephemeral, timestamp),
+            handshake::Info::new(incoming.peer_public_key, listener_ephemeral, timestamp)
+                .with_tag_over(&incoming.dialer_hello_msg),
         );
 
         // Derive shared secret and ensure it is contributory
@@ -661,7 +664,6 @@ mod tests {
 
                     // Read the hello from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
 
                     // Create mock shared secret and cipher for `confirmation`
                     let mock_secret = [1u8; 32];
@@ -674,7 +676,11 @@ mod tests {
                         peer_config.crypto.public_key(),
                         x25519::PublicKey::from_secret(&secret),
                         timestamp,
-                    );
+                    )
+                    .with_tag_over(&msg);
+
+                    let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
+
                     let hello =
                         handshake::Hello::sign(&mut actual_peer, &peer_config.namespace, info);
 
@@ -735,19 +741,19 @@ mod tests {
 
                     // Read the hello from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
-
-                    // Create mock cipher for `confirmation`
-                    let mock_secret = [1u8; 32];
-                    let mock_cipher = ChaCha20Poly1305::new(&mock_secret.into());
-
                     // Create a custom hello info bytes with zero ephemeral key
                     let timestamp = context.current().epoch_millis();
                     let info = handshake::Info::new(
                         recipient_pk,
                         x25519::PublicKey::from_bytes([0u8; 32]),
                         timestamp,
-                    );
+                    )
+                    .with_tag_over(&msg);
+                    let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
+
+                    // Create mock cipher for `confirmation`
+                    let mock_secret = [1u8; 32];
+                    let mock_cipher = ChaCha20Poly1305::new(&mock_secret.into());
 
                     // Create the signed `hello`
                     let hello = handshake::Hello::sign(&mut listener_crypto, &namespace, info);
@@ -775,6 +781,80 @@ mod tests {
 
             // Verify the error
             assert!(matches!(result, Err(Error::SharedSecretNotContributory)));
+        });
+    }
+
+    #[test]
+    fn test_upgrade_dialer_invalid_continuation_tag() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create cryptographic identities
+            let dialer_crypto = PrivateKey::from_seed(0);
+            let mut listener_crypto = PrivateKey::from_seed(1);
+            let listener_public_key = listener_crypto.public_key();
+
+            // Set up mock channels
+            let (dialer_sink, mut peer_stream) = mocks::Channel::init();
+            let (mut peer_sink, dialer_stream) = mocks::Channel::init();
+
+            // Dialer configuration
+            let dialer_config = Config {
+                crypto: dialer_crypto,
+                namespace: b"test_namespace".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(5),
+            };
+
+            // Spawn a mock peer that responds with a listener response containing an all-zero ephemeral key
+            context.with_label("mock_peer").spawn({
+                let namespace = dialer_config.namespace.clone();
+                let recipient_pk = dialer_config.crypto.public_key();
+                move |mut context| async move {
+                    use chacha20poly1305::KeyInit;
+
+                    // Read the hello from dialer
+                    let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
+                    let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
+
+                    // Create mock cipher for `confirmation`
+                    let mock_secret = [1u8; 32];
+                    let mock_cipher = ChaCha20Poly1305::new(&mock_secret.into());
+
+                    let secret = x25519::new(&mut context);
+                    let listener_ephemeral = x25519::PublicKey::from_secret(&secret);
+                    // Create a custom hello info bytes with zero ephemeral key
+                    let timestamp = context.current().epoch_millis();
+                    let info = handshake::Info::new(recipient_pk, listener_ephemeral, timestamp)
+                        .with_tag_over(b"not the right message");
+
+                    // Create the signed `hello`
+                    let hello = handshake::Hello::sign(&mut listener_crypto, &namespace, info);
+
+                    // Create fake listener response (using fake transcript)
+                    let fake_transcript = b"fake_transcript_for_non_contributory_test";
+                    let confirmation = Confirmation::create(mock_cipher, fake_transcript).unwrap();
+
+                    // Send the listener response
+                    send_frame(&mut peer_sink, &(hello, confirmation).encode(), 1024)
+                        .await
+                        .unwrap();
+                }
+            });
+
+            // Attempt connection - should fail due to non-contributory shared secret
+            let result = Connection::upgrade_dialer(
+                context,
+                dialer_config,
+                dialer_sink,
+                dialer_stream,
+                listener_public_key,
+            )
+            .await;
+
+            // Verify the error
+            assert!(matches!(result, Err(Error::InvalidInfoContinuationTag)));
         });
     }
 
