@@ -360,7 +360,7 @@ pub fn install_binary_cmd(profiling: bool) -> String {
         r#"
 # Install base tools and binary dependencies
 sudo apt-get update -y
-sudo apt-get install -y logrotate jq wget libjemalloc2 linux-tools-$(uname -r)
+sudo apt-get install -y logrotate jq wget libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
 
 # Setup binary
 chmod +x /home/ubuntu/binary
