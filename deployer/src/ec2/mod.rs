@@ -24,6 +24,7 @@
 //!               |    - Loki                         |
 //!               |    - Tempo                        |
 //!               |    - Grafana                      |
+//!               |    - Pyroscope                    |
 //!               |  - Security Group                 |
 //!               |    - All: Deployer IP             |
 //!               |    - 3100: Binary VPCs            |
@@ -39,6 +40,7 @@
 //! |    - Binary A                |  |    - Binary B                |
 //! |    - Promtail                |  |    - Promtail                |
 //! |    - Node Exporter           |  |    - Node Exporter           |
+//! |    - Pyroscope Agent         |  |    - Pyroscope Agent         |
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
@@ -55,6 +57,7 @@
 //! * Runs:
 //!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
+//!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
 //!     * **Tempo**: Listens at `:4318`, storing traces in `/var/lib/tempo`.
 //!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus, Loki, and Tempo datasources and a custom dashboard.
 //! * Ingress:
@@ -68,6 +71,7 @@
 //!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //!     * **Node Exporter**: Exposes system metrics at `:9100`.
+//!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
 //!     * Monitoring IP access to `:9090` and `:9100` for Prometheus.
@@ -98,7 +102,7 @@
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
 //! 3. Establishes VPC peering between the monitoring region and binary regions.
-//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, and Tempo.
+//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, Pyroscope, and Tempo.
 //! 5. Launches binary instances, uploads binaries, configurations, and hosts.yaml, and installs Promtail and the binary.
 //! 6. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
 //! 7. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
@@ -142,6 +146,7 @@
 //!     storage_class: gp2
 //!     binary: /path/to/binary
 //!     config: /path/to/config.conf
+//!     profiling: true
 //!   - name: node2
 //!     region: us-west-2
 //!     instance_type: t4g.small
@@ -149,6 +154,7 @@
 //!     storage_class: gp2
 //!     binary: /path/to/binary2
 //!     config: /path/to/config2.conf
+//!     profiling: false
 //! ports:
 //!   - protocol: tcp
 //!     port: 4545
@@ -192,6 +198,9 @@ cfg_if::cfg_if! {
 
         /// Port on monitoring where logs are pushed
         const LOGS_PORT: u16 = 3100;
+
+        /// Port on monitoring where profiles are pushed
+        const PROFILES_PORT: u16 = 4040;
 
         /// Port on monitoring where traces are pushed
         const TRACES_PORT: u16 = 4318;
@@ -320,6 +329,9 @@ pub struct InstanceConfig {
 
     /// Path to the binary configuration file
     pub config: String,
+
+    /// Whether to enable profiling
+    pub profiling: bool,
 }
 
 /// Monitoring configuration

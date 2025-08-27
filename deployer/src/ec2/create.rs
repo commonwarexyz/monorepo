@@ -2,7 +2,7 @@
 
 use crate::ec2::{
     aws::*, deployer_directory, services::*, utils::*, Config, Error, Host, Hosts, InstanceConfig,
-    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, TRACES_PORT,
+    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
 use std::{
