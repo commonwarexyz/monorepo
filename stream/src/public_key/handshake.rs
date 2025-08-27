@@ -27,12 +27,12 @@ pub struct Info<P: PublicKey> {
 
     /// Timestamp of the handshake (in epoch milliseconds).
     timestamp: u64,
-    /// c.f. [`Self::with_tag_over`]
+    /// c.f. [`Self::new_with_tag`]
     continuation_tag: Option<<Sha256 as Hasher>::Digest>,
 }
 
 impl<P: PublicKey> Info<P> {
-    /// Create a new hello.
+    /// Create a new info.
     pub fn new(recipient: P, ephemeral_public_key: x25519::PublicKey, timestamp: u64) -> Self {
         Self {
             recipient,
@@ -42,21 +42,28 @@ impl<P: PublicKey> Info<P> {
         }
     }
 
-    /// Augment this message by computing a tag over some data.
+    /// Create a new info with a tag linking to previous data.
     ///
     /// For example, to allow for the info to also be linked to the hello message sent by the other peer,
     /// or having this information attest to a MAC using a previous shared session key.
-    pub fn with_tag_over(self, data: &[u8]) -> Self {
+    pub fn new_with_tag(
+        recipient: P,
+        ephemeral_public_key: x25519::PublicKey,
+        timestamp: u64,
+        data: &[u8],
+    ) -> Self {
         let mut sha = Sha256::new();
         sha.update(data);
         Self {
+            recipient,
+            ephemeral_public_key,
+            timestamp,
             continuation_tag: Some(sha.finalize()),
-            ..self
         }
     }
 
     /// Check that the tag in this message matches a piece of information.
-    pub fn check_tag_over(&self, data: &[u8]) -> Result<(), Error> {
+    pub fn check_tag(&self, data: &[u8]) -> Result<(), Error> {
         let ok = |tag| {
             let mut sha = Sha256::new();
             sha.update(data);
@@ -205,7 +212,7 @@ impl<P: PublicKey> Hello<P> {
         }
 
         if let Some(d) = tag_data {
-            self.info.check_tag_over(d)?;
+            self.info.check_tag(d)?;
         }
         Ok(())
     }
@@ -709,13 +716,13 @@ mod tests {
 
     #[test]
     fn test_info_tag_confirmation_happy_path() {
-        let info = Info::new(
+        let info = Info::new_with_tag(
             PrivateKey::from_seed(1).public_key(),
             PublicKey::from_bytes([1u8; 32]),
             0,
-        )
-        .with_tag_over(b"ABC");
-        assert!(info.check_tag_over(b"ABC").is_ok())
+            b"ABC",
+        );
+        assert!(info.check_tag(b"ABC").is_ok())
     }
 
     #[test]
@@ -725,17 +732,17 @@ mod tests {
             PublicKey::from_bytes([1u8; 32]),
             0,
         );
-        assert!(info.check_tag_over(b"ABC").is_err())
+        assert!(info.check_tag(b"ABC").is_err())
     }
 
     #[test]
     fn test_info_tag_but_check_with_different_data_fails() {
-        let info = Info::new(
+        let info = Info::new_with_tag(
             PrivateKey::from_seed(1).public_key(),
             PublicKey::from_bytes([1u8; 32]),
             0,
-        )
-        .with_tag_over(b"ABC");
-        assert!(info.check_tag_over(b"not ABC").is_err())
+            b"ABC",
+        );
+        assert!(info.check_tag(b"not ABC").is_err())
     }
 }

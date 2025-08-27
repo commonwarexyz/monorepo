@@ -263,8 +263,12 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let hello = handshake::Hello::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::new(incoming.peer_public_key, listener_ephemeral, timestamp)
-                .with_tag_over(&incoming.dialer_hello_msg),
+            handshake::Info::new_with_tag(
+                incoming.peer_public_key,
+                listener_ephemeral,
+                timestamp,
+                &incoming.dialer_hello_msg,
+            ),
         );
 
         // Derive shared secret and ensure it is contributory
@@ -672,12 +676,12 @@ mod tests {
                     // Create and send own hello as listener response
                     let secret = x25519::new(&mut context);
                     let timestamp = context.current().epoch_millis();
-                    let info = handshake::Info::new(
+                    let info = handshake::Info::new_with_tag(
                         peer_config.crypto.public_key(),
                         x25519::PublicKey::from_secret(&secret),
                         timestamp,
-                    )
-                    .with_tag_over(&msg);
+                        &msg,
+                    );
 
                     let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
 
@@ -743,12 +747,12 @@ mod tests {
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
                     // Create a custom hello info bytes with zero ephemeral key
                     let timestamp = context.current().epoch_millis();
-                    let info = handshake::Info::new(
+                    let info = handshake::Info::new_with_tag(
                         recipient_pk,
                         x25519::PublicKey::from_bytes([0u8; 32]),
                         timestamp,
-                    )
-                    .with_tag_over(&msg);
+                        &msg,
+                    );
                     let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
 
                     // Create mock cipher for `confirmation`
@@ -826,8 +830,12 @@ mod tests {
                     let listener_ephemeral = x25519::PublicKey::from_secret(&secret);
                     // Create a custom hello info bytes with zero ephemeral key
                     let timestamp = context.current().epoch_millis();
-                    let info = handshake::Info::new(recipient_pk, listener_ephemeral, timestamp)
-                        .with_tag_over(b"not the right message");
+                    let info = handshake::Info::new_with_tag(
+                        recipient_pk,
+                        listener_ephemeral,
+                        timestamp,
+                        b"not the right message",
+                    );
 
                     // Create the signed `hello`
                     let hello = handshake::Hello::sign(&mut listener_crypto, &namespace, info);
