@@ -123,10 +123,10 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                     warn!(%e, "failed to revoke profiles ingress rule between monitoring and binary security groups");
                 } else {
                     info!(
-                    monitoring_sg,
-                    binary_sg,
-                    "revoked profiles ingress rule between monitoring and binary security groups"
-                );
+                        monitoring_sg,
+                        binary_sg,
+                        "revoked profiles ingress rule between monitoring and binary security groups"
+                    );
                 }
 
                 // Revoke ingress rule from monitoring security group to binary security group
