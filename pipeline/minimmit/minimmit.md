@@ -180,7 +180,7 @@ _After `M` messages, create and broadcast a `notarization(c, v)` certificate. Af
 
 1. On receiving `notarize(c, v)` from replica `r'`:
    1. If `!record_message(r, r', notarize(c, v))`, return.
-1. On observing `≥ M` `notarize(c, v)` messages for some `c` with `r.view == v`:
+1. On observing `≥ M` `notarize(c, v)` messages:
    1. Assemble `notarization(c, v)`.
    1. Add `notarization(c, v)` to `r.proofs[v]`.
    1. Broadcast `notarization(c, v)`.
