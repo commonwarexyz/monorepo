@@ -134,7 +134,7 @@ impl<H: Hasher> Tree<H> {
 
                 // Hash the right child
                 if chunk.len() == 2 {
-                    hasher.update(&chunk[1])
+                    hasher.update(&chunk[1]);
                 } else {
                     // If no right child exists, duplicate left child.
                     hasher.update(&chunk[0]);

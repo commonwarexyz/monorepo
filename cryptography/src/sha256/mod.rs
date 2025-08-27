@@ -79,8 +79,9 @@ impl Hasher for Sha256 {
         }
     }
 
-    fn update(&mut self, message: &[u8]) {
+    fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
+        self
     }
 
     fn finalize(&mut self) -> Self::Digest {
@@ -89,8 +90,9 @@ impl Hasher for Sha256 {
         Self::Digest::from(array)
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self) -> &mut Self {
         self.hasher = ISha256::new();
+        self
     }
 
     fn empty() -> Self::Digest {

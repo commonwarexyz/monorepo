@@ -193,7 +193,7 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     fn new() -> Self;
 
     /// Append message to previously recorded data.
-    fn update(&mut self, message: &[u8]);
+    fn update(&mut self, message: &[u8]) -> &mut Self;
 
     /// Hash all recorded data and reset the hasher
     /// to the initial state.
@@ -202,7 +202,7 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     /// Reset the hasher without generating a hash.
     ///
     /// This function does not need to be called after `finalize`.
-    fn reset(&mut self);
+    fn reset(&mut self) -> &mut Self;
 
     /// Return result of hashing nothing.
     fn empty() -> Self::Digest;
