@@ -142,7 +142,6 @@
 //!     storage_class: gp2
 //!     binary: /path/to/binary
 //!     config: /path/to/config.conf
-//!     profiling: true
 //!   - name: node2
 //!     region: us-west-2
 //!     instance_type: t4g.small
@@ -150,7 +149,6 @@
 //!     storage_class: gp2
 //!     binary: /path/to/binary2
 //!     config: /path/to/config2.conf
-//!     profiling: false
 //! ports:
 //!   - protocol: tcp
 //!     port: 4545
@@ -322,9 +320,6 @@ pub struct InstanceConfig {
 
     /// Path to the binary configuration file
     pub config: String,
-
-    /// Whether to enable profiling
-    pub profiling: bool,
 }
 
 /// Monitoring configuration

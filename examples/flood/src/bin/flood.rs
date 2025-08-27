@@ -63,7 +63,7 @@ fn main() {
     // Start runtime
     executor.start(|context| async move {
         // Configure telemetry
-        let tracing = if config.profiling {
+        let tracing = if config.tracing {
             Some(tokio::tracing::Config {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring),
                 name: public_key.to_string(),

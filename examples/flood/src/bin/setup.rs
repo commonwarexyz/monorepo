@@ -139,7 +139,7 @@ fn main() {
     let message_size = *matches.get_one::<usize>("message-size").unwrap();
     let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
     let mailbox_size = *matches.get_one::<usize>("mailbox-size").unwrap();
-    let profiling = *matches.get_one::<bool>("profiling").unwrap();
+    let tracing = *matches.get_one::<bool>("tracing").unwrap();
     let mut instance_configs = Vec::new();
     let mut peer_configs = Vec::new();
     for (index, scheme) in peer_schemes.iter().enumerate() {
@@ -155,7 +155,7 @@ fn main() {
             message_size,
             message_backlog,
             mailbox_size,
-            profiling,
+            tracing,
         };
         peer_configs.push((peer_config_file.clone(), peer_config));
 
@@ -170,7 +170,6 @@ fn main() {
             storage_class: storage_class.clone(),
             binary: BINARY_NAME.to_string(),
             config: peer_config_file,
-            profiling,
         };
         instance_configs.push(instance);
     }
