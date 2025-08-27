@@ -28,6 +28,7 @@
 //!               |  - Security Group                 |
 //!               |    - All: Deployer IP             |
 //!               |    - 3100: Binary VPCs            |
+//!               |    - 4040: Binary VPCs            |
 //!               |    - 4318: Binary VPCs            |
 //!               +-----------------------------------+
 //!                     ^                       ^
