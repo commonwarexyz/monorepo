@@ -98,7 +98,7 @@
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
 //! 3. Establishes VPC peering between the monitoring region and binary regions.
-//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, and Pyroscope.
+//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, and Tempo.
 //! 5. Launches binary instances, uploads binaries, configurations, and hosts.yaml, and installs Promtail and the binary.
 //! 6. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
 //! 7. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
