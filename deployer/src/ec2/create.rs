@@ -742,6 +742,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .ip_permissions(
                 IpPermission::builder()
                     .ip_protocol("tcp")
+                    .from_port(PROFILES_PORT as i32)
+                    .to_port(PROFILES_PORT as i32)
+                    .user_id_group_pairs(
+                        UserIdGroupPair::builder()
+                            .group_id(binary_sg_id.clone())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .ip_permissions(
+                IpPermission::builder()
+                    .ip_protocol("tcp")
                     .from_port(TRACES_PORT as i32)
                     .to_port(TRACES_PORT as i32)
                     .user_id_group_pairs(
@@ -772,6 +784,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         .ip_protocol("tcp")
                         .from_port(LOGS_PORT as i32)
                         .to_port(LOGS_PORT as i32)
+                        .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
+                        .build(),
+                )
+                .ip_permissions(
+                    IpPermission::builder()
+                        .ip_protocol("tcp")
+                        .from_port(PROFILES_PORT as i32)
+                        .to_port(PROFILES_PORT as i32)
                         .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
                         .build(),
                 )
