@@ -124,6 +124,23 @@ fn prune(r, view) {
     r.messages.remove(v => v < view);
     r.proofs.remove(v => v < view);
 }
+
+// Replica `r` constructs `notarize(c, v)`
+fn construct_notarize(r, c) -> Option<Notarize> {
+    if r.notarized != ⊥ or r.nullified 
+        return None
+    r.notarized = c
+    return `Some(notarize(c, v))`
+
+}
+
+// Replica `r` constructs `nullify(v)`
+fn construct_nullify(r) -> Option<Nullify> {
+    if r.notarized != ⊥ or r.nullified
+        return None
+    r.nullified = true
+    return `Some(nullify(v))`
+}
 ```
 
 ## 8. Protocol for Replica `r` in View `v`
@@ -146,20 +163,16 @@ _Treat `propose(r, c, v, (c', v'))` as `r`'s `notarize(c, v)`._
 _Upon receipt of a first valid block proposal from leader, broadcast `notarize(c, v)`._
 
 1. On receiving first `propose(r', c, v, (c', v'))` from `r' = leader(v)`:
-   1. If `r.notarized != ⊥` or `r.nullified`, return.
    1. If `!valid_parent(r, v, (c', v'))`, return.
    1. If `!verify(c, c')`, return.
-   1. Set `r.notarized = c`.
-   1. Broadcast `notarize(c, v)`.
+   1. If `let(Some(notarize) = construct_notarize(r, v))`, broadcast `notarize`.
 
 ### 8.3. Nullify by Timeout
 
 _If `timer` expires, broadcast `nullify(v)` if not yet broadcasted `notarize(c, v)`._
 
 1. On `timer` expiry:
-   1. If `r.notarized != ⊥` or `r.nullified`, return.
-   1. Set `r.nullified = true`.
-   1. Broadcast `nullify(v)`.
+   1. If `let(Some(nullify) = construct_nullify(r, v))`, broadcast `nullify`.
 
 ### 8.4. Notarization & Finalization
 
@@ -171,7 +184,7 @@ _After `M` messages, create and broadcast a `notarization(c, v)` certificate. Af
    1. Assemble `notarization(c, v)`.
    1. Add `notarization(c, v)` to `r.proofs[v]`.
    1. Broadcast `notarization(c, v)`.
-   1. If `r.notarized == ⊥` and `r.nullified == false`, broadcast `notarize(c, v)`.
+   1. If `let(Some(notarize) = construct_notarize(r, v))`, broadcast `notarize`.
    1. Call `enter_view(r, v + 1)`.
 1. On observing `≥ L` `notarize(c, v)` messages:
    1. Finalize `c` and all of its ancestors.
@@ -194,8 +207,7 @@ _After `M` messages, create and broadcast a `nullification(v)` certificate._
 _If you are in view `v` and have already broadcast `notarize(c, v)` for a `c` that cannot be finalized directly, broadcast `nullify(v)` to ensure some `proof(v)` will exist in view `v`._
 
 1. A replica  `r` with `r.view = v` and `r.notarized = b`, where `b != ⊥`, on observing messages from `≥ M` distinct replicas where each observed message is either `nullify(v)` or `notarize(b', v)` where `b' != b`:
-   1. Set `r.nullified = true`.
-   1. Broadcast `nullify(v)`.
+   1. If `let(Some(nullify) = construct_nullify(r, v))`, broadcast `nullify`.
 
 ## 9. Intuition
 
