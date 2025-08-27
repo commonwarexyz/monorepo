@@ -14,10 +14,14 @@ use super::{
     Error,
 };
 use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
+#[cfg(not(feature = "std"))]
+use alloc::{borrow::Cow, collections::BTreeMap, vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_utils::union_unique;
 use rand::RngCore;
+#[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
+#[cfg(feature = "std")]
 use std::{borrow::Cow, collections::BTreeMap};
 
 /// Computes the public key from the private key.
@@ -465,6 +469,7 @@ where
 ///
 /// This function assumes that each partial signature is unique and that
 /// each set of partial signatures has the same indices.
+#[cfg(feature = "std")]
 pub fn threshold_signature_recover_multiple<'a, V, I>(
     threshold: u32,
     mut many_evals: Vec<I>,
@@ -500,7 +505,7 @@ where
     let weights = compute_weights(indices)?;
 
     // If concurrency is not required, recover signatures sequentially
-    let concurrency = std::cmp::min(concurrency, prepared_evals.len());
+    let concurrency = core::cmp::min(concurrency, prepared_evals.len());
     if concurrency == 1 {
         return prepared_evals
             .iter()
@@ -525,6 +530,51 @@ where
             })
             .collect()
     })
+}
+
+// no_std version of `threshold_signature_recover_multiple` that does not use concurrency.
+#[cfg(not(feature = "std"))]
+pub fn threshold_signature_recover_multiple<'a, V, I>(
+    threshold: u32,
+    mut many_evals: Vec<I>,
+    _concurrency: usize,
+) -> Result<Vec<V::Signature>, Error>
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a PartialSignature<V>>,
+    V::Signature: 'a,
+{
+    // Process first set of evaluations
+    let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
+    let evals = prepare_evaluations(threshold, evals)?;
+    let mut prepared_evals = vec![evals];
+
+    // Prepare other evaluations and ensure they have the same indices
+    for evals in many_evals {
+        let evals = evals.into_iter().collect::<Vec<_>>();
+        let evals = prepare_evaluations(threshold, evals)?;
+        for (i, e) in prepared_evals[0].iter().enumerate() {
+            if e.index != evals[i].index {
+                return Err(Error::InvalidIndex);
+            }
+        }
+        prepared_evals.push(evals);
+    }
+
+    // Compute weights
+    let indices = prepared_evals[0]
+        .iter()
+        .map(|e| e.index)
+        .collect::<Vec<_>>();
+    let weights = compute_weights(indices)?;
+
+    // Recover signatures
+    return prepared_evals
+        .iter()
+        .map(|evals| {
+            threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
+        })
+        .collect();
 }
 
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
@@ -628,6 +678,7 @@ where
 /// and sum hashed messages together before performing a single pairing operation (instead of summing `len(messages)` pairings of
 /// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
 /// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
+#[cfg(feature = "std")]
 pub fn aggregate_verify_multiple_messages<'a, V, I>(
     public: &V::Public,
     messages: I,

@@ -30,18 +30,23 @@ use super::primitives::{
     variant::{MinPk, Variant},
 };
 use crate::{Array, BatchVerifier, PrivateKeyExt, Signer as _};
+#[cfg(not(feature = "std"))]
+use alloc::borrow::Cow;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_utils::{hex, union_unique, Span};
-use rand::{CryptoRng, Rng};
-use std::{
-    borrow::Cow,
-    fmt::{Debug, Display},
+use core::{
+    fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
     ops::Deref,
 };
+use rand::{CryptoRng, Rng, RngCore};
+#[cfg(feature = "std")]
+use std::borrow::Cow;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "bls12381";
@@ -85,13 +90,13 @@ impl Hash for PrivateKey {
 }
 
 impl Ord for PrivateKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.raw.cmp(&other.raw)
     }
 }
 
 impl PartialOrd for PrivateKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -117,13 +122,13 @@ impl From<Scalar> for PrivateKey {
 }
 
 impl Debug for PrivateKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for PrivateKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
@@ -213,13 +218,13 @@ impl Hash for PublicKey {
 }
 
 impl Ord for PublicKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.raw.cmp(&other.raw)
     }
 }
 
 impl PartialOrd for PublicKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -245,13 +250,13 @@ impl From<<MinPk as Variant>::Public> for PublicKey {
 }
 
 impl Debug for PublicKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for PublicKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
@@ -303,13 +308,13 @@ impl Hash for Signature {
 }
 
 impl Ord for Signature {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.raw.cmp(&other.raw)
     }
 }
 
 impl PartialOrd for Signature {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -335,13 +340,13 @@ impl From<<MinPk as Variant>::Signature> for Signature {
 }
 
 impl Debug for Signature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for Signature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
@@ -380,7 +385,7 @@ impl BatchVerifier<PublicKey> for Batch {
         true
     }
 
-    fn verify<R: rand::RngCore + CryptoRng>(self, rng: &mut R) -> bool {
+    fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool {
         MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures).is_ok()
     }
 }

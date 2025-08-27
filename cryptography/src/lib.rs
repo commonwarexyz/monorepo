@@ -19,7 +19,6 @@ use commonware_utils::Array;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng as _};
 use rand_chacha::ChaCha20Rng;
 
-#[cfg(feature = "std")]
 pub mod bls12381;
 pub mod ed25519;
 pub mod sha256;
