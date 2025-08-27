@@ -40,6 +40,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Generate constrained parameters
+        // 210 is the max size of an Info message using an Ed25519 key.
         let max_message_size = u.int_in_range(210..=1024 * 1023)?;
         let synchrony_bound_secs = u.int_in_range(1..=12)?;
         let max_handshake_age_secs = u.int_in_range(1..=12)?;
