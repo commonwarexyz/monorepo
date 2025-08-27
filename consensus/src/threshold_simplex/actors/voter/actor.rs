@@ -1666,7 +1666,7 @@ impl<
             self.context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),
-                compression: None,
+                compression: None, // most of the data is not compressible
                 codec_config: (),
                 buffer_pool: self.buffer_pool.clone(),
                 write_buffer: self.write_buffer,

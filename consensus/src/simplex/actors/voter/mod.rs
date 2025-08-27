@@ -26,7 +26,6 @@ pub struct Config<
     pub supervisor: S,
 
     pub partition: String,
-    pub compression: Option<u8>,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
@@ -130,7 +129,6 @@ mod tests {
                 reporter: supervisor.clone(),
                 supervisor,
                 partition: "test".to_string(),
-                compression: Some(3),
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
@@ -327,7 +325,6 @@ mod tests {
                 reporter: supervisor.clone(),
                 supervisor,
                 partition: "test".to_string(),
-                compression: Some(3),
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
