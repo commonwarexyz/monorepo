@@ -81,8 +81,8 @@ fn main() {
                 .value_parser(value_parser!(String)),
         )
         .arg(
-            Arg::new("profiling")
-                .long("profiling")
+            Arg::new("tracing")
+                .long("tracing")
                 .required(true)
                 .value_parser(value_parser!(bool)),
         )
