@@ -39,8 +39,7 @@ const DIGEST_LENGTH: usize = 32;
 
 /// Generate a SHA-256 digest from a message.
 pub fn hash(message: &[u8]) -> Digest {
-    let array: [u8; DIGEST_LENGTH] = ISha256::digest(message).into();
-    Digest::from(array)
+    Sha256::hash(message)
 }
 
 /// SHA-256 hasher.
