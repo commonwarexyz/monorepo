@@ -1,7 +1,19 @@
-use crate::{Array, PrivateKeyExt};
+cfg_if::cfg_if! {
+    if #[cfg(feature = "std")] {
+        use std::borrow::{Cow, ToOwned};
+    } else {
+        use alloc::borrow::{Cow, ToOwned};
+    }
+}
+use crate::PrivateKeyExt;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{hex, union_unique, Span};
+use commonware_utils::{hex, union_unique, Array, Span};
+use core::{
+    fmt::{Debug, Display},
+    hash::{Hash, Hasher},
+    ops::Deref,
+};
 use p256::{
     ecdsa::{
         signature::{Signer, Verifier},
@@ -10,12 +22,6 @@ use p256::{
     elliptic_curve::scalar::IsHigh,
 };
 use rand::{CryptoRng, Rng};
-use std::{
-    borrow::Cow,
-    fmt::{Debug, Display},
-    hash::{Hash, Hasher},
-    ops::Deref,
-};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "secp256r1";
@@ -81,8 +87,12 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key =
-            SigningKey::from_slice(&raw).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        let result = SigningKey::from_slice(&raw);
+        #[cfg(feature = "std")]
+        let key = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        #[cfg(not(feature = "std"))]
+        let key = result
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
         Ok(Self { raw, key })
     }
 }
@@ -102,13 +112,13 @@ impl Hash for PrivateKey {
 }
 
 impl Ord for PrivateKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.raw.cmp(&other.raw)
     }
 }
 
 impl PartialOrd for PrivateKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -134,13 +144,13 @@ impl From<SigningKey> for PrivateKey {
 }
 
 impl Debug for PrivateKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for PrivateKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
@@ -230,13 +240,13 @@ impl From<VerifyingKey> for PublicKey {
 }
 
 impl Debug for PublicKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for PublicKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
@@ -261,8 +271,12 @@ impl Read for Signature {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let signature = p256::ecdsa::Signature::from_slice(&raw)
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        let result = p256::ecdsa::Signature::from_slice(&raw);
+        #[cfg(feature = "std")]
+        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        #[cfg(not(feature = "std"))]
+        let signature = result
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
         if signature.s().is_high().into() {
             // Reject any signatures with a `s` value in the upper half of the curve order.
             return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
@@ -286,13 +300,13 @@ impl Hash for Signature {
 }
 
 impl Ord for Signature {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.raw.cmp(&other.raw)
     }
 }
 
 impl PartialOrd for Signature {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -318,13 +332,13 @@ impl From<p256::ecdsa::Signature> for Signature {
 }
 
 impl Debug for Signature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for Signature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }

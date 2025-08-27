@@ -50,8 +50,8 @@ commonware-stream = { version = "0.0.59", path = "stream" }
 commonware-utils = { version = "0.0.59", path = "utils", default-features = false }
 thiserror = { version = "2.0.12", default-features = false }
 bytes = { version = "1.7.1", default-features = false }
-sha2 = "0.10.8"
-blake3 = "1.8.2"
+sha2 = { version = "0.10.8", default-features = false }
+blake3 = { version = "1.8.2", default-features = false }
 rand = { version = "0.8.5", default-features = false }
 rand_distr = "0.4.3"
 futures = "0.3.31"
@@ -84,13 +84,13 @@ opentelemetry-otlp = "0.28.0"
 opentelemetry_sdk =  "0.28.0"
 tracing-opentelemetry = "0.29.0"
 io-uring = "0.7.4"
-rayon = "1.10.0"
+rayon = { version = "1.10.0", default-features = false }
 async-lock = "3.4.0"
 libc = "0.2.172"
 sysinfo = "0.33.0"
 zeroize = "1.5.7"
-blst = "0.3.13"
-p256 = "0.13.2"
+blst = { version = "0.3.13", default-features = false, features = ["no-threads"] }
+p256 = { version = "0.13.2", default-features = false }
 test-case = "3.3.1"
 chacha20poly1305 = "0.10.1"
 
