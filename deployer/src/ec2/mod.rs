@@ -22,13 +22,11 @@
 //!               |  - Monitoring Instance            |
 //!               |    - Prometheus                   |
 //!               |    - Loki                         |
-//!               |    - Pyroscope                    |
 //!               |    - Tempo                        |
 //!               |    - Grafana                      |
 //!               |  - Security Group                 |
 //!               |    - All: Deployer IP             |
 //!               |    - 3100: Binary VPCs            |
-//!               |    - 4040: Binary VPCs            |
 //!               |    - 4318: Binary VPCs            |
 //!               +-----------------------------------+
 //!                     ^                       ^
@@ -41,13 +39,10 @@
 //! |    - Binary A                |  |    - Binary B                |
 //! |    - Promtail                |  |    - Promtail                |
 //! |    - Node Exporter           |  |    - Node Exporter           |
-//! |    - Pyroscope Agent         |  |    - Pyroscope Agent         |
-//! |    - Memleak Agent           |  |    - Memleak Agent           |
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
 //! |    - 9100: Monitoring IP     |  |    - 9100: Monitoring IP     |
-//! |    - 9200: Monitoring IP     |  |    - 9200: Monitoring IP     |
 //! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
@@ -60,12 +55,11 @@
 //! * Runs:
 //!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
-//!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
 //!     * **Tempo**: Listens at `:4318`, storing traces in `/var/lib/tempo`.
-//!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
+//!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus, Loki, and Tempo datasources and a custom dashboard.
 //! * Ingress:
 //!     * Allows deployer IP access (TCP 0-65535).
-//!     * Binary instance traffic to Loki (TCP 3100), Pyroscope (TCP 4040), and Tempo (TCP 4318).
+//!     * Binary instance traffic to Loki (TCP 3100) and Tempo (TCP 4318).
 //!
 //! ### Binary
 //!
@@ -74,11 +68,9 @@
 //!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //!     * **Node Exporter**: Exposes system metrics at `:9100`.
-//!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
-//!     * **Memleak Agent**: Exposes `memleak` metrics at `:9200`.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
-//!     * Monitoring IP access to `:9090`, `:9100`, and `:9200` for Prometheus.
+//!     * Monitoring IP access to `:9090` and `:9100` for Prometheus.
 //!     * User-defined ports from the configuration.
 //!
 //! ## Networking
@@ -200,14 +192,8 @@ cfg_if::cfg_if! {
         /// Port on instance where system metrics are exposed
         const SYSTEM_PORT: u16 = 9100;
 
-        /// Port on instance where memleak metrics are exposed
-        const MEMLEAK_PORT: u16 = 9200;
-
         /// Port on monitoring where logs are pushed
         const LOGS_PORT: u16 = 3100;
-
-        /// Port on monitoring where profiles are pushed
-        const PROFILES_PORT: u16 = 4040;
 
         /// Port on monitoring where traces are pushed
         const TRACES_PORT: u16 = 4318;

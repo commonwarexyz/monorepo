@@ -2,7 +2,7 @@
 
 use crate::ec2::{
     aws::*, deployer_directory, services::*, utils::*, Config, Error, Host, Hosts, InstanceConfig,
-    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, TRACES_PORT,
 };
 use futures::future::try_join_all;
 use std::{
@@ -401,24 +401,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
     let loki_service_path = tag_directory.join("loki.service");
     std::fs::write(&loki_service_path, LOKI_SERVICE)?;
-    let pyroscope_service_path = tag_directory.join("pyroscope.service");
-    std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
     let tempo_service_path = tag_directory.join("tempo.service");
     std::fs::write(&tempo_service_path, TEMPO_SERVICE)?;
     let promtail_service_path = tag_directory.join("promtail.service");
     std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
     let node_exporter_service_path = tag_directory.join("node_exporter.service");
     std::fs::write(&node_exporter_service_path, NODE_EXPORTER_SERVICE)?;
-    let pyroscope_agent_service_path = tag_directory.join("pyroscope-agent.service");
-    std::fs::write(&pyroscope_agent_service_path, PYROSCOPE_AGENT_SERVICE)?;
-    let pyroscope_agent_timer_path = tag_directory.join("pyroscope-agent.timer");
-    std::fs::write(&pyroscope_agent_timer_path, PYROSCOPE_AGENT_TIMER)?;
     let binary_service_path = tag_directory.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
-    let memleak_agent_service_path = tag_directory.join("memleak-agent.service");
-    std::fs::write(&memleak_agent_service_path, MEMLEAK_AGENT_SERVICE)?;
-    let memleak_agent_script_path = tag_directory.join("memleak-agent.sh");
-    std::fs::write(&memleak_agent_script_path, MEMLEAK_AGENT_SCRIPT)?;
 
     // Write logrotate configuration file
     let logrotate_conf_path = tag_directory.join("logrotate.conf");
@@ -450,8 +440,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&all_yaml_path, ALL_YML)?;
     let loki_config_path = tag_directory.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
-    let pyroscope_config_path = tag_directory.join("pyroscope.yml");
-    std::fs::write(&pyroscope_config_path, PYROSCOPE_CONFIG)?;
     let tempo_yml_path = tag_directory.join("tempo.yml");
     std::fs::write(&tempo_yml_path, TEMPO_CONFIG)?;
     rsync_file(
@@ -512,20 +500,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?;
     rsync_file(
         private_key,
-        pyroscope_config_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/pyroscope.yml",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        pyroscope_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/pyroscope.service",
-    )
-    .await?;
-    rsync_file(
-        private_key,
         tempo_yml_path.to_str().unwrap(),
         &monitoring_ip,
         "/home/ubuntu/tempo.yml",
@@ -553,14 +527,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             PROMETHEUS_VERSION,
             GRAFANA_VERSION,
             LOKI_VERSION,
-            PYROSCOPE_VERSION,
             TEMPO_VERSION,
         ),
     )
     .await?;
     poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_active(private_key, &monitoring_ip, "loki").await?;
-    poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
     poll_service_active(private_key, &monitoring_ip, "tempo").await?;
     poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
     info!("configured monitoring instance");
@@ -600,10 +572,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let promtail_service_path = promtail_service_path.clone();
         let node_exporter_service_path = node_exporter_service_path.clone();
         let binary_service_path = binary_service_path.clone();
-        let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
-        let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
-        let memleak_agent_service_path = memleak_agent_service_path.clone();
-        let memleak_agent_script_path = memleak_agent_script_path.clone();
         let future = async move {
             rsync_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
             rsync_file(
@@ -666,52 +634,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "/home/ubuntu/logrotate.conf",
             )
             .await?;
-            rsync_file(
-                private_key,
-                pyroscope_agent_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/pyroscope-agent.service",
-            )
-            .await?;
-            let pyroscope_agent_script_path =
-                tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
-            std::fs::write(
-                &pyroscope_agent_script_path,
-                generate_pyroscope_script(
-                    &monitoring_private_ip,
-                    &instance.name,
-                    &ip,
-                    &instance.region,
-                ),
-            )?;
-            rsync_file(
-                private_key,
-                pyroscope_agent_script_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/pyroscope-agent.sh",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                pyroscope_agent_timer_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/pyroscope-agent.timer",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                memleak_agent_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/memleak-agent.service",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                memleak_agent_script_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/memleak-agent.sh",
-            )
-            .await?;
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
             ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
             poll_service_active(private_key, &ip, "promtail").await?;
@@ -722,7 +644,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
             .await?;
             poll_service_active(private_key, &ip, "node_exporter").await?;
-            ssh_execute(private_key, &ip, &install_binary_cmd(instance.profiling)).await?;
+            ssh_execute(private_key, &ip, &install_binary_cmd()).await?;
             poll_service_active(private_key, &ip, "binary").await?;
             info!(
                 ip = ip.as_str(),
@@ -752,18 +674,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     .ip_protocol("tcp")
                     .from_port(LOGS_PORT as i32)
                     .to_port(LOGS_PORT as i32)
-                    .user_id_group_pairs(
-                        UserIdGroupPair::builder()
-                            .group_id(binary_sg_id.clone())
-                            .build(),
-                    )
-                    .build(),
-            )
-            .ip_permissions(
-                IpPermission::builder()
-                    .ip_protocol("tcp")
-                    .from_port(PROFILES_PORT as i32)
-                    .to_port(PROFILES_PORT as i32)
                     .user_id_group_pairs(
                         UserIdGroupPair::builder()
                             .group_id(binary_sg_id.clone())
@@ -804,14 +714,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         .ip_protocol("tcp")
                         .from_port(LOGS_PORT as i32)
                         .to_port(LOGS_PORT as i32)
-                        .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
-                        .build(),
-                )
-                .ip_permissions(
-                    IpPermission::builder()
-                        .ip_protocol("tcp")
-                        .from_port(PROFILES_PORT as i32)
-                        .to_port(PROFILES_PORT as i32)
                         .ip_ranges(IpRange::builder().cidr_ip(binary_cidr).build())
                         .build(),
                 )
