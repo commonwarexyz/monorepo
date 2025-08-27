@@ -401,12 +401,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
     let loki_service_path = tag_directory.join("loki.service");
     std::fs::write(&loki_service_path, LOKI_SERVICE)?;
+    let pyroscope_service_path = tag_directory.join("pyroscope.service");
+    std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
     let tempo_service_path = tag_directory.join("tempo.service");
     std::fs::write(&tempo_service_path, TEMPO_SERVICE)?;
     let promtail_service_path = tag_directory.join("promtail.service");
     std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
     let node_exporter_service_path = tag_directory.join("node_exporter.service");
     std::fs::write(&node_exporter_service_path, NODE_EXPORTER_SERVICE)?;
+    let pyroscope_agent_service_path = tag_directory.join("pyroscope-agent.service");
+    std::fs::write(&pyroscope_agent_service_path, PYROSCOPE_AGENT_SERVICE)?;
+    let pyroscope_agent_timer_path = tag_directory.join("pyroscope-agent.timer");
+    std::fs::write(&pyroscope_agent_timer_path, PYROSCOPE_AGENT_TIMER)?;
     let binary_service_path = tag_directory.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
 
@@ -440,6 +446,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&all_yaml_path, ALL_YML)?;
     let loki_config_path = tag_directory.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
+    let pyroscope_config_path = tag_directory.join("pyroscope.yml");
+    std::fs::write(&pyroscope_config_path, PYROSCOPE_CONFIG)?;
     let tempo_yml_path = tag_directory.join("tempo.yml");
     std::fs::write(&tempo_yml_path, TEMPO_CONFIG)?;
     rsync_file(
@@ -496,6 +504,20 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         node_exporter_service_path.to_str().unwrap(),
         &monitoring_ip,
         "/home/ubuntu/node_exporter.service",
+    )
+    .await?;
+    rsync_file(
+        private_key,
+        pyroscope_config_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/pyroscope.yml",
+    )
+    .await?;
+    rsync_file(
+        private_key,
+        pyroscope_service_path.to_str().unwrap(),
+        &monitoring_ip,
+        "/home/ubuntu/pyroscope.service",
     )
     .await?;
     rsync_file(
