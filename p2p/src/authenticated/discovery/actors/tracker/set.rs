@@ -84,9 +84,9 @@ mod tests {
 
     fn expected_sorted_peers() -> Vec<ed25519::PublicKey> {
         vec![
+            ed25519::PrivateKey::from_seed(1).public_key(), // ff87a0b0a3c7c0ce827e9cada5ff79e75a44a0633bfcb5b50f99307ddb26b337
             ed25519::PrivateKey::from_seed(2).public_key(), // 191fc38f134aaf1b7fdb1f86330b9d03e94bd4ba884f490389de964448e89b3f
             ed25519::PrivateKey::from_seed(3).public_key(), // c5bbbb60e412879bbec7bb769804fa8e36e68af10d5477280b63deeaca931bed
-            ed25519::PrivateKey::from_seed(1).public_key(), // ff87a0b0a3c7c0ce827e9cada5ff79e75a44a0633bfcb5b50f99307ddb26b337
         ]
     }
 
@@ -130,15 +130,15 @@ mod tests {
         assert!(update_result, "Update for existing peer should return true");
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, true, false]),
-            "Peer 2 should be known"
+            BitVec::from(vec![false, false, true]),
+            "Peer 3 should be known"
         );
 
         let update_result_again = set.update(&peer_to_update, true); // Idempotent
         assert!(update_result_again, "Idempotent update should return true");
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, true, false]),
+            BitVec::from(vec![false, false, true]),
             "Knowledge should be unchanged after idempotent update"
         );
 
@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(
             set.knowledge(),
             BitVec::from(vec![false, false, false]),
-            "Peer 2 should be unknown again"
+            "Peer 3 should be unknown again"
         );
 
         let update_result_non_existent = set.update(&non_existent_peer, true);
@@ -186,8 +186,8 @@ mod tests {
         assert!(set.update(&peer3, false));
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, true, false]),
-            "Only peer 2 should be known"
+            BitVec::from(vec![false, false, true]),
+            "Only peer 3 should be known"
         );
     }
 
@@ -223,7 +223,7 @@ mod tests {
         let knowledge_after_first_update = set.knowledge();
         assert_eq!(
             knowledge_after_first_update,
-            BitVec::from(vec![true, false, false])
+            BitVec::from(vec![false, true, false])
         );
         assert_ne!(
             knowledge_before_updates, knowledge_after_first_update,
@@ -234,7 +234,7 @@ mod tests {
         let knowledge_after_second_update = set.knowledge();
         assert_eq!(
             knowledge_after_second_update,
-            BitVec::from(vec![true, true, false])
+            BitVec::from(vec![false, true, true])
         );
         assert_ne!(
             knowledge_after_first_update, knowledge_after_second_update,
