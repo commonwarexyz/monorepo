@@ -71,7 +71,7 @@ where
         .await?;
 
         // Prune the journal to the sync range
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata, 0);
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
         let (size, new_oldest_retained_loc) = prune_journal(
             &mut journal,
             lower_bound,
@@ -183,7 +183,7 @@ where
         }
 
         let (mut journal, mut metadata) = journal.into_inner();
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata, 0);
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
 
         let (next_write_loc, new_oldest_retained_loc) = prune_journal(
             &mut journal,

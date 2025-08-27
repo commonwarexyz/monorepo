@@ -69,9 +69,9 @@ _The client must use the same `--db` as the server it syncs from._
 
 The sync example supports three database types:
 
-- **`fixed`**: Fixed-size Any database ([adb::any::fixed::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/fixed/struct.Any.html)) - optimized for values of uniform size
-- **`variable`**: Variable-size Any database ([adb::any::variable::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/variable/struct.Any.html)) - supports values of varying sizes
-- **`immutable`**: Immutable database ([adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html)) - append-only database with historical proofs
+- [adb::any::fixed::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/fixed/struct.Any.html) - database with fixed value size
+- [adb::any::variable::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/variable/struct.Any.html) - database with variable value size
+- [adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html) - database that doesn't allow updates or deletions of previously set keys
 
 ## Example Session
 

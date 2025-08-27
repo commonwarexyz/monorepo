@@ -44,10 +44,9 @@ const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 /// Prefix used for the oldest_retained_loc key in metadata.
 const OLDEST_RETAINED_LOC_PREFIX: u8 = 0;
 
-/// Read the oldest_retained_loc from metadata, returning the provided default if not found.
+/// Read the oldest_retained_loc from metadata, returning 0 if not found.
 pub(super) fn read_oldest_retained_loc<E: RStorage + Clock + Metrics>(
     metadata: &Metadata<E, U64, Vec<u8>>,
-    default: u64,
 ) -> u64 {
     let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
     match metadata.get(&key) {
@@ -57,7 +56,7 @@ pub(super) fn read_oldest_retained_loc<E: RStorage + Clock + Metrics>(
                 .try_into()
                 .expect("oldest_retained_loc bytes could not be converted to u64"),
         ),
-        None => default,
+        None => 0,
     }
 }
 
@@ -249,7 +248,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         // Restore oldest_retained_loc from metadata or default to 0
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata, 0);
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
 
         let db = Self {
             mmr,
