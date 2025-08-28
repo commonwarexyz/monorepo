@@ -472,7 +472,7 @@ where
 pub fn threshold_signature_recover_multiple<'a, V, I>(
     threshold: u32,
     mut many_evals: Vec<I>,
-    concurrency: usize,
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
 where
     V: Variant,
@@ -503,18 +503,6 @@ where
         .collect::<Vec<_>>();
     let weights = compute_weights(indices)?;
 
-    recover_signatures::<V>(weights, prepared_evals, concurrency)
-}
-
-fn recover_signatures<'a, V>(
-    weights: BTreeMap<u32, Weight>,
-    prepared_evals: Vec<Vec<&Eval<V::Signature>>>,
-    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
-) -> Result<Vec<V::Signature>, Error>
-where
-    V: Variant,
-    V::Signature: 'a,
-{
     #[cfg(not(feature = "std"))]
     return prepared_evals
         .into_iter()
