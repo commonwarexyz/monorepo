@@ -66,16 +66,6 @@ impl<const N: usize> Bitmap<N> {
         }
     }
 
-    /// Create a new empty bitmap with the specified number of pruned chunks.
-    pub fn new_with_pruned_chunks(pruned_chunks: usize) -> Self {
-        let bitmap = VecDeque::from([[0u8; N]]);
-        Self {
-            bitmap,
-            next_bit: 0,
-            pruned_chunks,
-        }
-    }
-
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
     #[inline]
     pub fn bit_count(&self) -> u64 {
@@ -342,17 +332,6 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     pub fn new() -> Self {
         MerkleizedBitmap {
             bitmap: Bitmap::new(),
-            authenticated_len: 0,
-            mmr: Mmr::new(),
-            dirty_chunks: HashSet::new(),
-        }
-    }
-
-    /// Create a new bitmap with the specified number of pruned chunks.
-    /// This is useful when initializing from a previously pruned state.
-    pub fn new_with_pruned_chunks(pruned_chunks: usize) -> Self {
-        MerkleizedBitmap {
-            bitmap: Bitmap::new_with_pruned_chunks(pruned_chunks),
             authenticated_len: 0,
             mmr: Mmr::new(),
             dirty_chunks: HashSet::new(),
@@ -835,71 +814,6 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
-
-    #[test]
-    fn test_bitmap_new_with_pruned_chunks() {
-        // Test creating an Bitmap with pruned chunks
-        let mut bitmap = Bitmap::<SHA256_SIZE>::new_with_pruned_chunks(5);
-
-        // Should have the specified number of pruned chunks
-        assert_eq!(bitmap.pruned_chunks(), 5);
-
-        // Should be empty
-        assert_eq!(bitmap.len(), 1); // Always has at least one chunk
-        assert_eq!(bitmap.last_chunk().1, 0); // No bits in the last chunk
-
-        // Bit count should account for pruned chunks
-        let expected_bits = 5 * Bitmap::<SHA256_SIZE>::CHUNK_SIZE_BITS;
-        assert_eq!(bitmap.bit_count(), expected_bits);
-        assert_eq!(bitmap.pruned_bits(), expected_bits);
-
-        // Add some bits
-        bitmap.append(true);
-        bitmap.append(false);
-        bitmap.append(true);
-
-        // Bit count should now include the new bits plus the pruned ones
-        assert_eq!(bitmap.bit_count(), expected_bits + 3);
-        assert_eq!(bitmap.pruned_bits(), expected_bits);
-
-        // Test that we can access the new bits
-        assert!(bitmap.get_bit(expected_bits));
-        assert!(!bitmap.get_bit(expected_bits + 1));
-        assert!(bitmap.get_bit(expected_bits + 2));
-
-        // Test with zero pruned chunks (should be same as new())
-        let bitmap_zero = Bitmap::<SHA256_SIZE>::new_with_pruned_chunks(0);
-        let bitmap_new = Bitmap::<SHA256_SIZE>::new();
-        assert_eq!(bitmap_zero.pruned_chunks(), bitmap_new.pruned_chunks());
-        assert_eq!(bitmap_zero.bit_count(), bitmap_new.bit_count());
-    }
-
-    #[test_traced]
-    fn test_merkleized_bitmap_new_with_pruned_chunks() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            // Create a bitmap that appears to have 2 chunks already pruned
-            let bitmap = MerkleizedBitmap::<Sha256, SHA256_SIZE>::new_with_pruned_chunks(2);
-
-            // Should have the expected pruned chunk count
-            assert_eq!(bitmap.bitmap.pruned_chunks(), 2);
-
-            // Bit count should account for pruned chunks
-            let expected_bits = 2 * MerkleizedBitmap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS;
-            assert_eq!(bitmap.bit_count(), expected_bits);
-            assert_eq!(bitmap.pruned_bits(), expected_bits);
-
-            // Should be able to compute root (empty MMR)
-            let mut hasher = Standard::new();
-            let _root = bitmap.root(&mut hasher).await.unwrap();
-
-            // Test with zero pruned chunks (should be same as new())
-            let bitmap_zero = MerkleizedBitmap::<Sha256, SHA256_SIZE>::new_with_pruned_chunks(0);
-            let bitmap_new = MerkleizedBitmap::<Sha256, SHA256_SIZE>::new();
-            assert_eq!(bitmap_zero.bit_count(), bitmap_new.bit_count());
-            assert_eq!(bitmap_zero.pruned_bits(), bitmap_new.pruned_bits());
-        });
-    }
 
     fn test_chunk<const N: usize>(s: &[u8]) -> [u8; N] {
         assert_eq!(N % 32, 0);
