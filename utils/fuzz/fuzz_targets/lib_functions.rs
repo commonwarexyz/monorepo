@@ -8,8 +8,6 @@ use commonware_utils::{
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-const NANOS_PER_SEC: u32 = 1_000_000_000;
-
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     Hex { data: Vec<u8> },
@@ -24,7 +22,7 @@ enum FuzzInput {
     NZUsize { v: usize },
     NZU32 { v: u32 },
     NZU64 { v: u64 },
-    NonZeroDuration { secs: u64, nanos: u32 },
+    NonZeroDuration { millis: u64 },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -47,20 +45,19 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        FuzzInput::NonZeroDuration { secs, nanos } => {
-            let duration = safe_duration_new(secs, nanos).clamp(Duration::new(0, 1), Duration::MAX);
+        FuzzInput::NonZeroDuration { millis } => {
+            let duration = Duration::from_millis(millis);
 
             let nz_duration = NonZeroDuration::new(duration);
-            assert!(nz_duration.is_some());
+            if let Some(nz_duration) = nz_duration {
+                assert_eq!(nz_duration.get(), duration);
 
-            let nz_duration = nz_duration.unwrap();
-            assert_eq!(nz_duration.get(), duration);
+                let converted: Duration = nz_duration.into();
+                assert_eq!(converted, duration);
 
-            let converted: Duration = nz_duration.into();
-            assert_eq!(converted, duration);
-
-            let nz_duration = NonZeroDuration::new_panic(duration);
-            assert_eq!(nz_duration.get(), duration);
+                let nz_duration = NonZeroDuration::new_panic(duration);
+                assert_eq!(nz_duration.get(), duration);
+            }
         }
 
         FuzzInput::Hex { data } => {
@@ -174,20 +171,6 @@ fn fuzz(input: FuzzInput) {
 
             let zeros = vec![0u8; bytes.len()];
             assert_eq!(modulo(&zeros, n), 0);
-        }
-    }
-}
-
-fn safe_duration_new(secs: u64, nanos: u32) -> Duration {
-    if nanos < NANOS_PER_SEC {
-        Duration::new(secs, nanos)
-    } else {
-        let extra_secs = (nanos / NANOS_PER_SEC) as u64;
-        if let Some(total_secs) = secs.checked_add(extra_secs) {
-            let remaining_nanos = nanos % NANOS_PER_SEC;
-            Duration::new(total_secs, remaining_nanos)
-        } else {
-            Duration::MAX
         }
     }
 }
