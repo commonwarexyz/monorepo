@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_passive_observer() {
+    fn test_observer() {
         // Create context
         let n_active = 5;
         let required_containers = 100;

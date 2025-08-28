@@ -580,7 +580,7 @@ mod tests {
         all_online::<MinSig>();
     }
 
-    fn passive_observer<V: Variant>() {
+    fn observer<V: Variant>() {
         // Create context
         let n_active = 5;
         let threshold = quorum(n_active);
@@ -847,9 +847,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_passive_observer() {
-        passive_observer::<MinPk>();
-        passive_observer::<MinSig>();
+    fn test_observer() {
+        observer::<MinPk>();
+        observer::<MinSig>();
     }
 
     fn unclean_shutdown<V: Variant>() {
