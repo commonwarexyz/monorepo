@@ -71,7 +71,7 @@ pub fn construct_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
-pub async fn create_proof_store<Op, H, D>(
+pub fn create_proof_store<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
     start_loc: u64,
@@ -96,7 +96,7 @@ where
 /// Create a [ProofStore] from a list of digests (output by [verify_proof_and_extract_digests]).
 ///
 /// If you have not yet verified the proof, use [create_proof_store] instead.
-pub async fn create_proof_store_from_digests<D: Digest>(
+pub fn create_proof_store_from_digests<D: Digest>(
     proof: &Proof<D>,
     digests: Vec<(u64, D)>,
 ) -> ProofStore<D> {
