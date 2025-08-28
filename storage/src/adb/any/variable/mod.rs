@@ -791,9 +791,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Return the location of the start of the section that we will prune to in prune_inactive.
     /// Returns None if we should not prune.
     fn target_prune_loc(&self) -> Option<u64> {
-        let Some(oldest_retained_loc) = self.oldest_retained_loc() else {
-            return None;
-        };
+        let oldest_retained_loc = self.oldest_retained_loc()?;
 
         let target_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_delay);
         if target_loc < oldest_retained_loc {
