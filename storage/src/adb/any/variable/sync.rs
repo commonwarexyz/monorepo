@@ -74,6 +74,7 @@ where
         let oldest_retained_loc = read_oldest_retained_loc(&metadata);
         let (size, new_oldest_retained_loc) = prune_journal(
             &mut journal,
+            &mut metadata,
             lower_bound,
             upper_bound,
             oldest_retained_loc,
@@ -186,6 +187,7 @@ where
 
         let (next_write_loc, new_oldest_retained_loc) = prune_journal(
             &mut journal,
+            &mut metadata,
             lower_bound,
             upper_bound,
             oldest_retained_loc,
@@ -621,6 +623,7 @@ where
 ///   - Otherwise: returns the location of the first element found in the journal
 pub async fn prune_journal<E, V>(
     journal: &mut VJournal<E, V>,
+    metadata: &mut Metadata<E, U64, u64>,
     lower_bound: u64,
     upper_bound: u64,
     mut oldest_retained_loc: u64,
@@ -652,12 +655,18 @@ where
     );
 
     // Remove sections before the lower_section
+    let lower_section_start = lower_section * items_per_section_val;
     if lower_section > 0 {
+        debug!(lower_section, "removing sections before lower_section");
+        // Update metadata before pruning to ensure recovery is possible
+        // if we crash during pruning.
+        write_oldest_retained_loc(metadata, lower_section_start);
+        metadata.sync().await?;
         journal.prune(lower_section).await?;
     }
     // If the oldest_retained_loc was just pruned, we need to update it
-    if oldest_retained_loc < lower_section * items_per_section_val {
-        oldest_retained_loc = lower_section * items_per_section_val;
+    if oldest_retained_loc < lower_section_start {
+        oldest_retained_loc = lower_section_start;
     }
 
     // Remove sections after the upper_section
@@ -681,8 +690,12 @@ where
     }
 
     // Prune the lower section if needed
-    let lower_section_start = lower_section * items_per_section_val;
     if lower_bound > lower_section_start && journal.blobs.contains_key(&lower_section) {
+        debug!(lower_section, "pruning lower section");
+        // Update metadata before pruning to ensure recovery is possible
+        // if we crash during pruning.
+        write_oldest_retained_loc(metadata, lower_bound);
+        metadata.sync().await?;
         prune_lower(journal, lower_bound, items_per_section, oldest_retained_loc).await?;
     }
 
@@ -2699,6 +2712,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_empty_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let lower_bound = 10;
             let upper_bound = 20;
             let oldest_retained_loc = 0;
@@ -2706,6 +2729,7 @@ mod tests {
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
@@ -2738,6 +2762,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_before_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let items_per_section = NZU64!(5);
 
             // Add data to sections 0 and 1 (locations 0-9)
@@ -2753,6 +2787,7 @@ mod tests {
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
@@ -2785,6 +2820,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_partly_before_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let items_per_section = NZU64!(5);
 
             // Add data to sections 0, 1, 2 (locations 0-14)
@@ -2800,6 +2845,7 @@ mod tests {
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
@@ -2838,6 +2884,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_after_lower_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let items_per_section = NZU64!(5);
 
             // Add data to sections 2 and 3 (locations 10-19)
@@ -2853,6 +2909,7 @@ mod tests {
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
@@ -2888,6 +2945,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_after_lower_past_upper_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let items_per_section = NZU64!(5);
 
             // Add data to sections 2, 3, 4, 5 (locations 10-29)
@@ -2903,6 +2970,7 @@ mod tests {
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
@@ -2942,6 +3010,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_spanning_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let items_per_section = NZU64!(5);
 
             // Add data to sections 0-4 (locations 0-24)
@@ -2957,6 +3035,7 @@ mod tests {
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
@@ -2997,6 +3076,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_same_section_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let items_per_section = NZU64!(10);
 
             // Add data to sections 0-2 (locations 0-29)
@@ -3012,6 +3101,7 @@ mod tests {
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
@@ -3048,6 +3138,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_boundaries_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let items_per_section = NZU64!(5);
 
             // Add data to sections 0-4 (locations 0-24)
@@ -3063,6 +3163,7 @@ mod tests {
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
@@ -3103,6 +3204,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_partial_lower_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let items_per_section = NZU64!(10);
 
             // Add data to sections 1, 2, and 3 (locations 10-39)
@@ -3118,6 +3229,7 @@ mod tests {
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
@@ -3160,6 +3272,16 @@ mod tests {
                 .await
                 .expect("Failed to create journal");
 
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_prune_invalid_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
             let lower_bound = 20;
             let upper_bound = 10; // Invalid: lower > upper
             let oldest_retained_loc = 0;
@@ -3167,6 +3289,7 @@ mod tests {
 
             let result = prune_journal(
                 &mut journal,
+                &mut metadata,
                 lower_bound,
                 upper_bound,
                 oldest_retained_loc,
