@@ -24,6 +24,7 @@ bench = false
 
 [dev-dependencies]
 criterion = { workspace = true }
+rstest = { workspace = true }
 rand = { workspace = true }
 
 [[bench]]

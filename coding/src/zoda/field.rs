@@ -27,6 +27,8 @@ pub trait BinaryField:
     + Encode
     + Decode
 {
+    type Underlying: Into<Self> + From<Self> + Copy + Clone + PartialEq + Eq + Debug;
+
     /// Size of the field in bits.
     const BIT_SIZE: usize;
 
@@ -34,7 +36,7 @@ pub trait BinaryField:
     const BYTE_SIZE: usize;
 
     /// The irreducible polynomial used for the field.
-    const IRREDUCIBLE: usize;
+    const IRREDUCIBLE: Self::Underlying;
 
     /// The zero element of the field.
     const ZERO: Self;
@@ -59,15 +61,17 @@ macro_rules! binary_field {
     ($name:ident, $ty:ty, irreducible = $irreducible:literal) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #[repr(transparent)]
-        #[doc = concat!("A binary field element in GF(2^k), k = ", stringify!($ty), "::BITS.")]
+        #[doc = concat!("A binary field element in GF(2^k), k = [", stringify!($ty), "::BITS].")]
         pub struct $name($ty);
 
         impl BinaryField for $name {
+            type Underlying = $ty;
+
             const BIT_SIZE: usize = <$ty>::BITS as usize;
 
             const BYTE_SIZE: usize = <$ty>::BITS as usize >> 3;
 
-            const IRREDUCIBLE: usize = $irreducible;
+            const IRREDUCIBLE: Self::Underlying = $irreducible;
 
             const ZERO: Self = Self(0);
 
@@ -221,9 +225,74 @@ impl<'a, F: BinaryField> Mul<&[F]> for FieldVector<'a, F> {
     type Output = F;
 
     fn mul(self, rhs: &[F]) -> Self::Output {
+        assert_eq!(
+            self.len(),
+            rhs.len(),
+            "Field vectors must be of the same length"
+        );
+
         self.par_iter()
             .zip(rhs.par_iter())
             .map(|(a, b)| *a * *b)
             .reduce(|| F::ZERO, |a, b| a + b)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(1, 1, 0)]
+    #[case(u32::MAX, u32::MAX, 0)]
+    #[case(1, 2, 3)]
+    #[case(2, 1, 3)]
+    fn test_gf32_addition(#[case] lhs: u32, #[case] rhs: u32, #[case] expected: u32) {
+        assert_eq!(GF32::from(lhs) + GF32::from(rhs), GF32::from(expected));
+    }
+
+    #[rstest]
+    #[case(1, 1, 0)]
+    #[case(u128::MAX, u128::MAX, 0)]
+    #[case(1, 2, 3)]
+    #[case(2, 1, 3)]
+    fn test_gf128_addition(#[case] lhs: u128, #[case] rhs: u128, #[case] expected: u128) {
+        assert_eq!(GF128::from(lhs) + GF128::from(rhs), GF128::from(expected));
+    }
+
+    #[rstest]
+    #[case(0, 1, 0)]
+    #[case(1, 1, 1)]
+    #[case(2, 1, 2)]
+    #[case(2, 0x800041be, 485)]
+    #[case(2, 0x8000414c, 1)]
+    fn test_gf32_multiplication(#[case] lhs: u32, #[case] rhs: u32, #[case] expected: u32) {
+        assert_eq!(GF32::from(lhs) * GF32::from(rhs), GF32::from(expected));
+    }
+
+    #[rstest]
+    #[case(0, 1, 0)]
+    #[case(1, 1, 1)]
+    #[case(2, 1, 2)]
+    #[case(2, 0x8000000000000000000000000000008E, 411)]
+    #[case(2, 0x80000000000000000000000000000043, 1)]
+    fn test_gf128_multiplication(#[case] lhs: u128, #[case] rhs: u128, #[case] expected: u128) {
+        assert_eq!(GF128::from(lhs) * GF128::from(rhs), GF128::from(expected));
+    }
+
+    #[rstest]
+    #[case(&[1], &[1], 1)]
+    #[case(&[1, 2, 3], &[4, 5, 6], 4 ^ 10 ^ 10)]
+    #[should_panic(expected = "Field vectors must be of the same length")]
+    #[case(&[1], &[1, 2], 0xbadc0de)]
+    fn field_vector_mul(#[case] lhs: &[u32], #[case] rhs: &[u32], #[case] expected: u32) {
+        let lhs = lhs.iter().copied().map(GF32::from).collect::<Vec<_>>();
+        let rhs = rhs.iter().copied().map(GF32::from).collect::<Vec<_>>();
+
+        assert_eq!(
+            FieldVector::from(lhs.as_slice()) * rhs.as_slice(),
+            GF32::from(expected)
+        );
     }
 }

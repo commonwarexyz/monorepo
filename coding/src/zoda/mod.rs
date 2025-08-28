@@ -108,7 +108,7 @@
 //! let commitment = Commitment::<_, GF32>::create(&data, hasher, RATE_INVERSE).unwrap();
 //!
 //! // Generate a mock random vector (usually through fiat-shamir.)
-//! let mut r = vec![0u8; commitment.x_tilde.rows()];
+//! let mut r = vec![0u8; commitment.x.rows()];
 //! rand.fill_bytes(r.as_mut_slice());
 //! let r = r.into_iter().map(|b| (b as u32).into()).collect::<Vec<_>>();
 //! let r_prime = r.clone();
@@ -184,16 +184,16 @@ pub enum VerificationError {
 
 /// A ZODA commitment over arbitrary data.
 #[derive(Debug, Clone)]
-pub struct Commitment<H, F>
+pub struct Commitment<'a, H, F>
 where
     H: Hasher,
     F: BinaryField,
 {
     /// `X_tilde` is the original data square.
-    pub x_tilde: DataSquare<F>,
+    pub x_tilde: DataSquare<'a, F>,
 
     /// `X` is the final "Extended Data Square," with doubly Reed-Solomon encoded rows and columns.
-    pub x: DataSquare<F>,
+    pub x: DataSquare<'a, F>,
 
     /// A [`Tree`] of all the rows in `X`. Leaves commit to the encoded rows.
     ///
@@ -208,11 +208,11 @@ where
     pub col_tree: Tree<H>,
 }
 
-impl<H, F> Commitment<H, F>
+impl<'a, H, F> Commitment<'a, H, F>
 where
     H: Hasher,
     F: BinaryField,
-    for<'a> &'a F: Encode,
+    for<'f> &'f F: Encode,
 {
     /// Constructs a new [`Commitment`] from the given data.
     ///
@@ -371,17 +371,17 @@ where
 
     /// Reed-solomon encodes several lanes of data in parallel, producing an ordered set
     /// of recovery shards for each lane.
-    fn encode_lanes<'a>(
-        lanes: impl IndexedParallelIterator<Item = impl Iterator<Item = &'a F>>,
+    fn encode_lanes<'f>(
+        lanes: impl IndexedParallelIterator<Item = impl Iterator<Item = &'f F>>,
         shard_size: usize,
         rate_inverse: usize,
     ) -> Result<Vec<Vec<F>>, RSError>
     where
-        F: 'a,
+        F: 'f,
     {
         lanes
             .map(|mut lane| {
-                // Add each lane element as an original shard. (RS rate: 1/rate_inverse)
+                // Add each lane element as an original shard. (RS rate: rate_inverse^-1)
                 let mut encoder = ReedSolomonEncoder::new(
                     shard_size,
                     shard_size * rate_inverse.saturating_sub(1),
@@ -649,22 +649,38 @@ mod test {
     use commonware_cryptography::Blake3;
     use rand::{Rng, RngCore};
 
-    #[test]
-    fn test_e2e_gf32() {
-        const SIZE: usize = 2usize.pow(12);
-        const RATE_INVERSE: usize = 4;
+    const SIZE: usize = 2usize.pow(12);
+    const RATE_INVERSE: usize = 4;
 
-        let hasher = &mut Blake3::default();
+    struct ZodaTestCase<'a, F: BinaryField> {
+        commitment: Commitment<'a, Blake3, F>,
+        enc_proof: EncodingProof<F>,
+        sample: Sample<Blake3, F>,
+        r: Vec<F>,
+        r_prime: Vec<F>,
+    }
+
+    fn create_random_commitment<'a, F: BinaryField>(
+        hasher: &mut Blake3,
+        size: usize,
+        rate_inverse: usize,
+    ) -> ZodaTestCase<'a, F>
+    where
+        for<'f> &'f F: Encode,
+    {
         let mut rand = rand::thread_rng();
 
-        let mut data = vec![0u8; SIZE];
+        let mut data = vec![0u8; size];
         rand.fill_bytes(&mut data);
-        let commitment = Commitment::<_, GF32>::create(&data, hasher, RATE_INVERSE).unwrap();
+        let commitment = Commitment::<_, F>::create(&data, hasher, rate_inverse).unwrap();
 
         // Generate some randomness (testing; usually through fiat-shamir.)
-        let mut r = vec![0u8; commitment.x_tilde.rows()];
+        let mut r = vec![0u8; commitment.x.rows()];
         rand.fill_bytes(r.as_mut_slice());
-        let r = r.into_iter().map(|b| (b as u32).into()).collect::<Vec<_>>();
+        let r = r
+            .into_iter()
+            .map(|b| F::from_le_bytes(&b.to_le_bytes()))
+            .collect::<Vec<_>>();
         let r_prime = r.clone();
 
         // Generate the encoding proof.
@@ -679,7 +695,99 @@ mod test {
             .collect::<Vec<_>>();
         let sample = commitment.sample(&row_samples, &col_samples).unwrap();
 
+        ZodaTestCase {
+            commitment,
+            enc_proof,
+            sample,
+            r,
+            r_prime,
+        }
+    }
+
+    #[test]
+    fn test_create_invalid_rate() {
+        let err = Commitment::<_, GF32>::create(&[0u8; 16], &mut Blake3::default(), 1).unwrap_err();
+        assert!(matches!(err, CommitmentError::InvalidRate(1)));
+    }
+
+    #[test]
+    fn test_verify_gf32() {
+        let hasher = &mut Blake3::default();
+
+        let ZodaTestCase {
+            enc_proof,
+            sample,
+            r,
+            r_prime,
+            ..
+        } = create_random_commitment::<GF32>(hasher, SIZE, RATE_INVERSE);
+
         // Verify the integrity of the samples.
         verify(hasher, &sample, &enc_proof, &r, &r_prime, RATE_INVERSE).unwrap();
+    }
+
+    #[test]
+    fn test_verify_gf32_malicious_row_encoding() {
+        let hasher = &mut Blake3::default();
+
+        let ZodaTestCase {
+            commitment,
+            enc_proof,
+            mut sample,
+            r,
+            r_prime,
+        } = create_random_commitment::<GF32>(hasher, SIZE, RATE_INVERSE);
+
+        // Simulate a malicious actor by changing one of the sampled rows' parity shards.
+        let first_sampled_row = &mut sample.rows.iter_mut().next().unwrap().1 .0;
+        first_sampled_row[commitment.x_tilde.cols()..].fill(GF32::ONE);
+
+        let err = verify(hasher, &sample, &enc_proof, &r, &r_prime, RATE_INVERSE).unwrap_err();
+        assert!(matches!(err, VerificationError::EncodingProofInvalid));
+    }
+
+    #[test]
+    fn test_verify_gf32_malicious_col_encoding() {
+        let hasher = &mut Blake3::default();
+
+        let ZodaTestCase {
+            commitment,
+            enc_proof,
+            mut sample,
+            r,
+            r_prime,
+        } = create_random_commitment::<GF32>(hasher, SIZE, RATE_INVERSE);
+
+        // Simulate a malicious actor by changing one of the sampled cols' parity shards.
+        let first_sampled_row = &mut sample.cols.iter_mut().next().unwrap().1 .0;
+        first_sampled_row[commitment.x_tilde.rows()..].fill(GF32::ONE);
+
+        let err = verify(hasher, &sample, &enc_proof, &r, &r_prime, RATE_INVERSE).unwrap_err();
+        assert!(matches!(err, VerificationError::EncodingProofInvalid));
+    }
+
+    #[test]
+    fn test_verify_gf32_malicious_roots() {
+        let hasher = &mut Blake3::default();
+
+        let ZodaTestCase {
+            enc_proof,
+            mut sample,
+            r,
+            r_prime,
+            ..
+        } = create_random_commitment::<GF32>(hasher, SIZE, RATE_INVERSE);
+
+        let og_row_root = sample.row_root;
+        sample.row_root = Blake3::default().finalize();
+
+        let err = verify(hasher, &sample, &enc_proof, &r, &r_prime, RATE_INVERSE).unwrap_err();
+        assert!(matches!(err, VerificationError::MerkleTree(_)));
+
+        sample.row_root = og_row_root;
+        sample.col_root = Blake3::default().finalize();
+
+        let err = verify(hasher, &sample, &enc_proof, &r, &r_prime, RATE_INVERSE).unwrap_err();
+        assert!(matches!(err, VerificationError::MerkleTree(_)));
     }
 }

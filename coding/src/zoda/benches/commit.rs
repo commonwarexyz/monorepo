@@ -20,9 +20,8 @@ fn bench_create_commitment(c: &mut Criterion) {
         for elements in NUM_BYTES {
             c.bench_function(
                 &format!(
-                    "{}/field=gf32 hasher=sha256 bytes={}",
+                    "{}/field=gf32 hasher=sha256 rs_rate=1/{inv_rate} bytes={elements}",
                     module_path!(),
-                    elements
                 ),
                 |b| {
                     let mut rand = rand::thread_rng();
@@ -42,9 +41,8 @@ fn bench_create_commitment(c: &mut Criterion) {
 
             c.bench_function(
                 &format!(
-                    "{}/field=gf128 hasher=sha256 bytes={}",
+                    "{}/field=gf128 hasher=sha256 rs_rate=1/{inv_rate} bytes={elements}",
                     module_path!(),
-                    elements
                 ),
                 |b| {
                     let mut rand = rand::thread_rng();
