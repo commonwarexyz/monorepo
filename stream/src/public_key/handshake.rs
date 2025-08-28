@@ -27,6 +27,7 @@ pub struct Info<P: PublicKey> {
 
     /// Timestamp of the handshake (in epoch milliseconds).
     timestamp: u64,
+
     /// c.f. [`Self::new_with_tag`]
     continuation_tag: Option<<Sha256 as Hasher>::Digest>,
 }
@@ -207,6 +208,7 @@ impl<P: PublicKey> Hello<P> {
             return Err(Error::InvalidSignature);
         }
 
+        // Verify the continuation tag (if provided)
         if let Some(d) = tag_data {
             self.info.check_tag(d)?;
         }

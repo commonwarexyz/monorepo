@@ -118,11 +118,9 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
-    use commonware_cryptography::{Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
-
-    type Digest = <Sha256 as Hasher>::Digest;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);

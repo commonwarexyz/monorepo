@@ -207,16 +207,7 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     /// Return result of hashing nothing.
     fn empty() -> Self::Digest;
 
-    /// A convenience method for hashing a single message.
-    ///
-    /// This should have the same behavior as:
-    /// ```no_run
-    /// # use commonware_cryptography::Hasher;
-    /// # fn harness<ThisHasher: Hasher>(message: &[u8]) {
-    /// ThisHasher::new().update(message).finalize();
-    /// # }
-    ///
-    /// ```
+    /// Hash a single message with a one-time-use hasher.
     fn hash(message: &[u8]) -> Self::Digest {
         Self::new().update(message).finalize()
     }

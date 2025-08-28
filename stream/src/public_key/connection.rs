@@ -745,6 +745,7 @@ mod tests {
 
                     // Read the hello from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
+
                     // Create a custom hello info bytes with zero ephemeral key
                     let timestamp = context.current().epoch_millis();
                     let info = handshake::Info::new_with_tag(
@@ -816,8 +817,6 @@ mod tests {
                 let namespace = dialer_config.namespace.clone();
                 let recipient_pk = dialer_config.crypto.public_key();
                 move |mut context| async move {
-                    use chacha20poly1305::KeyInit;
-
                     // Read the hello from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
                     let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
@@ -826,9 +825,9 @@ mod tests {
                     let mock_secret = [1u8; 32];
                     let mock_cipher = ChaCha20Poly1305::new(&mock_secret.into());
 
+                    // Create a custom hello info bytes with wrong message
                     let secret = x25519::new(&mut context);
                     let listener_ephemeral = x25519::PublicKey::from_secret(&secret);
-                    // Create a custom hello info bytes with zero ephemeral key
                     let timestamp = context.current().epoch_millis();
                     let info = handshake::Info::new_with_tag(
                         recipient_pk,
@@ -851,7 +850,7 @@ mod tests {
                 }
             });
 
-            // Attempt connection - should fail due to non-contributory shared secret
+            // Attempt connection - should fail due to invalid continuation tag
             let result = Connection::upgrade_dialer(
                 context,
                 dialer_config,
