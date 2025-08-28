@@ -56,7 +56,6 @@ impl<
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
                 partition: cfg.partition,
-                compression: cfg.compression,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone(),
                 max_participants: cfg.max_participants,

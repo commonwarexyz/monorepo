@@ -751,7 +751,7 @@ impl<
 pub mod test {
     use super::*;
     use crate::translator::TwoCap;
-    use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
@@ -804,8 +804,8 @@ pub mod test {
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
 
             // Add one key.
-            let k1 = hash(&0u64.to_be_bytes());
-            let v1 = hash(&10u64.to_be_bytes());
+            let k1 = Sha256::hash(&0u64.to_be_bytes());
+            let v1 = Sha256::hash(&10u64.to_be_bytes());
             db.update(k1, v1).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit().await.unwrap();
@@ -972,20 +972,20 @@ pub mod test {
         let mut rng = StdRng::seed_from_u64(rng_seed);
 
         for i in 0u64..num_elements {
-            let k = hash(&i.to_be_bytes());
-            let v = hash(&rng.next_u32().to_be_bytes());
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
             db.update(k, v).await.unwrap();
         }
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency.
         for _ in 0u64..num_elements * 10 {
-            let rand_key = hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
             if rng.next_u32() % 7 == 0 {
                 db.delete(rand_key).await.unwrap();
                 continue;
             }
-            let v = hash(&rng.next_u32().to_be_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
             db.update(rand_key, v).await.unwrap();
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
@@ -1311,8 +1311,8 @@ pub mod test {
 
             const NUM_OPERATIONS: u64 = 500;
             for i in 0..NUM_OPERATIONS {
-                let key = hash(&i.to_be_bytes());
-                let value = hash(&(i * 1000).to_be_bytes());
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(key, value).await.unwrap();
 
                 // Commit periodically to advance the inactivity floor
@@ -1412,8 +1412,8 @@ pub mod test {
             // Apply identical operations to both databases
             const NUM_OPERATIONS: u64 = 1000;
             for i in 0..NUM_OPERATIONS {
-                let key = hash(&i.to_be_bytes());
-                let value = hash(&(i * 1000).to_be_bytes());
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 1000).to_be_bytes());
 
                 db_no_delay.update(key, value).await.unwrap();
                 db_max_delay.update(key, value).await.unwrap();

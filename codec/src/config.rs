@@ -1,6 +1,6 @@
 //! Types for use as [crate::Read::Cfg].
 
-use std::ops::{Bound, RangeBounds};
+use core::ops::{Bound, RangeBounds};
 
 /// Configuration for limiting the range of a [usize] value.
 ///
@@ -73,7 +73,7 @@ impl<R: RangeBounds<usize>> From<R> for RangeCfg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ops::Bound::{Excluded, Included, Unbounded};
+    use core::ops::Bound::{Excluded, Included, Unbounded};
 
     #[test]
     fn test_range_cfg_from() {

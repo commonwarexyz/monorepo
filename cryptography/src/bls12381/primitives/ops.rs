@@ -14,10 +14,14 @@ use super::{
     Error,
 };
 use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
+#[cfg(not(feature = "std"))]
+use alloc::{borrow::Cow, collections::BTreeMap, vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_utils::union_unique;
 use rand::RngCore;
+#[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
+#[cfg(feature = "std")]
 use std::{borrow::Cow, collections::BTreeMap};
 
 /// Computes the public key from the private key.
@@ -468,7 +472,7 @@ where
 pub fn threshold_signature_recover_multiple<'a, V, I>(
     threshold: u32,
     mut many_evals: Vec<I>,
-    concurrency: usize,
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
 where
     V: Variant,
@@ -499,32 +503,48 @@ where
         .collect::<Vec<_>>();
     let weights = compute_weights(indices)?;
 
-    // If concurrency is not required, recover signatures sequentially
-    let concurrency = std::cmp::min(concurrency, prepared_evals.len());
-    if concurrency == 1 {
-        return prepared_evals
-            .iter()
-            .map(|evals| {
-                threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
-            })
-            .collect();
+    #[cfg(not(feature = "std"))]
+    return prepared_evals
+        .into_iter()
+        .map(|evals| {
+            threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
+        })
+        .collect();
+
+    #[cfg(feature = "std")]
+    {
+        let concurrency = core::cmp::min(concurrency, prepared_evals.len());
+        if concurrency == 1 {
+            return prepared_evals
+                .into_iter()
+                .map(|evals| {
+                    threshold_signature_recover_with_weights::<V, _>(
+                        &weights,
+                        evals.iter().cloned(),
+                    )
+                })
+                .collect();
+        }
+
+        // Build a thread pool with the specified concurrency
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .expect("Unable to build thread pool");
+
+        // Recover signatures
+        pool.install(move || {
+            prepared_evals
+                .par_iter()
+                .map(|evals| {
+                    threshold_signature_recover_with_weights::<V, _>(
+                        &weights,
+                        evals.iter().cloned(),
+                    )
+                })
+                .collect()
+        })
     }
-
-    // Build a thread pool with the specified concurrency
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(concurrency)
-        .build()
-        .expect("Unable to build thread pool");
-
-    // Recover signatures
-    pool.install(move || {
-        prepared_evals
-            .par_iter()
-            .map(|evals| {
-                threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
-            })
-            .collect()
-    })
 }
 
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
@@ -632,37 +652,30 @@ pub fn aggregate_verify_multiple_messages<'a, V, I>(
     public: &V::Public,
     messages: I,
     signature: &V::Signature,
-    concurrency: usize,
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
 ) -> Result<(), Error>
 where
     V: Variant,
-    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>
-        + IntoParallelIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>
-        + Send
-        + Sync,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
+    I::IntoIter: Send + Sync,
 {
+    #[cfg(not(feature = "std"))]
+    let hm_sum = compute_hm_sum::<V, I>(messages);
+
+    #[cfg(feature = "std")]
     let hm_sum = if concurrency == 1 {
-        // Avoid pool overhead when concurrency is 1
-        let mut hm_sum = V::Signature::zero();
-        for (namespace, msg) in messages {
-            let hm = match namespace {
-                Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-                None => hash_message::<V>(V::MESSAGE, msg),
-            };
-            hm_sum.add(&hm);
-        }
-        hm_sum
+        compute_hm_sum::<V, I>(messages)
     } else {
-        // Build a thread pool with the specified concurrency
         let pool = ThreadPoolBuilder::new()
             .num_threads(concurrency)
             .build()
             .expect("Unable to build thread pool");
 
-        // Perform hashing to curve and summation of messages in parallel
+        // TODO(#1496): Revisit use of `.par_bridge()`
         pool.install(move || {
             messages
-                .into_par_iter()
+                .into_iter()
+                .par_bridge()
                 .map(|(namespace, msg)| match namespace {
                     Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
                     None => hash_message::<V>(V::MESSAGE, msg),
@@ -674,8 +687,24 @@ where
         })
     };
 
-    // Verify the signature
     V::verify(public, &hm_sum, signature)
+}
+
+/// Computes the sum over the hash of each message.
+fn compute_hm_sum<'a, V, I>(messages: I) -> V::Signature
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>,
+{
+    let mut hm_sum = V::Signature::zero();
+    for (namespace, msg) in messages {
+        let hm = match namespace {
+            Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+            None => hash_message::<V>(V::MESSAGE, msg),
+        };
+        hm_sum.add(&hm);
+    }
+    hm_sum
 }
 
 #[cfg(test)]

@@ -37,13 +37,13 @@ macro_rules! impl_numeric {
             type Cfg = ();
             #[inline]
             fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-                at_least(buf, std::mem::size_of::<$type>())?;
+                at_least(buf, core::mem::size_of::<$type>())?;
                 Ok(buf.$read_method())
             }
         }
 
         impl FixedSize for $type {
-            const SIZE: usize = std::mem::size_of::<$type>();
+            const SIZE: usize = core::mem::size_of::<$type>();
         }
     };
 }
@@ -187,7 +187,7 @@ mod tests {
             paste! {
                 #[test]
                 fn [<test_ $type>]() {
-                    let expected_len = std::mem::size_of::<$type>();
+                    let expected_len = core::mem::size_of::<$type>();
                     let values: [$type; 5] =
                         [0 as $type, 1 as $type, 42 as $type, <$type>::MAX, <$type>::MIN];
                     for value in values.iter() {

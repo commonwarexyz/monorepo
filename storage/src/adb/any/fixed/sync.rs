@@ -325,9 +325,8 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_cryptography::{
-        hash,
         sha256::{self, Digest},
-        Digest as _, Sha256,
+        Digest as _, Hasher, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -350,7 +349,7 @@ mod tests {
     }
 
     fn test_digest(value: u64) -> Digest {
-        hash(&value.to_be_bytes())
+        Sha256::hash(&value.to_be_bytes())
     }
 
     #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
@@ -1514,10 +1513,10 @@ mod tests {
             assert_eq!(synced_db.mmr.size(), 0);
 
             // Test that we can perform operations on the synced database
-            let key1 = hash(&1u64.to_be_bytes());
-            let value1 = hash(&10u64.to_be_bytes());
-            let key2 = hash(&2u64.to_be_bytes());
-            let value2 = hash(&20u64.to_be_bytes());
+            let key1 = Sha256::hash(&1u64.to_be_bytes());
+            let value1 = Sha256::hash(&10u64.to_be_bytes());
+            let key2 = Sha256::hash(&2u64.to_be_bytes());
+            let value2 = Sha256::hash(&20u64.to_be_bytes());
 
             synced_db.update(key1, value1).await.unwrap();
             synced_db.update(key2, value2).await.unwrap();
