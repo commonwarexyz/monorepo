@@ -300,28 +300,25 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
         let mut current_index = self.oldest_retained_loc().unwrap_or(0);
-        let mut first_section = Some(current_index / self.log_items_per_section);
+        let first_section = current_index / self.log_items_per_section;
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations, and any log operations that need to be re-added to the MMR & locations.
-
         {
             let stream = self.log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 let (section, offset, _size, op) = result.map_err(Error::Journal)?;
 
-                if let Some(got_first_section) = first_section {
-                    if section < got_first_section {
-                        // There is data in the log before the first section given by the oldest
-                        // retained location given in metadata. In commit(), we write the oldest
-                        // retained location to metadata before actually pruning the log and MMR.
-                        // We must have written the oldest retained location to metadata but not
-                        // actually pruned the log and MMR. Ignore the oldest_retained_loc in metadata
-                        // and start from the first section in the log.
-                        current_index = got_first_section * self.log_items_per_section;
-                        first_section = None; // Only reset once
-                    }
+                if section < first_section {
+                    // There is data in the log before the first section given by the oldest
+                    // retained location given in metadata. In commit(), we write the oldest
+                    // retained location to metadata before actually pruning the log and MMR.
+                    // We must have written the oldest retained location to metadata but not
+                    // actually pruned the log and MMR. Skip over all data before the oldest
+                    // retained location in the metadata.
+                    current_index = first_section * self.log_items_per_section;
+                    continue;
                 }
 
                 if current_index < self.inactivity_floor_loc {
@@ -1520,7 +1517,7 @@ pub(super) mod test {
 
             const NUM_OPERATIONS: u64 = 500;
             for i in 0..NUM_OPERATIONS {
-                let key = hash(&i.to_be_bytes());
+                let key = Sha256::hash(&i.to_be_bytes());
                 let value = vec![(i % 255) as u8; (i % 255) as usize];
                 db.update(key, value).await.unwrap();
 
@@ -1603,7 +1600,7 @@ pub(super) mod test {
             // Apply identical operations to both databases
             const NUM_OPERATIONS: u64 = 200;
             for i in 0..NUM_OPERATIONS {
-                let key = hash(&i.to_be_bytes());
+                let key = Sha256::hash(&i.to_be_bytes());
                 let value = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
 
                 db_no_delay.update(key, value.clone()).await.unwrap();
