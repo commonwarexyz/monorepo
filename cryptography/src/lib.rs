@@ -30,6 +30,7 @@ pub use bloomfilter::BloomFilter;
 pub mod lthash;
 pub use lthash::LtHash;
 pub mod secp256r1;
+pub mod transcript;
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
 pub trait Signer: Send + Sync + Clone + 'static {
