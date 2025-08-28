@@ -900,7 +900,7 @@ pub(super) mod test {
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
         translator::TwoCap,
     };
-    use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::NZU64;
@@ -1113,7 +1113,7 @@ pub(super) mod test {
 
             let mut map = HashMap::<Digest, Vec<u8>>::default();
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
                 map.insert(k, v);
@@ -1124,7 +1124,7 @@ pub(super) mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
                 map.insert(k, v);
@@ -1135,7 +1135,7 @@ pub(super) mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
                 map.remove(&k);
             }
@@ -1172,7 +1172,7 @@ pub(super) mod test {
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
                     let Some(db_value) = db.get(&k).await.unwrap() else {
                         panic!("key not found in db: {k}");
@@ -1215,7 +1215,7 @@ pub(super) mod test {
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
-            let k = hash(&UPDATES.to_be_bytes());
+            let k = Sha256::hash(&UPDATES.to_be_bytes());
             for i in 0u64..UPDATES {
                 let v = vec![(i % 255) as u8; ((i % 7) + 3) as usize];
                 db.update(k, v).await.unwrap();
@@ -1246,14 +1246,14 @@ pub(super) mod test {
             // insert & commit multiple batches to ensure repeated inactivity floor raising.
             for j in 0u64..ELEMENTS {
                 for i in 0u64..ELEMENTS {
-                    let k = hash(&(j * 1000 + i).to_be_bytes());
+                    let k = Sha256::hash(&(j * 1000 + i).to_be_bytes());
                     let v = vec![(i % 255) as u8; ((i % 7) + 3) as usize];
                     db.update(k, v.clone()).await.unwrap();
                     map.insert(k, v);
                 }
                 db.commit(None).await.unwrap();
             }
-            let k = hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
+            let k = Sha256::hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
@@ -1283,7 +1283,7 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
 
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1297,7 +1297,7 @@ pub(super) mod test {
 
             // re-apply the updates and commit them this time.
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1309,7 +1309,7 @@ pub(super) mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1326,7 +1326,7 @@ pub(super) mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1338,7 +1338,7 @@ pub(super) mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
 
@@ -1354,7 +1354,7 @@ pub(super) mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
             db.commit(None).await.unwrap();
@@ -1391,7 +1391,7 @@ pub(super) mod test {
 
             // Populate the db with some data
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v).await.unwrap();
             }
@@ -1420,7 +1420,7 @@ pub(super) mod test {
 
             // Add more elements and commit
             for i in 0u64..ELEMENTS * 2 {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v).await.unwrap();
             }
@@ -1435,7 +1435,7 @@ pub(super) mod test {
 
             // Add more elements but crash after writing only the MMR
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v).await.unwrap();
             }
@@ -1457,7 +1457,7 @@ pub(super) mod test {
 
             // Add more elements and commit
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 9) as usize];
                 db.update(k, v).await.unwrap();
             }
@@ -1466,7 +1466,7 @@ pub(super) mod test {
 
             // Add more elements but crash after writing only the locations
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 9) as usize];
                 db.update(k, v).await.unwrap();
             }
@@ -1479,7 +1479,7 @@ pub(super) mod test {
 
             // Add more elements and commit
             for i in 0u64..ELEMENTS * 2 {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 10) as usize];
                 db.update(k, v).await.unwrap();
             }
@@ -1488,7 +1488,7 @@ pub(super) mod test {
 
             // Add more elements but crash after writing only the oldest_retained_loc
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 10) as usize];
                 db.update(k, v).await.unwrap();
             }

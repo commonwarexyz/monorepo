@@ -42,12 +42,10 @@
 //! |    - Promtail                |  |    - Promtail                |
 //! |    - Node Exporter           |  |    - Node Exporter           |
 //! |    - Pyroscope Agent         |  |    - Pyroscope Agent         |
-//! |    - Memleak Agent           |  |    - Memleak Agent           |
 //! |  - Security Group            |  |  - Security Group            |
 //! |    - All: Deployer IP        |  |    - All: Deployer IP        |
 //! |    - 9090: Monitoring IP     |  |    - 9090: Monitoring IP     |
 //! |    - 9100: Monitoring IP     |  |    - 9100: Monitoring IP     |
-//! |    - 9200: Monitoring IP     |  |    - 9200: Monitoring IP     |
 //! |    - 8012: 0.0.0.0/0         |  |    - 8765: 12.3.7.9/32       |
 //! +------------------------------+  +------------------------------+
 //! ```
@@ -62,10 +60,10 @@
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
 //!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
 //!     * **Tempo**: Listens at `:4318`, storing traces in `/var/lib/tempo`.
-//!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus and Loki datasources and a custom dashboard.
+//!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus, Loki, and Tempo datasources and a custom dashboard.
 //! * Ingress:
 //!     * Allows deployer IP access (TCP 0-65535).
-//!     * Binary instance traffic to Loki (TCP 3100), Pyroscope (TCP 4040), and Tempo (TCP 4318).
+//!     * Binary instance traffic to Loki (TCP 3100) and Tempo (TCP 4318).
 //!
 //! ### Binary
 //!
@@ -75,10 +73,9 @@
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //!     * **Node Exporter**: Exposes system metrics at `:9100`.
 //!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
-//!     * **Memleak Agent**: Exposes `memleak` metrics at `:9200`.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
-//!     * Monitoring IP access to `:9090`, `:9100`, and `:9200` for Prometheus.
+//!     * Monitoring IP access to `:9090` and `:9100` for Prometheus.
 //!     * User-defined ports from the configuration.
 //!
 //! ## Networking
@@ -106,7 +103,7 @@
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
 //! 3. Establishes VPC peering between the monitoring region and binary regions.
-//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, and Pyroscope.
+//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, Pyroscope, and Tempo.
 //! 5. Launches binary instances, uploads binaries, configurations, and hosts.yaml, and installs Promtail and the binary.
 //! 6. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
 //! 7. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
@@ -199,9 +196,6 @@ cfg_if::cfg_if! {
 
         /// Port on instance where system metrics are exposed
         const SYSTEM_PORT: u16 = 9100;
-
-        /// Port on instance where memleak metrics are exposed
-        const MEMLEAK_PORT: u16 = 9200;
 
         /// Port on monitoring where logs are pushed
         const LOGS_PORT: u16 = 3100;

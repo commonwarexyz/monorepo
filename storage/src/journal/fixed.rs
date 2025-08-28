@@ -605,7 +605,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{hash, sha256::Digest};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
@@ -619,7 +619,7 @@ mod tests {
 
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
-        hash(&value.to_be_bytes())
+        Sha256::hash(&value.to_be_bytes())
     }
 
     fn test_cfg(items_per_blob: NonZeroU64) -> Config {
@@ -1434,7 +1434,7 @@ mod tests {
                 .read_at(vec![0u8; size as usize], 0)
                 .await
                 .expect("Failed to read blob");
-            let digest = hash(buf.as_ref());
+            let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
                 "ed2ea67208cde2ee8c16cca5aa4f369f55b1402258c6b7760e5baf134e38944a",
@@ -1449,7 +1449,7 @@ mod tests {
                 .read_at(vec![0u8; size as usize], 0)
                 .await
                 .expect("Failed to read blob");
-            let digest = hash(buf.as_ref());
+            let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
                 "cc7efd4fc999aff36b9fd4213ba8da5810dc1849f92ae2ddf7c6dc40545f9aff",

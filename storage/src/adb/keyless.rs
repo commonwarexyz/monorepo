@@ -481,7 +481,7 @@ mod test {
         adb::verify_proof,
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
     };
-    use commonware_cryptography::{hash, Sha256};
+    use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
@@ -754,7 +754,7 @@ mod test {
                 }
 
                 // Verify that proof fails with wrong root
-                let wrong_root = hash(&[0xFF; 32]);
+                let wrong_root = Sha256::hash(&[0xFF; 32]);
                 assert!(
                     !verify_proof(&mut hasher, &proof, start_loc, &ops, &wrong_root),
                     "Proof should fail with wrong root"

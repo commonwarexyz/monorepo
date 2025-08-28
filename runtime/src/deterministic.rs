@@ -38,6 +38,7 @@ use crate::{
 use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
+    future::AbortHandle,
     task::{waker_ref, ArcWake},
     Future,
 };
@@ -577,6 +578,7 @@ pub struct Context {
     executor: Arc<Executor>,
     network: Arc<Network>,
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
+    children: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
 impl Default for Context {
@@ -627,6 +629,7 @@ impl Context {
             executor: executor.clone(),
             network: Arc::new(network),
             storage,
+            children: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -690,6 +693,7 @@ impl Context {
             executor,
             network: Arc::new(network),
             storage: self.storage,
+            children: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -706,12 +710,13 @@ impl Clone for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            children: self.children.clone(),
         }
     }
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
@@ -725,8 +730,13 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
+
+        // Give spawned task its own empty children list
+        let children = Arc::new(Mutex::new(Vec::new()));
+        self.children = children.clone();
+
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, gauge, false);
+        let (f, handle) = Handle::init_future(future, gauge, false, children);
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -747,13 +757,36 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
+
         move |f: F| {
-            let (f, handle) = Handle::init_future(f, gauge, false);
+            // Give spawned task its own empty children list
+            let (f, handle) =
+                Handle::init_future(f, gauge, false, Arc::new(Mutex::new(Vec::new())));
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
             handle
         }
+    }
+
+    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Store parent's children list
+        let parent_children = self.children.clone();
+
+        // Spawn the child
+        let child_handle = self.spawn(f);
+
+        // Register this child with the parent
+        if let Some(abort_handle) = child_handle.abort_handle() {
+            parent_children.lock().unwrap().push(abort_handle);
+        }
+
+        child_handle
     }
 
     fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
@@ -852,6 +885,7 @@ impl crate::Metrics for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            children: self.children.clone(),
         }
     }
 

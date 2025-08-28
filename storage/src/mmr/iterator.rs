@@ -258,12 +258,12 @@ impl Iterator for PathIterator {
 mod tests {
     use super::*;
     use crate::mmr::{hasher::Standard, mem::Mmr};
-    use commonware_cryptography::{sha256::hash, Sha256};
+    use commonware_cryptography::{Hasher, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
     #[test]
     fn test_leaf_num_calculation() {
-        let digest = hash(b"testing");
+        let digest = Sha256::hash(b"testing");
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {

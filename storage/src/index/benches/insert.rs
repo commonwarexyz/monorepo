@@ -1,4 +1,4 @@
-use commonware_cryptography::hash;
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::Metrics;
 use commonware_storage::{index::Index, translator::TwoCap};
 use criterion::{criterion_group, Criterion};
@@ -34,7 +34,7 @@ fn bench_insert(c: &mut Criterion) {
                 let mut rng = StdRng::seed_from_u64(0);
                 let mut kvs = Vec::with_capacity(items);
                 for i in 0..items {
-                    kvs.push((hash(&i.to_be_bytes()), i as u64));
+                    kvs.push((Sha256::hash(&i.to_be_bytes()), i as u64));
                 }
 
                 let mut total = Duration::ZERO;

@@ -1,7 +1,7 @@
 use commonware_codec::{Codec, EncodeFixed};
-use std::{
+use core::{
     cmp::{Ord, PartialOrd},
-    error::Error as StdError,
+    error::Error as CoreError,
     fmt::{Debug, Display},
     hash::Hash,
     ops::Deref,
@@ -18,7 +18,7 @@ pub use u32::U32;
 
 /// Errors returned by the `Array` trait's functions.
 #[derive(Error, Debug, PartialEq)]
-pub enum Error<E: StdError + Send + Sync + 'static> {
+pub enum Error<E: CoreError + Send + Sync + 'static> {
     #[error("invalid bytes")]
     InsufficientBytes,
     #[error("other: {0}")]

@@ -17,7 +17,7 @@ use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 pub mod bls12381;
 pub mod ed25519;
 pub mod sha256;
-pub use sha256::{hash, CoreSha256, Sha256};
+pub use sha256::{CoreSha256, Sha256};
 pub mod blake3;
 pub use blake3::{Blake3, CoreBlake3};
 pub mod bloomfilter;
@@ -193,7 +193,7 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     fn new() -> Self;
 
     /// Append message to previously recorded data.
-    fn update(&mut self, message: &[u8]);
+    fn update(&mut self, message: &[u8]) -> &mut Self;
 
     /// Hash all recorded data and reset the hasher
     /// to the initial state.
@@ -202,10 +202,15 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     /// Reset the hasher without generating a hash.
     ///
     /// This function does not need to be called after `finalize`.
-    fn reset(&mut self);
+    fn reset(&mut self) -> &mut Self;
 
     /// Return result of hashing nothing.
     fn empty() -> Self::Digest;
+
+    /// Hash a single message with a one-time-use hasher.
+    fn hash(message: &[u8]) -> Self::Digest {
+        Self::new().update(message).finalize()
+    }
 }
 
 #[cfg(test)]

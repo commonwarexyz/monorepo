@@ -29,8 +29,11 @@
 //!
 //! Thus:
 //! - Message 1 is a `Hello` message from the dialer to the listener
-//! - Message 2 is a `Hello` and `Confirmation` message from the listener to the dialer
+//! - Message 2 is a `Hello` (with a continuation tag) and `Confirmation` message from the listener to the dialer
 //! - Message 3 is a `Confirmation` message from the dialer to the listener
+//!
+//! _The continuation tag binds the listener's [handshake::Hello] response to a particular dialer's
+//! [handshake::Hello] message, preventing exfiltration to a different session._
 //!
 //! ## Encryption
 //!
@@ -64,8 +67,9 @@
 //!   signatures.
 //! - **Forward Secrecy**: Ephemeral encryption keys ensure that any compromise of long-term static keys
 //!   doesn't expose the contents of previous sessions.
-//! - **Session Uniqueness**: Confirmations are bound to the complete handshake transcript (including
-//!   the randomly generated session key), preventing replay attacks and ensuring message integrity.
+//! - **Session Uniqueness**: A listener's [handshake::Hello] is bound to the dialer's [handshake::Hello] message and
+//!   [handshake::Confirmation]s are bound to the complete handshake transcript, preventing replay attacks and ensuring
+//!   message integrity.
 //! - **Handshake Timeout**: A configurable deadline is enforced for handshake completion to protect
 //!   against malicious peers that create connections but abandon handshakes.
 //!
