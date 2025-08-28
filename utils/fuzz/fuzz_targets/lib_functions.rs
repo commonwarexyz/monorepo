@@ -8,7 +8,6 @@ use commonware_utils::{
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     Hex { data: Vec<u8> },
@@ -23,7 +22,7 @@ enum FuzzInput {
     NZUsize { v: usize },
     NZU32 { v: u32 },
     NZU64 { v: u64 },
-    NonZeroDuration { millis: u64},
+    NonZeroDuration { millis: u64 },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -46,7 +45,7 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        FuzzInput::NonZeroDuration { millis }=> {
+        FuzzInput::NonZeroDuration { millis } => {
             let duration = Duration::from_millis(millis);
 
             let nz_duration = NonZeroDuration::new(duration);
