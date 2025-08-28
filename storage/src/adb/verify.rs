@@ -104,7 +104,7 @@ pub fn create_proof_store_from_digests<D: Digest>(
 }
 
 /// Generate a Multi-Proof for specific operations (identified by location) from a [ProofStore].
-pub async fn generate_multi_proof<D: Digest>(
+pub async fn create_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
     locations: &[u64],
 ) -> Result<Proof<D>, crate::mmr::Error> {
@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_generate_multi_proof() {
+    fn test_create_multi_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
@@ -510,7 +510,7 @@ mod tests {
 
             // Generate multi-proof for specific locations
             let target_locations = vec![2, 5, 10, 15, 18];
-            let multi_proof = generate_multi_proof(&proof_store, &target_locations)
+            let multi_proof = create_multi_proof(&proof_store, &target_locations)
                 .await
                 .unwrap();
 
@@ -641,7 +641,7 @@ mod tests {
                 create_proof_store(&mut hasher, &proof, 0, &operations, &root).unwrap();
 
             // Generate multi-proof for single element
-            let multi_proof = generate_multi_proof(&proof_store, &[1]).await.unwrap();
+            let multi_proof = create_multi_proof(&proof_store, &[1]).await.unwrap();
 
             // Verify single element
             assert!(verify_multi_proof(
