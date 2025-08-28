@@ -49,8 +49,7 @@ fn fuzz(input: FuzzInput) {
             let duration = Duration::from_millis(millis);
 
             let nz_duration = NonZeroDuration::new(duration);
-            if nz_duration.is_some() {
-                let nz_duration = nz_duration.unwrap();
+            if let Some(nz_duration) = nz_duration {
                 assert_eq!(nz_duration.get(), duration);
 
                 let converted: Duration = nz_duration.into();
