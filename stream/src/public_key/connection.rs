@@ -681,7 +681,6 @@ mod tests {
                         timestamp,
                         &msg,
                     );
-
                     let hello =
                         handshake::Hello::sign(&mut actual_peer, &peer_config.namespace, info);
 
