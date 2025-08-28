@@ -46,27 +46,22 @@ const OLDEST_RETAINED_LOC_PREFIX: u8 = 0;
 
 /// Read the oldest_retained_loc from metadata, returning 0 if not found.
 pub(super) fn read_oldest_retained_loc<E: RStorage + Clock + Metrics>(
-    metadata: &Metadata<E, U64, Vec<u8>>,
+    metadata: &Metadata<E, U64, u64>,
 ) -> u64 {
     let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
     match metadata.get(&key) {
-        Some(bytes) => u64::from_be_bytes(
-            bytes
-                .as_slice()
-                .try_into()
-                .expect("oldest_retained_loc bytes could not be converted to u64"),
-        ),
+        Some(oldest_retained_loc) => *oldest_retained_loc,
         None => 0,
     }
 }
 
 /// Write the oldest_retained_loc to metadata.
 pub(super) fn write_oldest_retained_loc<E: RStorage + Clock + Metrics>(
-    metadata: &mut Metadata<E, U64, Vec<u8>>,
+    metadata: &mut Metadata<E, U64, u64>,
     value: u64,
 ) {
     let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-    metadata.put(key, value.to_be_bytes().to_vec());
+    metadata.put(key, value);
 }
 
 /// Configuration for an `Any` authenticated db.
@@ -165,7 +160,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
     oldest_retained_loc: u64,
 
     /// Metadata storage for persisting database state.
-    metadata: Metadata<E, U64, Vec<u8>>,
+    metadata: Metadata<E, U64, u64>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -238,11 +233,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let metadata: Metadata<E, U64, Vec<u8>> = Metadata::init(
+        let metadata: Metadata<E, U64, u64> = Metadata::init(
             context.with_label("metadata"),
             MetadataConfig {
                 partition: cfg.metadata_partition,
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             },
         )
         .await?;

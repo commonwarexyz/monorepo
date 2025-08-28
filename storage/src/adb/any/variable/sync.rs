@@ -61,11 +61,11 @@ where
         .await?;
 
         // Initialize metadata storage
-        let mut metadata = Metadata::<E, U64, Vec<u8>>::init(
+        let mut metadata = Metadata::<E, U64, u64>::init(
             context.with_label("metadata"),
             crate::metadata::Config {
                 partition: config.metadata_partition.clone(),
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             },
         )
         .await?;
@@ -345,7 +345,7 @@ where
     size: u64,
 
     /// Tracks the oldest retained location in the `inner` journal.
-    metadata: Metadata<E, U64, Vec<u8>>,
+    metadata: Metadata<E, U64, u64>,
 }
 
 impl<E, K, V> Journal<E, K, V>
@@ -365,7 +365,7 @@ where
     pub async fn new(
         inner: VJournal<E, Variable<K, V>>,
         items_per_section: NonZeroU64,
-        metadata: Metadata<E, U64, Vec<u8>>,
+        metadata: Metadata<E, U64, u64>,
         size: u64,
     ) -> Result<Self, crate::journal::Error> {
         Ok(Self {
@@ -378,7 +378,7 @@ where
 
     /// Return the inner [VJournal] and [Metadata].
     #[allow(clippy::type_complexity)]
-    pub fn into_inner(self) -> (VJournal<E, Variable<K, V>>, Metadata<E, U64, Vec<u8>>) {
+    pub fn into_inner(self) -> (VJournal<E, Variable<K, V>>, Metadata<E, U64, u64>) {
         (self.inner, self.metadata)
     }
 }
