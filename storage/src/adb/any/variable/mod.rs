@@ -677,9 +677,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // the MMR and operations log. If we crash after writing this but before pruning, we will
         // recover on restart by recognizing that the actual oldest retained location we find in
         // the log is in a different section than the one we persisted here.
-        let target_prune_loc = self.target_prune_loc();
-        write_oldest_retained_loc(&mut self.metadata, target_prune_loc);
-        self.metadata.sync().await?;
+        if let Some(target_prune_loc) = self.target_prune_loc() {
+            write_oldest_retained_loc(&mut self.metadata, target_prune_loc);
+            self.metadata.sync().await?;
+        }
 
         self.sync().await?;
 
@@ -787,30 +788,33 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Return the location of the start of the section that we will prune to.
-    fn target_prune_loc(&self) -> u64 {
+    /// Return the location of the start of the section that we will prune to in prune_inactive.
+    /// Returns None if we should not prune.
+    fn target_prune_loc(&self) -> Option<u64> {
+        let Some(oldest_retained_loc) = self.oldest_retained_loc() else {
+            return None;
+        };
+
         let target_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_delay);
+        if target_loc < oldest_retained_loc {
+            return None;
+        }
+
         let target_section = target_loc / self.log_items_per_section;
-        target_section * self.log_items_per_section
+        Some(target_section * self.log_items_per_section)
     }
 
     /// Prune historical operations that are > `pruning_delay` steps behind the inactivity floor.
     /// This does not affect the db's root or current snapshot.
     pub(super) async fn prune_inactive(&mut self) -> Result<(), Error> {
-        let Some(oldest_retained_loc) = self.oldest_retained_loc() else {
+        let Some(target_prune_loc) = self.target_prune_loc() else {
             return Ok(());
         };
-
-        // Calculate the target pruning position
-        let target_prune_loc = self.target_prune_loc();
-        let ops_to_prune = target_prune_loc.saturating_sub(oldest_retained_loc);
-
-        if ops_to_prune == 0 {
-            return Ok(());
-        }
         debug!(
             log_size = self.log_size,
-            ops_to_prune, target_prune_loc, "pruning inactive ops"
+            oldest_retained_loc = self.oldest_retained_loc,
+            target_prune_loc,
+            "pruning inactive ops"
         );
 
         // Prune the log up to the section containing the requested pruning location. We always
@@ -820,7 +824,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // special recovery.
         let section_with_target = target_prune_loc / self.log_items_per_section;
         self.log.prune(section_with_target).await?;
-        self.oldest_retained_loc = section_with_target * self.log_items_per_section;
+        self.oldest_retained_loc = target_prune_loc;
 
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(self.oldest_retained_loc).await?;
@@ -838,9 +842,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 "closing db with uncommitted operations"
             );
         }
-
-        // Update the metadata with the current oldest_retained_loc.
-        write_oldest_retained_loc(&mut self.metadata, self.oldest_retained_loc);
 
         try_join!(
             self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
