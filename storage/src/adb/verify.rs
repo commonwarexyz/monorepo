@@ -100,7 +100,7 @@ pub fn create_proof_store_from_digests<D: Digest>(
     proof: &Proof<D>,
     digests: Vec<(u64, D)>,
 ) -> ProofStore<D> {
-    ProofStore::new_from_digests(digests, proof.size)
+    ProofStore::new_from_digests(proof.size, digests)
 }
 
 /// Generate a Multi-Proof for specific operations (identified by location) from a [ProofStore].
