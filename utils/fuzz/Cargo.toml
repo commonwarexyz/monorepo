@@ -13,7 +13,7 @@ libfuzzer-sys = { workspace = true }
 commonware-utils = { path = ".." }
 commonware-codec = { workspace = true }
 bytes = { workspace = true }
-rand = { workspace = true }
+rand = { workspace = true, features = ["std_rng"] }
 futures = { workspace = true }
 
 [[bin]]

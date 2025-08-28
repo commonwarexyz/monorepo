@@ -10,6 +10,7 @@ enum FuzzInput {
     Default,
     FromVec(Vec<u8>, StableBufBase),
     FromBytesMut(Vec<u8>, StableBufBase),
+    IntoBytesMut(Vec<u8>),
     PutSlice(Vec<u8>),
     Truncate(Vec<u8>, usize, StableBufBase),
     GetMut(Vec<u8>, StableBufBase),
@@ -63,6 +64,13 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(buf.len(), len);
 
                 let stable_buf: StableBuf = buf;
+                assert_eq!(stable_buf.len(), len);
+            }
+
+            FuzzInput::IntoBytesMut(data) => {
+                let len = data.len();
+                let bytes = BytesMut::from(&data[..]);
+                let stable_buf: StableBuf = bytes.into();
                 assert_eq!(stable_buf.len(), len);
             }
 

@@ -103,7 +103,7 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
-//! use commonware_cryptography::hash;
+//! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     translator::FourCap,
 //!     archive::{
@@ -129,7 +129,7 @@
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive.put(1, hash(b"data"), 10).await.unwrap();
+//!     archive.put(1, Sha256::hash(b"data"), 10).await.unwrap();
 //!
 //!     // Close the archive (also closes the journal)
 //!     archive.close().await.unwrap();

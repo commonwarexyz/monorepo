@@ -2,7 +2,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadRangeExt, Write};
-use commonware_cryptography::{hash, sha256::Digest, Committable, Digestible};
+use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, Sha256};
 
 /// A simple test message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,14 +31,14 @@ impl TestMessage {
 impl Digestible for TestMessage {
     type Digest = Digest;
     fn digest(&self) -> Digest {
-        hash(&self.content)
+        Sha256::hash(&self.content)
     }
 }
 
 impl Committable for TestMessage {
     type Commitment = Digest;
     fn commitment(&self) -> Digest {
-        hash(&self.commitment)
+        Sha256::hash(&self.commitment)
     }
 }
 

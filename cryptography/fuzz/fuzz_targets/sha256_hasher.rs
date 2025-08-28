@@ -2,10 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    sha256::{hash as our_hash, Digest, Sha256 as OurSha256},
-    Hasher,
-};
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256 as OurSha256};
 use libfuzzer_sys::fuzz_target;
 use sha2::{Digest as RefSha2Digest, Sha256 as RefSha256};
 
@@ -80,7 +77,7 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
 
 // Differential fuzzing
 fn fuzz_diff_hash(data: &[u8]) {
-    let our_hash_result = our_hash(data);
+    let our_hash_result = OurSha256::hash(data);
     let ref_hash_result = RefSha256::digest(data);
     assert_eq!(our_hash_result.as_ref(), ref_hash_result.as_slice());
 }

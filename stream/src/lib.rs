@@ -32,6 +32,8 @@ pub enum Error {
     InvalidTimestampOld(u64),
     #[error("timestamp too future: {0}")]
     InvalidTimestampFuture(u64),
+    #[error("info continuation tag was invalid")]
+    InvalidInfoContinuationTag,
 
     // Confirmation errors
     #[error("shared secret was not contributory")]

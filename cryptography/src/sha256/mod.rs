@@ -21,27 +21,23 @@
 //! ```
 
 use crate::Hasher;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, Array, Span};
-use rand::{CryptoRng, Rng};
-use sha2::{Digest as _, Sha256 as ISha256};
-use std::{
+use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
+use rand::{CryptoRng, Rng};
+use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
 pub type CoreSha256 = ISha256;
 
 const DIGEST_LENGTH: usize = 32;
-
-/// Generate a SHA-256 digest from a message.
-pub fn hash(message: &[u8]) -> Digest {
-    let array: [u8; DIGEST_LENGTH] = ISha256::digest(message).into();
-    Digest::from(array)
-}
 
 /// SHA-256 hasher.
 #[derive(Debug)]
@@ -79,8 +75,9 @@ impl Hasher for Sha256 {
         }
     }
 
-    fn update(&mut self, message: &[u8]) {
+    fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
+        self
     }
 
     fn finalize(&mut self) -> Self::Digest {
@@ -89,8 +86,9 @@ impl Hasher for Sha256 {
         Self::Digest::from(array)
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self) -> &mut Self {
         self.hasher = ISha256::new();
+        self
     }
 
     fn empty() -> Self::Digest {
@@ -146,13 +144,13 @@ impl Deref for Digest {
 }
 
 impl Debug for Digest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.0))
     }
 }
 
 impl Display for Digest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.0))
     }
 }
@@ -197,7 +195,7 @@ mod tests {
         assert_eq!(hex(digest.as_ref()), HELLO_DIGEST);
 
         // Test simple hasher
-        let hash = hash(msg);
+        let hash = Sha256::hash(msg);
         assert_eq!(hex(hash.as_ref()), HELLO_DIGEST);
     }
 

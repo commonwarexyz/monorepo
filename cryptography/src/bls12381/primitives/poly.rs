@@ -11,10 +11,18 @@ use crate::bls12381::primitives::{
     group::{self, Element, Scalar},
     Error,
 };
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap;
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use rand::{rngs::OsRng, RngCore};
-use std::{collections::BTreeMap, hash::Hash};
+use core::hash::Hash;
+#[cfg(feature = "std")]
+use rand::rngs::OsRng;
+use rand::RngCore;
+#[cfg(feature = "std")]
+use std::collections::BTreeMap;
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
@@ -72,6 +80,7 @@ pub struct Poly<C>(Vec<C>);
 /// sampled at random using kernel randomness.
 ///
 /// In the context of secret sharing, the threshold is the degree + 1.
+#[cfg(feature = "std")]
 pub fn new(degree: u32) -> Poly<Scalar> {
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L46-L52
     new_from(degree, &mut OsRng)

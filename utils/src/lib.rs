@@ -4,20 +4,32 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
+#![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
 use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
-use std::time::Duration;
+use core::{fmt::Write as FmtWrite, time::Duration};
 
 pub mod sequence;
 pub use sequence::{Array, Span};
 mod bitvec;
 pub use bitvec::{BitIterator, BitVec};
+#[cfg(feature = "std")]
 pub mod channels;
+#[cfg(feature = "std")]
 mod time;
+#[cfg(feature = "std")]
 pub use time::{parse_duration, SystemTimeExt};
+#[cfg(feature = "std")]
 mod priority_set;
+#[cfg(feature = "std")]
 pub use priority_set::PrioritySet;
+#[cfg(feature = "std")]
 pub mod futures;
 mod stable_buf;
 pub use stable_buf::StableBuf;
@@ -26,7 +38,7 @@ pub use stable_buf::StableBuf;
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
     for byte in bytes.iter() {
-        hex.push_str(&format!("{byte:02x}"));
+        write!(hex, "{byte:02x}").expect("writing to string should never fail");
     }
     hex
 }
@@ -129,7 +141,7 @@ macro_rules! NZUsize {
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
         // For literals, the compiler *might* optimize, but the check is still conceptually there.
-        std::num::NonZeroUsize::new($val).expect("value must be non-zero")
+        core::num::NonZeroUsize::new($val).expect("value must be non-zero")
     };
 }
 
@@ -137,7 +149,7 @@ macro_rules! NZUsize {
 #[macro_export]
 macro_rules! NZU8 {
     ($val:expr) => {
-        std::num::NonZeroU8::new($val).expect("value must be non-zero")
+        core::num::NonZeroU8::new($val).expect("value must be non-zero")
     };
 }
 
@@ -145,7 +157,7 @@ macro_rules! NZU8 {
 #[macro_export]
 macro_rules! NZU16 {
     ($val:expr) => {
-        std::num::NonZeroU16::new($val).expect("value must be non-zero")
+        core::num::NonZeroU16::new($val).expect("value must be non-zero")
     };
 }
 
@@ -155,7 +167,7 @@ macro_rules! NZU32 {
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
         // For literals, the compiler *might* optimize, but the check is still conceptually there.
-        std::num::NonZeroU32::new($val).expect("value must be non-zero")
+        core::num::NonZeroU32::new($val).expect("value must be non-zero")
     };
 }
 
@@ -165,7 +177,7 @@ macro_rules! NZU64 {
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
         // For literals, the compiler *might* optimize, but the check is still conceptually there.
-        std::num::NonZeroU64::new($val).expect("value must be non-zero")
+        core::num::NonZeroU64::new($val).expect("value must be non-zero")
     };
 }
 

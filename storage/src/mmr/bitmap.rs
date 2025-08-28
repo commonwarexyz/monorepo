@@ -658,7 +658,7 @@ mod tests {
     use super::*;
     use crate::mmr::hasher::Standard;
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{hash, Sha256};
+    use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
 
@@ -668,7 +668,7 @@ mod tests {
         assert_eq!(N % 32, 0);
         let mut vec: Vec<u8> = Vec::new();
         for _ in 0..N / 32 {
-            vec.extend(hash(s).iter());
+            vec.extend(Sha256::hash(s).iter());
         }
 
         vec.try_into().unwrap()

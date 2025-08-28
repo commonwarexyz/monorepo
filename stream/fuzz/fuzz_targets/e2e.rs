@@ -360,6 +360,7 @@ fn fuzz(input: FuzzInput) {
                                             &dialer_state.config.namespace,
                                             dialer_state.config.synchrony_bound,
                                             dialer_state.config.max_handshake_age,
+                                            None,
                                         );
 
                                         match verify_result {
@@ -525,6 +526,7 @@ fn fuzz(input: FuzzInput) {
                                             &listener_state.config.namespace,
                                             listener_state.config.synchrony_bound,
                                             listener_state.config.max_handshake_age,
+                                            None,
                                         );
 
                                         match verify_result {

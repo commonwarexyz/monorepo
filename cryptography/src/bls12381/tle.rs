@@ -87,6 +87,8 @@ use crate::{
     },
     sha256::Digest,
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_utils::sequence::FixedBytes;

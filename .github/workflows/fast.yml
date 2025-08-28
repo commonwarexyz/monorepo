@@ -138,6 +138,27 @@ jobs:
     - name: Build storage
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_storage.wasm
 
+  no_std:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Add minimal no_std target
+      run: rustup target add thumbv7em-none-eabihf
+    - name: Install ARM bare-metal toolchain (required to compile C from x86 worker)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-arm-none-eabi
+    - name: Build and test codec
+      run: cargo build -p commonware-codec --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_codec.rlib && cargo test -p commonware-codec --no-default-features --verbose
+    - name: Build utils
+      run: cargo build -p commonware-utils --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_utils.rlib
+    - name: Build cryptography
+      run: cargo build -p commonware-cryptography --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_cryptography.rlib
+
   Unsafe:
     runs-on: ubuntu-latest
     timeout-minutes: 30

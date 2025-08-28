@@ -1,9 +1,9 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use std::{
+use core::{
     cmp::{Ord, PartialOrd},
-    fmt::{Debug, Display},
+    fmt::{Debug, Display, Formatter},
     hash::Hash,
     ops::Deref,
 };
@@ -87,13 +87,13 @@ impl Deref for U32 {
 }
 
 impl Debug for U32 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", u32::from_be_bytes(self.0))
     }
 }
 
 impl Display for U32 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", u32::from_be_bytes(self.0))
     }
 }
