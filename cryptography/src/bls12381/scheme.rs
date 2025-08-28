@@ -1,4 +1,4 @@
-//! BLS12-381 implementation of the `Scheme` trait.
+//! BLS12-381 implementation of the [crate::Verifier] and [crate::Signer] traits.
 //!
 //! This implementation uses the `blst` crate for BLS12-381 operations. This
 //! crate implements serialization according to the "ZCash BLS12-381" specification
