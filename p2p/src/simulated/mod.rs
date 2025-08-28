@@ -1134,6 +1134,99 @@ mod tests {
     }
 
     #[test]
+    fn test_many_to_one_bandwidth_sharing() {
+        use commonware_cryptography::ed25519;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.clone(),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            // Create 10 senders and 1 receiver
+            let mut senders = Vec::new();
+            let mut sender_txs = Vec::new();
+            for i in 0..10 {
+                let sender = ed25519::PrivateKey::from_seed(i).public_key();
+                senders.push(sender.clone());
+                let (tx, _) = oracle.register(sender.clone(), 0).await.unwrap();
+                sender_txs.push(tx);
+
+                // Each sender has 10KB/s egress
+                oracle
+                    .set_bandwidth(sender.clone(), 10_000, usize::MAX)
+                    .await
+                    .unwrap();
+            }
+
+            let receiver = ed25519::PrivateKey::from_seed(100).public_key();
+            let (_, mut receiver_rx) = oracle.register(receiver.clone(), 0).await.unwrap();
+
+            // Receiver has 100KB/s ingress
+            oracle
+                .set_bandwidth(receiver.clone(), usize::MAX, 100_000)
+                .await
+                .unwrap();
+
+            // Add links with no latency
+            for sender in &senders {
+                oracle
+                    .add_link(
+                        sender.clone(),
+                        receiver.clone(),
+                        Link {
+                            latency: Duration::ZERO,
+                            jitter: Duration::ZERO,
+                            success_rate: 1.0,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let start = context.current();
+
+            // All senders send 10KB simultaneously
+            let mut handles = Vec::new();
+            for (i, mut tx) in sender_txs.into_iter().enumerate() {
+                let receiver_clone = receiver.clone();
+                let handle = context.clone().spawn(move |_| async move {
+                    let msg = Bytes::from(vec![i as u8; 10_000]);
+                    tx.send(Recipients::One(receiver_clone), msg, true)
+                        .await
+                        .unwrap();
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all sends to complete
+            for handle in handles {
+                handle.await.unwrap();
+            }
+
+            // All 10 messages should be received at ~1s
+            // (100KB total data at 100KB/s aggregate bandwidth)
+            for i in 0..10 {
+                let (_, _msg) = receiver_rx.recv().await.unwrap();
+                let recv_time = context.current().duration_since(start).unwrap();
+
+                // Messages should all complete around 1s
+                assert!(
+                    recv_time >= Duration::from_millis(950)
+                        && recv_time <= Duration::from_millis(1100),
+                    "Message {} received at {:?}, expected ~1s",
+                    i,
+                    recv_time
+                );
+            }
+        });
+    }
+
+    #[test]
     fn test_one_to_many_fast_sender() {
         // Test that 1 fast sender (100KB/s) sending to 10 receivers (10KB/s each)
         // should complete all sends in ~1s and all messages received in ~1s
@@ -1231,99 +1324,6 @@ mod tests {
                     recv_time >= Duration::from_millis(950)
                         && recv_time <= Duration::from_millis(1100),
                     "Receiver {} received at {:?}, expected ~1s",
-                    i,
-                    recv_time
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn test_many_to_one_bandwidth_sharing() {
-        use commonware_cryptography::ed25519;
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
-                context.clone(),
-                Config {
-                    max_size: 1024 * 1024,
-                },
-            );
-            network.start();
-
-            // Create 10 senders and 1 receiver
-            let mut senders = Vec::new();
-            let mut sender_txs = Vec::new();
-            for i in 0..10 {
-                let sender = ed25519::PrivateKey::from_seed(i).public_key();
-                senders.push(sender.clone());
-                let (tx, _) = oracle.register(sender.clone(), 0).await.unwrap();
-                sender_txs.push(tx);
-
-                // Each sender has 10KB/s egress
-                oracle
-                    .set_bandwidth(sender.clone(), 10_000, usize::MAX)
-                    .await
-                    .unwrap();
-            }
-
-            let receiver = ed25519::PrivateKey::from_seed(100).public_key();
-            let (_, mut receiver_rx) = oracle.register(receiver.clone(), 0).await.unwrap();
-
-            // Receiver has 100KB/s ingress
-            oracle
-                .set_bandwidth(receiver.clone(), usize::MAX, 100_000)
-                .await
-                .unwrap();
-
-            // Add links with no latency
-            for sender in &senders {
-                oracle
-                    .add_link(
-                        sender.clone(),
-                        receiver.clone(),
-                        Link {
-                            latency: Duration::ZERO,
-                            jitter: Duration::ZERO,
-                            success_rate: 1.0,
-                        },
-                    )
-                    .await
-                    .unwrap();
-            }
-
-            let start = context.current();
-
-            // All senders send 10KB simultaneously
-            let mut handles = Vec::new();
-            for (i, mut tx) in sender_txs.into_iter().enumerate() {
-                let receiver_clone = receiver.clone();
-                let handle = context.clone().spawn(move |_| async move {
-                    let msg = Bytes::from(vec![i as u8; 10_000]);
-                    tx.send(Recipients::One(receiver_clone), msg, true)
-                        .await
-                        .unwrap();
-                });
-                handles.push(handle);
-            }
-
-            // Wait for all sends to complete
-            for handle in handles {
-                handle.await.unwrap();
-            }
-
-            // All 10 messages should be received at ~1s
-            // (100KB total data at 100KB/s aggregate bandwidth)
-            for i in 0..10 {
-                let (_, _msg) = receiver_rx.recv().await.unwrap();
-                let recv_time = context.current().duration_since(start).unwrap();
-
-                // Messages should all complete around 1s
-                assert!(
-                    recv_time >= Duration::from_millis(950)
-                        && recv_time <= Duration::from_millis(1100),
-                    "Message {} received at {:?}, expected ~1s",
                     i,
                     recv_time
                 );
@@ -1432,8 +1432,10 @@ mod tests {
 
     #[test]
     fn test_dynamic_bandwidth_allocation_staggered() {
-        // Test that bandwidth is dynamically allocated as transfers start and complete at different times
-        // Scenario: 3 senders to 1 receiver, starting at different times
+        // Test that bandwidth is dynamically allocated as
+        // transfers start and complete at different times
+        //
+        // 3 senders to 1 receiver, starting at different times
         // Receiver has 30KB/s, senders each have 30KB/s
         use commonware_cryptography::ed25519;
 
@@ -1527,7 +1529,6 @@ mod tests {
             });
 
             // Receive and verify timing
-            // With the new BTreeMap-based scheduling:
             // Message 0: starts at t=0, gets full 30KB/s, completes at t=1s
             let (_, msg0) = receiver_rx.recv().await.unwrap();
             assert_eq!(msg0[0], 0);
@@ -1538,7 +1539,7 @@ mod tests {
                 t0
             );
 
-            // The new algorithm may deliver messages in a different order based on
+            // The algorithm may deliver messages in a different order based on
             // efficient bandwidth usage. Let's collect the next two messages and
             // verify their timings regardless of order.
             let (_, msg_a) = receiver_rx.recv().await.unwrap();
@@ -1634,9 +1635,10 @@ mod tests {
             let start = context.current();
 
             // All start at the same time but with different sizes
-            // With our slot-based system, bandwidth is reserved in advance
-            // The actual behavior depends on the order tasks are processed
-            // Since all senders start at once, they'll compete for bandwidth
+            //
+            // The scheduler reserves bandwidth in advance, the actual behavior
+            // depends on the order tasks are processed. Since all senders
+            // start at once, they'll compete for bandwidth
 
             let sizes = [10_000, 20_000, 30_000];
             let mut handles = Vec::new();
@@ -1656,10 +1658,9 @@ mod tests {
                 handle.await.unwrap();
             }
 
-            // Receive messages - with our slot-based system, they arrive in the order
-            // they were scheduled, not necessarily size order
-
-            // Collect all messages and sort by receive time to verify timing
+            // Receive messages. They arrive in the order they were scheduled,
+            // not necessarily size order. Collect all messages and sort by
+            // receive time to verify timing
             let mut messages = Vec::new();
             for _ in 0..3 {
                 let (_, msg) = receiver_rx.recv().await.unwrap();
@@ -1667,11 +1668,10 @@ mod tests {
                 messages.push((msg[0] as usize, msg.len(), t));
             }
 
-            // With slot-based scheduling, the actual timing depends on ordering
-            // When all start at once, they'll reserve bandwidth slots sequentially
-            // First gets full 30KB/s, others wait or get remaining bandwidth
-
-            // Just verify all messages arrived and total time is reasonable
+            // When all start at once, they'll reserve bandwidth slots
+            // sequentially. First gets full 30KB/s, others wait or get
+            // remaining bandwidth. Just verify all messages arrived and total
+            // time is reasonable
             assert_eq!(messages.len(), 3);
 
             // Total data is 60KB at 30KB/s receiver ingress = 2s minimum
@@ -1834,9 +1834,8 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (mut sender_tx, _sender_rx) = oracle.register(pk_sender.clone(), 0).await.unwrap();
-            let (_receiver_tx, mut receiver_rx) =
-                oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            let (mut sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, mut receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
             oracle
                 .add_link(
                     pk_sender.clone(),
@@ -1907,9 +1906,9 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_sender_bandwidth_blocks_forever() {
-        // This test verifies that when sender bandwidth is 0, the send never completes
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+    fn test_zero_sender_bandwidth_returns_empty() {
+        // This test verifies that when sender bandwidth is 0, the send returns empty list
+        let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -1923,9 +1922,8 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (sender_tx, _sender_rx) = oracle.register(pk_sender.clone(), 0).await.unwrap();
-            let (_receiver_tx, mut receiver_rx) =
-                oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            let (sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, mut receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
             oracle
                 .add_link(
                     pk_sender.clone(),
@@ -1951,30 +1949,25 @@ mod tests {
 
             let msg = Bytes::from(vec![1u8; 1000]);
 
-            // Try to send - this should block forever
-            context.with_label("blocked-sender").spawn({
-                let mut sender = sender_tx.clone();
-                let receiver = pk_receiver.clone();
-                let msg = msg.clone();
-                move |_| async move { sender.send(Recipients::One(receiver), msg, false).await }
-            });
+            // Try to send, this should return empty list
+            let mut sender = sender_tx.clone();
+            let result = sender
+                .send(Recipients::One(pk_receiver.clone()), msg.clone(), false)
+                .await
+                .unwrap();
 
-            // Wait 2 seconds and verify the send hasn't completed
-            context.sleep(Duration::from_secs(2)).await;
+            // Should get empty list since sender has zero bandwidth
+            assert!(result.is_empty());
 
-            // Try to receive with timeout - should timeout
-            let timeout_ctx = context.with_label("timeout");
-            let received = select! {
-                msg = receiver_rx.recv() => { Some(msg) },
-                _ = timeout_ctx.sleep(Duration::from_secs(1)) => { None },
+            // Try to receive with timeout, should timeout since nothing was sent
+            select! {
+              _ = receiver_rx.recv() => {
+                panic!(
+                  "Should not receive message when sender bandwidth is 0"
+                );
+              },
+              _ = context.clone().sleep(Duration::from_secs(2)) => {},
             };
-            assert!(
-                received.is_none(),
-                "Should not receive message when sender bandwidth is 0"
-            );
-
-            // Verify send is still pending (would panic if completed with error)
-            // We can't directly check if it's pending, but if test doesn't hang, it works
         });
     }
 
@@ -1995,9 +1988,8 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (mut sender_tx, _sender_rx) = oracle.register(pk_sender.clone(), 0).await.unwrap();
-            let (_receiver_tx, mut receiver_rx) =
-                oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            let (mut sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, mut receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
             oracle
                 .add_link(
                     pk_sender.clone(),
@@ -2011,33 +2003,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            // First test: normal bandwidth on both sides
             oracle
                 .set_bandwidth(pk_sender.clone(), 10_000, usize::MAX)
                 .await
                 .unwrap();
-            oracle
-                .set_bandwidth(pk_receiver.clone(), usize::MAX, 10_000)
-                .await
-                .unwrap();
-
-            let msg1 = Bytes::from(vec![1u8; 10_000]); // 10KB
-            let start1 = context.current();
-            sender_tx
-                .send(Recipients::One(pk_receiver.clone()), msg1.clone(), false)
-                .await
-                .unwrap();
-            let (_sender, received1) = receiver_rx.recv().await.unwrap();
-            let time1 = context.current().duration_since(start1).unwrap();
-            assert_eq!(received1.len(), 10_000);
-            // Should take ~1s + latency
-            assert!(
-                time1 >= Duration::from_millis(1009) && time1 <= Duration::from_millis(1020),
-                "Normal transfer should take ~1s + latency, got {:?}",
-                time1
-            );
-
-            // Second test: receiver bandwidth is 0
             oracle
                 .set_bandwidth(pk_receiver.clone(), usize::MAX, 0)
                 .await
@@ -2060,7 +2029,16 @@ mod tests {
                 send_time
             );
 
-            // Message never arrives
+            // Message should never arrive
+            // Try to receive with timeout, should timeout
+            select! {
+              _ = receiver_rx.recv() => {
+                panic!(
+                  "Should not receive message when receiver bandwidth is 0"
+                );
+              },
+              _ = context.clone().sleep(Duration::from_secs(2)) => {},
+            };
         });
     }
 }

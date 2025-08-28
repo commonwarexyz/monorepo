@@ -387,12 +387,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             };
 
             if !sender_has_bandwidth {
-                // Sender has no bandwidth, transmission blocks forever
-                // Since we don't spawn any acknowledgment task, the sender will wait indefinitely
+                // Sender has no bandwidth, skip this recipient
                 trace!(
                     ?origin,
                     ?recipient,
-                    "sender has zero bandwidth, transmission blocked forever"
+                    "sender has zero bandwidth, skipping recipient"
                 );
 
                 continue;
