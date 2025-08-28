@@ -171,7 +171,6 @@ _After `M` messages, create and broadcast a `notarization(c, v)` certificate. Af
    1. Assemble `notarization(c, v)`.
    1. Add `notarization(c, v)` to `r.proofs[v]`.
    1. Broadcast `notarization(c, v)`.
-   1. If `notarize = construct_notarize(r, c)`, broadcast `notarize`.
    1. Call `enter_view(r, v + 1)`.
 1. On observing `≥ L` `notarize(c, v)` messages:
    1. Finalize `c` and all of its ancestors.
