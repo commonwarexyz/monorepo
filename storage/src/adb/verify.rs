@@ -127,18 +127,12 @@ where
     H: Hasher<Digest = D>,
     D: Digest,
 {
-    // Build the list of (element, position) pairs for verification
-    let elements: Vec<_> = operations
+    // Encode operations and convert locations to positions
+    let elements = operations
         .iter()
         .map(|(loc, op)| (op.encode(), leaf_num_to_pos(*loc)))
-        .collect();
-
-    // Convert to references for verify_multi_inclusion
-    let element_refs: Vec<_> = elements
-        .iter()
-        .map(|(bytes, pos)| (bytes.as_ref(), *pos))
-        .collect();
+        .collect::<Vec<_>>();
 
     // Verify the proof
-    proof.verify_multi_inclusion(hasher, &element_refs, target_root)
+    proof.verify_multi_inclusion(hasher, &elements, target_root)
 }
