@@ -317,11 +317,10 @@ impl BitVec {
     /// Creates a mask with the first `num_bits` bits set to 1.
     #[inline(always)]
     fn mask_over_first_n_bits(num_bits: usize) -> Block {
-        assert!(num_bits <= BITS_PER_BLOCK, "num_bits exceeds block size");
-        // Special-case for `BITS_PER_BLOCK` bits to avoid shl overflow
         match num_bits {
             BITS_PER_BLOCK => FULL_BLOCK,
-            _ => (1 << num_bits) - 1,
+            n if n < BITS_PER_BLOCK => FULL_BLOCK.unbounded_shr((BITS_PER_BLOCK - n) as u32),
+            _ => panic!("num_bits exceeds block size: {}", num_bits),
         }
     }
 
@@ -950,8 +949,10 @@ mod tests {
         // Test with various sizes
         for i in 0..=BITS_PER_BLOCK {
             let mask = BitVec::mask_over_first_n_bits(i);
-            assert_eq!(mask.count_ones() as usize, i);
-            assert_eq!(mask.count_zeros() as usize, BITS_PER_BLOCK - i);
+            let ones = mask.trailing_ones() as usize;
+            let zeroes = mask.leading_zeros() as usize;
+            assert_eq!(ones, i);
+            assert_eq!(ones.checked_add(zeroes).unwrap(), BITS_PER_BLOCK);
             assert_eq!(
                 mask,
                 ((1 as Block)
