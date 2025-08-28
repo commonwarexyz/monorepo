@@ -14,7 +14,7 @@ documentation = "https://docs.rs/commonware-runtime"
 thiserror = { workspace = true }
 cfg-if = { workspace = true }
 commonware-macros = { workspace = true }
-commonware-utils = { workspace = true }
+commonware-utils = { workspace = true, features = ["std"] }
 futures = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }

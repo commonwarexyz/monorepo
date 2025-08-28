@@ -44,8 +44,8 @@
 //! - One task's completion depends on another task's submission
 //! - The event loop is blocked waiting for completions and can't process new submissions
 //!
-//! When enabled, the event loop periodically wakes up to check for new work, ensuring
-//! forward progress even when no completions are immediately available.
+//! When enabled, the event loop uses a bounded wait time when waiting for completions,
+//! ensuring forward progress even when no completions are immediately available.
 //!
 //! ## Shutdown Process
 //!
@@ -62,9 +62,9 @@ use futures::{
 };
 use io_uring::{
     cqueue::Entry as CqueueEntry,
-    opcode::{LinkTimeout, Timeout},
+    opcode::LinkTimeout,
     squeue::Entry as SqueueEntry,
-    types::Timespec,
+    types::{SubmitArgs, Timespec},
     IoUring,
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
@@ -72,13 +72,6 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
-/// Reserved ID for a CQE that indicates the event loop timed out
-/// while waiting for in-flight operations to complete
-/// during shutdown.
-const SHUTDOWN_TIMEOUT_WORK_ID: u64 = u64::MAX - 1;
-/// Reserved ID for a CQE that indicates the event loop should
-/// wake up to check for new work.
-const POLL_WORK_ID: u64 = u64::MAX - 2;
 
 #[derive(Debug)]
 /// Tracks io_uring metrics.
@@ -175,6 +168,20 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     }
     if cfg.single_issuer {
         builder = builder.setup_single_issuer();
+        // Enable `DEFER_TASKRUN` to defer work processing until `io_uring_enter` is
+        // called with `IORING_ENTER_GETEVENTS`. By default, io_uring processes work at
+        // the end of any system call or thread interrupt, which can delay application
+        // progress. With `DEFER_TASKRUN`, completions are only processed when explicitly
+        // requested, reducing overhead and improving CPU cache locality.
+        //
+        // This is safe in our implementation since we always call `submit_and_wait()`
+        // (which sets `IORING_ENTER_GETEVENTS`), and we are also enabling
+        // `IORING_SETUP_SINGLE_ISSUER` here, which is a pre-requisite.
+        //
+        // This is available since kernel 6.1.
+        //
+        // See IORING_SETUP_DEFER_TASKRUN in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
+        builder = builder.setup_defer_taskrun();
     }
 
     // When `op_timeout` is set, each operation uses 2 SQ entries (op + linked
@@ -220,15 +227,6 @@ fn handle_cqe(
                 cfg.op_timeout.is_some(),
                 "received TIMEOUT_WORK_ID with op_timeout disabled"
             );
-        }
-        POLL_WORK_ID => {
-            assert!(
-                cfg.force_poll.is_some(),
-                "received POLL_WORK_ID without force_poll enabled"
-            );
-        }
-        SHUTDOWN_TIMEOUT_WORK_ID => {
-            unreachable!("received SHUTDOWN_TIMEOUT_WORK_ID, should be handled in drain");
         }
         _ => {
             let result = cqe.result();
@@ -282,7 +280,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                     Some(work) => work,
                     // Channel closed, shut down
                     None => {
-                        drain(&mut ring, &mut waiters, &cfg).await;
+                        drain(&mut ring, &mut waiters, &cfg);
                         return;
                     }
                 }
@@ -293,7 +291,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                     Ok(Some(work_item)) => work_item,
                     // Channel closed, shut down
                     Ok(None) => {
-                        drain(&mut ring, &mut waiters, &cfg).await;
+                        drain(&mut ring, &mut waiters, &cfg);
                         return;
                     }
                     // No new work available, wait for a completion
@@ -309,7 +307,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             // Assign a unique id
             let work_id = next_work_id;
             next_work_id += 1;
-            if next_work_id == POLL_WORK_ID {
+            if next_work_id == TIMEOUT_WORK_ID {
                 // Wrap back to 0
                 next_work_id = 0;
             }
@@ -347,63 +345,76 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             }
         }
 
-        if let Some(freq) = cfg.force_poll {
-            // Submit a timeout operation to wake us up to check for new work.
-            let timeout = io_uring::types::Timespec::new()
-                .sec(freq.as_secs())
-                .nsec(freq.subsec_nanos());
-            let timeout = Timeout::new(&timeout).build().user_data(POLL_WORK_ID);
-            unsafe {
-                ring.submission()
-                    .push(&timeout)
-                    .expect("unable to push to queue");
-            }
-        }
-
-        // Wait for at least 1 item to be in the completion queue.
+        // Submit and wait for at least 1 item to be in the completion queue.
         // Note that we block until anything is in the completion queue,
         // even if it's there before this call. That is, a completion
         // that arrived before this call will be counted and cause this
         // call to return. Note that waiters.len() > 0 here.
+        //
+        // When `force_poll` is enabled, we'll also timeout after the specified
+        // duration to process new work, ensuring we don't block indefinitely.
         metrics.pending_operations.set(waiters.len() as _);
-        ring.submit_and_wait(1).expect("unable to submit to ring");
+        submit_and_wait(&mut ring, 1, cfg.force_poll).expect("unable to submit to ring");
     }
 }
 
 /// Process `ring` completions until all pending operations are complete or
-/// until `timeout` fires. If `timeout` is None, wait indefinitely.
+/// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
+/// indefinitely.
 #[allow(clippy::type_complexity)]
-async fn drain(
+fn drain(
     ring: &mut IoUring,
     waiters: &mut HashMap<u64, (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>)>,
     cfg: &Config,
 ) {
-    if let Some(timeout) = cfg.shutdown_timeout {
-        // Create a timeout that will fire if we can't clear all the inflight operations.
-        let timeout = Timespec::new()
+    // When op_timeout is set, each operation uses 2 SQ entries
+    // (op + linked timeout).
+    let pending = if cfg.op_timeout.is_some() {
+        waiters.len() * 2
+    } else {
+        waiters.len()
+    };
+
+    submit_and_wait(ring, pending, cfg.shutdown_timeout).expect("unable to submit to ring");
+    while let Some(cqe) = ring.completion().next() {
+        handle_cqe(waiters, cqe, cfg);
+    }
+}
+
+/// Submits pending operations and waits for completions.
+///
+/// This function submits all pending SQEs to the kernel and waits for at least
+/// `want` completions to arrive. It can optionally use a timeout to bound the
+/// wait time, which is useful for implementing periodic wake-ups.
+///
+/// When a timeout is provided, this uses `submit_with_args` with the EXT_ARG
+/// feature to implement a bounded wait without injecting a timeout SQE
+/// (available since kernel 5.11+). Without a timeout, it falls back to the
+/// standard `submit_and_wait`.
+///
+/// # Returns
+/// * `Ok(true)` - Successfully received `want` completions
+/// * `Ok(false)` - Timed out waiting for completions (only when timeout is set)
+/// * `Err(e)` - An error occurred during submission or waiting
+fn submit_and_wait(
+    ring: &mut IoUring,
+    want: usize,
+    timeout: Option<Duration>,
+) -> Result<bool, std::io::Error> {
+    if let Some(timeout) = timeout {
+        let ts = Timespec::new()
             .sec(timeout.as_secs())
             .nsec(timeout.subsec_nanos());
-        let timeout = Timeout::new(&timeout)
-            .build()
-            .user_data(SHUTDOWN_TIMEOUT_WORK_ID);
-        unsafe {
-            ring.submission()
-                .push(&timeout)
-                .expect("unable to push to queue");
-        }
-    }
 
-    while !waiters.is_empty() {
-        ring.submit_and_wait(1).expect("unable to submit to ring");
-        while let Some(cqe) = ring.completion().next() {
-            if cqe.user_data() == SHUTDOWN_TIMEOUT_WORK_ID {
-                // We timed out waiting for the shutdown to complete.
-                // Abandon all remaining operations.
-                assert!(cfg.shutdown_timeout.is_some());
-                return;
-            }
-            handle_cqe(waiters, cqe, cfg);
+        let args = SubmitArgs::new().timespec(&ts);
+
+        match ring.submitter().submit_with_args(want, &args) {
+            Ok(_) => Ok(true),
+            Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(false),
+            Err(err) => Err(err),
         }
+    } else {
+        ring.submit_and_wait(want).map(|_| true)
     }
 }
 
@@ -424,6 +435,7 @@ mod tests {
             mpsc::channel,
             oneshot::{self, Canceled},
         },
+        executor::block_on,
         SinkExt as _,
     };
     use io_uring::{
@@ -661,5 +673,40 @@ mod tests {
 
         drop(submitter);
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_single_issuer() {
+        // Test that SINGLE_ISSUER with DEFER_TASKRUN works correctly.
+        // The simplest test: just submit a no-op and verify it completes.
+        let cfg = super::Config {
+            single_issuer: true,
+            ..Default::default()
+        };
+
+        let (mut sender, receiver) = channel(1);
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+
+        // Run io_uring in a dedicated thread
+        let uring_thread = std::thread::spawn(move || block_on(super::run(cfg, metrics, receiver)));
+
+        // Submit a no-op
+        let (tx, rx) = oneshot::channel();
+        sender
+            .send(Op {
+                work: opcode::Nop::new().build(),
+                sender: tx,
+                buffer: None,
+            })
+            .await
+            .unwrap();
+
+        // Verify it completes successfully
+        let (result, _) = rx.await.unwrap();
+        assert_eq!(result, 0);
+
+        // Clean shutdown
+        drop(sender);
+        uring_thread.join().unwrap();
     }
 }

@@ -26,4 +26,6 @@
 
 mod scheme;
 
-pub use scheme::{Batch, PrivateKey, PublicKey, Signature};
+#[cfg(feature = "std")]
+pub use scheme::Batch;
+pub use scheme::{PrivateKey, PublicKey, Signature};

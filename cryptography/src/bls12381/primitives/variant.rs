@@ -8,13 +8,18 @@ use super::{
     Error,
 };
 use crate::bls12381::primitives::group::{Element, Scalar};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use blst::{
     blst_final_exp, blst_fp12, blst_miller_loop, Pairing as blst_pairing, BLS12_381_NEG_G1,
     BLS12_381_NEG_G2,
 };
 use commonware_codec::FixedSize;
+use core::{
+    fmt::{Debug, Formatter},
+    hash::Hash,
+};
 use rand::{CryptoRng, RngCore};
-use std::{fmt::Debug, hash::Hash};
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
@@ -190,7 +195,7 @@ impl Variant for MinPk {
 }
 
 impl Debug for MinPk {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MinPk").finish()
     }
 }
@@ -336,7 +341,7 @@ impl Variant for MinSig {
 }
 
 impl Debug for MinSig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MinSig").finish()
     }
 }

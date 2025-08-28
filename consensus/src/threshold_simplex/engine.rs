@@ -95,7 +95,6 @@ impl<
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
                 partition: cfg.partition,
-                compression: cfg.compression,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,

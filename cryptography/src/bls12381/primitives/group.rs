@@ -11,6 +11,8 @@
 //! is already taken care of for you if you use the provided `deserialize` function.
 
 use super::variant::Variant;
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use blst::{
     blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
     blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub,
@@ -32,13 +34,13 @@ use commonware_codec::{
     FixedSize, Read, ReadExt, Write,
 };
 use commonware_utils::hex;
-use rand::RngCore;
-use std::{
-    fmt::{Debug, Display},
+use core::{
+    fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
     mem::MaybeUninit,
     ptr,
 };
+use rand::RngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -184,7 +186,7 @@ impl GT {
             // GT (Fp12) consists of 12 field elements, each 48 bytes
             // We need to serialize it properly
             let fp12_ptr = &self.0 as *const blst_fp12 as *const u8;
-            std::ptr::copy_nonoverlapping(fp12_ptr, slice.as_mut_ptr(), GT_ELEMENT_BYTE_LENGTH);
+            core::ptr::copy_nonoverlapping(fp12_ptr, slice.as_mut_ptr(), GT_ELEMENT_BYTE_LENGTH);
         }
         slice
     }
@@ -389,25 +391,25 @@ impl Hash for Scalar {
 }
 
 impl PartialOrd for Scalar {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Scalar {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.as_slice().cmp(&other.as_slice())
     }
 }
 
 impl Debug for Scalar {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
     }
 }
 
 impl Display for Scalar {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
     }
 }
@@ -470,13 +472,13 @@ impl EncodeSize for Share {
 }
 
 impl Display for Share {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "Share(index={}, private={})", self.index, self.private)
     }
 }
 
 impl Debug for Share {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "Share(index={}, private={})", self.index, self.private)
     }
 }
@@ -587,13 +589,13 @@ impl Hash for G1 {
 }
 
 impl PartialOrd for G1 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for G1 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.as_slice().cmp(&other.as_slice())
     }
 }
@@ -673,13 +675,13 @@ impl Point for G1 {
 }
 
 impl Debug for G1 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
     }
 }
 
 impl Display for G1 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
     }
 }
@@ -796,13 +798,13 @@ impl Hash for G2 {
 }
 
 impl PartialOrd for G2 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for G2 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.as_slice().cmp(&other.as_slice())
     }
 }
@@ -879,13 +881,13 @@ impl Point for G2 {
 }
 
 impl Debug for G2 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
     }
 }
 
 impl Display for G2 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
     }
 }

@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_cryptography::hash;
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::journal::{
     fixed::{
@@ -98,7 +98,7 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations.iter() {
             match op {
                 JournalOperation::Append { value } => {
-                    let digest = hash(&value.to_be_bytes());
+                    let digest = Sha256::hash(&value.to_be_bytes());
                     let _pos = journal.append(digest).await.unwrap();
                     journal_size += 1;
                 }
@@ -171,7 +171,7 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::AppendMany { count } => {
                     for _ in 0..*count {
-                        let digest = hash(&next_value.to_be_bytes());
+                        let digest = Sha256::hash(&next_value.to_be_bytes());
                         journal.append(digest).await.unwrap();
                         next_value += 1;
                         journal_size += 1;
