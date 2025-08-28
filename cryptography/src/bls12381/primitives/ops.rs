@@ -676,24 +676,13 @@ where
         + Sync,
 {
     let hm_sum = if concurrency == 1 {
-        // Avoid pool overhead when concurrency is 1
-        let mut hm_sum = V::Signature::zero();
-        for (namespace, msg) in messages {
-            let hm = match namespace {
-                Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-                None => hash_message::<V>(V::MESSAGE, msg),
-            };
-            hm_sum.add(&hm);
-        }
-        hm_sum
+        compute_hm_sum::<V, I>(messages)
     } else {
-        // Build a thread pool with the specified concurrency
         let pool = ThreadPoolBuilder::new()
             .num_threads(concurrency)
             .build()
             .expect("Unable to build thread pool");
 
-        // Perform hashing to curve and summation of messages in parallel
         pool.install(move || {
             messages
                 .into_par_iter()
@@ -708,22 +697,27 @@ where
         })
     };
 
-    // Verify the signature
     V::verify(public, &hm_sum, signature)
 }
-
-// no_std version of aggregate_verify_multiple_messages which ignores the concurrency parameter and
-// runs in current thread.
 #[cfg(not(feature = "std"))]
 pub fn aggregate_verify_multiple_messages<'a, V, I>(
     public: &V::Public,
     messages: I,
     signature: &V::Signature,
-    _concurrency: usize,
 ) -> Result<(), Error>
 where
     V: Variant,
     I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
+{
+    let hm_sum = compute_hm_sum::<V, I>(messages);
+    V::verify(public, &hm_sum, signature)
+}
+
+/// Computes the sum over the hash of each message.
+fn compute_hm_sum<'a, V, I>(messages: I) -> V::Signature
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>,
 {
     let mut hm_sum = V::Signature::zero();
     for (namespace, msg) in messages {
@@ -733,8 +727,7 @@ where
         };
         hm_sum.add(&hm);
     }
-    // Verify the signature
-    V::verify(public, &hm_sum, signature)
+    hm_sum
 }
 
 #[cfg(test)]
