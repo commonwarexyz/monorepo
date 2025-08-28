@@ -604,10 +604,10 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
         let mut chunks: Vec<u64> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| (chunk_index + self.bitmap.pruned_chunks()) as u64)
+            .map(|&chunk_index| (chunk_index + self.bitmap.pruned_chunks) as u64)
             .collect();
         for i in self.authenticated_len..self.bitmap.len() - 1 {
-            chunks.push((i + self.bitmap.pruned_chunks()) as u64);
+            chunks.push((i + self.bitmap.pruned_chunks) as u64);
         }
 
         chunks
@@ -630,7 +630,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
             .dirty_chunks
             .iter()
             .map(|chunk_index| {
-                let pos = leaf_num_to_pos((*chunk_index + self.bitmap.pruned_chunks()) as u64);
+                let pos = leaf_num_to_pos((*chunk_index + self.bitmap.pruned_chunks) as u64);
                 (pos, self.bitmap.get_chunk_by_index(*chunk_index))
             })
             .collect::<Vec<_>>();
