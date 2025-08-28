@@ -320,7 +320,7 @@ impl BitVec {
         match num_bits {
             BITS_PER_BLOCK => FULL_BLOCK,
             n if n < BITS_PER_BLOCK => FULL_BLOCK.unbounded_shr((BITS_PER_BLOCK - n) as u32),
-            _ => panic!("num_bits exceeds block size: {}", num_bits),
+            _ => panic!("num_bits exceeds block size: {num_bits}"),
         }
     }
 

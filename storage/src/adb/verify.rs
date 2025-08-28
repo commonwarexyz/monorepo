@@ -65,7 +65,7 @@ pub fn digests_required_for_proof<D: Digest>(size: u64, start_loc: u64, end_loc:
 /// Construct a [Proof] from a size and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
-pub fn construct_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
+pub fn create_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
     let size = leaf_num_to_pos(size);
     Proof::<D> { size, digests }
 }
@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_construct_proof() {
+    fn test_create_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
@@ -359,7 +359,7 @@ mod tests {
             }
 
             // Construct proof
-            let proof = construct_proof(size, digests.clone());
+            let proof = create_proof(size, digests.clone());
             assert_eq!(proof.size, leaf_num_to_pos(size));
             assert_eq!(proof.digests.len(), digests.len());
 
