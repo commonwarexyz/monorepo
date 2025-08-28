@@ -46,7 +46,7 @@ pub fn hash(message: &[u8]) -> Digest {
 
 /// BLAKE3 hasher.
 #[cfg_attr(
-    feature = "parallel-blake3",
+    feature = "parallel",
     doc = "When the input message is larger than 128KiB, `rayon` is used to parallelize hashing."
 )]
 #[derive(Debug, Default)]
@@ -71,10 +71,10 @@ impl Hasher for Blake3 {
     }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
-        #[cfg(not(feature = "parallel-blake3"))]
+        #[cfg(not(feature = "parallel"))]
         self.hasher.update(message);
 
-        #[cfg(feature = "parallel-blake3")]
+        #[cfg(feature = "parallel")]
         {
             // 128 KiB
             const PARALLEL_THRESHOLD: usize = 2usize.pow(17);
