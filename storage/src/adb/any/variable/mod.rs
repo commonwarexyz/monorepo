@@ -296,6 +296,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut uncommitted_ops = HashMap::new();
         let mut current_index = self.oldest_retained_loc().unwrap_or(0);
         let first_section = current_index / self.log_items_per_section;
+        let mut warned_about_first_section = false;
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations, and any log operations that need to be re-added to the MMR & locations.
@@ -312,15 +313,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     // We must have written the oldest retained location to metadata but not
                     // actually pruned the log and MMR. Skip over all data before the oldest
                     // retained location in the metadata.
-                    let first_section_start = first_section * self.log_items_per_section;
-                    if current_index != first_section_start {
+                    if !warned_about_first_section {
                         warn!(
                             current_index,
                             section,
-                            first_section_start,
                             "metadata oldest_retained_loc after first log section; skipping"
                         );
-                        current_index = first_section_start;
+                        warned_about_first_section = true;
                     }
                     continue;
                 }

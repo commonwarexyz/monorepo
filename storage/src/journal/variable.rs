@@ -739,16 +739,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob.sync().await.map_err(Error::Runtime)
     }
 
-    /// Ensures that all data in all sections is synced to the underlying store.
-    pub async fn sync_all(&self) -> Result<(), Error> {
-        for (section, blob) in self.blobs.iter() {
-            self.prune_guard(*section, false)?;
-            blob.sync().await.map_err(Error::Runtime)?;
-            self.synced.inc();
-        }
-        Ok(())
-    }
-
     /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Prune any blobs that are smaller than the minimum
