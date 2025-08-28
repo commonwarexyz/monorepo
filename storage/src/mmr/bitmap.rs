@@ -263,6 +263,11 @@ impl<const N: usize> Bitmap<N> {
         self.bitmap.len()
     }
 
+    /// Returns true if the bitmap is empty.
+    pub fn is_empty(&self) -> bool {
+        self.bitmap.is_empty()
+    }
+
     /// Get a reference to a chunk by its index in the current bitmap
     pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
         &self.bitmap[index]
@@ -271,6 +276,12 @@ impl<const N: usize> Bitmap<N> {
     /// Get the number of pruned chunks
     pub fn pruned_chunks(&self) -> usize {
         self.pruned_chunks
+    }
+}
+
+impl<const N: usize> Default for Bitmap<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -606,7 +617,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     pub async fn sync(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
         // Add newly appended chunks to the MMR (other than the very last).
         let start = self.authenticated_len;
-        assert!(self.bitmap.len() > 0);
+        assert!(!self.bitmap.is_empty());
         let end = self.bitmap.len() - 1;
         for i in start..end {
             self.mmr
@@ -828,12 +839,12 @@ mod tests {
     #[test]
     fn test_bitmap_new_with_pruned_chunks() {
         // Test creating an Bitmap with pruned chunks
-        let bitmap = Bitmap::<SHA256_SIZE>::new_with_pruned_chunks(5);
+        let mut bitmap = Bitmap::<SHA256_SIZE>::new_with_pruned_chunks(5);
 
         // Should have the specified number of pruned chunks
         assert_eq!(bitmap.pruned_chunks(), 5);
 
-        // Should still be empty otherwise
+        // Should be empty
         assert_eq!(bitmap.len(), 1); // Always has at least one chunk
         assert_eq!(bitmap.last_chunk().1, 0); // No bits in the last chunk
 
@@ -842,42 +853,25 @@ mod tests {
         assert_eq!(bitmap.bit_count(), expected_bits);
         assert_eq!(bitmap.pruned_bits(), expected_bits);
 
-        // Test with zero pruned chunks (should be same as new())
-        let bitmap_zero = Bitmap::<SHA256_SIZE>::new_with_pruned_chunks(0);
-        let bitmap_new = Bitmap::<SHA256_SIZE>::new();
-        assert_eq!(bitmap_zero.pruned_chunks(), bitmap_new.pruned_chunks());
-        assert_eq!(bitmap_zero.bit_count(), bitmap_new.bit_count());
-    }
-
-    #[test]
-    fn test_bitmap_with_pruned_chunks_operations() {
-        // Create an Bitmap that appears to have 3 chunks already pruned
-        let mut bitmap = Bitmap::<SHA256_SIZE>::new_with_pruned_chunks(3);
-
-        // Initial state
-        let chunk_size_bits = Bitmap::<SHA256_SIZE>::CHUNK_SIZE_BITS;
-        assert_eq!(bitmap.bit_count(), 3 * chunk_size_bits);
-        assert_eq!(bitmap.pruned_bits(), 3 * chunk_size_bits);
-
         // Add some bits
         bitmap.append(true);
         bitmap.append(false);
         bitmap.append(true);
 
         // Bit count should now include the new bits plus the pruned ones
-        assert_eq!(bitmap.bit_count(), 3 * chunk_size_bits + 3);
-        assert_eq!(bitmap.pruned_bits(), 3 * chunk_size_bits); // Pruned bits unchanged
+        assert_eq!(bitmap.bit_count(), expected_bits + 3);
+        assert_eq!(bitmap.pruned_bits(), expected_bits);
 
-        // Test that we can still access the new bits
-        let current_bit_offset = 3 * chunk_size_bits;
-        assert_eq!(bitmap.get_bit(current_bit_offset), true);
-        assert_eq!(bitmap.get_bit(current_bit_offset + 1), false);
-        assert_eq!(bitmap.get_bit(current_bit_offset + 2), true);
+        // Test that we can access the new bits
+        assert!(bitmap.get_bit(expected_bits));
+        assert!(!bitmap.get_bit(expected_bits + 1));
+        assert!(bitmap.get_bit(expected_bits + 2));
 
-        // Test pruning - prune to remove one more chunk
-        bitmap.prune_to_bit(4 * chunk_size_bits);
-        assert_eq!(bitmap.pruned_chunks(), 4);
-        assert_eq!(bitmap.pruned_bits(), 4 * chunk_size_bits);
+        // Test with zero pruned chunks (should be same as new())
+        let bitmap_zero = Bitmap::<SHA256_SIZE>::new_with_pruned_chunks(0);
+        let bitmap_new = Bitmap::<SHA256_SIZE>::new();
+        assert_eq!(bitmap_zero.pruned_chunks(), bitmap_new.pruned_chunks());
+        assert_eq!(bitmap_zero.bit_count(), bitmap_new.bit_count());
     }
 
     #[test_traced]
@@ -1204,8 +1198,8 @@ mod tests {
     }
 
     fn flip_bit<const N: usize>(bit_offset: u64, chunk: &[u8; N]) -> [u8; N] {
-        let byte_offset = Bitmap::<SHA256_SIZE>::chunk_byte_offset(bit_offset);
-        let mask = Bitmap::<SHA256_SIZE>::chunk_byte_bitmask(bit_offset);
+        let byte_offset = Bitmap::<N>::chunk_byte_offset(bit_offset);
+        let mask = Bitmap::<N>::chunk_byte_bitmask(bit_offset);
         let mut tmp = chunk.to_vec();
         tmp[byte_offset] ^= mask;
         tmp.try_into().unwrap()

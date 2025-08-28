@@ -1,7 +1,7 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
 //! with a key, and also whether that value is the _current_ value associated with it. Its
 //! implementation is based on an [Any] authenticated database combined with an authenticated
-//! [Bitmap] over the activity status of each operation. The two structures are "grafted" together
+//! [MerkleizedBitmap] over the activity status of each operation. The two structures are "grafted" together
 //! to minimize proof sizes.
 
 use crate::{
@@ -640,7 +640,8 @@ impl<
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of info.chunk, since these bits are not part of
         // the mmr.
-        if info.loc / MerkleizedBitmap::<H, N>::CHUNK_SIZE_BITS == op_count / MerkleizedBitmap::<H, N>::CHUNK_SIZE_BITS
+        if info.loc / MerkleizedBitmap::<H, N>::CHUNK_SIZE_BITS
+            == op_count / MerkleizedBitmap::<H, N>::CHUNK_SIZE_BITS
         {
             let expected_last_chunk_digest = verifier.digest(&info.chunk);
             if last_chunk_digest != expected_last_chunk_digest {
@@ -659,8 +660,12 @@ impl<
         };
 
         let next_bit = op_count % MerkleizedBitmap::<H, N>::CHUNK_SIZE_BITS;
-        let reconstructed_root =
-            MerkleizedBitmap::<H, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
+        let reconstructed_root = MerkleizedBitmap::<H, N>::partial_chunk_root(
+            hasher,
+            &mmr_root,
+            next_bit,
+            &last_chunk_digest,
+        );
 
         reconstructed_root == *root
     }
