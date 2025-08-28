@@ -506,11 +506,10 @@ where
     recover_signatures::<V>(weights, prepared_evals, concurrency)
 }
 
-#[allow(unused_variables)] // for no_std which ignores concurrency
 fn recover_signatures<'a, V>(
     weights: BTreeMap<u32, Weight>,
     prepared_evals: Vec<Vec<&Eval<V::Signature>>>,
-    concurrency: usize,
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
 where
     V: Variant,
@@ -661,12 +660,11 @@ where
 /// and sum hashed messages together before performing a single pairing operation (instead of summing `len(messages)` pairings of
 /// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
 /// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
-#[allow(unused_variables)] // for no_std which ignores concurrency
 pub fn aggregate_verify_multiple_messages<'a, V, I>(
     public: &V::Public,
     messages: I,
     signature: &V::Signature,
-    concurrency: usize,
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))] concurrency: usize,
 ) -> Result<(), Error>
 where
     V: Variant,
