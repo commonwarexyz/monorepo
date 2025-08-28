@@ -358,8 +358,7 @@ mod tests {
             dkg::ops::{self, evaluate_all},
             primitives::{ops::sign_message, variant::MinSig},
         },
-        sha256::Sha256,
-        Hasher,
+        Hasher, Sha256,
     };
     use commonware_runtime::deterministic;
 

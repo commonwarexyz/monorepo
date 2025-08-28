@@ -159,8 +159,7 @@ mod tests {
             primitives::variant::{MinPk, MinSig},
         },
         ed25519::PublicKey,
-        sha256::Sha256,
-        Hasher,
+        Hasher, Sha256,
     };
 
     /// Aggregated helper functions to reduce duplication in tests.

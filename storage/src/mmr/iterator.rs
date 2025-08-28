@@ -258,7 +258,7 @@ impl Iterator for PathIterator {
 mod tests {
     use super::*;
     use crate::mmr::{hasher::Standard, mem::Mmr};
-    use commonware_cryptography::{sha256::Sha256, Hasher};
+    use commonware_cryptography::{Hasher, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
     #[test]
