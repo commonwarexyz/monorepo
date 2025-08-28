@@ -8,7 +8,7 @@ use commonware_consensus::{
     Automaton, Relay,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group, group::Scalar, poly, variant::MinSig},
+    bls12381::primitives::{group, poly, variant::MinSig},
     sha256, Committable, Signer,
 };
 use commonware_p2p::{
@@ -36,7 +36,7 @@ pub struct Orchestrator<
     signer: C,
     application: A,
     polynomial: poly::Public<MinSig>,
-    share_private: Scalar,
+    shares: Vec<group::Share>,
     oracle: Oracle<E, C::PublicKey>,
     marshal: marshal::Mailbox<MinSig, Block>,
 
@@ -66,7 +66,7 @@ impl<
                 signer: cfg.signer,
                 application: cfg.application,
                 polynomial: cfg.polynomial,
-                share_private: cfg.share.private,
+                shares: cfg.shares,
                 oracle: cfg.oracle,
                 marshal: cfg.marshal,
 
@@ -197,16 +197,12 @@ impl<
 
         // Build per-epoch supervisor from selected participants; if not selected, do nothing
         let my_pk = self.signer.public_key();
-        let my_share = participants
+        let share = participants
             .iter()
             .position(|pk| pk == &my_pk)
-            .map(|i| i as u32)
-            .map(|index| group::Share {
-                index,
-                private: self.share_private.clone(),
-            });
+            .map(|i| self.shares[i].clone());
         let supervisor =
-            crate::supervisor::Supervisor::new(self.polynomial.clone(), participants, my_share);
+            crate::supervisor::Supervisor::new(self.polynomial.clone(), participants, share);
 
         // Initialize consensus engine for this epoch
         let engine = threshold_simplex::Engine::new(

@@ -2,23 +2,31 @@ use clap::{value_parser, Arg, Command};
 use commonware_broadcast::buffered;
 use commonware_consensus::marshal;
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{Element, Scalar, Share},
-        poly,
-        variant::{MinSig, Variant},
+    bls12381::{
+        dkg::ops,
+        primitives::{
+            group::{Element, Scalar, Share},
+            poly,
+            variant::{MinSig, Variant},
+        },
     },
     ed25519, PrivateKeyExt as _, Signer as _,
 };
-use commonware_epocher::{application::Application, orchestrator};
+use commonware_epocher::{application::Application, orchestrator, ACTIVE_VALIDATORS, THRESHOLD};
 use commonware_p2p::authenticated::discovery;
 use commonware_resolver::p2p::mocks as resolver_mocks;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU32, NZU64};
 use governor::Quota;
+use rand::{rngs::StdRng, SeedableRng};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
 };
+
+const TOTAL_VALIDATORS: u32 = 10;
+const ACTIVE_VALIDATORS: u32 = 4;
+const THRESHOLD: u32 = 3;
 
 fn main() {
     let matches = Command::new("epocher-validator")
@@ -66,8 +74,9 @@ fn main() {
     // Start runtime
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
-        // Setup P2P
-        let p2p_cfg = discovery::Config::aggressive(
+        // Setup P2P.
+        // Tracks at least 3 peer sets since the epoch+2 set is established at end-of-epoch.
+        let mut p2p_cfg = discovery::Config::aggressive(
             signer.clone(),
             b"EPOCHER",
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -75,18 +84,14 @@ fn main() {
             bootstrapper_identities,
             1024 * 1024,
         );
+        p2p_cfg.tracked_peer_sets = 3;
         let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
-        // Helper to build trivial identity and share
-        let polynomial = poly::Public::<MinSig>::from(vec![<MinSig as Variant>::Public::one()]);
-        let identity = *poly::public::<MinSig>(&polynomial);
-        let my_index = validators
-            .iter()
-            .position(|pk| pk == &signer.public_key())
-            .expect("me must be in validators") as u32;
-        let my_share = Share {
-            index: my_index,
-            private: Scalar::one(),
-        };
+
+        // Create shares.
+        let mut rng = StdRng::seed_from_u64(0);
+        let (polynomial, mut shares) =
+            ops::generate_shares::<_, MinSig>(&mut rng, None, ACTIVE_VALIDATORS, THRESHOLD);
+        shares.sort_by(|a, b| a.index.cmp(&b.index));
 
         // Register physical channels for consensus, broadcast, and backfill
         let channel_p = network.register(0, Quota::per_second(NZU32!(10)), 256);
@@ -118,7 +123,7 @@ fn main() {
         let namespace = b"EPOCHER".to_vec();
         let marshal_cfg = marshal::Config {
             public_key: signer.public_key(),
-            identity,
+            identity: *poly::public::<MinSig>(&polynomial),
             coordinator: coordinator.clone(),
             partition_prefix: format!("marshal-{}", signer.public_key()),
             mailbox_size: 1024,
@@ -153,7 +158,7 @@ fn main() {
             application: application.clone(),
             marshal,
             polynomial,
-            share: my_share,
+            shares,
             namespace,
             validators,
             muxer_size: 1024,

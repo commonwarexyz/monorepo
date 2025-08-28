@@ -4,8 +4,7 @@ use commonware_cryptography::{
     bls12381::{
         dkg::ops::evaluate_all,
         primitives::{
-            group,
-            poly::{self, Public},
+            group, poly,
             variant::{MinSig, Variant},
         },
     },
@@ -26,7 +25,7 @@ pub struct Supervisor<P: PublicKey> {
 
 impl<P: PublicKey> Supervisor<P> {
     pub fn new(
-        polynomial: Public<MinSig>,
+        polynomial: poly::Public<MinSig>,
         mut participants: Vec<P>,
         share: Option<group::Share>,
     ) -> Self {
