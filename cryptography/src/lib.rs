@@ -90,11 +90,6 @@ pub trait Verifier {
     fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool;
 }
 
-/// A [Scheme] is both a [Signer] and a [Verifier].
-pub trait Scheme: Signer + Verifier {}
-
-impl<S: Signer + Verifier> Scheme for S {}
-
 /// A [PublicKey], able to verify [Signature]s.
 pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 
