@@ -136,3 +136,797 @@ where
     // Verify the proof
     proof.verify_multi_inclusion(hasher, &elements, target_root)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mmr::mem::Mmr;
+    use commonware_codec::{EncodeSize, Write};
+    use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{deterministic, Runner};
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestOp {
+        data: Vec<u8>,
+    }
+
+    impl Write for TestOp {
+        fn write(&self, writer: &mut impl bytes::BufMut) {
+            writer.put_slice(&self.data);
+        }
+    }
+
+    impl EncodeSize for TestOp {
+        fn encode_size(&self) -> usize {
+            self.data.len()
+        }
+    }
+
+    fn test_digest(v: u8) -> Digest {
+        hash(&[v])
+    }
+
+    fn test_hasher() -> Standard<Sha256> {
+        Standard::new()
+    }
+
+    #[test_traced]
+    fn test_verify_proof_valid() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            // Add some operations to the MMR
+            let operations = vec![
+                TestOp {
+                    data: vec![1, 2, 3],
+                },
+                TestOp {
+                    data: vec![4, 5, 6],
+                },
+                TestOp {
+                    data: vec![7, 8, 9],
+                },
+            ];
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+            let root = mmr.root(&mut hasher);
+
+            // Generate proof for all operations
+            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+
+            // Verify the proof
+            assert!(verify_proof(
+                &mut hasher,
+                &proof,
+                0, // start_loc
+                &operations,
+                &root,
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_verify_proof_invalid_root() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            // Add some operations to the MMR
+            let operations = vec![
+                TestOp {
+                    data: vec![1, 2, 3],
+                },
+                TestOp {
+                    data: vec![4, 5, 6],
+                },
+            ];
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+            let proof = mmr.range_proof(positions[0], positions[1]).await.unwrap();
+
+            // Verify should fail with wrong root
+            let wrong_root = test_digest(99);
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                0,
+                &operations,
+                &wrong_root,
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_verify_proof_wrong_operations() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            // Add some operations to the MMR
+            let operations = vec![
+                TestOp {
+                    data: vec![1, 2, 3],
+                },
+                TestOp {
+                    data: vec![4, 5, 6],
+                },
+            ];
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+            let root = mmr.root(&mut hasher);
+            let proof = mmr.range_proof(positions[0], positions[1]).await.unwrap();
+
+            // Try to verify with different operations
+            let wrong_operations = vec![
+                TestOp {
+                    data: vec![9, 9, 9],
+                },
+                TestOp {
+                    data: vec![8, 8, 8],
+                },
+            ];
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                0,
+                &wrong_operations,
+                &root,
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_verify_proof_with_offset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            // Add some initial operations (that we won't prove)
+            for i in 0..5 {
+                let data = vec![i];
+                mmr.add(&mut hasher, &data);
+            }
+
+            // Add operations we want to prove (starting at location 5)
+            let operations = vec![
+                TestOp {
+                    data: vec![10, 11, 12],
+                },
+                TestOp {
+                    data: vec![13, 14, 15],
+                },
+                TestOp {
+                    data: vec![16, 17, 18],
+                },
+            ];
+            let start_loc = 5u64;
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+            let root = mmr.root(&mut hasher);
+            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+
+            // Verify with correct start location
+            assert!(verify_proof(
+                &mut hasher,
+                &proof,
+                start_loc,
+                &operations,
+                &root,
+            ));
+
+            // Verify fails with wrong start location
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                0, // wrong start_loc
+                &operations,
+                &root,
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_extract_pinned_nodes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            // Add elements
+            let mut positions = Vec::new();
+            for i in 0..10 {
+                let data = vec![i];
+                positions.push(mmr.add(&mut hasher, &data));
+            }
+
+            // Generate proof for a range
+            let start_loc = 2u64;
+            let operations_len = 4u64;
+            let end_loc = start_loc + operations_len - 1;
+            let proof = mmr
+                .range_proof(positions[start_loc as usize], positions[end_loc as usize])
+                .await
+                .unwrap();
+
+            // Extract pinned nodes
+            let pinned_nodes = extract_pinned_nodes(&proof, start_loc, operations_len);
+            assert!(pinned_nodes.is_ok());
+            let nodes = pinned_nodes.unwrap();
+            assert!(!nodes.is_empty());
+
+            // Verify the extracted nodes match what we expect from the proof
+            let start_pos = leaf_num_to_pos(start_loc);
+            let expected_pinned: Vec<u64> = Proof::<Digest>::nodes_to_pin(start_pos).collect();
+            assert_eq!(nodes.len(), expected_pinned.len());
+        });
+    }
+
+    #[test_traced]
+    fn test_extract_pinned_nodes_single_operation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            // Add some operations to the MMR
+            let mut positions = Vec::new();
+            for i in 0..5 {
+                let data = vec![i];
+                positions.push(mmr.add(&mut hasher, &data));
+            }
+            let start_loc = 2u64;
+            let operations_len = 1u64; // Single operation
+            let proof = mmr.proof(positions[start_loc as usize]).await.unwrap();
+
+            // Extract pinned nodes
+            let pinned_nodes = extract_pinned_nodes(&proof, start_loc, operations_len);
+            assert!(pinned_nodes.is_ok());
+        });
+    }
+
+    #[test_traced]
+    fn test_verify_proof_and_extract_digests() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            let operations = vec![
+                TestOp {
+                    data: vec![1, 2, 3],
+                },
+                TestOp {
+                    data: vec![4, 5, 6],
+                },
+                TestOp {
+                    data: vec![7, 8, 9],
+                },
+                TestOp {
+                    data: vec![10, 11, 12],
+                },
+            ];
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+
+            let root = mmr.root(&mut hasher);
+            let proof = mmr.range_proof(positions[1], positions[3]).await.unwrap();
+
+            // Verify and extract digests for subset of operations
+            let result = verify_proof_and_extract_digests(
+                &mut hasher,
+                &proof,
+                1, // start_loc
+                &operations[1..4],
+                &root,
+            );
+
+            assert!(result.is_ok());
+            let digests = result.unwrap();
+            assert!(!digests.is_empty());
+
+            // Each digest should have a position and value
+            // Positions can be 0 or higher
+            for (pos, _digest) in &digests {
+                assert!(*pos < u64::MAX);
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_verify_proof_and_extract_digests_invalid() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            let operations = vec![
+                TestOp {
+                    data: vec![1, 2, 3],
+                },
+                TestOp {
+                    data: vec![4, 5, 6],
+                },
+            ];
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+
+            let proof = mmr.range_proof(positions[0], positions[1]).await.unwrap();
+            let wrong_root = test_digest(99);
+
+            // Should fail with wrong root
+            let result =
+                verify_proof_and_extract_digests(&mut hasher, &proof, 0, &operations, &wrong_root);
+
+            assert!(result.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_construct_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            // Build MMR with test operations
+            let operations: Vec<TestOp> = (0..15).map(|i| TestOp { data: vec![i] }).collect();
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                positions.push(mmr.add(&mut hasher, &encoded));
+            }
+
+            let root = mmr.root(&mut hasher);
+
+            // The size here is the number of leaves added (15 in this case)
+            let size = 15;
+            let start_loc = 3u64;
+            let end_loc = 7u64;
+
+            // Get required digests
+            let required_positions = digests_required_for_proof::<Digest>(size, start_loc, end_loc);
+
+            // Fetch the actual digests
+            let mut digests = Vec::new();
+            for pos in required_positions {
+                if let Some(digest) = mmr.get_node(pos) {
+                    digests.push(digest);
+                }
+            }
+
+            // Construct proof
+            let proof = construct_proof(size, digests.clone());
+            assert_eq!(proof.size, leaf_num_to_pos(size));
+            assert_eq!(proof.digests.len(), digests.len());
+
+            // Verify the constructed proof works correctly
+            assert!(verify_proof(
+                &mut hasher,
+                &proof,
+                start_loc,
+                &operations[start_loc as usize..=end_loc as usize],
+                &root,
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_create_proof_store() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            let operations = vec![
+                TestOp {
+                    data: vec![1, 2, 3],
+                },
+                TestOp {
+                    data: vec![4, 5, 6],
+                },
+                TestOp {
+                    data: vec![7, 8, 9],
+                },
+            ];
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+
+            let root = mmr.root(&mut hasher);
+            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+
+            // Create proof store
+            let result = create_proof_store(
+                &mut hasher,
+                &proof,
+                0, // start_loc
+                &operations,
+                &root,
+            );
+
+            assert!(result.is_ok());
+            let proof_store = result.unwrap();
+
+            // Verify we can generate sub-proofs from the store
+            let sub_proof =
+                Proof::<Digest>::range_proof(&proof_store, positions[0], positions[1]).await;
+            assert!(sub_proof.is_ok());
+        });
+    }
+
+    #[test_traced]
+    fn test_create_proof_store_invalid_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            let operations = vec![
+                TestOp {
+                    data: vec![1, 2, 3],
+                },
+                TestOp {
+                    data: vec![4, 5, 6],
+                },
+            ];
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+
+            let proof = mmr.range_proof(positions[0], positions[1]).await.unwrap();
+            let wrong_root = test_digest(99);
+
+            // Should fail with invalid root
+            let result = create_proof_store(&mut hasher, &proof, 0, &operations, &wrong_root);
+
+            assert!(result.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_create_proof_store_from_digests() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            let operations = vec![
+                TestOp {
+                    data: vec![1, 2, 3],
+                },
+                TestOp {
+                    data: vec![4, 5, 6],
+                },
+                TestOp {
+                    data: vec![7, 8, 9],
+                },
+            ];
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+
+            let root = mmr.root(&mut hasher);
+            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+
+            // First verify and extract digests
+            let digests =
+                verify_proof_and_extract_digests(&mut hasher, &proof, 0, &operations, &root)
+                    .unwrap();
+
+            // Create proof store from digests
+            let proof_store = create_proof_store_from_digests(&proof, digests);
+
+            // Verify we can use the proof store
+            let sub_proof =
+                Proof::<Digest>::range_proof(&proof_store, positions[0], positions[1]).await;
+            assert!(sub_proof.is_ok());
+        });
+    }
+
+    #[test_traced]
+    fn test_generate_multi_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            // Create a larger MMR for multi-proof testing
+            let operations: Vec<TestOp> = (0..20)
+                .map(|i| TestOp {
+                    data: vec![i as u8, (i + 1) as u8, (i + 2) as u8],
+                })
+                .collect();
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+
+            let root = mmr.root(&mut hasher);
+
+            // Create proof for full range
+            let proof = mmr.range_proof(positions[0], positions[19]).await.unwrap();
+
+            // Create proof store
+            let proof_store =
+                create_proof_store(&mut hasher, &proof, 0, &operations, &root).unwrap();
+
+            // Generate multi-proof for specific locations
+            let target_locations = vec![2, 5, 10, 15, 18];
+            let multi_proof = generate_multi_proof(&proof_store, &target_locations).await;
+
+            assert!(multi_proof.is_ok());
+            let multi_proof = multi_proof.unwrap();
+
+            // Prepare operations for verification
+            let selected_ops: Vec<(u64, TestOp)> = target_locations
+                .iter()
+                .map(|&loc| (loc, operations[loc as usize].clone()))
+                .collect();
+
+            // Verify the multi-proof
+            assert!(verify_multi_proof(
+                &mut hasher,
+                &multi_proof,
+                &selected_ops,
+                &root,
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_verify_multi_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            let operations: Vec<TestOp> = (0..10)
+                .map(|i| TestOp {
+                    data: vec![i as u8],
+                })
+                .collect();
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+
+            let root = mmr.root(&mut hasher);
+
+            // Generate multi-proof directly from MMR
+            let target_positions = vec![positions[1], positions[4], positions[7]];
+            let multi_proof = Proof::multi_proof(&mmr, &target_positions).await.unwrap();
+
+            // Verify with correct operations
+            let selected_ops = vec![
+                (1, operations[1].clone()),
+                (4, operations[4].clone()),
+                (7, operations[7].clone()),
+            ];
+
+            assert!(verify_multi_proof(
+                &mut hasher,
+                &multi_proof,
+                &selected_ops,
+                &root,
+            ));
+
+            // Verify fails with wrong operations
+            let wrong_ops = vec![
+                (1, TestOp { data: vec![99] }),
+                (4, operations[4].clone()),
+                (7, operations[7].clone()),
+            ];
+
+            assert!(!verify_multi_proof(
+                &mut hasher,
+                &multi_proof,
+                &wrong_ops,
+                &root,
+            ));
+
+            // Verify fails with wrong locations
+            let wrong_locations = vec![
+                (0, operations[1].clone()), // Wrong location
+                (4, operations[4].clone()),
+                (7, operations[7].clone()),
+            ];
+
+            assert!(!verify_multi_proof(
+                &mut hasher,
+                &multi_proof,
+                &wrong_locations,
+                &root,
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_multi_proof_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+
+            // Test with empty MMR (which is the correct case for empty proof)
+            let empty_mmr = Mmr::new();
+            let empty_root = empty_mmr.root(&mut hasher);
+            let empty_proof = Proof::multi_proof(&empty_mmr, &[]).await.unwrap();
+
+            assert!(empty_proof.verify_multi_inclusion(
+                &mut hasher,
+                &[] as &[(&[u8], u64)],
+                &empty_root,
+            ));
+
+            // Also test that empty proof with non-empty MMR
+            let mut mmr = Mmr::new();
+            for i in 0..5 {
+                let data = vec![i];
+                mmr.add(&mut hasher, &data);
+            }
+
+            let _root = mmr.root(&mut hasher);
+            let multi_proof = Proof::multi_proof(&mmr, &[]).await.unwrap();
+
+            // Empty multi-proof should have the right size but no digests
+            assert_eq!(multi_proof.size, mmr.size());
+            assert!(multi_proof.digests.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_multi_proof_single_element() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            let operations = vec![
+                TestOp { data: vec![1] },
+                TestOp { data: vec![2] },
+                TestOp { data: vec![3] },
+            ];
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+
+            let root = mmr.root(&mut hasher);
+
+            // Create proof store for all elements
+            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+            let proof_store =
+                create_proof_store(&mut hasher, &proof, 0, &operations, &root).unwrap();
+
+            // Generate multi-proof for single element
+            let multi_proof = generate_multi_proof(&proof_store, &[1]).await.unwrap();
+
+            // Verify single element
+            assert!(verify_multi_proof(
+                &mut hasher,
+                &multi_proof,
+                &[(1, operations[1].clone())],
+                &root,
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_proof_store_sub_ranges() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = test_hasher();
+            let mut mmr = Mmr::new();
+
+            let operations: Vec<TestOp> = (0..15)
+                .map(|i| TestOp {
+                    data: vec![i as u8, (i + 1) as u8],
+                })
+                .collect();
+
+            let mut positions = Vec::new();
+            for op in &operations {
+                let encoded = op.encode();
+                let pos = mmr.add(&mut hasher, &encoded);
+                positions.push(pos);
+            }
+
+            let root = mmr.root(&mut hasher);
+
+            // Create proof for range [3, 12]
+            let proof = mmr.range_proof(positions[3], positions[12]).await.unwrap();
+            let proof_store =
+                create_proof_store(&mut hasher, &proof, 3, &operations[3..13], &root).unwrap();
+
+            // Test various sub-ranges
+            let sub_ranges = vec![
+                (3, 5),
+                (7, 10),
+                (3, 12),
+                (8, 8), // Single element
+            ];
+
+            for (start, end) in sub_ranges {
+                let sub_proof =
+                    Proof::<Digest>::range_proof(&proof_store, positions[start], positions[end])
+                        .await;
+
+                assert!(
+                    sub_proof.is_ok(),
+                    "Failed to generate sub-proof for range [{}, {}]",
+                    start,
+                    end
+                );
+
+                let sub_proof = sub_proof.unwrap();
+                assert!(
+                    sub_proof.verify_range_inclusion(
+                        &mut hasher,
+                        &operations[start..=end]
+                            .iter()
+                            .map(|op| op.encode())
+                            .collect::<Vec<_>>(),
+                        positions[start],
+                        &root,
+                    ),
+                    "Failed to verify sub-proof for range [{}, {}]",
+                    start,
+                    end
+                );
+            }
+        });
+    }
+}
