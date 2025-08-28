@@ -148,16 +148,12 @@ jobs:
       uses: ./.github/actions/setup
     - name: Add minimal no_std target
       run: rustup target add thumbv7em-none-eabihf
-    - name: Install ARM bare-metal toolchain (required for blst)
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-arm-none-eabi
     - name: Build and test codec
       run: cargo build -p commonware-codec --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_codec.rlib && cargo test -p commonware-codec --no-default-features --verbose
     - name: Build utils
       run: cargo build -p commonware-utils --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_utils.rlib
     - name: Build cryptography
-      run: cargo build -p commonware-cryptography --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_cryptography.rlib
+      run: cargo build -p commonware-cryptography --no-default-features --features portable --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_cryptography.rlib
 
   Unsafe:
     runs-on: ubuntu-latest

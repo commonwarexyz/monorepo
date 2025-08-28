@@ -40,6 +40,7 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 parallel = ["blake3/rayon", "rayon"]
+portable = ["blst/portable"]
 default = ["std"]
 std = ["commonware-codec/std", "commonware-utils/std", "rand/std", "rand/std_rng", "thiserror/std", "rayon", "ed25519-consensus/std", "p256/std"]
 
