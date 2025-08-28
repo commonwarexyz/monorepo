@@ -141,30 +141,12 @@ where
 mod tests {
     use super::*;
     use crate::mmr::mem::Mmr;
-    use commonware_codec::{EncodeSize, Write};
-    use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
-    #[derive(Debug, Clone, PartialEq)]
-    struct TestOp {
-        data: Vec<u8>,
-    }
-
-    impl Write for TestOp {
-        fn write(&self, writer: &mut impl bytes::BufMut) {
-            writer.put_slice(&self.data);
-        }
-    }
-
-    impl EncodeSize for TestOp {
-        fn encode_size(&self) -> usize {
-            self.data.len()
-        }
-    }
-
     fn test_digest(v: u8) -> Digest {
-        hash(&[v])
+        Sha256::hash(&[v])
     }
 
     fn test_hasher() -> Standard<Sha256> {
@@ -179,17 +161,7 @@ mod tests {
             let mut mmr = Mmr::new();
 
             // Add some operations to the MMR
-            let operations = vec![
-                TestOp {
-                    data: vec![1, 2, 3],
-                },
-                TestOp {
-                    data: vec![4, 5, 6],
-                },
-                TestOp {
-                    data: vec![7, 8, 9],
-                },
-            ];
+            let operations = vec![1, 2, 3];
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
@@ -220,14 +192,7 @@ mod tests {
             let mut mmr = Mmr::new();
 
             // Add some operations to the MMR
-            let operations = vec![
-                TestOp {
-                    data: vec![1, 2, 3],
-                },
-                TestOp {
-                    data: vec![4, 5, 6],
-                },
-            ];
+            let operations = vec![1, 2, 3];
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
@@ -256,14 +221,7 @@ mod tests {
             let mut mmr = Mmr::new();
 
             // Add some operations to the MMR
-            let operations = vec![
-                TestOp {
-                    data: vec![1, 2, 3],
-                },
-                TestOp {
-                    data: vec![4, 5, 6],
-                },
-            ];
+            let operations = vec![1, 2, 3];
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
@@ -274,14 +232,7 @@ mod tests {
             let proof = mmr.range_proof(positions[0], positions[1]).await.unwrap();
 
             // Try to verify with different operations
-            let wrong_operations = vec![
-                TestOp {
-                    data: vec![9, 9, 9],
-                },
-                TestOp {
-                    data: vec![8, 8, 8],
-                },
-            ];
+            let wrong_operations = vec![9, 10, 11];
             assert!(!verify_proof(
                 &mut hasher,
                 &proof,
@@ -306,17 +257,7 @@ mod tests {
             }
 
             // Add operations we want to prove (starting at location 5)
-            let operations = vec![
-                TestOp {
-                    data: vec![10, 11, 12],
-                },
-                TestOp {
-                    data: vec![13, 14, 15],
-                },
-                TestOp {
-                    data: vec![16, 17, 18],
-                },
-            ];
+            let operations = vec![10, 11, 12];
             let start_loc = 5u64;
             let mut positions = Vec::new();
             for op in &operations {
@@ -413,20 +354,7 @@ mod tests {
             let mut hasher = test_hasher();
             let mut mmr = Mmr::new();
 
-            let operations = vec![
-                TestOp {
-                    data: vec![1, 2, 3],
-                },
-                TestOp {
-                    data: vec![4, 5, 6],
-                },
-                TestOp {
-                    data: vec![7, 8, 9],
-                },
-                TestOp {
-                    data: vec![10, 11, 12],
-                },
-            ];
+            let operations = vec![1, 2, 3, 4];
 
             let mut positions = Vec::new();
             for op in &operations {
@@ -466,14 +394,7 @@ mod tests {
             let mut hasher = test_hasher();
             let mut mmr = Mmr::new();
 
-            let operations = vec![
-                TestOp {
-                    data: vec![1, 2, 3],
-                },
-                TestOp {
-                    data: vec![4, 5, 6],
-                },
-            ];
+            let operations = vec![1, 2, 3];
 
             let mut positions = Vec::new();
             for op in &operations {
@@ -501,7 +422,7 @@ mod tests {
             let mut mmr = Mmr::new();
 
             // Build MMR with test operations
-            let operations: Vec<TestOp> = (0..15).map(|i| TestOp { data: vec![i] }).collect();
+            let operations: Vec<u64> = (0u64..15).map(|i| i).collect();
 
             let mut positions = Vec::new();
             for op in &operations {
@@ -550,17 +471,7 @@ mod tests {
             let mut hasher = test_hasher();
             let mut mmr = Mmr::new();
 
-            let operations = vec![
-                TestOp {
-                    data: vec![1, 2, 3],
-                },
-                TestOp {
-                    data: vec![4, 5, 6],
-                },
-                TestOp {
-                    data: vec![7, 8, 9],
-                },
-            ];
+            let operations = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
             let mut positions = Vec::new();
             for op in &operations {
@@ -576,8 +487,8 @@ mod tests {
             let result = create_proof_store(
                 &mut hasher,
                 &proof,
-                0, // start_loc
-                &operations,
+                0,                 // start_loc
+                &operations[0..3], // Only the first 3 operations covered by the proof
                 &root,
             );
 
@@ -598,14 +509,7 @@ mod tests {
             let mut hasher = test_hasher();
             let mut mmr = Mmr::new();
 
-            let operations = vec![
-                TestOp {
-                    data: vec![1, 2, 3],
-                },
-                TestOp {
-                    data: vec![4, 5, 6],
-                },
-            ];
+            let operations = vec![1, 2, 3];
 
             let mut positions = Vec::new();
             for op in &operations {
@@ -631,17 +535,7 @@ mod tests {
             let mut hasher = test_hasher();
             let mut mmr = Mmr::new();
 
-            let operations = vec![
-                TestOp {
-                    data: vec![1, 2, 3],
-                },
-                TestOp {
-                    data: vec![4, 5, 6],
-                },
-                TestOp {
-                    data: vec![7, 8, 9],
-                },
-            ];
+            let operations = vec![1, 2, 3];
 
             let mut positions = Vec::new();
             for op in &operations {
@@ -676,11 +570,7 @@ mod tests {
             let mut mmr = Mmr::new();
 
             // Create a larger MMR for multi-proof testing
-            let operations: Vec<TestOp> = (0..20)
-                .map(|i| TestOp {
-                    data: vec![i as u8, (i + 1) as u8, (i + 2) as u8],
-                })
-                .collect();
+            let operations: Vec<u64> = (0..20).map(|i| i).collect();
 
             let mut positions = Vec::new();
             for op in &operations {
@@ -706,7 +596,7 @@ mod tests {
             let multi_proof = multi_proof.unwrap();
 
             // Prepare operations for verification
-            let selected_ops: Vec<(u64, TestOp)> = target_locations
+            let selected_ops: Vec<(u64, u64)> = target_locations
                 .iter()
                 .map(|&loc| (loc, operations[loc as usize].clone()))
                 .collect();
@@ -728,11 +618,7 @@ mod tests {
             let mut hasher = test_hasher();
             let mut mmr = Mmr::new();
 
-            let operations: Vec<TestOp> = (0..10)
-                .map(|i| TestOp {
-                    data: vec![i as u8],
-                })
-                .collect();
+            let operations: Vec<u64> = (0..10).map(|i| i).collect();
 
             let mut positions = Vec::new();
             for op in &operations {
@@ -763,7 +649,7 @@ mod tests {
 
             // Verify fails with wrong operations
             let wrong_ops = vec![
-                (1, TestOp { data: vec![99] }),
+                (1, 99),
                 (4, operations[4].clone()),
                 (7, operations[7].clone()),
             ];
@@ -831,11 +717,7 @@ mod tests {
             let mut hasher = test_hasher();
             let mut mmr = Mmr::new();
 
-            let operations = vec![
-                TestOp { data: vec![1] },
-                TestOp { data: vec![2] },
-                TestOp { data: vec![3] },
-            ];
+            let operations = vec![1, 2, 3];
 
             let mut positions = Vec::new();
             for op in &operations {
@@ -871,11 +753,7 @@ mod tests {
             let mut hasher = test_hasher();
             let mut mmr = Mmr::new();
 
-            let operations: Vec<TestOp> = (0..15)
-                .map(|i| TestOp {
-                    data: vec![i as u8, (i + 1) as u8],
-                })
-                .collect();
+            let operations: Vec<u64> = (0..15).map(|i| i).collect();
 
             let mut positions = Vec::new();
             for op in &operations {
