@@ -259,7 +259,7 @@ impl<const N: usize> Bitmap<N> {
     }
 
     /// Get the number of chunks in the bitmap
-    pub fn chunk_count(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.bitmap.len()
     }
 
@@ -269,7 +269,7 @@ impl<const N: usize> Bitmap<N> {
     }
 
     /// Get the number of pruned chunks
-    pub fn pruned_chunk_count(&self) -> usize {
+    pub fn pruned_chunks(&self) -> usize {
         self.pruned_chunks
     }
 }
@@ -485,7 +485,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
         self.bitmap.prune_to_bit(bit_offset);
 
         // Update authenticated length
-        self.authenticated_len = self.bitmap.chunk_count() - 1;
+        self.authenticated_len = self.bitmap.len() - 1;
 
         // Update MMR
         let chunk_num = Bitmap::<N>::chunk_num(bit_offset);
@@ -582,7 +582,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
 
     /// Whether there are any updates that are not yet reflected in this bitmap's root.
     pub fn is_dirty(&self) -> bool {
-        !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.chunk_count() - 1
+        !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.len() - 1
     }
 
     /// The chunks (identified by their number) that have been modified or added since the last `sync`.
@@ -590,10 +590,10 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
         let mut chunks: Vec<u64> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| (chunk_index + self.bitmap.pruned_chunk_count()) as u64)
+            .map(|&chunk_index| (chunk_index + self.bitmap.pruned_chunks()) as u64)
             .collect();
-        for i in self.authenticated_len..self.bitmap.chunk_count() - 1 {
-            chunks.push((i + self.bitmap.pruned_chunk_count()) as u64);
+        for i in self.authenticated_len..self.bitmap.len() - 1 {
+            chunks.push((i + self.bitmap.pruned_chunks()) as u64);
         }
 
         chunks
@@ -603,8 +603,8 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     pub async fn sync(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
         // Add newly appended chunks to the MMR (other than the very last).
         let start = self.authenticated_len;
-        assert!(self.bitmap.chunk_count() > 0);
-        let end = self.bitmap.chunk_count() - 1;
+        assert!(self.bitmap.len() > 0);
+        let end = self.bitmap.len() - 1;
         for i in start..end {
             self.mmr
                 .add_batched(hasher, self.bitmap.get_chunk_by_index(i));
@@ -616,7 +616,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
             .dirty_chunks
             .iter()
             .map(|chunk_index| {
-                let pos = leaf_num_to_pos((*chunk_index + self.bitmap.pruned_chunk_count()) as u64);
+                let pos = leaf_num_to_pos((*chunk_index + self.bitmap.pruned_chunks()) as u64);
                 (pos, self.bitmap.get_chunk_by_index(*chunk_index))
             })
             .collect::<Vec<_>>();
@@ -828,10 +828,10 @@ mod tests {
         let bitmap = Bitmap::<SHA256_SIZE>::new_with_pruned_chunks(5);
 
         // Should have the specified number of pruned chunks
-        assert_eq!(bitmap.pruned_chunk_count(), 5);
+        assert_eq!(bitmap.pruned_chunks(), 5);
 
         // Should still be empty otherwise
-        assert_eq!(bitmap.chunk_count(), 1); // Always has at least one chunk
+        assert_eq!(bitmap.len(), 1); // Always has at least one chunk
         assert_eq!(bitmap.last_chunk().1, 0); // No bits in the last chunk
 
         // Bit count should account for pruned chunks
@@ -842,10 +842,7 @@ mod tests {
         // Test with zero pruned chunks (should be same as new())
         let bitmap_zero = Bitmap::<SHA256_SIZE>::new_with_pruned_chunks(0);
         let bitmap_new = Bitmap::<SHA256_SIZE>::new();
-        assert_eq!(
-            bitmap_zero.pruned_chunk_count(),
-            bitmap_new.pruned_chunk_count()
-        );
+        assert_eq!(bitmap_zero.pruned_chunks(), bitmap_new.pruned_chunks());
         assert_eq!(bitmap_zero.bit_count(), bitmap_new.bit_count());
     }
 
@@ -876,7 +873,7 @@ mod tests {
 
         // Test pruning - prune to remove one more chunk
         bitmap.prune_to_bit(4 * chunk_size_bits);
-        assert_eq!(bitmap.pruned_chunk_count(), 4);
+        assert_eq!(bitmap.pruned_chunks(), 4);
         assert_eq!(bitmap.pruned_bits(), 4 * chunk_size_bits);
     }
 
@@ -888,7 +885,7 @@ mod tests {
             let bitmap = MerkleizedBitmap::<Sha256, SHA256_SIZE>::new_with_pruned_chunks(2);
 
             // Should have the expected pruned chunk count
-            assert_eq!(bitmap.bitmap.pruned_chunk_count(), 2);
+            assert_eq!(bitmap.bitmap.pruned_chunks(), 2);
 
             // Bit count should account for pruned chunks
             let expected_bits = 2 * MerkleizedBitmap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS;
@@ -945,9 +942,9 @@ mod tests {
         executor.start(|_| async move {
             let mut bitmap: MerkleizedBitmap<Sha256, SHA256_SIZE> = MerkleizedBitmap::new();
             assert_eq!(bitmap.bit_count(), 0);
-            assert_eq!(bitmap.bitmap.pruned_chunk_count(), 0);
+            assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             bitmap.prune_to_bit(0);
-            assert_eq!(bitmap.bitmap.pruned_chunk_count(), 0);
+            assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             assert_eq!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
             assert_eq!(bitmap.last_chunk().1, 0);
 
@@ -965,7 +962,7 @@ mod tests {
             assert_ne!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
             assert_eq!(bitmap.last_chunk().1, 1);
             // Pruning should be a no-op since we're not beyond a chunk boundary.
-            assert_eq!(bitmap.bitmap.pruned_chunk_count(), 0);
+            assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
 
             // Fill up a full chunk
@@ -992,7 +989,7 @@ mod tests {
             // Now pruning all bits should matter.
             bitmap.prune_to_bit(256);
             assert_eq!(bitmap.bit_count(), 256);
-            assert_eq!(bitmap.bitmap.pruned_chunk_count(), 1);
+            assert_eq!(bitmap.bitmap.pruned_chunks(), 1);
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
             // Last chunk should be empty again
             assert_eq!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
@@ -1144,7 +1141,7 @@ mod tests {
 
             // Confirm pruning everything doesn't affect the root.
             bitmap.prune_to_bit(bitmap.bit_count());
-            assert_eq!(bitmap.bitmap.pruned_chunk_count(), 3);
+            assert_eq!(bitmap.bitmap.pruned_chunks(), 3);
             assert_eq!(bitmap.bit_count(), 256 * 3 + 1);
             assert_eq!(newer_root, bitmap.root(&mut hasher).await.unwrap());
         });
@@ -1329,7 +1326,7 @@ mod tests {
                 for j in i..FULL_CHUNK_COUNT {
                     bitmap.append_chunk_unchecked(&test_chunk(format!("test{j}").as_bytes()));
                 }
-                assert_eq!(bitmap.bitmap.pruned_chunk_count(), i);
+                assert_eq!(bitmap.bitmap.pruned_chunks(), i);
                 assert_eq!(bitmap.bit_count(), FULL_CHUNK_COUNT as u64 * 256);
                 bitmap.sync(&mut hasher).await.unwrap();
                 assert_eq!(bitmap.root(&mut hasher).await.unwrap(), chunk_aligned_root);
