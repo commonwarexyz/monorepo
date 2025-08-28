@@ -671,6 +671,7 @@ where
             .build()
             .expect("Unable to build thread pool");
 
+        // TODO(#1496): Revisit use of `.par_bridge()`
         pool.install(move || {
             messages
                 .into_iter()
