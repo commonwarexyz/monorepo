@@ -317,7 +317,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     // We must have written the oldest retained location to metadata but not
                     // actually pruned the log and MMR. Skip over all data before the oldest
                     // retained location in the metadata.
-                    current_index = first_section * self.log_items_per_section;
+                    let first_section_start = first_section * self.log_items_per_section;
+                    if current_index != first_section_start {
+                        warn!(
+                            current_index,
+                            section,
+                            first_section_start,
+                            "metadata oldest_retained_loc after first log section; skipping"
+                        );
+                        current_index = first_section_start;
+                    }
                     continue;
                 }
 
