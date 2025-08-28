@@ -1,7 +1,7 @@
 use crate::mmr::{
-    hasher::Standard, 
-    iterator::leaf_num_to_pos, 
-    verification::{Proof, ProofStore}
+    hasher::Standard,
+    iterator::leaf_num_to_pos,
+    verification::{Proof, ProofStore},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
@@ -70,8 +70,7 @@ pub fn construct_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
     Proof::<D> { size, digests }
 }
 
-/// Convert an event proof to a ProofStore by verifying it and extracting all digests.
-/// This ProofStore can then be used to generate multi-proofs for filtered listeners.
+/// Verify a [Proof] and convert it into a [ProofStore].
 pub async fn create_proof_store<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
@@ -86,47 +85,37 @@ where
 {
     // Convert operation location to MMR position
     let start_pos = leaf_num_to_pos(start_loc);
-    
+
     // Encode operations for verification
-    let elements: Vec<Vec<u8>> = operations
-        .iter()
-        .map(|op| op.encode().to_vec())
-        .collect();
-    
+    let elements: Vec<Vec<u8>> = operations.iter().map(|op| op.encode().to_vec()).collect();
+
     // Create ProofStore by verifying the proof and extracting all digests
     ProofStore::new(hasher, proof, &elements, start_pos, root)
 }
 
-/// Generate a multi-proof for specific operation locations from a ProofStore.
-/// This is used to create proofs for filtered listeners who only care about certain operations.
-/// 
-/// # Arguments
-/// * `proof_store` - The ProofStore containing all digests from the original proof
-/// * `locations` - The operation locations (indices) to include in the filtered proof
-pub async fn generate_filtered_proof<D>(
+/// Create a [ProofStore] from a list of digests (output by [verify_proof_and_extract_digests]).
+///
+/// If you have not yet verified the proof, use [create_proof_store] instead.
+pub async fn create_proof_store_from_digests<D: Digest>(
+    proof: &Proof<D>,
+    digests: Vec<(u64, D)>,
+) -> ProofStore<D> {
+    ProofStore::new_from_digests(digests, proof.size)
+}
+
+/// Generate a Multi-Proof for specific operations (identified by location) from a [ProofStore].
+pub async fn generate_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
     locations: &[u64],
-) -> Result<Proof<D>, crate::mmr::Error>
-where
-    D: Digest,
-{
+) -> Result<Proof<D>, crate::mmr::Error> {
     // Convert locations to MMR positions
-    let positions: Vec<u64> = locations
-        .iter()
-        .map(|&loc| leaf_num_to_pos(loc))
-        .collect();
-    
+    let positions: Vec<u64> = locations.iter().map(|&loc| leaf_num_to_pos(loc)).collect();
+
+    // Generate the proof
     Proof::multi_proof(proof_store, &positions).await
 }
 
-/// Verify a multi-inclusion proof for operations at specific locations.
-/// This handles the conversion from locations to MMR positions internally.
-///
-/// # Arguments
-/// * `hasher` - The hasher to use for verification
-/// * `proof` - The multi-inclusion proof
-/// * `operations` - The operations paired with their locations
-/// * `target_root` - The expected root hash
+/// Verify a Multi-Proof for operations at specific locations.
 pub fn verify_multi_proof<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
@@ -147,13 +136,13 @@ where
             (op.encode().to_vec(), pos)
         })
         .collect();
-    
+
     // Convert to references for verify_multi_inclusion
     let element_refs: Vec<(&[u8], u64)> = elements
         .iter()
         .map(|(bytes, pos)| (bytes.as_slice(), *pos))
         .collect();
-    
+
     // Verify using multi-proof verification
     proof.verify_multi_inclusion(hasher, &element_refs, target_root)
 }
