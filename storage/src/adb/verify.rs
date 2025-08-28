@@ -62,7 +62,7 @@ pub fn digests_required_for_proof<D: Digest>(size: u64, start_loc: u64, end_loc:
     Proof::<D>::nodes_required_for_range_proof(size, start_pos, end_pos)
 }
 
-/// Construct a [Proof] from a size and a list of digests.
+/// Create a [Proof] from a size and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
 pub fn create_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
@@ -103,7 +103,7 @@ pub fn create_proof_store_from_digests<D: Digest>(
     ProofStore::new_from_digests(proof.size, digests)
 }
 
-/// Generate a Multi-Proof for specific operations (identified by location) from a [ProofStore].
+/// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
 pub async fn create_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
     locations: &[u64],
