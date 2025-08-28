@@ -124,23 +124,6 @@ fn prune(r, view) {
     r.messages.remove(v => v < view);
     r.proofs.remove(v => v < view);
 }
-
-// Replica `r` constructs `notarize(c, v)`
-fn construct_notarize(r, c) -> Option<Notarize> {
-    if r.notarized != ⊥ or r.nullified 
-        return None
-    r.notarized = c
-    return `Some(notarize(c, v))`
-
-}
-
-// Replica `r` constructs `nullify(v)`
-fn construct_nullify(r) -> Option<Nullify> {
-    if r.notarized != ⊥ or r.nullified
-        return None
-    r.nullified = true
-    return `Some(nullify(v))`
-}
 ```
 
 ## 8. Protocol for Replica `r` in View `v`
@@ -163,16 +146,20 @@ _Treat `propose(r, c, v, (c', v'))` as `r`'s `notarize(c, v)`._
 _Upon receipt of a first valid block proposal from leader, broadcast `notarize(c, v)`._
 
 1. On receiving first `propose(r', c, v, (c', v'))` from `r' = leader(v)`:
+   1. If `r.notarized != ⊥` or `r.nullified`, return.
    1. If `!valid_parent(r, v, (c', v'))`, return.
    1. If `!verify(c, c')`, return.
-   1. If `notarize = construct_notarize(r, c)`, broadcast `notarize`.
+   1. Set `r.notarized = c`.
+   1. Broadcast `notarize(c, v)`.
 
 ### 8.3. Nullify by Timeout
 
 _If `timer` expires, broadcast `nullify(v)` if not yet broadcasted `notarize(c, v)`._
 
 1. On `timer` expiry:
-   1. If `nullify = construct_nullify(r)`, broadcast `nullify`.
+   1. If `r.notarized != ⊥` or `r.nullified`, return.
+   1. Set `r.nullified = true`.
+   1. Broadcast `nullify(v)`.
 
 ### 8.4. Notarization & Finalization
 
