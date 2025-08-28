@@ -4,6 +4,8 @@
 //! the length of the vector must fit within a [u32].
 
 use crate::{EncodeSize, Error, RangeCfg, Read, Write};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 
 impl<T: Write> Write for Vec<T> {
@@ -41,13 +43,15 @@ impl<T: Read> Read for Vec<T> {
 mod tests {
     use super::*;
     use crate::{DecodeRangeExt, Encode};
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
 
     #[test]
     fn test_vec() {
         let vec_values = [vec![], vec![1u8], vec![1u8, 2u8, 3u8]];
         for value in vec_values {
             let encoded = value.encode();
-            assert_eq!(encoded.len(), value.len() * std::mem::size_of::<u8>() + 1);
+            assert_eq!(encoded.len(), value.len() * core::mem::size_of::<u8>() + 1);
 
             // Valid decoding
             let len = value.len();

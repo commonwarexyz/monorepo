@@ -32,9 +32,6 @@ pub struct Config<
     /// Partition for consensus engine storage.
     pub partition: String,
 
-    /// Compression level for consensus engine storage.
-    pub compression: Option<u8>,
-
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.
     pub mailbox_size: usize,

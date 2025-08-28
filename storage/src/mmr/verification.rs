@@ -732,12 +732,12 @@ mod tests {
     use crate::mmr::{hasher::Standard, mem::Mmr};
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
     fn test_digest(v: u8) -> Digest {
-        hash(&[v])
+        Sha256::hash(&[v])
     }
 
     #[test_traced]

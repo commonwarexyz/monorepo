@@ -785,13 +785,13 @@ mod tests {
             build_and_check_test_roots_mmr, build_batched_and_check_test_roots_journaled, ROOTS,
         },
     };
-    use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::{hex, NZUsize, NZU64};
 
     fn test_digest(v: usize) -> Digest {
-        hash(&v.to_be_bytes())
+        Sha256::hash(&v.to_be_bytes())
     }
 
     const PAGE_SIZE: usize = 111;

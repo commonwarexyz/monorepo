@@ -10,7 +10,7 @@ use chacha20poly1305::{
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
-use commonware_cryptography::{PublicKey, Signer};
+use commonware_cryptography::{Hasher, PublicKey, Sha256, Signer};
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
@@ -27,15 +27,48 @@ pub struct Info<P: PublicKey> {
 
     /// Timestamp of the handshake (in epoch milliseconds).
     timestamp: u64,
+
+    /// c.f. [`Self::new_with_tag`]
+    continuation_tag: Option<<Sha256 as Hasher>::Digest>,
 }
 
 impl<P: PublicKey> Info<P> {
-    /// Create a new hello.
+    /// Create a new info.
     pub fn new(recipient: P, ephemeral_public_key: x25519::PublicKey, timestamp: u64) -> Self {
         Self {
             recipient,
             ephemeral_public_key,
             timestamp,
+            continuation_tag: None,
+        }
+    }
+
+    /// Create a new info with a tag linking to previous data.
+    ///
+    /// For example, to allow for the info to also be linked to the hello message sent by the other peer,
+    /// or having this information attest to a MAC using a previous shared session key.
+    pub fn new_with_tag(
+        recipient: P,
+        ephemeral_public_key: x25519::PublicKey,
+        timestamp: u64,
+        data: &[u8],
+    ) -> Self {
+        Self {
+            recipient,
+            ephemeral_public_key,
+            timestamp,
+            continuation_tag: Some(Sha256::hash(data)),
+        }
+    }
+
+    pub fn check_tag(&self, data: &[u8]) -> Result<(), Error> {
+        if self
+            .continuation_tag
+            .is_some_and(|tag| tag == Sha256::hash(data))
+        {
+            Ok(())
+        } else {
+            Err(Error::InvalidInfoContinuationTag)
         }
     }
 }
@@ -45,6 +78,7 @@ impl<P: PublicKey> Write for Info<P> {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
         UInt(self.timestamp).write(buf);
+        self.continuation_tag.write(buf);
     }
 }
 
@@ -55,10 +89,12 @@ impl<P: PublicKey> Read for Info<P> {
         let recipient = P::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
-        Ok(Info {
+        let continuation_tag = Option::read(buf)?;
+        Ok(Self {
             recipient,
             ephemeral_public_key,
             timestamp,
+            continuation_tag,
         })
     }
 }
@@ -68,6 +104,7 @@ impl<P: PublicKey> EncodeSize for Info<P> {
         self.recipient.encode_size()
             + self.ephemeral_public_key.encode_size()
             + UInt(self.timestamp).encode_size()
+            + self.continuation_tag.encode_size()
     }
 }
 
@@ -127,6 +164,7 @@ impl<P: PublicKey> Hello<P> {
         namespace: &[u8],
         synchrony_bound: Duration,
         max_handshake_age: Duration,
+        tag_data: Option<&[u8]>,
     ) -> Result<(), Error> {
         // Verify that the signature is for us
         //
@@ -168,6 +206,11 @@ impl<P: PublicKey> Hello<P> {
             .verify(Some(namespace), &self.info.encode(), &self.signature)
         {
             return Err(Error::InvalidSignature);
+        }
+
+        // Verify the continuation tag (if provided)
+        if let Some(d) = tag_data {
+            self.info.check_tag(d)?;
         }
         Ok(())
     }
@@ -298,11 +341,7 @@ mod tests {
             let hello = Hello::sign(
                 &mut sender,
                 TEST_NAMESPACE,
-                Info {
-                    timestamp,
-                    recipient: recipient.clone(),
-                    ephemeral_public_key,
-                },
+                Info::new(recipient.clone(), ephemeral_public_key, timestamp),
             );
 
             // Decode the hello message
@@ -336,6 +375,7 @@ mod tests {
                     TEST_NAMESPACE,
                     synchrony_bound,
                     max_handshake_age,
+                    None,
                 )
                 .unwrap();
             assert_eq!(hello.signer, sender.public_key());
@@ -357,11 +397,7 @@ mod tests {
             let hello = Hello::sign(
                 &mut sender,
                 TEST_NAMESPACE,
-                Info {
-                    timestamp: 0,
-                    recipient: recipient.public_key(),
-                    ephemeral_public_key,
-                },
+                Info::new(recipient.public_key(), ephemeral_public_key, 0),
             );
 
             // Setup a mock sink and stream
@@ -407,11 +443,11 @@ mod tests {
             let hello = Hello::sign(
                 &mut sender,
                 TEST_NAMESPACE,
-                Info {
-                    timestamp: 0,
-                    recipient: PrivateKey::from_seed(1).public_key(),
+                Info::new(
+                    PrivateKey::from_seed(1).public_key(),
                     ephemeral_public_key,
-                },
+                    0,
+                ),
             );
 
             // Setup a mock sink and stream
@@ -509,11 +545,7 @@ mod tests {
             let hello = Hello::sign(
                 &mut sender,
                 TEST_NAMESPACE,
-                Info {
-                    timestamp: 0,
-                    recipient: recipient.public_key(),
-                    ephemeral_public_key,
-                },
+                Info::new(recipient.public_key(), ephemeral_public_key, 0),
             );
 
             // Tamper with the hello to make the signature invalid
@@ -528,6 +560,7 @@ mod tests {
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
+                None,
             );
             assert!(matches!(result, Err(Error::InvalidSignature)));
         });
@@ -548,11 +581,7 @@ mod tests {
             let hello = Hello::sign(
                 &mut signer,
                 TEST_NAMESPACE,
-                Info {
-                    timestamp: 0,
-                    recipient: recipient.clone(),
-                    ephemeral_public_key,
-                },
+                Info::new(recipient.clone(), ephemeral_public_key, 0),
             );
 
             // Time starts at 0 in deterministic executor.
@@ -567,6 +596,7 @@ mod tests {
                     TEST_NAMESPACE,
                     synchrony_bound,
                     timeout_duration,
+                    None,
                 )
                 .unwrap();
 
@@ -580,6 +610,7 @@ mod tests {
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
+                None,
             );
             assert!(matches!(result, Err(Error::InvalidTimestampOld(t)) if t == 0));
         });
@@ -648,22 +679,14 @@ mod tests {
             let hello_ok = Hello::sign(
                 &mut signer,
                 TEST_NAMESPACE,
-                Info{
-                    timestamp: SYNCHRONY_BOUND_MILLIS,
-                    recipient: recipient.clone(),
-                    ephemeral_public_key,
-                },
+                Info::new(recipient.clone(), ephemeral_public_key, SYNCHRONY_BOUND_MILLIS)
             );
 
             // Create a hello 1ms too far into the future.
             let hello_late = Hello::sign(
                 &mut signer,
                 TEST_NAMESPACE,
-                Info{
-                    timestamp:SYNCHRONY_BOUND_MILLIS + 1,
-                    recipient: recipient.clone(),
-                    ephemeral_public_key,
-                },
+                Info::new(recipient.clone(), ephemeral_public_key, SYNCHRONY_BOUND_MILLIS + 1)
             );
 
             // Verify the okay hello.
@@ -673,6 +696,7 @@ mod tests {
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
+                None,
             ).unwrap(); // no error
 
             // Hello too far into the future fails.
@@ -682,8 +706,41 @@ mod tests {
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
+                None
             );
             assert!(matches!(result, Err(Error::InvalidTimestampFuture(t)) if t == SYNCHRONY_BOUND_MILLIS + 1));
         });
+    }
+
+    #[test]
+    fn test_info_tag_confirmation_happy_path() {
+        let info = Info::new_with_tag(
+            PrivateKey::from_seed(1).public_key(),
+            PublicKey::from_bytes([1u8; 32]),
+            0,
+            b"ABC",
+        );
+        assert!(info.check_tag(b"ABC").is_ok())
+    }
+
+    #[test]
+    fn test_info_no_tag_but_check_with_data_fails() {
+        let info = Info::new(
+            PrivateKey::from_seed(1).public_key(),
+            PublicKey::from_bytes([1u8; 32]),
+            0,
+        );
+        assert!(info.check_tag(b"ABC").is_err())
+    }
+
+    #[test]
+    fn test_info_tag_but_check_with_different_data_fails() {
+        let info = Info::new_with_tag(
+            PrivateKey::from_seed(1).public_key(),
+            PublicKey::from_bytes([1u8; 32]),
+            0,
+            b"ABC",
+        );
+        assert!(info.check_tag(b"not ABC").is_err())
     }
 }

@@ -25,7 +25,7 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
-//! use commonware_cryptography::hash;
+//! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     archive::{
 //!         Archive as _,
@@ -56,7 +56,7 @@
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive.put(1, hash(b"data"), 10).await.unwrap();
+//!     archive.put(1, Sha256::hash(b"data"), 10).await.unwrap();
 //!
 //!     // Close the archive (also closes the freezer and ordinal)
 //!     archive.close().await.unwrap();
@@ -118,7 +118,7 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
-    use commonware_cryptography::{hash, sha256::Digest};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
 
@@ -155,8 +155,8 @@ mod tests {
             let mut archive = Archive::init(context.clone(), cfg.clone()).await.unwrap();
 
             // Add some data
-            let key1 = hash(b"key1");
-            let key2 = hash(b"key2");
+            let key1 = Sha256::hash(b"key1");
+            let key2 = Sha256::hash(b"key2");
             archive.put(1, key1, 2000).await.unwrap();
             archive.put(2, key2, 2001).await.unwrap();
 

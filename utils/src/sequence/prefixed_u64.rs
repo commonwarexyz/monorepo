@@ -3,9 +3,9 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use std::{
+use core::{
     cmp::{Ord, PartialOrd},
-    fmt::{Debug, Display},
+    fmt::{Debug, Display, Formatter},
     hash::Hash,
     ops::Deref,
 };
@@ -83,7 +83,7 @@ impl Deref for U64 {
 }
 
 impl Debug for U64 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{}:{}",
@@ -94,7 +94,7 @@ impl Debug for U64 {
 }
 
 impl Display for U64 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         Debug::fmt(self, f)
     }
 }
