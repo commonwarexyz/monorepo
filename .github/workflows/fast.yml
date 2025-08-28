@@ -148,7 +148,7 @@ jobs:
       uses: ./.github/actions/setup
     - name: Add minimal no_std target
       run: rustup target add thumbv7em-none-eabihf
-    - name: Install ARM bare-metal toolchain (required for blst)
+    - name: Install ARM bare-metal toolchain (required to compile C from x86 worker)
       run: |
         sudo apt-get update
         sudo apt-get install -y gcc-arm-none-eabi
