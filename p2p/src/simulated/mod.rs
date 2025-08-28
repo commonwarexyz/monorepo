@@ -10,6 +10,52 @@
 //! `commonware-p2p::simulated` can be run deterministically when paired with `commonware-runtime::deterministic`.
 //! This makes it possible to reproduce an arbitrary order of delivered/dropped messages with a given seed.
 //!
+//! # Bandwidth Simulation
+//!
+//! The simulator provides a realistic model of bandwidth contention where network
+//! capacity is a shared, finite resource. This is achieved without the overhead
+//! of simulating byte-by-byte transfers.
+//!
+//! ## Core Model
+//!
+//! The bandwidth model is built on an event-based timeline. Instead of simulating
+//! continuous data flow, the scheduler calculates the key points in time where
+//! bandwidth availability changes for a peer. These changes occur whenever a
+//! transfer starts or finishes.
+//!
+//! Each peer has a schedule for its egress (upload) and ingress (download)
+//! bandwidth. When a new message is sent, the scheduler performs the following steps:
+//!
+//! 1. **Find Available Capacity:** It looks at the sender's egress schedule and the
+//!    receiver's ingress schedule to find the available bandwidth over time. The
+//!    effective transfer rate is always limited by the minimum of the two.
+//!
+//! 2. **Fill Time Slots:** The algorithm iterates through time, finding "slots" of
+//!    available bandwidth. It calculates how much of the message can be sent in
+//!    each slot until the entire message is accounted for. For example, if two
+//!    10KB messages are sent over a 10KB/s link, the second message will be
+//!    scheduled to start only after the first one completes.
+//!
+//! 3. **Reserve Bandwidth:** Once the completion time is calculated, the new
+//!    transfer is added to the schedules of both the sender and receiver as a
+//!    bandwidth reservation, consuming capacity for its calculated duration.
+//!
+//! ## Latency vs. Transmission Delay
+//!
+//! The simulation correctly distinguishes between two key components of message delivery:
+//!
+//! - **Transmission Delay:** The time it takes to send all bytes of a message over
+//!   the link. This is determined by the message size and the available bandwidth
+//!   (e.g., a 10KB message on a 10KB/s link has a 1-second transmission delay).
+//! - **Network Latency:** The time it takes for a byte to travel from the sender
+//!   to the receiver, independent of bandwidth. This is configured via the `Link`
+//!   properties.
+//!
+//! The final delivery time of a message is the sum of when its transmission completes
+//! plus the simulated network latency. This model ensures that large messages correctly
+//! occupy the network link for longer periods, affecting other concurrent transfers,
+//! while still accounting for the physical travel time of the data.
+//!
 //! # Example
 //!
 //! ```rust
@@ -85,6 +131,7 @@
 //! });
 //! ```
 
+mod bandwidth;
 mod ingress;
 mod metrics;
 mod network;

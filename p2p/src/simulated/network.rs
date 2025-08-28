@@ -1,6 +1,7 @@
 //! Implementation of a simulated p2p network.
 
 use super::{
+    bandwidth,
     ingress::{self, Oracle},
     metrics, Error,
 };
@@ -253,6 +254,73 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
         }
     }
+}
+
+impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
+    /// Schedule a transmission respecting bandwidth limits on both sender and receiver.
+    fn schedule_transmission(
+        &mut self,
+        sender: &P,
+        receiver: &P,
+        data_size: usize,
+        now: SystemTime,
+        should_deliver: bool,
+    ) -> SystemTime {
+        // Prune and get used bandwidth for sender and receiver
+        let sender_used = {
+            let sender_peer = self.peers.get_mut(sender).expect("sender not found");
+            sender_peer.egress.prune_and_get_usage(now)
+        };
+
+        let receiver_used = if should_deliver && sender != receiver {
+            let receiver_peer = self.peers.get_mut(receiver).expect("receiver not found");
+            Some(receiver_peer.ingress.prune_and_get_usage(now))
+        } else {
+            None
+        };
+
+        let sender_schedule = {
+            let sender = self.peers.get(sender).expect("sender not found");
+            (&sender.egress, sender_used)
+        };
+
+        let receiver_schedule = if let Some(used) = receiver_used {
+            let receiver_peer = self.peers.get(receiver).expect("receiver not found");
+            Some((&receiver_peer.ingress, used))
+        } else {
+            None
+        };
+
+        // Now calculate reservations
+        let (reservations, completion_time) =
+            bandwidth::calculate_reservations(data_size, now, sender_schedule, receiver_schedule);
+
+        // Apply reservations to sender
+        if !reservations.is_empty() {
+            let sender_peer = self.peers.get_mut(sender).expect("sender not found");
+            for reservation in &reservations {
+                sender_peer.egress.add_reservation(
+                    reservation.start,
+                    reservation.end,
+                    reservation.bandwidth,
+                );
+            }
+
+            // Apply to receiver if delivering
+            if receiver_used.is_some() {
+                let receiver_peer = self.peers.get_mut(receiver).expect("receiver not found");
+                for reservation in &reservations {
+                    receiver_peer.ingress.add_reservation(
+                        reservation.start,
+                        reservation.end,
+                        reservation.bandwidth,
+                    );
+                }
+            }
+        }
+
+        completion_time
+    }
 
     /// Handle a task.
     ///
@@ -286,7 +354,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
 
             // Determine if there is a link between the sender and recipient
-            let link = match self.links.get_mut(&o_r) {
+            let link = match self.links.get(&o_r) {
                 Some(link) => link,
                 None => {
                     trace!(?origin, ?recipient, reason = "no link", "dropping message",);
@@ -300,57 +368,49 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
                 .inc();
 
+            // Check bandwidth constraints and determine if the message should be delivered
+            let (sender_has_bandwidth, should_deliver) = {
+                let sender_peer = self.peers.get(&origin).expect("sender must exist");
+                let receiver_peer = self.peers.get(&recipient).expect("receiver must exist");
+
+                let sender_has_bandwidth = sender_peer.egress.bandwidth_bps > 0;
+                let receiver_has_bandwidth = receiver_peer.ingress.bandwidth_bps > 0;
+
+                let should_deliver = self.context.gen_bool(link.success_rate);
+
+                (
+                    sender_has_bandwidth,
+                    // If the receiver has no bandwidth then we treat it as if the message
+                    // is never delivered. Still consume sender-side bandwidth.
+                    should_deliver && receiver_has_bandwidth,
+                )
+            };
+
+            if !sender_has_bandwidth {
+                // Sender has no bandwidth, transmission blocks forever
+                // Since we don't spawn any acknowledgment task, the sender will wait indefinitely
+                trace!(
+                    ?origin,
+                    ?recipient,
+                    "sender has zero bandwidth, transmission blocked forever"
+                );
+
+                continue;
+            }
+
             // Sample latency and get current time
             let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
             let now = self.context.current();
 
-            // Get peer bandwidth info and calculate effective bandwidth
-            let (sender_egress_bps, sender_egress_available_at) = {
-                let sender = self.peers.get(&origin).unwrap();
-                (sender.egress_bps, sender.egress_available_at)
-            };
-
-            let (receiver_ingress_bps, receiver_ingress_available_at) = {
-                let receiver = self.peers.get(&recipient).unwrap();
-                (receiver.ingress_bps, receiver.ingress_available_at)
-            };
-
-            // Effective bandwidth is limited by the slower endpoint (like TCP flow control),
-            // sender can't transmit faster than receiver can accept, modeling backpressure
-            let effective_bps = sender_egress_bps.min(receiver_ingress_bps);
-
-            // Calculate transmission timing
-            let transmission_duration = if effective_bps == 0 {
-                Duration::MAX
-            } else {
-                Duration::from_secs_f64(message.len() as f64 / effective_bps as f64)
-            };
-
-            // The transmission can start when both the sender and receiver's bandwidth is
-            // free
-            let transmission_start_at = now
-                .max(sender_egress_available_at)
-                .max(receiver_ingress_available_at);
-
-            // Determine when transmission completes
-            let transmission_complete_at = transmission_start_at + transmission_duration;
-
-            // Always update sender's egress (sender uses bandwidth regardless of
-            // delivery), this reserves the "pipe" for the duration of the transmission
-            self.peers.get_mut(&origin).unwrap().egress_available_at = transmission_complete_at;
-
-            // Determine if message should be delivered
-            let should_deliver = self.context.gen_bool(link.success_rate);
-
-            // Only update receiver's ingress if message will be delivered
-            if should_deliver {
-                self.peers.get_mut(&recipient).unwrap().ingress_available_at =
-                    transmission_complete_at;
-            }
+            // Schedule the transmission
+            let transmission_complete_at =
+                self.schedule_transmission(&origin, &recipient, message.len(), now, should_deliver);
 
             // If the message should be delivered, queue it immediately on the
             // link to preserve ordering
             if should_deliver {
+                let link = self.links.get_mut(&o_r).unwrap();
+
                 // The final arrival time includes the per-message latency
                 let receive_complete_at = transmission_complete_at + latency;
 
@@ -361,11 +421,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             }
 
+            let transmission_duration = transmission_complete_at
+                .duration_since(now)
+                .unwrap_or(Duration::ZERO);
+
             trace!(
                 ?origin,
                 ?recipient,
-                latency_ms = latency.as_millis(),
                 transmission_duration_ms = transmission_duration.as_millis(),
+                latency_ms = latency.as_millis(),
+                delivered = should_deliver,
                 "sending message",
             );
 
@@ -555,13 +620,9 @@ struct Peer<P: PublicKey> {
     // Control to register new channels
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
 
-    // Bandwidth configuration in bytes per second
-    egress_bps: usize,
-    ingress_bps: usize,
-
-    // When this peer can next send/receive
-    egress_available_at: SystemTime,
-    ingress_available_at: SystemTime,
+    // Bandwidth schedules for egress and ingress
+    egress: bandwidth::BandwidthSchedule,
+    ingress: bandwidth::BandwidthSchedule,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -689,14 +750,11 @@ impl<P: PublicKey> Peer<P> {
         });
 
         // Return peer
-        let now = context.current();
         Self {
             socket,
             control: control_sender,
-            egress_bps,
-            ingress_bps,
-            egress_available_at: now,
-            ingress_available_at: now,
+            egress: bandwidth::BandwidthSchedule::new(egress_bps),
+            ingress: bandwidth::BandwidthSchedule::new(ingress_bps),
         }
     }
 
@@ -719,8 +777,8 @@ impl<P: PublicKey> Peer<P> {
     /// (download) rates in bytes per second. Use `usize::MAX` for effectively
     /// unlimited bandwidth.
     fn set_bandwidth(&mut self, egress_bps: usize, ingress_bps: usize) {
-        self.egress_bps = egress_bps;
-        self.ingress_bps = ingress_bps;
+        self.egress.bandwidth_bps = egress_bps;
+        self.ingress.bandwidth_bps = ingress_bps;
     }
 }
 
