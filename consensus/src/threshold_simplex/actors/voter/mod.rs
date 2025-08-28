@@ -120,7 +120,11 @@ mod tests {
             let mut participants = BTreeMap::new();
             participants.insert(
                 0,
-                (polynomial.clone(), validators.clone(), shares[0].clone()),
+                (
+                    polynomial.clone(),
+                    validators.clone(),
+                    Some(shares[0].clone()),
+                ),
             );
             let supervisor_config = mocks::supervisor::Config::<_, MinSig> {
                 namespace: namespace.clone(),
@@ -430,7 +434,11 @@ mod tests {
             let mut participants = BTreeMap::new();
             participants.insert(
                 0,
-                (polynomial.clone(), validators.clone(), shares[0].clone()),
+                (
+                    polynomial.clone(),
+                    validators.clone(),
+                    Some(shares[0].clone()),
+                ),
             );
             let supervisor_config = mocks::supervisor::Config::<_, MinSig> {
                 namespace: namespace.clone(),

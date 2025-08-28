@@ -24,11 +24,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-type ViewInfo<P, V> = (Vec<V>, HashMap<P, u32>, Vec<P>, group::Share);
+// Fields: Polynomial, ShareIndexMap, Validators, MyShare
+type ViewInfo<P, V> = (Vec<V>, HashMap<P, u32>, Vec<P>, Option<group::Share>);
 
 pub struct Config<P: PublicKey, V: Variant> {
     pub namespace: Vec<u8>,
-    pub participants: BTreeMap<View, (poly::Public<V>, Vec<P>, group::Share)>,
+    #[allow(clippy::type_complexity)]
+    pub participants: BTreeMap<View, (poly::Public<V>, Vec<P>, Option<group::Share>)>,
 }
 
 type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
@@ -60,7 +62,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Supervisor<P, V, D> {
     pub fn new(cfg: Config<P, V>) -> Self {
         let mut identity = None;
         let mut parsed_participants = BTreeMap::new();
-        for (view, (polynomial, mut validators, share)) in cfg.participants.into_iter() {
+        for (view, (polynomial, mut validators, my_share)) in cfg.participants.into_iter() {
             let evaluations = evaluate_all::<V>(&polynomial, validators.len() as u32);
             let mut map = HashMap::new();
             for (index, validator) in validators.iter().enumerate() {
@@ -73,7 +75,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Supervisor<P, V, D> {
             } else if identity.as_ref().unwrap() != view_identity {
                 panic!("public keys do not match");
             }
-            parsed_participants.insert(view, (evaluations, map, validators, share));
+            parsed_participants.insert(view, (evaluations, map, validators, my_share));
         }
         Self {
             identity: identity.unwrap(),
@@ -169,7 +171,7 @@ impl<P: PublicKey, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
                 panic!("no participants in required range");
             }
         };
-        Some(closest)
+        closest.as_ref()
     }
 }
 
@@ -426,74 +428,5 @@ impl<P: PublicKey, V: Variant, D: Digest> Monitor for Supervisor<P, V, D> {
         self.subscribers.lock().unwrap().push(tx);
         let latest = *self.latest.lock().unwrap();
         (latest, rx)
-    }
-}
-
-/// Passive is a thin wrapper around Supervisor that disables signing by returning
-/// None for share(). This is useful for tests that need to run a non-active observer
-/// that still receives and verifies consensus certificates.
-#[derive(Clone)]
-pub struct Passive<P: PublicKey, V: Variant, D: Digest> {
-    pub inner: Supervisor<P, V, D>,
-}
-
-impl<P: PublicKey, V: Variant, D: Digest> Passive<P, V, D> {
-    pub fn new(inner: Supervisor<P, V, D>) -> Self {
-        Self { inner }
-    }
-}
-
-impl<P: PublicKey, V: Variant, D: Digest> Su for Passive<P, V, D> {
-    type Index = View;
-    type PublicKey = P;
-
-    fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
-        unimplemented!("only defined in supertrait")
-    }
-
-    fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {
-        self.inner.participants(index)
-    }
-
-    fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
-        self.inner.is_participant(index, candidate)
-    }
-}
-
-impl<P: PublicKey, V: Variant, D: Digest> TSu for Passive<P, V, D> {
-    type Seed = V::Signature;
-    type Identity = V::Public;
-    type Polynomial = Vec<V::Public>;
-    type Share = group::Share;
-
-    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
-        TSu::leader(&self.inner, index, seed)
-    }
-
-    fn identity(&self) -> &Self::Identity {
-        self.inner.identity()
-    }
-
-    fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial> {
-        self.inner.polynomial(index)
-    }
-
-    fn share(&self, _: Self::Index) -> Option<&Self::Share> {
-        None
-    }
-}
-
-impl<P: PublicKey, V: Variant, D: Digest> Reporter for Passive<P, V, D> {
-    type Activity = Activity<V, D>;
-
-    async fn report(&mut self, activity: Self::Activity) {
-        self.inner.report(activity).await
-    }
-}
-
-impl<P: PublicKey, V: Variant, D: Digest> Monitor for Passive<P, V, D> {
-    type Index = View;
-    async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
-        self.inner.subscribe().await
     }
 }

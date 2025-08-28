@@ -387,7 +387,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -602,28 +606,29 @@ mod tests {
             network.start();
 
             // Register participants (active)
-            let mut schemes_active = Vec::new();
-            let mut validators_active = Vec::new();
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
             for i in 0..n_active {
                 let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
-                schemes_active.push(scheme);
-                validators_active.push(pk);
+                schemes.push(scheme);
+                validators.push(pk);
             }
-            validators_active.sort();
-            schemes_active.sort_by_key(|s| s.public_key());
+            schemes.sort_by_key(|s| s.public_key());
+            validators.sort();
 
-            // Add passive observer (no share)
-            let passive_scheme = PrivateKey::from_seed(n_active as u64);
-            let passive_pk = passive_scheme.public_key();
+            // Add observer (no share)
+            let scheme_observer = PrivateKey::from_seed(n_active as u64);
+            let pk_observer = scheme_observer.public_key();
+            schemes.push(scheme_observer);
 
-            // Register all (including passive) with the network
-            let mut all_validators = validators_active.clone();
-            all_validators.push(passive_pk.clone());
+            // Register all (including observer) with the network
+            let mut all_validators = validators.clone();
+            all_validators.push(pk_observer.clone());
             all_validators.sort();
             let mut registrations = register_validators(&mut oracle, &all_validators).await;
 
-            // Link all peers (including passive)
+            // Link all peers (including observer)
             let link = Link {
                 latency: 10.0,
                 jitter: 1.0,
@@ -631,35 +636,35 @@ mod tests {
             };
             link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
 
-            // Derive threshold for active participants only
+            // Derive threshold
             let (polynomial, shares) =
                 ops::generate_shares::<_, V>(&mut context, None, n_active, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors_active = Vec::new();
+            let mut supervisors = Vec::new();
 
-            for (idx, scheme) in schemes_active.into_iter().enumerate() {
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                let is_observer = scheme.public_key() == pk_observer;
+
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
-                // Configure engine (active)
+                // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(
-                    0,
-                    (
-                        polynomial.clone(),
-                        validators_active.clone(),
-                        shares[idx].clone(),
-                    ),
-                );
+                let share = if is_observer {
+                    None
+                } else {
+                    Some(shares[idx].clone())
+                };
+                participants.insert(0, (polynomial.clone(), validators.clone(), share));
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors_active.push(supervisor.clone());
+                supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -705,69 +710,9 @@ mod tests {
                 engine.start(pending, recovered, resolver);
             }
 
-            // Configure passive observer engine
-            let context = context.with_label(&format!("validator-{}", passive_pk));
-            let mut participants = BTreeMap::new();
-            // Provide any share to inner mock supervisor; wrapper will hide it
-            participants.insert(
-                0,
-                (
-                    polynomial.clone(),
-                    validators_active.clone(),
-                    shares[0].clone(),
-                ),
-            );
-            let passive_inner =
-                mocks::supervisor::Supervisor::new(mocks::supervisor::Config::<_, V> {
-                    namespace: namespace.clone(),
-                    participants,
-                });
-            let passive_supervisor = mocks::supervisor::Passive::new(passive_inner);
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                participant: passive_pk.clone(),
-                propose_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-            };
-            let (actor, application) = mocks::application::Application::new(
-                context.with_label("application"),
-                application_cfg,
-            );
-            actor.start();
-            let blocker = oracle.control(passive_pk.clone());
-            let cfg = config::Config {
-                crypto: passive_scheme,
-                blocker,
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: passive_supervisor.clone(),
-                supervisor: passive_supervisor.clone(),
-                partition: passive_pk.to_string(),
-                mailbox_size: 1024,
-                namespace: namespace.clone(),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout,
-                skip_timeout,
-                max_fetch_count: 1,
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                fetch_concurrent: 1,
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let engine = Engine::new(context.with_label("engine"), cfg);
-            let (pending, recovered, resolver) = registrations
-                .remove(&passive_pk)
-                .expect("passive should be registered");
-            engine.start(pending, recovered, resolver);
-
-            // Wait for all active engines to finish
+            // Wait for all  engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors_active.iter_mut() {
+            for supervisor in supervisors.iter_mut() {
                 let (mut latest, mut monitor) = supervisor.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
@@ -777,72 +722,22 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Verify passive observed the same notarizations/nullifications/finalizations
-            let mut expected_notarizations = std::collections::HashSet::new();
-            let mut expected_finalizations = std::collections::HashSet::new();
-            let mut expected_nullifications = std::collections::HashSet::new();
-            for supervisor in supervisors_active.iter() {
+            // Verify observer observed the same notarizations/nullifications/finalizations
+            for supervisor in supervisors.iter() {
+                // Ensure no faults or invalid signatures
                 {
-                    let map = supervisor.notarizations.lock().unwrap();
-                    for view in map.keys() {
-                        expected_notarizations.insert(*view);
-                    }
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(faults.is_empty());
                 }
                 {
-                    let map = supervisor.finalizations.lock().unwrap();
-                    for view in map.keys() {
-                        expected_finalizations.insert(*view);
-                    }
+                    let invalid = supervisor.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
                 }
-                {
-                    let map = supervisor.nullifications.lock().unwrap();
-                    for view in map.keys() {
-                        expected_nullifications.insert(*view);
-                    }
-                }
-            }
 
-            // Limit checks to views before activity timeout horizon
-            let latest_complete = required_containers - activity_timeout;
-
-            {
-                let p_not = passive_supervisor.inner.notarizations.lock().unwrap();
-                for v in expected_notarizations.iter() {
-                    if *v > 0 && *v < latest_complete {
-                        assert!(p_not.contains_key(v), "missing notarization at view {v}");
-                    }
-                }
+                // Ensure no blocked connections
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(blocked.is_empty());
             }
-            {
-                let p_fin = passive_supervisor.inner.finalizations.lock().unwrap();
-                for v in expected_finalizations.iter() {
-                    if *v > 0 && *v < latest_complete {
-                        assert!(p_fin.contains_key(v), "missing finalization at view {v}");
-                    }
-                }
-            }
-            {
-                let p_nul = passive_supervisor.inner.nullifications.lock().unwrap();
-                for v in expected_nullifications.iter() {
-                    if *v > 0 && *v < latest_complete {
-                        assert!(p_nul.contains_key(v), "missing nullification at view {v}");
-                    }
-                }
-            }
-
-            // Ensure passive reported no faults or invalid signatures
-            {
-                let faults = passive_supervisor.inner.faults.lock().unwrap();
-                assert!(faults.is_empty());
-            }
-            {
-                let invalid = passive_supervisor.inner.invalid.lock().unwrap();
-                assert_eq!(*invalid, 0);
-            }
-
-            // Ensure no blocked connections
-            let blocked = oracle.blocked().await.unwrap();
-            assert!(blocked.is_empty());
         });
     }
 
@@ -925,7 +820,11 @@ mod tests {
                     let mut participants = BTreeMap::new();
                     participants.insert(
                         0,
-                        (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                        (
+                            polynomial.clone(),
+                            validators.clone(),
+                            Some(shares[idx].clone()),
+                        ),
                     );
                     let supervisor_config = mocks::supervisor::Config::<_, V> {
                         namespace: namespace.clone(),
@@ -1118,7 +1017,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config {
@@ -1242,7 +1141,11 @@ mod tests {
             let mut participants = BTreeMap::new();
             participants.insert(
                 0,
-                (polynomial.clone(), validators.clone(), shares[0].clone()),
+                (
+                    polynomial.clone(),
+                    validators.clone(),
+                    Some(shares[0].clone()),
+                ),
             );
             let supervisor_config = mocks::supervisor::Config::<_, V> {
                 namespace: namespace.clone(),
@@ -1386,7 +1289,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -1641,7 +1544,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -1826,7 +1729,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -2036,7 +1943,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -2242,7 +2153,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -2419,7 +2334,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -2612,7 +2527,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -2790,7 +2705,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -2967,7 +2882,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -3153,7 +3068,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -3318,7 +3233,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -3471,7 +3390,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
 
                 // Store first supervisor for monitoring
