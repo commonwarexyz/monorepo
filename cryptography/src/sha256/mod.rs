@@ -21,15 +21,17 @@
 //! ```
 
 use crate::Hasher;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, Array, Span};
-use rand::{CryptoRng, Rng};
-use sha2::{Digest as _, Sha256 as ISha256};
-use std::{
+use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
+use rand::{CryptoRng, Rng};
+use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
@@ -142,13 +144,13 @@ impl Deref for Digest {
 }
 
 impl Debug for Digest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.0))
     }
 }
 
 impl Display for Digest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.0))
     }
 }

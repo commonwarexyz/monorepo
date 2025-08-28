@@ -25,11 +25,11 @@ use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, Array, Span};
-use rand::{CryptoRng, Rng};
-use std::{
+use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
+use rand::{CryptoRng, Rng};
 use zeroize::Zeroize;
 
 /// Re-export [blake3::Hasher] as `CoreBlake3` for external use if needed.
@@ -46,7 +46,7 @@ pub fn hash(message: &[u8]) -> Digest {
 
 /// BLAKE3 hasher.
 #[cfg_attr(
-    feature = "parallel-blake3",
+    feature = "parallel",
     doc = "When the input message is larger than 128KiB, `rayon` is used to parallelize hashing."
 )]
 #[derive(Debug, Default)]
@@ -71,10 +71,10 @@ impl Hasher for Blake3 {
     }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
-        #[cfg(not(feature = "parallel-blake3"))]
+        #[cfg(not(feature = "parallel"))]
         self.hasher.update(message);
 
-        #[cfg(feature = "parallel-blake3")]
+        #[cfg(feature = "parallel")]
         {
             // 128 KiB
             const PARALLEL_THRESHOLD: usize = 2usize.pow(17);
@@ -161,13 +161,13 @@ impl Deref for Digest {
 }
 
 impl Debug for Digest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.0))
     }
 }
 
 impl Display for Digest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.0))
     }
 }

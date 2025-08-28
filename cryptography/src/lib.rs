@@ -9,10 +9,15 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
 
 use commonware_codec::{Encode, ReadExt};
 use commonware_utils::Array;
-use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand::{CryptoRng, Rng, RngCore, SeedableRng as _};
+use rand_chacha::ChaCha20Rng;
 
 pub mod bls12381;
 pub mod ed25519;
@@ -62,7 +67,7 @@ pub trait PrivateKeyExt: PrivateKey {
     /// This function is insecure and should only be used for examples
     /// and testing.
     fn from_seed(seed: u64) -> Self {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
         Self::from_rng(&mut rng)
     }
 
