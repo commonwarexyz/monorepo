@@ -762,11 +762,6 @@ impl<
         round.advance_deadline = None;
         round.nullify_retry = None;
 
-        // Return early if we are not a participant
-        if self.supervisor.share(self.view).is_none() {
-            return;
-        }
-
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
@@ -1336,7 +1331,7 @@ impl<
         round.broadcast_notarize = true;
 
         // Construct notarize
-        let share = self.supervisor.share(view)?;
+        let share = self.supervisor.share(view).unwrap();
         let proposal = round.proposal.as_ref().unwrap();
         Some(Notarize::sign(&self.namespace, share, proposal.clone()))
     }
@@ -1387,7 +1382,7 @@ impl<
             return None;
         }
         round.broadcast_finalize = true;
-        let share = self.supervisor.share(view)?;
+        let share = self.supervisor.share(view).unwrap();
         let Some(proposal) = &round.proposal else {
             return None;
         };
