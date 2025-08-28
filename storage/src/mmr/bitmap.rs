@@ -28,7 +28,7 @@ use commonware_utils::sequence::prefixed_u64::U64;
 use std::collections::{HashSet, VecDeque};
 use tracing::{debug, error, warn};
 
-/// A bitmap where each chunk is N bytes.
+/// A bitmap that stores data in chunks of N bytes.
 #[derive(Clone, Debug)]
 pub struct Bitmap<const N: usize> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
