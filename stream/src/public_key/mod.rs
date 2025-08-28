@@ -32,8 +32,8 @@
 //! - Message 2 is a `Hello` (with a continuation tag) and `Confirmation` message from the listener to the dialer
 //! - Message 3 is a `Confirmation` message from the dialer to the listener
 //!
-//! _The continuation tag binds the a response to a particular dialer's hello message, preventing
-//! exfiltration to a different session._
+//! _The continuation tag binds the listener's [handshake::Hello] response to a particular dialer's
+//! [handshake::Hello] message, preventing exfiltration to a different session._
 //!
 //! ## Encryption
 //!
