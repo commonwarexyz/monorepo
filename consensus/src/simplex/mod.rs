@@ -470,6 +470,240 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_passive_observer() {
+        // Create context
+        let n_active = 5;
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes_active = Vec::new();
+            let mut validators_active = Vec::new();
+            for i in 0..n_active {
+                let scheme = PrivateKey::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes_active.push(scheme);
+                validators_active.push(pk);
+            }
+            validators_active.sort();
+            schemes_active.sort_by_key(|s| s.public_key());
+
+            // Add passive observer not in participants
+            let passive_scheme = PrivateKey::from_seed(n_active as u64);
+            let passive_pk = passive_scheme.public_key();
+
+            // Register all (including passive) with the network
+            let mut all_validators = validators_active.clone();
+            all_validators.push(passive_pk.clone());
+            all_validators.sort();
+            let mut registrations = register_validators(&mut oracle, &all_validators).await;
+
+            // Link all peers (including passive)
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors_active = Vec::new();
+            let view_validators = BTreeMap::from_iter(vec![(0, validators_active.clone())]);
+            for scheme in schemes_active.into_iter() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Start engine (active)
+                let validator = scheme.public_key();
+                let supervisor_config = mocks::supervisor::Config {
+                    namespace: namespace.clone(),
+                    participants: view_validators.clone(),
+                };
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
+                supervisors_active.push(supervisor.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let cfg = config::Config {
+                    crypto: scheme,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    supervisor,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_participants: n_active as usize,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine.start(voter, resolver);
+            }
+
+            // Configure passive observer engine (not in participants)
+            let context = context.with_label(&format!("validator-{}", passive_pk));
+            let passive_view = BTreeMap::from_iter(vec![(0, validators_active.clone())]);
+            let supervisor_config = mocks::supervisor::Config {
+                namespace: namespace.clone(),
+                participants: passive_view,
+            };
+            let passive_supervisor =
+                mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                participant: passive_pk.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let (actor, application) = mocks::application::Application::new(
+                context.with_label("application"),
+                application_cfg,
+            );
+            actor.start();
+            let cfg = config::Config {
+                crypto: passive_scheme,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: passive_supervisor.clone(),
+                supervisor: passive_supervisor.clone(),
+                partition: passive_pk.to_string(),
+                mailbox_size: 1024,
+                namespace: namespace.clone(),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout,
+                skip_timeout,
+                max_participants: n_active as usize,
+                max_fetch_count: 1,
+                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                fetch_concurrent: 1,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let engine = Engine::new(context.with_label("engine"), cfg);
+            let (voter, resolver) = registrations
+                .remove(&passive_pk)
+                .expect("passive should be registered");
+            engine.start(voter, resolver);
+
+            // Wait for all active engines to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors_active.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Build expected sets from active supervisors
+            let mut exp_notarizations = std::collections::HashSet::new();
+            let mut exp_finalizations = std::collections::HashSet::new();
+            let mut exp_nullifications = std::collections::HashSet::new();
+            for sup in supervisors_active.iter() {
+                {
+                    let m = sup.notarizations.lock().unwrap();
+                    for view in m.keys() {
+                        exp_notarizations.insert(*view);
+                    }
+                }
+                {
+                    let m = sup.finalizations.lock().unwrap();
+                    for view in m.keys() {
+                        exp_finalizations.insert(*view);
+                    }
+                }
+                {
+                    let m = sup.nullifications.lock().unwrap();
+                    for view in m.keys() {
+                        exp_nullifications.insert(*view);
+                    }
+                }
+            }
+
+            let latest_complete = required_containers - activity_timeout;
+
+            // Check passive observed the same
+            {
+                let p = passive_supervisor.notarizations.lock().unwrap();
+                for v in exp_notarizations.iter() {
+                    if *v > 0 && *v < latest_complete {
+                        assert!(p.contains_key(v), "missing notarization at view {v}");
+                    }
+                }
+            }
+            {
+                let p = passive_supervisor.finalizations.lock().unwrap();
+                for v in exp_finalizations.iter() {
+                    if *v > 0 && *v < latest_complete {
+                        assert!(p.contains_key(v), "missing finalization at view {v}");
+                    }
+                }
+            }
+            {
+                let p = passive_supervisor.nullifications.lock().unwrap();
+                for v in exp_nullifications.iter() {
+                    if *v > 0 && *v < latest_complete {
+                        assert!(p.contains_key(v), "missing nullification at view {v}");
+                    }
+                }
+            }
+
+            // Ensure passive reported no faults
+            {
+                let faults = passive_supervisor.faults.lock().unwrap();
+                assert!(faults.is_empty());
+            }
+        });
+    }
+
+    #[test_traced]
     fn test_unclean_shutdown() {
         // Create context
         let n = 5;
