@@ -657,7 +657,7 @@ pub fn aggregate_verify_multiple_messages<'a, V, I>(
 where
     V: Variant,
     I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
-    I::IntoIter: Send,
+    I::IntoIter: Send + Sync,
 {
     #[cfg(not(feature = "std"))]
     let hm_sum = compute_hm_sum::<V, I>(messages);
