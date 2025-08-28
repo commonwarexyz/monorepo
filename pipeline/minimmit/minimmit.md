@@ -192,7 +192,7 @@ _After `M` messages, create and broadcast a `nullification(v)` certificate._
 
 _If you are in view `v` and have already broadcast `notarize(c, v)` for a `c` that cannot be finalized directly, broadcast `nullify(v)` to ensure some `proof(v)` will exist in view `v`._
 
-1. A replica  `r` with `r.view = v` and `r.notarized = b`, where `b != ⊥`, on observing messages from `≥ M` distinct replicas where each observed message is either `nullify(v)` or `notarize(b', v)` where `b' != b`:
+1. A replica `r` with `r.view = v` and `r.notarized = b`, where `b != ⊥`, on observing messages from `≥ M` distinct replicas where each observed message is either `nullify(v)` or `notarize(b', v)` where `b' != b`:
    1. Set `r.nullified = true`.
    1. Broadcast `nullify(v)`.
 
