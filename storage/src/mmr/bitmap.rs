@@ -479,6 +479,10 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     ///
     /// - Panics if there are unprocessed updates.
     pub fn prune_to_bit(&mut self, bit_offset: u64) {
+        let chunk_num = Bitmap::<N>::chunk_num(bit_offset);
+        if chunk_num < self.bitmap.pruned_chunks() {
+            return;
+        }
         assert!(!self.is_dirty(), "cannot prune with unprocessed updates");
 
         // Prune inner bitmap
@@ -488,7 +492,6 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
         self.authenticated_len = self.bitmap.len() - 1;
 
         // Update MMR
-        let chunk_num = Bitmap::<N>::chunk_num(bit_offset);
         let mmr_pos = leaf_num_to_pos(chunk_num as u64);
         self.mmr.prune_to_pos(mmr_pos);
     }
