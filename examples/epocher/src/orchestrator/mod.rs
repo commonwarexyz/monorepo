@@ -29,7 +29,7 @@ pub struct Config<
     pub application: A,
     pub marshal: marshal::Mailbox<MinSig, Block>,
     pub polynomial: poly::Public<MinSig>,
-    pub share: group::Share,
+    pub shares: Vec<group::Share>,
 
     pub namespace: Vec<u8>,
     pub validators: Vec<C::PublicKey>,
