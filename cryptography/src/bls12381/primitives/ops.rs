@@ -661,7 +661,7 @@ where
 /// and sum hashed messages together before performing a single pairing operation (instead of summing `len(messages)` pairings of
 /// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
 /// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
-#[cfg(feature = "std")]
+#[allow(unused_variables)] // for no_std which ignores concurrency
 pub fn aggregate_verify_multiple_messages<'a, V, I>(
     public: &V::Public,
     messages: I,
@@ -670,11 +670,13 @@ pub fn aggregate_verify_multiple_messages<'a, V, I>(
 ) -> Result<(), Error>
 where
     V: Variant,
-    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>
-        + IntoParallelIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>
-        + Send
-        + Sync,
+    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
+    I::IntoIter: Send,
 {
+    #[cfg(not(feature = "std"))]
+    let hm_sum = compute_hm_sum::<V, I>(messages);
+
+    #[cfg(feature = "std")]
     let hm_sum = if concurrency == 1 {
         compute_hm_sum::<V, I>(messages)
     } else {
@@ -685,7 +687,8 @@ where
 
         pool.install(move || {
             messages
-                .into_par_iter()
+                .into_iter()
+                .par_bridge()
                 .map(|(namespace, msg)| match namespace {
                     Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
                     None => hash_message::<V>(V::MESSAGE, msg),
@@ -697,19 +700,6 @@ where
         })
     };
 
-    V::verify(public, &hm_sum, signature)
-}
-#[cfg(not(feature = "std"))]
-pub fn aggregate_verify_multiple_messages<'a, V, I>(
-    public: &V::Public,
-    messages: I,
-    signature: &V::Signature,
-) -> Result<(), Error>
-where
-    V: Variant,
-    I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])> + Send + Sync,
-{
-    let hm_sum = compute_hm_sum::<V, I>(messages);
     V::verify(public, &hm_sum, signature)
 }
 
