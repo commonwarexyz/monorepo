@@ -664,10 +664,9 @@ mod tests {
             // Spawn a mock peer that responds with a listener response from wrong peer
             context.with_label("mock_peer").spawn({
                 move |mut context| async move {
-                    use chacha20poly1305::KeyInit;
-
                     // Read the hello from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
+                    let _ = handshake::Hello::<PublicKey>::decode(msg.clone()).unwrap();
 
                     // Create mock shared secret and cipher for `confirmation`
                     let mock_secret = [1u8; 32];
@@ -682,8 +681,6 @@ mod tests {
                         timestamp,
                         &msg,
                     );
-
-                    let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
 
                     let hello =
                         handshake::Hello::sign(&mut actual_peer, &peer_config.namespace, info);
@@ -741,10 +738,9 @@ mod tests {
                 let namespace = dialer_config.namespace.clone();
                 let recipient_pk = dialer_config.crypto.public_key();
                 move |context| async move {
-                    use chacha20poly1305::KeyInit;
-
                     // Read the hello from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
+                    let _ = handshake::Hello::<PublicKey>::decode(msg.clone()).unwrap();
 
                     // Create a custom hello info bytes with zero ephemeral key
                     let timestamp = context.current().epoch_millis();
@@ -754,7 +750,6 @@ mod tests {
                         timestamp,
                         &msg,
                     );
-                    let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
 
                     // Create mock cipher for `confirmation`
                     let mock_secret = [1u8; 32];
