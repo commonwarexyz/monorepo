@@ -1,10 +1,6 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_cryptography::{
-    hash,
-    sha256::{Digest, Sha256},
-    Committable, Digestible, Hasher,
-};
+use commonware_cryptography::{sha256::Digest, Committable, Digestible, Hasher, Sha256};
 
 /// A mock request for testing
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -37,7 +33,7 @@ impl Committable for Request {
     type Commitment = Digest;
 
     fn commitment(&self) -> Self::Commitment {
-        hash(&self.id.to_be_bytes())
+        Sha256::hash(&self.id.to_be_bytes())
     }
 }
 
@@ -83,7 +79,7 @@ impl FixedSize for Response {
 impl Committable for Response {
     type Commitment = Digest;
     fn commitment(&self) -> Self::Commitment {
-        hash(&self.id.to_be_bytes())
+        Sha256::hash(&self.id.to_be_bytes())
     }
 }
 

@@ -802,7 +802,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 mod tests {
     use super::*;
     use bytes::BufMut;
-    use commonware_cryptography::hash;
+    use commonware_cryptography::{Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
     use commonware_utils::{NZUsize, StableBuf};
@@ -1995,7 +1995,7 @@ mod tests {
                 .read_at(vec![0u8; size as usize], 0)
                 .await
                 .expect("Failed to read blob");
-            let digest = hash(buf.as_ref());
+            let digest = Sha256::hash(buf.as_ref());
             assert_eq!(
                 hex(&digest),
                 "ca3845fa7fabd4d2855ab72ed21226d1d6eb30cb895ea9ec5e5a14201f3f25d8",

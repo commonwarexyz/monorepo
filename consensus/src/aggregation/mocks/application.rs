@@ -1,5 +1,5 @@
 use crate::{aggregation::types::Index, Automaton as A};
-use commonware_cryptography::{hash, sha256, Hasher, Sha256};
+use commonware_cryptography::{Hasher, Sha256};
 use futures::channel::oneshot;
 use tracing::trace;
 
@@ -22,7 +22,7 @@ impl Application {
 
 impl A for Application {
     type Context = Index;
-    type Digest = sha256::Digest;
+    type Digest = <Sha256 as Hasher>::Digest;
 
     async fn genesis(&mut self) -> Self::Digest {
         let mut hasher = Sha256::default();
@@ -36,11 +36,11 @@ impl A for Application {
         let digest = match self.strategy {
             Strategy::Correct => {
                 let payload = format!("data for index {context}");
-                hash(payload.as_bytes())
+                Sha256::hash(payload.as_bytes())
             }
             Strategy::Incorrect => {
                 let conflicting_payload = format!("conflicting_data for index {context}");
-                hash(conflicting_payload.as_bytes())
+                Sha256::hash(conflicting_payload.as_bytes())
             }
         };
 

@@ -70,7 +70,7 @@ impl Hasher for Blake3 {
         }
     }
 
-    fn update(&mut self, message: &[u8]) {
+    fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "parallel-blake3"))]
         self.hasher.update(message);
 
@@ -86,6 +86,8 @@ impl Hasher for Blake3 {
                 self.hasher.update(message);
             }
         }
+
+        self
     }
 
     fn finalize(&mut self) -> Self::Digest {
@@ -95,8 +97,9 @@ impl Hasher for Blake3 {
         Self::Digest::from(array)
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self) -> &mut Self {
         self.hasher = CoreBlake3::new();
+        self
     }
 
     fn empty() -> Self::Digest {

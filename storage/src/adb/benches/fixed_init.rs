@@ -1,4 +1,4 @@
-use commonware_cryptography::{hash, Hasher, Sha256};
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::PoolRef,
@@ -68,19 +68,19 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
         // Insert a random value for every possible element into the db.
         let mut rng = StdRng::seed_from_u64(42);
         for i in 0u64..num_elements {
-            let k = hash(&i.to_be_bytes());
-            let v = hash(&rng.next_u32().to_be_bytes());
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
             db.update(k, v).await.unwrap();
         }
 
         // Randomly update / delete them.
         for _ in 0u64..num_operations {
-            let rand_key = hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
             if rng.next_u32() % DELETE_FREQUENCY == 0 {
                 db.delete(rand_key).await.unwrap();
                 continue;
             }
-            let v = hash(&rng.next_u32().to_be_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
             db.update(rand_key, v).await.unwrap();
             if rng.next_u32() % COMMIT_FREQUENCY == 0 {
                 db.commit().await.unwrap();

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{hash, sha256::Sha256};
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_storage::bmt::{Builder, Proof, RangeProof};
 use libfuzzer_sys::fuzz_target;
 
@@ -85,7 +85,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::AddLeaf { value } => {
                 if let Some(ref mut b) = builder {
-                    let digest = hash(&value.to_be_bytes());
+                    let digest = Sha256::hash(&value.to_be_bytes());
                     b.add(&digest);
                     leaf_values.push(*value);
                 }
@@ -117,7 +117,7 @@ fn fuzz(input: FuzzInput) {
             } => {
                 if let (Some(ref p), Some(ref t)) = (&proof, &tree) {
                     let mut hasher = Sha256::default();
-                    let leaf_digest = hash(&leaf_value.to_be_bytes());
+                    let leaf_digest = Sha256::hash(&leaf_value.to_be_bytes());
                     let root = t.root();
                     let _ = p.verify(&mut hasher, &leaf_digest, *position, &root);
                 }
@@ -145,7 +145,7 @@ fn fuzz(input: FuzzInput) {
                 leaf_values.clear();
 
                 for i in 0..count {
-                    let digest = hash(&(i as u64).to_be_bytes());
+                    let digest = Sha256::hash(&(i as u64).to_be_bytes());
                     b.add(&digest);
                     leaf_values.push(i as u64);
                 }
@@ -168,8 +168,10 @@ fn fuzz(input: FuzzInput) {
                 if let (Some(ref rp), Some(ref t)) = (&range_proof, &tree) {
                     // Convert leaf values to digests
                     let mut hasher = Sha256::default();
-                    let leaf_digests: Vec<_> =
-                        leaf_values.iter().map(|v| hash(&v.to_be_bytes())).collect();
+                    let leaf_digests: Vec<_> = leaf_values
+                        .iter()
+                        .map(|v| Sha256::hash(&v.to_be_bytes()))
+                        .collect();
 
                     // Verify range proof
                     let root = t.root();
@@ -226,7 +228,7 @@ fn fuzz(input: FuzzInput) {
                             let leaf_digests: Vec<_> = leaf_values
                                 [start_idx..start_idx + actual_count]
                                 .iter()
-                                .map(|v| hash(&v.to_be_bytes()))
+                                .map(|v| Sha256::hash(&v.to_be_bytes()))
                                 .collect();
 
                             // Verify with wrong position (verify_start instead of proof_start)
@@ -246,7 +248,7 @@ fn fuzz(input: FuzzInput) {
                     let mut hasher = Sha256::default();
                     let tampered_digests: Vec<_> = tampered_values
                         .iter()
-                        .map(|v| hash(&v.to_be_bytes()))
+                        .map(|v| Sha256::hash(&v.to_be_bytes()))
                         .collect();
 
                     // Verify with tampered digests

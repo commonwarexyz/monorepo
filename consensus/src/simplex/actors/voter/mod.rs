@@ -51,7 +51,7 @@ mod tests {
         Viewable,
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{ed25519, hash, PrivateKeyExt as _, Sha256};
+    use commonware_cryptography::{ed25519, Hasher as _, PrivateKeyExt as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
@@ -189,7 +189,7 @@ mod tests {
             actor.start(backfiller, voter_sender, voter_receiver);
 
             // Send finalization over network (view 100)
-            let payload = hash(b"test");
+            let payload = Sha256::hash(b"test");
             let proposal = Proposal::new(100, 50, payload);
             let mut signatures = Vec::new();
             for i in 0..threshold {
@@ -217,7 +217,7 @@ mod tests {
             }
 
             // Send old notarization from backfiller that should be ignored (view 50)
-            let payload = hash(b"test2");
+            let payload = Sha256::hash(b"test2");
             let proposal = Proposal::new(50, 49, payload);
             let mut signatures = Vec::new();
             for i in 0..threshold {
@@ -229,7 +229,7 @@ mod tests {
             mailbox.notarization(notarization).await;
 
             // Send new finalization (view 300)
-            let payload = hash(b"test3");
+            let payload = Sha256::hash(b"test3");
             let proposal = Proposal::new(300, 100, payload);
             let mut signatures = Vec::new();
             for i in 0..threshold {
@@ -392,7 +392,7 @@ mod tests {
             let journal_floor_target: View = lf_target - activity_timeout + 5;
 
             // Send finalization over network (view 100)
-            let proposal = Proposal::new(lf_target, lf_target - 1, hash(b"test"));
+            let proposal = Proposal::new(lf_target, lf_target - 1, Sha256::hash(b"test"));
             let mut signatures = Vec::new();
             for i in 0..threshold {
                 let finalization = Finalize::sign(
@@ -426,7 +426,7 @@ mod tests {
             let proposal = Proposal::new(
                 journal_floor_target,
                 journal_floor_target - 1,
-                hash(b"test2"),
+                Sha256::hash(b"test2"),
             );
             let mut signatures = Vec::new();
             for i in 0..threshold {
@@ -462,7 +462,11 @@ mod tests {
             // problematic_view (42) < journal_floor_target (45)
             // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
             let problematic_view: View = journal_floor_target - 3;
-            let proposal = Proposal::new(problematic_view, problematic_view - 1, hash(b"test3"));
+            let proposal = Proposal::new(
+                problematic_view,
+                problematic_view - 1,
+                Sha256::hash(b"test3"),
+            );
             let mut signatures = Vec::new();
             for i in 0..threshold {
                 let notarize = Notarize::sign(
@@ -493,7 +497,7 @@ mod tests {
             }
 
             // Send finalization over network (view 100)
-            let proposal = Proposal::new(100, 99, hash(b"test"));
+            let proposal = Proposal::new(100, 99, Sha256::hash(b"test"));
             let mut signatures = Vec::new();
             for i in 0..threshold {
                 let finalization = Finalize::sign(
