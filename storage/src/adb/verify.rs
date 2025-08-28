@@ -62,10 +62,10 @@ pub fn digests_required_for_proof<D: Digest>(size: u64, start_loc: u64, end_loc:
     Proof::<D>::nodes_required_for_range_proof(size, start_pos, end_pos)
 }
 
-/// Construct a [Proof] from a size and a list of digests.
+/// Create a [Proof] from a size and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
-pub fn construct_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
+pub fn create_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
     let size = leaf_num_to_pos(size);
     Proof::<D> { size, digests }
 }
@@ -103,8 +103,8 @@ pub fn create_proof_store_from_digests<D: Digest>(
     ProofStore::new_from_digests(proof.size, digests)
 }
 
-/// Generate a Multi-Proof for specific operations (identified by location) from a [ProofStore].
-pub async fn generate_multi_proof<D: Digest>(
+/// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
+pub async fn create_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
     locations: &[u64],
 ) -> Result<Proof<D>, crate::mmr::Error> {
@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_construct_proof() {
+    fn test_create_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
@@ -359,7 +359,7 @@ mod tests {
             }
 
             // Construct proof
-            let proof = construct_proof(size, digests.clone());
+            let proof = create_proof(size, digests.clone());
             assert_eq!(proof.size, leaf_num_to_pos(size));
             assert_eq!(proof.digests.len(), digests.len());
 
@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_generate_multi_proof() {
+    fn test_create_multi_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
@@ -510,7 +510,7 @@ mod tests {
 
             // Generate multi-proof for specific locations
             let target_locations = vec![2, 5, 10, 15, 18];
-            let multi_proof = generate_multi_proof(&proof_store, &target_locations)
+            let multi_proof = create_multi_proof(&proof_store, &target_locations)
                 .await
                 .unwrap();
 
@@ -641,7 +641,7 @@ mod tests {
                 create_proof_store(&mut hasher, &proof, 0, &operations, &root).unwrap();
 
             // Generate multi-proof for single element
-            let multi_proof = generate_multi_proof(&proof_store, &[1]).await.unwrap();
+            let multi_proof = create_multi_proof(&proof_store, &[1]).await.unwrap();
 
             // Verify single element
             assert!(verify_multi_proof(
