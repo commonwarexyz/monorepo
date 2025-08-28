@@ -8,19 +8,19 @@ use std::{
 ///
 /// This struct manages bandwidth allocations over time using a delta-based approach.
 /// Each entry in the schedule represents a change in bandwidth usage at a specific time.
-pub(super) struct BandwidthSchedule {
+pub(super) struct Schedule {
     /// Map of time -> bandwidth delta. Positive deltas increase usage, negative decrease.
     pub(super) schedule: BTreeMap<SystemTime, isize>,
     /// Maximum bandwidth capacity in bytes per second. usize::MAX represents unlimited.
-    pub(super) bandwidth_bps: usize,
+    pub(super) bps: usize,
 }
 
-impl BandwidthSchedule {
+impl Schedule {
     /// Creates a new bandwidth schedule with the specified capacity.
-    pub(super) fn new(bandwidth_bps: usize) -> Self {
+    pub(super) fn new(bps: usize) -> Self {
         Self {
             schedule: BTreeMap::new(),
-            bandwidth_bps,
+            bps,
         }
     }
 
@@ -40,10 +40,10 @@ impl BandwidthSchedule {
     /// Returns the amount of bandwidth that can be used for new transfers,
     /// accounting for the bandwidth already in use.
     pub(super) fn available_bandwidth(&self, used: isize) -> usize {
-        if self.bandwidth_bps == usize::MAX {
+        if self.bps == usize::MAX {
             usize::MAX
         } else {
-            (self.bandwidth_bps as isize - used).max(0) as usize
+            (self.bps as isize - used).max(0) as usize
         }
     }
 
@@ -136,8 +136,18 @@ impl<'a> MergedScheduleIterator<'a> {
     }
 }
 
+/// Represents a point in time where bandwidth allocation changes.
+///
+/// Used by `MergedScheduleIterator` to chronologically process bandwidth changes
+/// from merged sender/receiver schedules when calculating transfer reservations.
+struct Event {
+    time: SystemTime,
+    sender_delta: isize,
+    receiver_delta: isize,
+}
+
 impl<'a> Iterator for MergedScheduleIterator<'a> {
-    type Item = (SystemTime, isize, isize); // (event_time, sender_delta, receiver_delta)
+    type Item = Event;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next_time = self.peek_time()?;
@@ -145,7 +155,11 @@ impl<'a> Iterator for MergedScheduleIterator<'a> {
         let sender_delta = Self::consume_deltas(&mut self.sender, next_time);
         let receiver_delta = Self::consume_deltas(&mut self.receiver, next_time);
 
-        Some((next_time, sender_delta, receiver_delta))
+        Some(Event {
+            time: next_time,
+            sender_delta,
+            receiver_delta,
+        })
     }
 }
 
@@ -153,41 +167,42 @@ impl<'a> Iterator for MergedScheduleIterator<'a> {
 ///
 /// # Parameters
 /// - `remaining_data`: Bytes still to transfer
-/// - `bandwidth_bps`: Available bandwidth in bytes per second
+/// - `bps`: Available bandwidth in bytes per second
 /// - `window_duration`: Time until next bandwidth change (`None` if no future events)
 ///
-/// Returns a tuple `(bytes_transferred, time_taken)`.
+/// Returns a tuple `(bytes_transferred, time_taken)`, `None` if no transfer can occur
+/// (if bandwidth is 0).
 fn calculate_window_transfer(
     remaining_data: f64,
-    bandwidth_bps: usize,
+    bps: usize,
     window_duration: Option<Duration>,
-) -> (f64, Duration) {
-    if bandwidth_bps == usize::MAX {
+) -> Option<(f64, Duration)> {
+    if bps == usize::MAX {
         // Unlimited bandwidth: transfer is instantaneous
-        return (remaining_data, Duration::ZERO);
+        return Some((remaining_data, Duration::ZERO));
     }
 
-    if bandwidth_bps == 0 {
+    if bps == 0 {
         // No bandwidth: no transfer can occur
-        return (0.0, window_duration.unwrap_or(Duration::ZERO));
+        return None;
     }
 
-    let time_needed = Duration::from_secs_f64(remaining_data / bandwidth_bps as f64);
+    let time_needed = Duration::from_secs_f64(remaining_data / bps as f64);
 
     match window_duration {
         Some(duration) => {
             if time_needed <= duration {
                 // Entire transfer fits within the window
-                (remaining_data, time_needed)
+                Some((remaining_data, time_needed))
             } else {
                 // Window will be completely filled
-                let amount = bandwidth_bps as f64 * duration.as_secs_f64();
-                (amount, duration)
+                let amount = bps as f64 * duration.as_secs_f64();
+                Some((amount, duration))
             }
         }
         None => {
             // No upcoming events, transfer takes exactly the time needed
-            (remaining_data, time_needed)
+            Some((remaining_data, time_needed))
         }
     }
 }
@@ -205,8 +220,8 @@ fn calculate_window_transfer(
 pub(super) fn calculate_reservations(
     data_size: usize,
     now: SystemTime,
-    sender: (&BandwidthSchedule, isize),
-    receiver: Option<(&BandwidthSchedule, isize)>,
+    sender: (&Schedule, isize),
+    receiver: Option<(&Schedule, isize)>,
 ) -> (Vec<Reservation>, SystemTime) {
     if data_size == 0 {
         return (Vec::new(), now);
@@ -243,9 +258,9 @@ pub(super) fn calculate_reservations(
             .and_then(|t| t.duration_since(current_time).ok());
 
         // Calculate transfer and create reservation if progress can be made
-        let (amount, duration) = calculate_window_transfer(remaining_data, bandwidth, window);
-
-        if amount > 0.0 {
+        if let Some((amount, duration)) =
+            calculate_window_transfer(remaining_data, bandwidth, window)
+        {
             let end_time = current_time + duration;
 
             reservations.push(Reservation {
@@ -263,7 +278,12 @@ pub(super) fn calculate_reservations(
         }
 
         // Advance to the next state
-        if let Some((event_time, sender_delta, receiver_delta)) = events.next() {
+        if let Some(Event {
+            time: event_time,
+            sender_delta,
+            receiver_delta,
+        }) = events.next()
+        {
             // Move time forward to the next event
             current_time = event_time;
             sender_used_bandwidth += sender_delta;
@@ -288,22 +308,21 @@ mod tests {
     fn test_calculate_window_transfer() {
         // Unlimited bandwidth
         let (amount, duration) =
-            calculate_window_transfer(1000.0, usize::MAX, Some(Duration::from_secs(10)));
+            calculate_window_transfer(1000.0, usize::MAX, Some(Duration::from_secs(10))).unwrap();
         assert_eq!(amount, 1000.0);
         assert_eq!(duration, Duration::ZERO);
 
         // Zero bandwidth
         let window = Duration::from_secs(5);
-        let (amount, duration) = calculate_window_transfer(1000.0, 0, Some(window));
-        assert_eq!(amount, 0.0);
-        assert_eq!(duration, window);
+        assert!(calculate_window_transfer(1000.0, 0, Some(window)).is_none());
 
         // Transfer fits within the window
         let (amount, duration) = calculate_window_transfer(
             1000.0,
             1000,                         // 1000 B/s
             Some(Duration::from_secs(2)), // 2 second window
-        );
+        )
+        .unwrap();
         assert_eq!(amount, 1000.0);
         assert_eq!(duration, Duration::from_secs(1)); // 1000 bytes at 1000 B/s = 1s
 
@@ -312,7 +331,8 @@ mod tests {
             2000.0,
             1000,                         // 1000 B/s
             Some(Duration::from_secs(1)), // 1 second window
-        );
+        )
+        .unwrap();
         assert_eq!(amount, 1000.0); // Can only transfer 1000 bytes in 1s at 1000 B/s
         assert_eq!(duration, Duration::from_secs(1));
 
@@ -320,7 +340,8 @@ mod tests {
         let (amount, duration) = calculate_window_transfer(
             5000.0, 1000, // 1000 B/s
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(amount, 5000.0);
         assert_eq!(duration, Duration::from_secs(5)); // 5000 bytes at 1000 B/s = 5s
     }
@@ -330,7 +351,7 @@ mod tests {
         let now = UNIX_EPOCH;
 
         // Unlimited bandwidth on both ends
-        let sender_schedule = BandwidthSchedule::new(usize::MAX);
+        let sender_schedule = Schedule::new(usize::MAX);
         let (reservations, completion) = calculate_reservations(
             1000,
             now,
@@ -344,7 +365,7 @@ mod tests {
         assert_eq!(completion, now);
 
         // Limited by sender bandwidth (1000 B/s, 1000 bytes = 1s)
-        let sender_schedule = BandwidthSchedule::new(1000);
+        let sender_schedule = Schedule::new(1000);
         let (reservations, completion) =
             calculate_reservations(1000, now, (&sender_schedule, 0), None);
         assert_eq!(reservations.len(), 1);
@@ -354,8 +375,8 @@ mod tests {
         assert_eq!(completion, now + Duration::from_secs(1));
 
         // Limited by receiver bandwidth
-        let sender_schedule = BandwidthSchedule::new(usize::MAX);
-        let receiver_schedule = BandwidthSchedule::new(500); // 500 B/s
+        let sender_schedule = Schedule::new(usize::MAX);
+        let receiver_schedule = Schedule::new(500); // 500 B/s
         let (reservations, completion) = calculate_reservations(
             1000,
             now,
@@ -369,8 +390,8 @@ mod tests {
         assert_eq!(completion, now + Duration::from_secs(2));
 
         // Limited by minimum of sender and receiver bandwidth
-        let sender_schedule = BandwidthSchedule::new(2000);
-        let receiver_schedule = BandwidthSchedule::new(1000); // Receiver is bottleneck
+        let sender_schedule = Schedule::new(2000);
+        let receiver_schedule = Schedule::new(1000); // Receiver is bottleneck
         let (reservations, completion) = calculate_reservations(
             3000,
             now,
@@ -390,7 +411,7 @@ mod tests {
 
         // Partial capacity available
         // Create a sender schedule with existing traffic: 500 B/s used from t=1s to t=2s
-        let mut sender_schedule = BandwidthSchedule::new(1000); // 1000 B/s total capacity
+        let mut sender_schedule = Schedule::new(1000); // 1000 B/s total capacity
         sender_schedule
             .schedule
             .insert(now + Duration::from_secs(1), 500); // Start using 500 B/s at t=1s
@@ -426,7 +447,7 @@ mod tests {
         assert_eq!(completion, now + Duration::from_millis(2500));
 
         // No capacity available initially (should return empty)
-        let mut full_schedule = BandwidthSchedule::new(1000);
+        let mut full_schedule = Schedule::new(1000);
         full_schedule.schedule.insert(now, 1000); // Use full capacity from t=0
         full_schedule
             .schedule
@@ -450,7 +471,7 @@ mod tests {
         let now = UNIX_EPOCH;
 
         // Create a simple staggered scenario with bandwidth that becomes available
-        let sender_schedule = BandwidthSchedule::new(1000); // 1000 B/s total
+        let sender_schedule = Schedule::new(1000); // 1000 B/s total
 
         // No existing traffic, just test a simple transfer
         let (reservations, completion) = calculate_reservations(
@@ -470,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_bandwidth_schedule_operations() {
-        let mut schedule = BandwidthSchedule::new(1000);
+        let mut schedule = Schedule::new(1000);
         let now = UNIX_EPOCH;
 
         // Test prune_and_get_usage with no past events
@@ -525,27 +546,52 @@ mod tests {
         let mut iter = MergedScheduleIterator::new(&sender_schedule, &receiver_schedule);
 
         // Should get events in chronological order
-        let (t1, s1, r1) = iter.next().unwrap();
+        let Event {
+            time: t1,
+            sender_delta: s1,
+            receiver_delta: r1,
+        } = iter.next().unwrap();
+
         assert_eq!(t1, now + Duration::from_secs(1));
         assert_eq!(s1, 100);
         assert_eq!(r1, 0);
 
-        let (t2, s2, r2) = iter.next().unwrap();
+        let Event {
+            time: t2,
+            sender_delta: s2,
+            receiver_delta: r2,
+        } = iter.next().unwrap();
+
         assert_eq!(t2, now + Duration::from_secs(2));
         assert_eq!(s2, 0);
         assert_eq!(r2, 50);
 
-        let (t3, s3, r3) = iter.next().unwrap();
+        let Event {
+            time: t3,
+            sender_delta: s3,
+            receiver_delta: r3,
+        } = iter.next().unwrap();
+
         assert_eq!(t3, now + Duration::from_secs(3));
         assert_eq!(s3, -100); // Both have events at t=3
         assert_eq!(r3, -50);
 
-        let (t4, s4, r4) = iter.next().unwrap();
+        let Event {
+            time: t4,
+            sender_delta: s4,
+            receiver_delta: r4,
+        } = iter.next().unwrap();
+
         assert_eq!(t4, now + Duration::from_secs(4));
         assert_eq!(s4, 0);
         assert_eq!(r4, 150);
 
-        let (t5, s5, r5) = iter.next().unwrap();
+        let Event {
+            time: t5,
+            sender_delta: s5,
+            receiver_delta: r5,
+        } = iter.next().unwrap();
+
         assert_eq!(t5, now + Duration::from_secs(5));
         assert_eq!(s5, 200);
         assert_eq!(r5, 0);

@@ -1140,7 +1140,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
-                context.clone(),
+                context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                 },

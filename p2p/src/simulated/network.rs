@@ -373,8 +373,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let sender_peer = self.peers.get(&origin).expect("sender must exist");
                 let receiver_peer = self.peers.get(&recipient).expect("receiver must exist");
 
-                let sender_has_bandwidth = sender_peer.egress.bandwidth_bps > 0;
-                let receiver_has_bandwidth = receiver_peer.ingress.bandwidth_bps > 0;
+                let sender_has_bandwidth = sender_peer.egress.bps > 0;
+                let receiver_has_bandwidth = receiver_peer.ingress.bps > 0;
 
                 let should_deliver = self.context.gen_bool(link.success_rate);
 
@@ -620,8 +620,8 @@ struct Peer<P: PublicKey> {
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
 
     // Bandwidth schedules for egress and ingress
-    egress: bandwidth::BandwidthSchedule,
-    ingress: bandwidth::BandwidthSchedule,
+    egress: bandwidth::Schedule,
+    ingress: bandwidth::Schedule,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -752,8 +752,8 @@ impl<P: PublicKey> Peer<P> {
         Self {
             socket,
             control: control_sender,
-            egress: bandwidth::BandwidthSchedule::new(egress_bps),
-            ingress: bandwidth::BandwidthSchedule::new(ingress_bps),
+            egress: bandwidth::Schedule::new(egress_bps),
+            ingress: bandwidth::Schedule::new(ingress_bps),
         }
     }
 
@@ -776,8 +776,8 @@ impl<P: PublicKey> Peer<P> {
     /// (download) rates in bytes per second. Use `usize::MAX` for effectively
     /// unlimited bandwidth.
     fn set_bandwidth(&mut self, egress_bps: usize, ingress_bps: usize) {
-        self.egress.bandwidth_bps = egress_bps;
-        self.ingress.bandwidth_bps = ingress_bps;
+        self.egress.bps = egress_bps;
+        self.ingress.bps = ingress_bps;
     }
 }
 
