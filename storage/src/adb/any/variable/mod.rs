@@ -330,6 +330,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     continue;
                 }
 
+                // Track the position and offset after the last commit.
+                if after_last_commit.is_none() {
+                    after_last_commit = Some((current_index, offset));
+                }
+
                 if current_index >= mmr_leaves {
                     // Add operations that are missing from the MMR/location map.
                     debug!(
@@ -339,11 +344,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     self.mmr.add(&mut self.hasher, &op.encode()).await?;
                     self.locations.append(offset.into()).await?;
                     mmr_leaves += 1;
-                }
-
-                // Track the position and offset after the last commit.
-                if after_last_commit.is_none() {
-                    after_last_commit = Some((current_index, offset));
                 }
 
                 match op {
@@ -687,12 +687,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         self.sync().await?;
 
+        debug!(log_size = self.log_size, "commit complete");
+
         // TODO: Make the frequency with which we prune known inactive items configurable in case
         // this turns out to be a significant part of commit overhead, or the user wants to ensure
         // the log is backed up externally before discarding.
         self.prune_inactive().await?;
 
-        debug!(log_size = self.log_size, "commit complete");
+        debug!(
+            oldest_retained_loc = self.oldest_retained_loc,
+            "prune complete"
+        );
+
         Ok(())
     }
 
