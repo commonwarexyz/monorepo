@@ -1,9 +1,12 @@
 use super::{
     actors::{resolver, voter},
     config::Config,
-    types::{Activity, Context, View},
+    types::{Activity, Context},
 };
-use crate::{Automaton, Relay, Reporter, Supervisor};
+use crate::{
+    types::{Epoch, View},
+    Automaton, Relay, Reporter, Supervisor,
+};
 use commonware_cryptography::{Digest, Signer};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -17,7 +20,7 @@ pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Signer,
     D: Digest,
-    A: Automaton<Context = Context<D>, Digest = D>,
+    A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
@@ -34,7 +37,7 @@ impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Signer,
         D: Digest,
-        A: Automaton<Context = Context<D>, Digest = D>,
+        A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
@@ -57,6 +60,7 @@ impl<
                 supervisor: cfg.supervisor.clone(),
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
+                epoch: cfg.epoch,
                 namespace: cfg.namespace.clone(),
                 max_participants: cfg.max_participants,
                 leader_timeout: cfg.leader_timeout,

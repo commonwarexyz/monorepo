@@ -1,4 +1,4 @@
-use crate::Block;
+use crate::{types::Round, Block};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_resolver::{p2p::Producer, Consumer};
@@ -105,7 +105,7 @@ impl<B: Block> Producer for Handler<B> {
 pub enum Request<B: Block> {
     Block(B::Commitment),
     Finalized { height: u64 },
-    Notarized { view: u64 },
+    Notarized { round: Round },
 }
 
 impl<B: Block> Request<B> {
@@ -130,7 +130,7 @@ impl<B: Block> Request<B> {
                 *theirs > *mine
             }
             (Self::Finalized { .. }, _) => true,
-            (Self::Notarized { view: mine }, Self::Notarized { view: theirs }) => *theirs > *mine,
+            (Self::Notarized { round: mine }, Self::Notarized { round: theirs }) => *theirs > *mine,
             (Self::Notarized { .. }, _) => true,
         }
     }
@@ -142,7 +142,7 @@ impl<B: Block> Write for Request<B> {
         match self {
             Self::Block(commitment) => commitment.write(buf),
             Self::Finalized { height } => height.write(buf),
-            Self::Notarized { view } => view.write(buf),
+            Self::Notarized { round } => round.write(buf),
         }
     }
 }
@@ -157,7 +157,7 @@ impl<B: Block> Read for Request<B> {
                 height: u64::read(buf)?,
             },
             NOTARIZED_REQUEST => Self::Notarized {
-                view: u64::read(buf)?,
+                round: Round::read(buf)?,
             },
             i => return Err(CodecError::InvalidEnum(i)),
         };
@@ -170,7 +170,7 @@ impl<B: Block> EncodeSize for Request<B> {
         1 + match self {
             Self::Block(block) => block.encode_size(),
             Self::Finalized { height } => height.encode_size(),
-            Self::Notarized { view } => view.encode_size(),
+            Self::Notarized { round } => round.encode_size(),
         }
     }
 }
@@ -182,7 +182,7 @@ impl<B: Block> PartialEq for Request<B> {
         match (&self, &other) {
             (Self::Block(a), Self::Block(b)) => a == b,
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a == b,
-            (Self::Notarized { view: a }, Self::Notarized { view: b }) => a == b,
+            (Self::Notarized { round: a }, Self::Notarized { round: b }) => a == b,
             _ => false,
         }
     }
@@ -195,7 +195,7 @@ impl<B: Block> Ord for Request<B> {
         match (&self, &other) {
             (Self::Block(a), Self::Block(b)) => a.cmp(b),
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a.cmp(b),
-            (Self::Notarized { view: a }, Self::Notarized { view: b }) => a.cmp(b),
+            (Self::Notarized { round: a }, Self::Notarized { round: b }) => a.cmp(b),
             (a, b) => a.subject().cmp(&b.subject()),
         }
     }
@@ -212,7 +212,7 @@ impl<B: Block> Hash for Request<B> {
         match self {
             Self::Block(commitment) => commitment.hash(state),
             Self::Finalized { height } => height.hash(state),
-            Self::Notarized { view } => view.hash(state),
+            Self::Notarized { round } => round.hash(state),
         }
     }
 }
@@ -222,7 +222,7 @@ impl<B: Block> Display for Request<B> {
         match self {
             Self::Block(commitment) => write!(f, "Block({commitment:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
-            Self::Notarized { view } => write!(f, "Notarized({view:?})"),
+            Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
     }
 }
@@ -232,7 +232,7 @@ impl<B: Block> Debug for Request<B> {
         match self {
             Self::Block(commitment) => write!(f, "Block({commitment:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
-            Self::Notarized { view } => write!(f, "Notarized({view:?})"),
+            Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
     }
 }
@@ -285,8 +285,8 @@ mod tests {
 
     #[test]
     fn test_subject_notarized_encoding() {
-        let view = 67890u64;
-        let request = Request::<B>::Notarized { view };
+        let round = Round::from((67890, 12345));
+        let request = Request::<B>::Notarized { round };
 
         // Test encoding
         let encoded = request.encode();
@@ -296,7 +296,7 @@ mod tests {
         let mut buf = encoded.as_ref();
         let decoded = Request::<B>::read(&mut buf).unwrap();
         assert_eq!(request, decoded);
-        assert_eq!(decoded, Request::Notarized { view });
+        assert_eq!(decoded, Request::Notarized { round });
     }
 
     #[test]
@@ -317,7 +317,9 @@ mod tests {
     fn test_subject_predicate() {
         let r1 = Request::<B>::Finalized { height: 100 };
         let r2 = Request::<B>::Finalized { height: 200 };
-        let r3 = Request::<B>::Notarized { view: 150 };
+        let r3 = Request::<B>::Notarized {
+            round: Round::from((333, 150)),
+        };
 
         let predicate = r1.predicate();
         assert!(predicate(&r2)); // r2.height > r1.height
@@ -332,7 +334,9 @@ mod tests {
         let commitment = Sha256::hash(&[0u8; 32]);
         let r1 = Request::<B>::Block(commitment);
         let r2 = Request::<B>::Finalized { height: u64::MAX };
-        let r3 = Request::<B>::Notarized { view: 0 };
+        let r3 = Request::<B>::Notarized {
+            round: Round::from((333, 0)),
+        };
 
         // Verify encode_size matches actual encoded length
         assert_eq!(r1.encode_size(), r1.encode().len());
@@ -367,9 +371,15 @@ mod tests {
         assert_eq!(fin2.cmp(&fin3), std::cmp::Ordering::Equal);
 
         // Notarized ordering by view
-        let not1 = Request::<B>::Notarized { view: 50 };
-        let not2 = Request::<B>::Notarized { view: 150 };
-        let not3 = Request::<B>::Notarized { view: 150 };
+        let not1 = Request::<B>::Notarized {
+            round: Round::from((333, 50)),
+        };
+        let not2 = Request::<B>::Notarized {
+            round: Round::from((333, 150)),
+        };
+        let not3 = Request::<B>::Notarized {
+            round: Round::from((333, 150)),
+        };
 
         assert!(not1 < not2);
         assert!(not2 > not1);
@@ -381,7 +391,9 @@ mod tests {
         let commitment = Sha256::hash(b"test");
         let block = Request::<B>::Block(commitment);
         let finalized = Request::<B>::Finalized { height: 100 };
-        let notarized = Request::<B>::Notarized { view: 200 };
+        let notarized = Request::<B>::Notarized {
+            round: Round::from((333, 200)),
+        };
 
         // Block < Finalized < Notarized
         assert!(block < finalized);
@@ -408,7 +420,9 @@ mod tests {
         let block1 = Request::<B>::Block(commitment1);
         let block2 = Request::<B>::Block(commitment2);
         let finalized = Request::<B>::Finalized { height: 100 };
-        let notarized = Request::<B>::Notarized { view: 200 };
+        let notarized = Request::<B>::Notarized {
+            round: Round::from((333, 200)),
+        };
 
         // PartialOrd should always return Some
         assert!(block1.partial_cmp(&block2).is_some());
@@ -437,11 +451,15 @@ mod tests {
         let commitment3 = Sha256::hash(b"c");
 
         let requests = vec![
-            Request::<B>::Notarized { view: 300 },
+            Request::<B>::Notarized {
+                round: Round::from((333, 300)),
+            },
             Request::<B>::Block(commitment2),
             Request::<B>::Finalized { height: 200 },
             Request::<B>::Block(commitment1),
-            Request::<B>::Notarized { view: 250 },
+            Request::<B>::Notarized {
+                round: Round::from((333, 250)),
+            },
             Request::<B>::Finalized { height: 100 },
             Request::<B>::Block(commitment3),
         ];
@@ -466,8 +484,18 @@ mod tests {
         assert_eq!(sorted[4], Request::<B>::Finalized { height: 200 });
 
         // Check that notarized come last
-        assert_eq!(sorted[5], Request::<B>::Notarized { view: 250 });
-        assert_eq!(sorted[6], Request::<B>::Notarized { view: 300 });
+        assert_eq!(
+            sorted[5],
+            Request::<B>::Notarized {
+                round: Round::from((333, 250))
+            }
+        );
+        assert_eq!(
+            sorted[6],
+            Request::<B>::Notarized {
+                round: Round::from((333, 300))
+            }
+        );
     }
 
     #[test]
@@ -475,8 +503,12 @@ mod tests {
         // Test with extreme values
         let min_finalized = Request::<B>::Finalized { height: 0 };
         let max_finalized = Request::<B>::Finalized { height: u64::MAX };
-        let min_notarized = Request::<B>::Notarized { view: 0 };
-        let max_notarized = Request::<B>::Notarized { view: u64::MAX };
+        let min_notarized = Request::<B>::Notarized {
+            round: Round::from((333, 0)),
+        };
+        let max_notarized = Request::<B>::Notarized {
+            round: Round::from((333, u64::MAX)),
+        };
 
         assert!(min_finalized < max_finalized);
         assert!(min_notarized < max_notarized);
