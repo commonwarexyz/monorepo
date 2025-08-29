@@ -1187,6 +1187,7 @@ dependencies = [
  "bytes",
  "clap",
  "colored",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
