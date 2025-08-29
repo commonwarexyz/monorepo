@@ -73,8 +73,9 @@ pub mod bitmap;
 pub mod grafting;
 // Re-export storage-core modules.
 pub use commonware_storage_core::mmr as core;
-pub use core::{hasher::Standard as StandardHasher, iterator, Hasher};
+pub use core::{hasher::Standard as StandardHasher, iterator, proof::Proof, Hasher};
 pub mod journaled;
+pub mod storage;
 pub mod verification;
 
 /// Errors that can occur when interacting with an MMR.

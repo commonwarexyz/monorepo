@@ -14,8 +14,7 @@ use crate::{
     mmr::{
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
-        verification::Proof,
-        StandardHasher as Standard,
+        Proof, StandardHasher as Standard,
     },
     store::operation::Variable as Operation,
     translator::Translator,

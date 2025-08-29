@@ -59,13 +59,12 @@
 //! base MMR, yielding node 13 as its grafting point.
 
 use crate::mmr::{
-    core::hasher::Standard,
-    core::{self, Hasher as _, Storage as _},
+    iterator::PeakIterator,
     iterator::{leaf_num_to_pos, leaf_pos_to_num, pos_to_height},
-    Error,
+    storage::Storage as StorageTrait,
+    Error, Hasher as HasherTrait, StandardHasher as Standard,
 };
 use commonware_cryptography::Hasher as CHasher;
-use commonware_storage_core::mmr::iterator::PeakIterator;
 use futures::future::try_join_all;
 use std::collections::HashMap;
 use tracing::debug;
@@ -102,7 +101,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     pub async fn load_grafted_digests(
         &mut self,
         leaves: &[u64],
-        mmr: &impl core::Storage<H::Digest>,
+        mmr: &impl StorageTrait<H::Digest>,
     ) -> Result<(), Error> {
         let mut futures = Vec::with_capacity(leaves.len());
         for leaf_num in leaves {
@@ -206,7 +205,7 @@ pub(super) fn source_pos(base_node_pos: u64, height: u32) -> Option<u64> {
     Some(peak_pos)
 }
 
-impl<H: CHasher> core::Hasher<H> for Hasher<'_, H> {
+impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
     /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
     ///
     /// # Warning
@@ -226,7 +225,7 @@ impl<H: CHasher> core::Hasher<H> for Hasher<'_, H> {
         self.hasher.finalize()
     }
 
-    fn fork(&self) -> impl core::Hasher<H> {
+    fn fork(&self) -> impl HasherTrait<H> {
         HasherFork {
             hasher: Standard::new(),
             height: self.height,
@@ -261,7 +260,7 @@ impl<H: CHasher> core::Hasher<H> for Hasher<'_, H> {
     }
 }
 
-impl<H: CHasher> core::Hasher<H> for HasherFork<'_, H> {
+impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
     fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
         let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
@@ -276,7 +275,7 @@ impl<H: CHasher> core::Hasher<H> for HasherFork<'_, H> {
         self.hasher.finalize()
     }
 
-    fn fork(&self) -> impl core::Hasher<H> {
+    fn fork(&self) -> impl HasherTrait<H> {
         HasherFork {
             hasher: Standard::new(),
             height: self.height,
@@ -339,12 +338,12 @@ impl<'a, H: CHasher> Verifier<'a, H> {
     }
 }
 
-impl<H: CHasher> core::Hasher<H> for Verifier<'_, H> {
+impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
     fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
         self.hasher.leaf_digest(pos, element)
     }
 
-    fn fork(&self) -> impl core::Hasher<H> {
+    fn fork(&self) -> impl HasherTrait<H> {
         Verifier {
             hasher: Standard::new(),
             height: self.height,
@@ -420,7 +419,7 @@ impl<H: CHasher> core::Hasher<H> for Verifier<'_, H> {
 
 /// A [Storage] implementation that makes grafted trees look like a single MMR for conveniently
 /// generating inclusion proofs.
-pub struct Storage<'a, H: CHasher, S1: core::Storage<H::Digest>, S2: core::Storage<H::Digest>> {
+pub struct Storage<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> {
     peak_tree: &'a S1,
     base_mmr: &'a S2,
     height: u32,
@@ -428,7 +427,7 @@ pub struct Storage<'a, H: CHasher, S1: core::Storage<H::Digest>, S2: core::Stora
     _marker: std::marker::PhantomData<H>,
 }
 
-impl<'a, H: CHasher, S1: core::Storage<H::Digest>, S2: core::Storage<H::Digest>>
+impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
     Storage<'a, H, S1, S2>
 {
     /// Creates a new [Grafting] Storage instance.
@@ -452,14 +451,14 @@ impl<'a, H: CHasher, S1: core::Storage<H::Digest>, S2: core::Storage<H::Digest>>
     }
 }
 
-impl<H: CHasher, S1: core::Storage<H::Digest>, S2: core::Storage<H::Digest>>
-    core::Storage<H::Digest> for Storage<'_, H, S1, S2>
+impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> StorageTrait<H::Digest>
+    for Storage<'_, H, S1, S2>
 {
     fn size(&self) -> u64 {
         self.base_mmr.size()
     }
 
-    async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, core::Error> {
+    async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
         let height = pos_to_height(pos);
         if height < self.height {
             return self.base_mmr.get_node(pos).await;
@@ -477,11 +476,12 @@ impl<H: CHasher, S1: core::Storage<H::Digest>, S2: core::Storage<H::Digest>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{core::Mmr, iterator::leaf_num_to_pos, verification::Proof};
-    use commonware_cryptography::{sha256::Digest, Hasher as CHasher, Sha256};
+    use crate::mmr::{core::Mmr, iterator::leaf_num_to_pos, verification};
+    use commonware_cryptography::{Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
     use commonware_storage_core::mmr::stability::{build_test_mmr, ROOTS};
+    use commonware_storage_core::mmr::Hasher as _;
     use commonware_utils::hex;
 
     #[test]
@@ -754,7 +754,7 @@ mod tests {
                 // Confirm we can generate and verify an inclusion proofs for each of the 4 leafs of the grafted MMR.
                 {
                     let pos = 0;
-                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = verification::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
 
@@ -767,7 +767,7 @@ mod tests {
                     ));
 
                     let pos = 1;
-                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = verification::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
                     assert!(proof.verify_element_inclusion(
@@ -778,7 +778,7 @@ mod tests {
                     ));
 
                     let pos = 3;
-                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = verification::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&p2]);
@@ -790,7 +790,7 @@ mod tests {
                     ));
 
                     let pos = 4;
-                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = verification::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
                     assert!(proof.verify_element_inclusion(
@@ -805,7 +805,7 @@ mod tests {
                 {
                     // Valid proof of the last element.
                     let pos = 4;
-                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = verification::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&p2]);
@@ -857,9 +857,7 @@ mod tests {
                 // test range proving
                 {
                     // Confirm we can prove the entire range.
-                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, 0, 4)
-                        .await
-                        .unwrap();
+                    let proof = verification::range_proof(&grafted_mmr, 0, 4).await.unwrap();
                     let range = vec![&b1, &b2, &b3, &b4];
                     let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&p1, &p2]);
                     assert!(proof.verify_range_inclusion(
@@ -892,7 +890,7 @@ mod tests {
             // as an existing one.
             let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
             let pos = 0;
-            let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
+            let proof = verification::range_proof(&grafted_mmr, pos, pos)
                 .await
                 .unwrap();
 
@@ -901,7 +899,7 @@ mod tests {
 
             let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
             let pos = 7;
-            let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
+            let proof = verification::range_proof(&grafted_mmr, pos, pos)
                 .await
                 .unwrap();
             assert!(proof.verify_element_inclusion(&mut verifier, &b5, pos, &grafted_storage_root));
@@ -911,7 +909,7 @@ mod tests {
 
 /// A [Storage] implementation that makes grafted trees look like a single MMR for conveniently
 /// generating inclusion proofs.
-pub struct Grafting<'a, H: CHasher, S1: core::Storage<H::Digest>, S2: core::Storage<H::Digest>> {
+pub struct Grafting<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> {
     peak_tree: &'a S1,
     base_mmr: &'a S2,
     height: u32,
@@ -919,7 +917,7 @@ pub struct Grafting<'a, H: CHasher, S1: core::Storage<H::Digest>, S2: core::Stor
     _marker: std::marker::PhantomData<H>,
 }
 
-impl<'a, H: CHasher, S1: core::Storage<H::Digest>, S2: core::Storage<H::Digest>>
+impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
     Grafting<'a, H, S1, S2>
 {
     /// Creates a new [Grafting] Storage instance.
@@ -943,14 +941,14 @@ impl<'a, H: CHasher, S1: core::Storage<H::Digest>, S2: core::Storage<H::Digest>>
     }
 }
 
-impl<H: CHasher, S1: core::Storage<H::Digest>, S2: core::Storage<H::Digest>>
-    core::Storage<H::Digest> for Grafting<'_, H, S1, S2>
+impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> StorageTrait<H::Digest>
+    for Grafting<'_, H, S1, S2>
 {
     fn size(&self) -> u64 {
         self.base_mmr.size()
     }
 
-    async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, core::Error> {
+    async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
         let height = pos_to_height(pos);
         if height < self.height {
             return self.base_mmr.get_node(pos).await;

@@ -1,7 +1,5 @@
 use crate::mmr::{
-    iterator::leaf_num_to_pos,
-    verification::{Proof, ProofStore},
-    StandardHasher as Standard,
+    iterator::leaf_num_to_pos, verification::ProofStore, Proof, StandardHasher as Standard,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
@@ -29,7 +27,7 @@ pub fn extract_pinned_nodes<D: Digest>(
     proof: &Proof<D>,
     start_loc: u64,
     operations_len: u64,
-) -> Result<Vec<D>, crate::mmr::Error> {
+) -> Result<Vec<D>, core::Error> {
     let start_pos_mmr = leaf_num_to_pos(start_loc);
     let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
     proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr)
@@ -43,7 +41,7 @@ pub fn verify_proof_and_extract_digests<Op, H, D>(
     start_loc: u64,
     operations: &[Op],
     target_root: &D,
-) -> Result<Vec<(u64, D)>, crate::mmr::Error>
+) -> Result<Vec<(u64, D)>, core::Error>
 where
     Op: Encode,
     H: Hasher<Digest = D>,

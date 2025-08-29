@@ -1,6 +1,6 @@
 use crate::{
     adb::{self, any::fixed::Any, immutable::Immutable},
-    mmr::verification::Proof,
+    mmr::Proof,
     store::operation::{Fixed, Variable},
     translator::Translator,
 };

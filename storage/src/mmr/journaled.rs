@@ -14,8 +14,8 @@ use crate::{
     mmr::{
         core,
         iterator::{nodes_to_pin, PeakIterator},
-        verification::Proof,
-        Error, Hasher,
+        storage::Storage,
+        verification, Error, Hasher, Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -622,7 +622,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         end_element_pos: u64,
     ) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
-        Proof::<H::Digest>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
+        verification::range_proof(self, start_element_pos, end_element_pos).await
     }
 
     /// Analagous to range_proof but for a previous database state.
@@ -634,13 +634,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         end_element_pos: u64,
     ) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
-        Proof::<H::Digest>::historical_range_proof::<Mmr<E, H>>(
-            self,
-            size,
-            start_element_pos,
-            end_element_pos,
-        )
-        .await
+        verification::historical_range_proof(self, size, start_element_pos, end_element_pos).await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
@@ -761,28 +755,25 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> core::Storage<H::Digest> for Mmr<E, H> {
+impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Mmr<E, H> {
     fn size(&self) -> u64 {
         self.size()
     }
 
-    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, core::Error> {
-        self.get_node(position)
-            .await
-            .map_err(|e| core::Error::Wrapped(Box::new(e)))
+    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
+        self.get_node(position).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{iterator::leaf_num_to_pos, StandardHasher};
+    use crate::mmr::{iterator::leaf_num_to_pos, StandardHasher as Standard};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_storage_core::mmr::stability::{
-        build_and_check_test_roots_mmr, build_batched_and_check_test_roots, ROOTS,
-    };
+    use commonware_storage_core::mmr::stability::ROOTS;
+    use commonware_storage_core::mmr::Hasher as _;
     use commonware_utils::{hex, NZUsize, NZU64};
 
     fn test_digest(v: usize) -> Digest {
@@ -803,43 +794,44 @@ mod tests {
         }
     }
 
+    pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
+        journaled_mmr: &mut Mmr<E, Sha256>,
+    ) {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        for i in 0u64..199 {
+            hasher.inner().update(&i.to_be_bytes());
+            let element = hasher.inner().finalize();
+            journaled_mmr
+                .add_batched(&mut hasher, &element)
+                .await
+                .unwrap();
+        }
+        journaled_mmr.sync(&mut hasher).await.unwrap();
+        assert_eq!(
+            hex(&journaled_mmr.root(&mut hasher)),
+            ROOTS[199],
+            "Root after 200 elements"
+        );
+    }
+
     /// Test that the MMR root computation remains stable.
-    /*
     #[test]
     fn test_journaled_mmr_root_stability() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut mmr = Mmr::init(context.clone(), &mut StandardHasher::new(), test_config())
-                .await
-                .unwrap();
-            build_and_check_test_roots_mmr(&mut mmr).await;
-            mmr.destroy().await.unwrap();
-        });
-    }
-    */
-
-    /// Test that the MMR root computation remains stable by comparing against previously computed
-    /// roots.
-    /*
-    #[test]
-    fn test_journaled_mmr_root_stability_batched() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut std_hasher = StandardHasher::new();
-            let mut mmr = Mmr::init(context.clone(), &mut std_hasher, test_config())
+            let mut mmr = Mmr::init(context.clone(), &mut Standard::new(), test_config())
                 .await
                 .unwrap();
             build_batched_and_check_test_roots_journaled(&mut mmr).await;
             mmr.destroy().await.unwrap();
         });
     }
-    */
 
     #[test_traced]
     fn test_journaled_mmr_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
@@ -859,7 +851,7 @@ mod tests {
     fn test_journaled_mmr_pop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
@@ -932,7 +924,7 @@ mod tests {
     fn test_journaled_mmr_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
@@ -996,7 +988,7 @@ mod tests {
     fn test_journaled_mmr_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
@@ -1080,7 +1072,7 @@ mod tests {
     fn test_journaled_mmr_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
             // make sure pruning doesn't break root computation, adding of new nodes, etc.
             const LEAF_COUNT: usize = 2000;
             let cfg_pruned = test_config();
@@ -1188,7 +1180,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build MMR with 2000 leaves.
-            let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
             const LEAF_COUNT: usize = 2000;
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
@@ -1256,7 +1248,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create MMR with 10 elements
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
@@ -1305,7 +1297,7 @@ mod tests {
     fn test_journaled_mmr_historical_range_proof_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
@@ -1373,7 +1365,7 @@ mod tests {
     fn test_journaled_mmr_historical_range_proof_large() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
 
             let mut mmr = Mmr::init(
                 context.clone(),
@@ -1445,7 +1437,7 @@ mod tests {
     fn test_journaled_mmr_historical_range_proof_singleton() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
@@ -1474,7 +1466,7 @@ mod tests {
     fn test_journaled_mmr_init_from_pinned_nodes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
 
             // Create an in-memory MMR with some elements
             let mut original_mmr = Mmr::init(
@@ -1507,7 +1499,7 @@ mod tests {
                 .unwrap();
 
             // Get the journal digest
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
             let original_journal_digest = original_mmr.root(&mut hasher);
 
             // Get the pinned nodes
@@ -1586,7 +1578,7 @@ mod tests {
     fn test_journaled_mmr_init_from_pinned_nodes_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
 
             // === TEST 1: Empty MMR (size 0) ===
             let mut empty_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
@@ -1650,7 +1642,7 @@ mod tests {
     fn test_journaled_mmr_init_sync_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
 
             // Test fresh start scenario with completely new MMR (no existing data)
             let sync_cfg = SyncConfig::<Digest> {
@@ -1686,7 +1678,7 @@ mod tests {
     fn test_journaled_mmr_init_sync_nonempty_exact_match() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
 
             // Create initial MMR with elements.
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
@@ -1740,7 +1732,7 @@ mod tests {
     fn test_journaled_mmr_init_sync_partial_overlap() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
 
             // Create initial MMR with elements.
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())

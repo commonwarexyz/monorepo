@@ -218,7 +218,7 @@ where
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1))
                         .await;
-                    IndexedFetchResult { start_loc, result }
+                    IndexedFetchResult::<DB::Op, DB::Digest, R::Error> { start_loc, result }
                 }),
             );
         }
@@ -261,7 +261,7 @@ where
                     let result = resolver
                         .get_operations(target_size, start_loc, batch_size)
                         .await;
-                    IndexedFetchResult { start_loc, result }
+                    IndexedFetchResult::<DB::Op, DB::Digest, R::Error> { start_loc, result }
                 }),
             );
         }
@@ -538,7 +538,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::verification::Proof;
+    use crate::mmr::Proof;
     use commonware_cryptography::sha256;
     use futures::channel::oneshot;
 

@@ -13,13 +13,12 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        core,
         core::{Config, Mmr},
         iterator::{leaf_num_to_pos, nodes_to_pin},
-        verification::Proof,
-        Error,
+        storage::Storage,
+        verification, Error,
         Error::*,
-        Hasher,
+        Hasher, Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -555,7 +554,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             ));
         }
 
-        let mut proof = Proof::<H::Digest>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+        let mut proof = verification::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
         proof.size = self.bit_count();
         if self.next_bit == 0 {
             // Bitmap is chunk aligned.
@@ -656,12 +655,12 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     }
 }
 
-impl<H: CHasher, const N: usize> core::Storage<H::Digest> for Bitmap<H, N> {
+impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
     fn size(&self) -> u64 {
         self.size()
     }
 
-    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, core::Error> {
+    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
         Ok(self.get_node(position))
     }
 }

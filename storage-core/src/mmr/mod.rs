@@ -24,11 +24,9 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use commonware_cryptography::Digest;
 use commonware_cryptography::Hasher as CHasher;
 #[cfg(feature = "std")]
 use commonware_runtime::ThreadPool;
-use core::future::Future;
 pub use hasher::Hasher;
 #[cfg(feature = "std")]
 use rayon::prelude::*;
@@ -55,8 +53,6 @@ pub enum Error {
     RootMismatch,
     #[error("invalid proof")]
     InvalidProof,
-    #[error("wrapped: {0}")]
-    Wrapped(alloc::boxed::Box<dyn core::error::Error + Send + Sync>),
 }
 
 pub struct Config<H: CHasher> {
@@ -631,25 +627,29 @@ impl<H: CHasher> Mmr<H> {
         self.range_proof(element_pos, element_pos)
     }
 
-    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
-    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for the specified element. Returns ElementPruned error if some
+    /// element needed to generate the proof has been pruned.
     ///
     /// # Warning
     ///
     /// Panics if there are unprocessed batch updates.
-    pub fn range_proof(
-        &self,
-        start_element_pos: u64,
-        end_element_pos: u64,
-    ) -> Result<Proof<H::Digest>, Error> {
-        if start_element_pos < self.pruned_to_pos {
-            return Err(ElementPruned(start_element_pos));
+    pub fn range_proof(&self, start_pos: u64, end_pos: u64) -> Result<Proof<H::Digest>, Error> {
+        if start_pos < self.pruned_to_pos {
+            return Err(ElementPruned(start_pos));
         }
         assert!(
             self.dirty_nodes.is_empty(),
             "dirty nodes must be processed before computing proofs"
         );
-        Proof::<H::Digest>::range_proof(self, start_element_pos, end_element_pos)
+        let size = self.size();
+        let positions =
+            Proof::<H::Digest>::nodes_required_for_range_proof(size, start_pos, end_pos);
+        let digests = positions
+            .into_iter()
+            .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Proof { size, digests })
     }
 
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
@@ -677,6 +677,7 @@ impl<H: CHasher> Mmr<H> {
         );
         // Recompute the set of older nodes to retain.
         self.pinned_nodes = self.nodes_to_pin(pos);
+        println!("pinned_nodes: {:?}", self.pinned_nodes);
         let retained_nodes = self.pos_to_index(pos);
         self.nodes.drain(0..retained_nodes);
         self.pruned_to_pos = pos;
@@ -737,25 +738,6 @@ impl<H: CHasher> Mmr<H> {
     }
 }
 
-/// A trait for accessing MMR digests from storage.
-pub trait Storage<D: Digest>: Send + Sync {
-    /// Return the number of elements in the MMR.
-    fn size(&self) -> u64;
-
-    /// Return the specified node of the MMR if it exists & hasn't been pruned.
-    fn get_node(&self, position: u64) -> impl Future<Output = Result<Option<D>, Error>> + Send;
-}
-
-impl<H: CHasher> Storage<H::Digest> for Mmr<H> {
-    fn size(&self) -> u64 {
-        self.size()
-    }
-
-    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        Ok(Mmr::get_node(self, position))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,6 +749,7 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_runtime::{create_pool, deterministic, tokio, Runner};
     use commonware_utils::hex;
+    use std::println;
 
     /// Test empty MMR behavior.
     #[test]
@@ -880,6 +863,11 @@ mod tests {
 
             // After pruning up to a peak, we shouldn't be able to prove any elements before it.
             assert!(matches!(mmr.proof(0), Err(ElementPruned(_))));
+            println!(
+                "proof(11): {:?} {:?}",
+                mmr.proof(11),
+                proof::Proof::<commonware_cryptography::sha256::Digest>::nodes_required_for_range_proof(mmr.size(), 11, 11)
+            );
             assert!(matches!(mmr.proof(11), Err(ElementPruned(_))));
             // We should still be able to prove any leaf following this peak, the first of which is
             // at position 15.

@@ -14,8 +14,7 @@ use crate::{
         bitmap::Bitmap,
         grafting::{Hasher as Grafting, Storage as GStorage, Verifier as GraftingVerifier},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        verification::Proof,
-        Hasher, StandardHasher as Standard,
+        verification, Hasher, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -451,7 +450,7 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, mmr, height);
 
-        let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, start_pos, end_pos).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, start_pos, end_pos).await?;
 
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
@@ -575,7 +574,7 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();
@@ -692,7 +691,7 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();

@@ -1,18 +1,9 @@
-//! Defines the inclusion [Proof] structure, functions for generating them from any MMR implementing
-//! the [Storage] trait, and functions for verifying them against a root digest.
-//!
-//! ## Historical Proof Generation
-//!
-//! This module provides both current and historical proof generation capabilities:
-//! - [Proof::range_proof] generates proofs against the current MMR state
-//! - [Proof::historical_range_proof] generates proofs against historical MMR states
-//!
-//! Historical proofs are essential for sync operations where we need to prove elements
-//! against a past state of the MMR rather than its current state.
+//! Defines the inclusion [Proof] structure, functions for, functions for verifying them against a
+//! root digest, and functions for identifying the nodes required to generate a proof.
 
 use crate::mmr::{
     iterator::{leaf_num_to_pos, leaf_pos_to_num, nodes_to_pin, PathIterator, PeakIterator},
-    Error, Hasher, Mmr,
+    Error, Hasher,
 };
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
@@ -27,7 +18,7 @@ use tracing::debug;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(Error, Debug)]
-pub(crate) enum ReconstructionError {
+pub enum ReconstructionError {
     #[error("missing digests in proof")]
     MissingDigests,
     #[error("extra digests in proof")]
@@ -159,7 +150,7 @@ impl<D: Digest> Proof<D> {
         elements: &[E],
         start_element_pos: u64,
         root: &D,
-    ) -> Result<Vec<(u64, D)>, Error>
+    ) -> Result<Vec<(u64, D)>, super::Error>
     where
         I: CHasher<Digest = D>,
         H: Hasher<I>,
@@ -184,7 +175,7 @@ impl<D: Digest> Proof<D> {
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
     /// of elements, or returns a [ReconstructionError] if the input data is invalid.
-    pub(crate) fn reconstruct_root<I, H, E>(
+    pub fn reconstruct_root<I, H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
@@ -204,7 +195,7 @@ impl<D: Digest> Proof<D> {
     /// Reconstruct the peak digests of the MMR that produced this proof, returning
     /// [ReconstructionError] if the input data is invalid.  If collected_digests is Some, then all
     /// node digests used in the process will be added to the wrapped vector.
-    fn reconstruct_peak_digests<I, H, E>(
+    pub fn reconstruct_peak_digests<I, H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
@@ -359,70 +350,18 @@ impl<D: Digest> Proof<D> {
         positions
     }
 
-    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
-    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
-    pub fn range_proof<H: CHasher<Digest = D>>(
-        mmr: &Mmr<H>,
-        start_element_pos: u64,
-        end_element_pos: u64,
-    ) -> Result<Proof<D>, Error> {
-        Self::historical_range_proof(mmr, mmr.size(), start_element_pos, end_element_pos)
-    }
-
-    /// Analogous to range_proof but for a previous database state. Specifically, the state when the
-    /// MMR had `size` elements.
-    pub fn historical_range_proof<H: CHasher<Digest = D>>(
-        mmr: &Mmr<H>,
-        size: u64,
-        start_element_pos: u64,
-        end_element_pos: u64,
-    ) -> Result<Proof<D>, Error> {
-        assert!(start_element_pos <= end_element_pos);
-        assert!(start_element_pos < mmr.size());
-        assert!(end_element_pos < mmr.size());
-
-        let positions =
-            Self::nodes_required_for_range_proof(size, start_element_pos, end_element_pos);
-        let digests = positions
-            .into_iter()
-            .map(|pos| mmr.get_node(pos).ok_or(Error::ElementPruned(pos)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Proof { size, digests })
-    }
-
-    /// Return an inclusion proof for the specified positions. This is analogous to range_proof
-    /// but supports non-contiguous positions.
+    /// Returns the positions of the minimal set of nodes required to prove the inclusion of the
+    /// elements at the specified `positions`.
     ///
     /// The order of positions does not affect the output (sorted internally).
-    pub fn multi_proof<H: CHasher<Digest = D>>(
-        mmr: &Mmr<H>,
-        positions: &[u64],
-    ) -> Result<Proof<D>, Error> {
-        // If there are no positions, return an empty proof
-        if positions.is_empty() {
-            return Ok(Proof {
-                size: mmr.size(),
-                digests: vec![],
-            });
-        }
-
+    pub fn nodes_required_for_multi_proof(size: u64, positions: &[u64]) -> BTreeSet<u64> {
         // Collect all required node positions
         //
         // TODO(#1472): Optimize this loop
-        let size = mmr.size();
-        let node_positions: BTreeSet<_> = positions
+        positions
             .iter()
             .flat_map(|pos| Self::nodes_required_for_range_proof(size, *pos, *pos))
-            .collect();
-
-        // Fetch all required digests and collect with positions
-        let digests = node_positions
-            .iter()
-            .map(|&pos| mmr.get_node(pos).ok_or(Error::ElementPruned(pos)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Proof { size, digests })
+            .collect()
     }
 
     /// Return true if `proof` proves that the elements at the specified positions are included in the MMR
@@ -1166,143 +1105,6 @@ mod tests {
     }
 
     #[test]
-    fn test_proving_historical_range_proof_basic() {
-        // Create an MMR with 5 elements
-        let mut mmr = Mmr::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut elements = Vec::new();
-        let mut element_positions = Vec::new();
-        for i in 0..5 {
-            elements.push(test_digest(i));
-            element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
-        }
-        let current_size = mmr.size();
-        let current_root = mmr.root(&mut hasher);
-
-        {
-            // Historical proof should match regular proof at current size
-            let historical_proof = Proof::historical_range_proof(
-                &mmr,
-                current_size,
-                element_positions[0],
-                element_positions[2],
-            )
-            .unwrap();
-            let regular_proof = mmr
-                .range_proof(element_positions[0], element_positions[2])
-                .unwrap();
-
-            assert_eq!(historical_proof.size, current_size);
-            assert_eq!(historical_proof.digests, regular_proof.digests);
-            assert!(historical_proof.verify_range_inclusion(
-                &mut hasher,
-                &elements[0..3],
-                element_positions[0],
-                &current_root
-            ));
-        }
-
-        {
-            // Historical proof should match regular proof at historical size
-            let mut ref_mmr = Mmr::new();
-            for elt in elements.iter().take(3) {
-                ref_mmr.add(&mut hasher, elt);
-            }
-            let ref_size = ref_mmr.size();
-            let ref_root = ref_mmr.root(&mut hasher);
-            let ref_proof = Proof::historical_range_proof(
-                &mmr,
-                ref_size,
-                element_positions[0],
-                element_positions[2],
-            )
-            .unwrap();
-            let historical_proof = Proof::historical_range_proof(
-                &mmr,
-                ref_size,
-                element_positions[0],
-                element_positions[2],
-            )
-            .unwrap();
-
-            assert_eq!(ref_proof.size, ref_size);
-            assert_eq!(ref_proof.digests, historical_proof.digests);
-            assert!(ref_proof.verify_range_inclusion(
-                &mut hasher,
-                &elements[0..3],
-                element_positions[0],
-                &ref_root
-            ));
-        }
-    }
-
-    #[test]
-    fn test_proving_historical_range_proof_large() {
-        // Simulate a sync scenario: server has 1000 operations, client syncs 600-799
-        let mut server_mmr = Mmr::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut elements = Vec::new();
-        let mut element_positions = Vec::new();
-
-        // Add 1000 elements to server
-        for i in 0..1000 {
-            elements.push(test_digest((i % 256) as u8));
-            element_positions.push(server_mmr.add(&mut hasher, elements.last().unwrap()));
-        }
-
-        // Want operations 600-799
-        let start_loc = 600;
-        let end_loc = 799;
-
-        // Create historical MMR state as it would have been after end_loc elements
-        let mut ref_mmr = Mmr::new();
-        for elt in elements.iter().take(end_loc + 1) {
-            ref_mmr.add(&mut hasher, elt);
-        }
-        let ref_size = ref_mmr.size();
-        let ref_root = ref_mmr.root(&mut hasher);
-
-        // Generate proof at historical position
-        let historical_proof = Proof::historical_range_proof(
-            &server_mmr,
-            ref_size,
-            element_positions[start_loc],
-            element_positions[end_loc],
-        )
-        .unwrap();
-
-        assert_eq!(historical_proof.size, ref_size);
-
-        // Verify the sync proof
-        assert!(historical_proof.verify_range_inclusion(
-            &mut hasher,
-            &elements[start_loc..=end_loc],
-            element_positions[start_loc],
-            &ref_root // Compare to historical root
-        ));
-    }
-
-    #[test]
-    fn test_proving_historical_range_proof_singleton() {
-        let mut mmr = Mmr::new();
-        let mut single_hasher: Standard<Sha256> = Standard::new();
-        let element = test_digest(0);
-        mmr.add(&mut single_hasher, &element);
-        let single_historical_size = mmr.size();
-        let single_root = mmr.root(&mut single_hasher);
-
-        let single_element_proof =
-            Proof::historical_range_proof(&mmr, single_historical_size, 0, 0).unwrap();
-
-        assert!(single_element_proof.verify_range_inclusion(
-            &mut single_hasher,
-            &[element],
-            0,
-            &single_root
-        ));
-    }
-
-    #[test]
     fn test_proving_digests_from_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr = Mmr::default();
@@ -1432,8 +1234,18 @@ mod tests {
         let root = mmr.root(&mut hasher);
 
         // Generate proof for non-contiguous single elements
-        let multi_proof =
-            Proof::multi_proof(&mmr, &[positions[0], positions[5], positions[10]]).unwrap();
+        let nodes_for_multi_proof = Proof::<Digest>::nodes_required_for_multi_proof(
+            mmr.size(),
+            &[positions[0], positions[5], positions[10]],
+        );
+        let digests = nodes_for_multi_proof
+            .into_iter()
+            .map(|pos| mmr.get_node(pos).unwrap())
+            .collect();
+        let multi_proof = Proof {
+            size: mmr.size(),
+            digests,
+        };
 
         assert_eq!(multi_proof.size, mmr.size());
 
@@ -1512,13 +1324,16 @@ mod tests {
         ));
 
         // Empty multi-proof
-        let empty_multi = Proof::multi_proof(&mmr, &[]).unwrap();
-        assert_eq!(empty_multi.size, mmr.size());
-        assert!(empty_multi.digests.is_empty());
+        let empty_multi = Proof::<Digest>::nodes_required_for_multi_proof(mmr.size(), &[]);
+        assert_eq!(empty_multi.len(), mmr.size() as usize);
+        assert!(empty_multi.is_empty());
 
         let empty_mmr = Mmr::new();
         let empty_root = empty_mmr.root(&mut hasher);
-        let empty_proof = Proof::multi_proof(&empty_mmr, &[]).unwrap();
+        let empty_proof = Proof {
+            size: 0,
+            digests: vec![],
+        };
         assert!(empty_proof.verify_multi_inclusion(
             &mut hasher,
             &[] as &[(Digest, u64)],
@@ -1545,7 +1360,18 @@ mod tests {
         let total_digests_separate = proof1.digests.len() + proof2.digests.len();
 
         // Generate multi-proof for the same positions
-        let multi_proof = Proof::multi_proof(&mmr, &[positions[0], positions[1]]).unwrap();
+        let multi_proof = Proof::<Digest>::nodes_required_for_multi_proof(
+            mmr.size(),
+            &[positions[0], positions[1]],
+        );
+        let digests = multi_proof
+            .into_iter()
+            .map(|pos| mmr.get_node(pos).unwrap())
+            .collect();
+        let multi_proof = Proof {
+            size: mmr.size(),
+            digests,
+        };
 
         // The combined proof should have fewer digests due to deduplication
         assert!(multi_proof.digests.len() < total_digests_separate);
