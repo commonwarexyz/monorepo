@@ -1,4 +1,4 @@
-use crate::{aggregation::types::Epoch, Monitor as M};
+use crate::{types::Epoch, Monitor as M};
 use futures::channel::mpsc;
 use std::sync::{Arc, Mutex};
 
