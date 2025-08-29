@@ -59,11 +59,17 @@
 //!     let mut cache = Cache::init(context, cfg).await.unwrap();
 //!
 //!     // Put data at index
-//!     cache.put(1, "cached_data").await.unwrap();
+//!     cache.put(1, 100u32).await.unwrap();
 //!
 //!     // Get data by index
-//!     let data: Option<&str> = cache.get(1).await.unwrap();
-//!     assert_eq!(data, Some("cached_data"));
+//!     let data: Option<u32> = cache.get(1).await.unwrap();
+//!     assert_eq!(data, Some(100));
+//!
+//!     // Check for gaps in the index space
+//!     cache.put(10, 200u32).await.unwrap();
+//!     let (current_end, start_next) = cache.next_gap(5);
+//!     assert!(current_end.is_none());
+//!     assert_eq!(start_next, Some(10));
 //!
 //!     // Close the cache (also closes the journal)
 //!     cache.close().await.unwrap();
