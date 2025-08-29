@@ -1,6 +1,6 @@
 [package]
 name = "commonware-storage-fuzz"
-version = "0.0.59"
+version = "0.0.60"
 publish = false
 edition = "2021"
 

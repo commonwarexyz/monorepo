@@ -34,20 +34,20 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.59", path = "broadcast" }
-commonware-codec = { version = "0.0.59", path = "codec", default-features = false }
-commonware-coding = { version = "0.0.59", path = "coding" }
-commonware-collector = { version = "0.0.59", path = "collector" }
-commonware-consensus = { version = "0.0.59", path = "consensus" }
-commonware-cryptography = { version = "0.0.59", path = "cryptography" }
-commonware-deployer = { version = "0.0.59", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.59", path = "macros" }
-commonware-p2p = { version = "0.0.59", path = "p2p" }
-commonware-resolver = { version = "0.0.59", path = "resolver" }
-commonware-runtime = { version = "0.0.59", path = "runtime" }
-commonware-storage = { version = "0.0.59", path = "storage" }
-commonware-stream = { version = "0.0.59", path = "stream" }
-commonware-utils = { version = "0.0.59", path = "utils", default-features = false }
+commonware-broadcast = { version = "0.0.60", path = "broadcast" }
+commonware-codec = { version = "0.0.60", path = "codec", default-features = false }
+commonware-coding = { version = "0.0.60", path = "coding" }
+commonware-collector = { version = "0.0.60", path = "collector" }
+commonware-consensus = { version = "0.0.60", path = "consensus" }
+commonware-cryptography = { version = "0.0.60", path = "cryptography" }
+commonware-deployer = { version = "0.0.60", path = "deployer", default-features = false }
+commonware-macros = { version = "0.0.60", path = "macros" }
+commonware-p2p = { version = "0.0.60", path = "p2p" }
+commonware-resolver = { version = "0.0.60", path = "resolver" }
+commonware-runtime = { version = "0.0.60", path = "runtime" }
+commonware-storage = { version = "0.0.60", path = "storage" }
+commonware-stream = { version = "0.0.60", path = "stream" }
+commonware-utils = { version = "0.0.60", path = "utils", default-features = false }
 thiserror = { version = "2.0.12", default-features = false }
 bytes = { version = "1.7.1", default-features = false }
 sha2 = { version = "0.10.8", default-features = false }
