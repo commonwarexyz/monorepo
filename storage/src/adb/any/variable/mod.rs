@@ -619,7 +619,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // TODO: Make the frequency with which we prune known inactive items configurable in case
         // this turns out to be a significant part of commit overhead, or the user wants to ensure
         // the log is backed up externally before discarding.
-        self.prune_inactive().await?;
+        // self.prune_inactive().await?;
 
         Ok(())
     }
