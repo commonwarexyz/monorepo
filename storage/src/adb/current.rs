@@ -262,6 +262,13 @@ impl<
         self.any.get(key).await
     }
 
+    /// Get the value of the operation with location `loc` in the db. Returns
+    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// otherwise assumed valid.
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+        self.any.get_loc(loc).await
+    }
+
     /// Get the level of the base MMR into which we are grafting.
     ///
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
@@ -560,7 +567,7 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
-        let op = self.any.get_with_loc(&key).await?;
+        let op = self.any.get_key_loc(&key).await?;
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound);
         };
@@ -744,7 +751,7 @@ impl<
 pub mod test {
     use super::*;
     use crate::translator::TwoCap;
-    use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
@@ -797,8 +804,8 @@ pub mod test {
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
 
             // Add one key.
-            let k1 = hash(&0u64.to_be_bytes());
-            let v1 = hash(&10u64.to_be_bytes());
+            let k1 = Sha256::hash(&0u64.to_be_bytes());
+            let v1 = Sha256::hash(&10u64.to_be_bytes());
             db.update(k1, v1).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit().await.unwrap();
@@ -846,7 +853,7 @@ pub mod test {
             db.update(k, v1).await.unwrap();
             db.commit().await.unwrap();
 
-            let op = db.any.get_with_loc(&k).await.unwrap().unwrap();
+            let op = db.any.get_key_loc(&k).await.unwrap().unwrap();
             let proof = db
                 .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
@@ -913,7 +920,7 @@ pub mod test {
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
             // inclusion of the operation itself, and not just the chunk.
-            let (_, active_loc) = db.any.get_with_loc(&info.key).await.unwrap().unwrap();
+            let (_, active_loc) = db.any.get_key_loc(&info.key).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
@@ -965,20 +972,20 @@ pub mod test {
         let mut rng = StdRng::seed_from_u64(rng_seed);
 
         for i in 0u64..num_elements {
-            let k = hash(&i.to_be_bytes());
-            let v = hash(&rng.next_u32().to_be_bytes());
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
             db.update(k, v).await.unwrap();
         }
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency.
         for _ in 0u64..num_elements * 10 {
-            let rand_key = hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
             if rng.next_u32() % 7 == 0 {
                 db.delete(rand_key).await.unwrap();
                 continue;
             }
-            let v = hash(&rng.next_u32().to_be_bytes());
+            let v = Sha256::hash(&rng.next_u32().to_be_bytes());
             db.update(rand_key, v).await.unwrap();
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
@@ -1048,9 +1055,9 @@ pub mod test {
                 }
                 // Found an active operation! Create a proof for its active current key/value.
                 let op = db.any.log.read(i).await.unwrap();
-                let key = op.to_key().unwrap();
+                let key = op.key().unwrap();
                 let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
-                assert_eq!(info.value, *op.to_value().unwrap());
+                assert_eq!(info.value, *op.value().unwrap());
                 // Proof should validate against the current value and correct root.
                 assert!(CurrentTest::verify_key_value_proof(
                     hasher.inner(),
@@ -1304,8 +1311,8 @@ pub mod test {
 
             const NUM_OPERATIONS: u64 = 500;
             for i in 0..NUM_OPERATIONS {
-                let key = hash(&i.to_be_bytes());
-                let value = hash(&(i * 1000).to_be_bytes());
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(key, value).await.unwrap();
 
                 // Commit periodically to advance the inactivity floor
@@ -1405,8 +1412,8 @@ pub mod test {
             // Apply identical operations to both databases
             const NUM_OPERATIONS: u64 = 1000;
             for i in 0..NUM_OPERATIONS {
-                let key = hash(&i.to_be_bytes());
-                let value = hash(&(i * 1000).to_be_bytes());
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 1000).to_be_bytes());
 
                 db_no_delay.update(key, value).await.unwrap();
                 db_max_delay.update(key, value).await.unwrap();

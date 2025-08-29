@@ -2,13 +2,17 @@
 name = "commonware-codec"
 edition = "2021"
 publish = true
-version = "0.0.58"
+version = "0.0.59"
 license = "MIT OR Apache-2.0"
 description = "Serialize structured data."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/codec"
 documentation = "https://docs.rs/commonware-codec"
+
+[features]
+default = ["std"]
+std = ["thiserror/std", "bytes/std"]
 
 [dependencies]
 thiserror = { workspace = true }

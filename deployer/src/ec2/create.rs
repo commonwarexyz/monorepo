@@ -415,10 +415,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     std::fs::write(&pyroscope_agent_timer_path, PYROSCOPE_AGENT_TIMER)?;
     let binary_service_path = tag_directory.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
-    let memleak_agent_service_path = tag_directory.join("memleak-agent.service");
-    std::fs::write(&memleak_agent_service_path, MEMLEAK_AGENT_SERVICE)?;
-    let memleak_agent_script_path = tag_directory.join("memleak-agent.sh");
-    std::fs::write(&memleak_agent_script_path, MEMLEAK_AGENT_SCRIPT)?;
 
     // Write logrotate configuration file
     let logrotate_conf_path = tag_directory.join("logrotate.conf");
@@ -602,8 +598,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let binary_service_path = binary_service_path.clone();
         let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
         let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
-        let memleak_agent_service_path = memleak_agent_service_path.clone();
-        let memleak_agent_script_path = memleak_agent_script_path.clone();
         let future = async move {
             rsync_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
             rsync_file(
@@ -696,20 +690,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 pyroscope_agent_timer_path.to_str().unwrap(),
                 &ip,
                 "/home/ubuntu/pyroscope-agent.timer",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                memleak_agent_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/memleak-agent.service",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                memleak_agent_script_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/memleak-agent.sh",
             )
             .await?;
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;

@@ -1,5 +1,10 @@
 //! Exchange messages over arbitrary transport.
 
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+
 pub mod public_key;
 pub mod utils;
 
@@ -27,6 +32,8 @@ pub enum Error {
     InvalidTimestampOld(u64),
     #[error("timestamp too future: {0}")]
     InvalidTimestampFuture(u64),
+    #[error("info continuation tag was invalid")]
+    InvalidInfoContinuationTag,
 
     // Confirmation errors
     #[error("shared secret was not contributory")]

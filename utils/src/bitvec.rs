@@ -10,12 +10,14 @@
 //! used over more performant types like [usize] or [u64]. Such types would result in more
 //! complex encoding and decoding logic.
 
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
-use std::{
-    fmt::{self, Write as _},
+use core::{
+    fmt::{self, Formatter, Write as _},
     ops::{BitAnd, BitOr, BitXor, Index},
 };
 
@@ -23,7 +25,7 @@ use std::{
 type Block = u8;
 
 /// Number of bits in a [Block].
-const BITS_PER_BLOCK: usize = std::mem::size_of::<Block>() * 8;
+const BITS_PER_BLOCK: usize = Block::BITS as usize;
 
 /// Empty block of bits (all bits set to 0).
 const EMPTY_BLOCK: Block = 0;
@@ -315,11 +317,10 @@ impl BitVec {
     /// Creates a mask with the first `num_bits` bits set to 1.
     #[inline(always)]
     fn mask_over_first_n_bits(num_bits: usize) -> Block {
-        assert!(num_bits <= BITS_PER_BLOCK, "num_bits exceeds block size");
-        // Special-case for `BITS_PER_BLOCK` bits to avoid shl overflow
         match num_bits {
             BITS_PER_BLOCK => FULL_BLOCK,
-            _ => (1 << num_bits) - 1,
+            n if n < BITS_PER_BLOCK => FULL_BLOCK.unbounded_shr((BITS_PER_BLOCK - n) as u32),
+            _ => panic!("num_bits exceeds block size: {num_bits}"),
         }
     }
 
@@ -438,13 +439,13 @@ impl From<BitVec> for Vec<bool> {
 // ---------- Debug ----------
 
 impl fmt::Debug for BitVec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         // For very large BitVecs, only show a preview
         const MAX_DISPLAY: usize = 64;
         const HALF_DISPLAY: usize = MAX_DISPLAY / 2;
 
         // Closure for writing a bit
-        let write_bit = |formatter: &mut fmt::Formatter<'_>, index: usize| -> fmt::Result {
+        let write_bit = |formatter: &mut Formatter<'_>, index: usize| -> core::fmt::Result {
             formatter.write_char(if self.get_bit_unchecked(index) {
                 '1'
             } else {
@@ -948,8 +949,10 @@ mod tests {
         // Test with various sizes
         for i in 0..=BITS_PER_BLOCK {
             let mask = BitVec::mask_over_first_n_bits(i);
-            assert_eq!(mask.count_ones() as usize, i);
-            assert_eq!(mask.count_zeros() as usize, BITS_PER_BLOCK - i);
+            let ones = mask.trailing_ones() as usize;
+            let zeroes = mask.leading_zeros() as usize;
+            assert_eq!(ones, i);
+            assert_eq!(ones.checked_add(zeroes).unwrap(), BITS_PER_BLOCK);
             assert_eq!(
                 mask,
                 ((1 as Block)

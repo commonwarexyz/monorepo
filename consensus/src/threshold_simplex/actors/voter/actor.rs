@@ -444,7 +444,6 @@ pub struct Actor<
     supervisor: S,
 
     partition: String,
-    compression: Option<u8>,
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
     buffer_pool: PoolRef,
@@ -552,7 +551,6 @@ impl<
                 supervisor: cfg.supervisor,
 
                 partition: cfg.partition,
-                compression: cfg.compression,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 buffer_pool: cfg.buffer_pool,
@@ -1668,7 +1666,7 @@ impl<
             self.context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),
-                compression: self.compression,
+                compression: None, // most of the data is not compressible
                 codec_config: (),
                 buffer_pool: self.buffer_pool.clone(),
                 write_buffer: self.write_buffer,

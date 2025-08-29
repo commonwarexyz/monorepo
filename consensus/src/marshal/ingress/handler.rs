@@ -242,14 +242,17 @@ mod tests {
     use super::*;
     use crate::marshal::mocks::block::Block as TestBlock;
     use commonware_codec::{Encode, ReadExt};
-    use commonware_cryptography::sha256::{self, Digest as Sha256Digest};
+    use commonware_cryptography::{
+        sha256::{Digest as Sha256Digest, Sha256},
+        Hasher as _,
+    };
     use std::collections::BTreeSet;
 
     type B = TestBlock<Sha256Digest>;
 
     #[test]
     fn test_subject_block_encoding() {
-        let commitment = sha256::hash(b"test");
+        let commitment = Sha256::hash(b"test");
         let request = Request::<B>::Block(commitment);
 
         // Test encoding
@@ -326,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_encode_size() {
-        let commitment = sha256::hash(&[0u8; 32]);
+        let commitment = Sha256::hash(&[0u8; 32]);
         let r1 = Request::<B>::Block(commitment);
         let r2 = Request::<B>::Finalized { height: u64::MAX };
         let r3 = Request::<B>::Notarized { view: 0 };
@@ -340,8 +343,8 @@ mod tests {
     #[test]
     fn test_request_ord_same_variant() {
         // Test ordering within the same variant
-        let commitment1 = sha256::hash(b"test1");
-        let commitment2 = sha256::hash(b"test2");
+        let commitment1 = Sha256::hash(b"test1");
+        let commitment2 = Sha256::hash(b"test2");
         let block1 = Request::<B>::Block(commitment1);
         let block2 = Request::<B>::Block(commitment2);
 
@@ -375,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_request_ord_cross_variant() {
-        let commitment = sha256::hash(b"test");
+        let commitment = Sha256::hash(b"test");
         let block = Request::<B>::Block(commitment);
         let finalized = Request::<B>::Finalized { height: 100 };
         let notarized = Request::<B>::Notarized { view: 200 };
@@ -400,8 +403,8 @@ mod tests {
 
     #[test]
     fn test_request_partial_ord() {
-        let commitment1 = sha256::hash(b"test1");
-        let commitment2 = sha256::hash(b"test2");
+        let commitment1 = Sha256::hash(b"test1");
+        let commitment2 = Sha256::hash(b"test2");
         let block1 = Request::<B>::Block(commitment1);
         let block2 = Request::<B>::Block(commitment2);
         let finalized = Request::<B>::Finalized { height: 100 };
@@ -429,9 +432,9 @@ mod tests {
 
     #[test]
     fn test_request_ord_sorting() {
-        let commitment1 = sha256::hash(b"a");
-        let commitment2 = sha256::hash(b"b");
-        let commitment3 = sha256::hash(b"c");
+        let commitment1 = Sha256::hash(b"a");
+        let commitment2 = Sha256::hash(b"b");
+        let commitment3 = Sha256::hash(b"c");
 
         let requests = vec![
             Request::<B>::Notarized { view: 300 },
@@ -480,7 +483,7 @@ mod tests {
         assert!(max_finalized < min_notarized);
 
         // Test self-comparison
-        let commitment = sha256::hash(b"self");
+        let commitment = Sha256::hash(b"self");
         let block = Request::<B>::Block(commitment);
         assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
         assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);

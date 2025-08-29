@@ -2,10 +2,11 @@
 
 use arbitrary::Arbitrary;
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, max_faults, modulo, quorum, union, union_unique, NZUsize,
-    NZU32, NZU64,
+    from_hex, from_hex_formatted, hex, max_faults, modulo, quorum, quorum_from_slice, union,
+    union_unique, NZUsize, NonZeroDuration, NZU32, NZU64,
 };
 use libfuzzer_sys::fuzz_target;
+use std::time::Duration;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
@@ -14,12 +15,14 @@ enum FuzzInput {
     FromHexFormatted { hex_str: String },
     MaxFaults { n: u32 },
     Quorum { n: u32 },
+    QuorumFromSlice { a: Vec<u8> },
     Union { a: Vec<u8>, b: Vec<u8> },
     UnionUnique { namespace: Vec<u8>, msg: Vec<u8> },
     Modulo { bytes: Vec<u8>, n: u64 },
     NZUsize { v: usize },
     NZU32 { v: u32 },
     NZU64 { v: u64 },
+    NonZeroDuration { millis: u64 },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -39,6 +42,21 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::NZU64 { v } => {
             if v != 0 {
                 let _ = NZU64!(v).get() == v;
+            }
+        }
+
+        FuzzInput::NonZeroDuration { millis } => {
+            let duration = Duration::from_millis(millis);
+
+            let nz_duration = NonZeroDuration::new(duration);
+            if let Some(nz_duration) = nz_duration {
+                assert_eq!(nz_duration.get(), duration);
+
+                let converted: Duration = nz_duration.into();
+                assert_eq!(converted, duration);
+
+                let nz_duration = NonZeroDuration::new_panic(duration);
+                assert_eq!(nz_duration.get(), duration);
             }
         }
 
@@ -89,6 +107,15 @@ fn fuzz(input: FuzzInput) {
             let faults = max_faults(n);
 
             assert_eq!(q, n - faults);
+        }
+
+        FuzzInput::QuorumFromSlice { a } => {
+            let l = a.len() as u32;
+            if l == 0 {
+                return;
+            }
+            let q = quorum_from_slice(a.as_slice());
+            assert_eq!(q, quorum(l));
         }
 
         FuzzInput::Union { a, b } => {

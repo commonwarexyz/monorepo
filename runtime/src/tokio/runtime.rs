@@ -10,11 +10,12 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    network::metered::Network as MeteredNetwork, signal::Signal,
-    storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
+    network::metered::Network as MeteredNetwork, process::metered::Metrics as MeteredProcess,
+    signal::Signal, storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
     utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
+use futures::future::AbortHandle;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -253,13 +254,21 @@ impl crate::Runner for Runner {
             .build()
             .expect("failed to create Tokio runtime");
 
+        // Collect process metrics.
+        //
+        // We prefer to collect process metrics outside of `Context` because
+        // we are using `runtime_registry` rather than the one provided by `Context`.
+        let process = MeteredProcess::init(runtime_registry);
+        runtime.spawn(process.collect(tokio::time::sleep));
+
+        // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_storage");
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(IoUringConfig {
                         storage_directory: self.cfg.storage_directory.clone(),
-                        ring_config: Default::default(),
+                        iouring_config: Default::default(),
                     }, iouring_registry),
                     runtime_registry,
                 );
@@ -274,6 +283,7 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
@@ -324,6 +334,7 @@ impl crate::Runner for Runner {
             spawned: false,
             executor: executor.clone(),
             network,
+            children: Arc::new(Mutex::new(Vec::new())),
         };
         let output = executor.runtime.block_on(f(context));
         gauge.dec();
@@ -357,6 +368,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
+    children: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
 impl Clone for Context {
@@ -367,12 +379,13 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
+            children: self.children.clone(),
         }
     }
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
@@ -387,8 +400,13 @@ impl crate::Spawner for Context {
         // Set up the task
         let catch_panics = self.executor.cfg.catch_panics;
         let executor = self.executor.clone();
+
+        // Give spawned task its own empty children list
+        let children = Arc::new(Mutex::new(Vec::new()));
+        self.children = children.clone();
+
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, gauge, catch_panics);
+        let (f, handle) = Handle::init_future(future, gauge, catch_panics, children);
 
         // Spawn the task
         executor.runtime.spawn(f);
@@ -409,13 +427,40 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
+
         move |f: F| {
-            let (f, handle) = Handle::init_future(f, gauge, executor.cfg.catch_panics);
+            let (f, handle) = Handle::init_future(
+                f,
+                gauge,
+                executor.cfg.catch_panics,
+                // Give spawned task its own empty children list
+                Arc::new(Mutex::new(Vec::new())),
+            );
 
             // Spawn the task
             executor.runtime.spawn(f);
             handle
         }
+    }
+
+    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Store parent's children list
+        let parent_children = self.children.clone();
+
+        // Spawn the child
+        let child_handle = self.spawn(f);
+
+        // Register this child with the parent
+        if let Some(abort_handle) = child_handle.abort_handle() {
+            parent_children.lock().unwrap().push(abort_handle);
+        }
+
+        child_handle
     }
 
     fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
@@ -516,6 +561,7 @@ impl crate::Metrics for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
+            children: self.children.clone(),
         }
     }
 

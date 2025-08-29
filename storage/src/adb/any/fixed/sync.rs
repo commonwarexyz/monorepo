@@ -245,7 +245,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
 /// - Reading from positions 0-19 will return `ItemPruned` since those blobs don't exist
 /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
 ///   leaving operations 20-24 in tail blob 2.
-async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
+pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     context: E,
     cfg: fixed::Config,
     size: u64,
@@ -325,9 +325,8 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_cryptography::{
-        hash,
         sha256::{self, Digest},
-        Digest as _, Sha256,
+        Digest as _, Hasher, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -350,7 +349,7 @@ mod tests {
     }
 
     fn test_digest(value: u64) -> Digest {
-        hash(&value.to_be_bytes())
+        Sha256::hash(&value.to_be_bytes())
     }
 
     #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
@@ -384,7 +383,7 @@ mod tests {
             for op in &target_db_ops {
                 match op {
                     Fixed::Update(key, _) => {
-                        if let Some((value, loc)) = target_db.get_with_loc(key).await.unwrap() {
+                        if let Some((value, loc)) = target_db.get_key_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (value, loc));
                             deleted_keys.remove(key);
                         }
@@ -433,12 +432,12 @@ mod tests {
 
             // Verify that the synced database matches the target state
             for (key, &(value, loc)) in &expected_kvs {
-                let synced_opt = got_db.get_with_loc(key).await.unwrap();
+                let synced_opt = got_db.get_key_loc(key).await.unwrap();
                 assert_eq!(synced_opt, Some((value, loc)));
             }
             // Verify that deleted keys are absent
             for key in &deleted_keys {
-                assert!(got_db.get_with_loc(key).await.unwrap().is_none(),);
+                assert!(got_db.get_key_loc(key).await.unwrap().is_none(),);
             }
 
             // Put more key-value pairs into both databases
@@ -611,10 +610,7 @@ mod tests {
             assert_eq!(synced_db.root(&mut hasher), root);
 
             // Verify the synced database doesn't have any operations beyond the sync range.
-            assert_eq!(
-                synced_db.get(final_op.to_key().unwrap()).await.unwrap(),
-                None
-            );
+            assert_eq!(synced_db.get(final_op.key().unwrap()).await.unwrap(), None);
 
             synced_db.destroy().await.unwrap();
         });
@@ -701,15 +697,15 @@ mod tests {
             }
 
             for target_op in &original_ops {
-                if let Some(key) = target_op.to_key() {
+                if let Some(key) = target_op.key() {
                     let target_value = target_db.read().await.get(key).await.unwrap();
                     let synced_value = sync_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);
                 }
             }
             // Verify the last operation is present
-            let last_key = last_op[0].to_key().unwrap();
-            let last_value = *last_op[0].to_value().unwrap();
+            let last_key = last_op[0].key().unwrap();
+            let last_value = *last_op[0].value().unwrap();
             assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
 
             sync_db.destroy().await.unwrap();
@@ -795,7 +791,7 @@ mod tests {
 
             // Verify state matches for sample operations
             for target_op in &target_ops {
-                if let Some(key) = target_op.to_key() {
+                if let Some(key) = target_op.key() {
                     let target_value = target_db.get(key).await.unwrap();
                     let synced_value = sync_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);
@@ -1517,10 +1513,10 @@ mod tests {
             assert_eq!(synced_db.mmr.size(), 0);
 
             // Test that we can perform operations on the synced database
-            let key1 = hash(&1u64.to_be_bytes());
-            let value1 = hash(&10u64.to_be_bytes());
-            let key2 = hash(&2u64.to_be_bytes());
-            let value2 = hash(&20u64.to_be_bytes());
+            let key1 = Sha256::hash(&1u64.to_be_bytes());
+            let value1 = Sha256::hash(&10u64.to_be_bytes());
+            let key2 = Sha256::hash(&2u64.to_be_bytes());
+            let value2 = Sha256::hash(&20u64.to_be_bytes());
 
             synced_db.update(key1, value1).await.unwrap();
             synced_db.update(key2, value2).await.unwrap();

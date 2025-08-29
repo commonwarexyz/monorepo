@@ -114,6 +114,9 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     hasher: Standard<H>,
+
+    /// The location of the last commit operation, or None if no commit has been made.
+    last_commit: Option<u64>,
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
@@ -176,6 +179,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
+        let last_commit = log_size.checked_sub(1);
+
         Ok(Immutable {
             mmr,
             log,
@@ -185,6 +190,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             log_items_per_section: cfg.log_items_per_section.get(),
             snapshot,
             hasher,
+            last_commit,
         })
     }
 
@@ -243,6 +249,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
+        let last_commit = log_size.checked_sub(1);
+
         let mut db = Immutable {
             mmr,
             log: cfg.log,
@@ -252,6 +260,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             log_items_per_section: cfg.db_config.log_items_per_section.get(),
             snapshot,
             hasher: Standard::<H>::new(),
+            last_commit,
         };
 
         db.sync().await?;
@@ -346,7 +355,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             Variable::Set(key, _) => {
                                 uncommitted_ops.push((key, loc));
                             }
-                            Variable::Commit() => {
+                            Variable::Commit(_) => {
                                 for (key, loc) in uncommitted_ops.iter() {
                                     snapshot.insert(key, *loc);
                                 }
@@ -445,6 +454,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         Ok(None)
+    }
+
+    /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
+    /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.op_count());
+        if loc < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        let offset = self.locations.read(loc).await?.into();
+        let section = loc / self.log_items_per_section;
+        let op = self.log.get(section, offset).await?.expect("invalid loc");
+
+        Ok(op.into_value())
     }
 
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
@@ -584,10 +608,26 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Batch operations will be parallelized if a thread pool
-    /// is provided.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.apply_op(Variable::Commit()).await?;
+    /// is provided. Caller can associate an arbitrary `metadata` value with the commit.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
+        self.last_commit = Some(self.log_size);
+        self.apply_op(Variable::Commit(metadata)).await?;
         self.sync().await
+    }
+
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+        let section = last_commit / self.log_items_per_section;
+        let offset = self.locations.read(last_commit).await?.into();
+        let Some(Variable::Commit(metadata)) = self.log.get(section, offset).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit}");
+        };
+
+        Ok(Some((last_commit, metadata)))
     }
 
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
@@ -628,8 +668,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Simulate a failed commit that successfully writes the log to the commit point, but without
     /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
     #[cfg(test)]
-    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error> {
-        self.apply_op(Variable::Commit()).await?;
+    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.apply_op(Variable::Commit(None)).await?;
         self.log.close().await?;
         self.locations.close().await?;
         self.mmr
@@ -642,8 +685,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
     /// fully committing the log, requiring rollback of the MMR and log upon reopening.
     #[cfg(test)]
-    pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
-        self.apply_op(Variable::Commit()).await?;
+    pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.apply_op(Variable::Commit(None)).await?;
         let mut section = self.current_section();
 
         self.mmr.close(&mut self.hasher).await?;
@@ -665,8 +711,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn simulate_failed_commit_locations(
         mut self,
         operations_to_trim: u64,
-    ) -> Result<(), Error> {
-        self.apply_op(Variable::Commit()).await?;
+    ) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.apply_op(Variable::Commit(None)).await?;
         let op_count = self.op_count();
         assert!(op_count >= operations_to_trim);
 
@@ -683,7 +732,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 pub(super) mod test {
     use super::*;
     use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr, translator::TwoCap};
-    use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self},
@@ -733,6 +782,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let k1 = Sha256::fill(1u8);
@@ -745,7 +795,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1); // commit op added
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
@@ -779,18 +829,28 @@ pub(super) mod test {
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 1);
             // Commit the first key.
-            db.commit().await.unwrap();
+            let metadata = Some(vec![99, 100]);
+            db.commit(metadata.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 2);
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((1, metadata.clone()))
+            );
             // Set the second key.
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
             assert_eq!(db.op_count(), 3);
+
+            // Make sure we can still get metadata.
+            assert_eq!(db.get_metadata().await.unwrap(), Some((1, metadata)));
+
             // Commit the second key.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 4);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((3, None)));
 
             // Capture state.
             let root = db.root(&mut hasher);
@@ -808,6 +868,7 @@ pub(super) mod test {
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.get_metadata().await.unwrap(), Some((3, None)));
 
             // Cleanup.
             db.destroy().await.unwrap();
@@ -824,14 +885,14 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
 
             assert_eq!(db.op_count(), ELEMENTS);
 
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -841,7 +902,7 @@ pub(super) mod test {
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), ELEMENTS + 1);
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
             }
@@ -868,7 +929,7 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -879,7 +940,7 @@ pub(super) mod test {
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -913,7 +974,7 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -924,7 +985,7 @@ pub(super) mod test {
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -953,14 +1014,14 @@ pub(super) mod test {
             let k1 = Sha256::fill(1u8);
             let v1 = vec![1, 2, 3];
             db.set(k1, v1).await.unwrap();
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let first_commit_root = db.root(&mut hasher);
 
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
 
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -970,7 +1031,7 @@ pub(super) mod test {
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -998,14 +1059,14 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
 
             assert_eq!(db.op_count(), ELEMENTS);
 
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Prune the db to the first half of the operations.
@@ -1019,11 +1080,11 @@ pub(super) mod test {
 
             // Try to fetch a pruned key.
             let pruned_loc = oldest_retained_loc - 1;
-            let pruned_key = hash(&pruned_loc.to_be_bytes());
+            let pruned_key = Sha256::hash(&pruned_loc.to_be_bytes());
             assert!(db.get(&pruned_key).await.unwrap().is_none());
 
             // Try to fetch unpruned key.
-            let unpruned_key = hash(&oldest_retained_loc.to_be_bytes());
+            let unpruned_key = Sha256::hash(&oldest_retained_loc.to_be_bytes());
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1051,11 +1112,11 @@ pub(super) mod test {
 
             // Try to fetch a pruned key.
             let pruned_loc = oldest_retained_loc - 3;
-            let pruned_key = hash(&pruned_loc.to_be_bytes());
+            let pruned_key = Sha256::hash(&pruned_loc.to_be_bytes());
             assert!(db.get(&pruned_key).await.unwrap().is_none());
 
             // Try to fetch unpruned key.
-            let unpruned_key = hash(&oldest_retained_loc.to_be_bytes());
+            let unpruned_key = Sha256::hash(&oldest_retained_loc.to_be_bytes());
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
             // Confirm behavior of trying to create a proof of pruned items is as expected.

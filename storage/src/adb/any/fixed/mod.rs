@@ -363,12 +363,24 @@ impl<
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        Ok(self.get_with_loc(key).await?.map(|(v, _)| v))
+        Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
+    }
+
+    /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
+    /// if the location precedes the oldest retained location. The location is otherwise assumed
+    /// valid.
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.op_count());
+        if loc < self.inactivity_floor_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        Ok(self.log.read(loc).await?.into_value())
     }
 
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
-    pub(crate) async fn get_with_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
+    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
         for &loc in self.snapshot.get(key) {
             let (k, v) = Self::get_update_op(&self.log, loc).await?;
             if k == *key {
@@ -574,9 +586,8 @@ impl<
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
-        let Some(key) = op.to_key() else {
-            // `op` is a commit
-            return Ok(None);
+        let Some(key) = op.key() else {
+            return Ok(None); // operations without keys cannot be active
         };
         let new_loc = self.op_count();
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
@@ -606,7 +617,7 @@ impl<
     ///
     /// This method does not change the state of the db's snapshot, but it always changes the root
     /// since it applies at least one operation.
-    pub(crate) async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
+    async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.op_count() {
                 break;
@@ -716,7 +727,7 @@ pub(super) mod test {
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
-    use commonware_cryptography::{hash, sha256::Digest, Digest as _, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
@@ -986,8 +997,8 @@ pub(super) mod test {
 
             let mut map = HashMap::<Digest, Digest>::default();
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
-                let v = hash(&(i * 1000).to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
                 map.insert(k, v);
             }
@@ -997,8 +1008,8 @@ pub(super) mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
-                let v = hash(&((i + 1) * 10000).to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
                 db.update(k, v).await.unwrap();
                 map.insert(k, v);
             }
@@ -1008,7 +1019,7 @@ pub(super) mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
                 map.remove(&k);
             }
@@ -1049,7 +1060,7 @@ pub(super) mod test {
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
-                let k = hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
                     let Some(db_value) = db.get(&k).await.unwrap() else {
                         panic!("key not found in db: {k}");
@@ -1091,8 +1102,8 @@ pub(super) mod test {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
-                let v = hash(&(i * 1000).to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
             db.sync().await.unwrap();
@@ -1100,8 +1111,8 @@ pub(super) mod test {
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
-                let v = hash(&((i + 1) * 10000).to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
 
@@ -1118,8 +1129,8 @@ pub(super) mod test {
 
             // Write some additional nodes, simulate failed log commit, and test we recover to the previous commit point.
             for i in 0u64..100 {
-                let k = hash(&i.to_be_bytes());
-                let v = hash(&((i + 2) * 10000).to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&((i + 2) * 10000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
             db.simulate_failed_commit_log().await.unwrap();
@@ -1134,14 +1145,14 @@ pub(super) mod test {
             assert_eq!(new_db.op_count(), 0);
             // Insert 1000 keys then sync.
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
-                let v = hash(&(i * 1000).to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 new_db.update(k, v).await.unwrap();
             }
             assert_eq!(new_db.op_count(), 1000);
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
-                let v = hash(&((i + 1) * 10000).to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
                 new_db.update(k, v).await.unwrap();
             }
             new_db
@@ -1167,9 +1178,9 @@ pub(super) mod test {
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
-            let k = hash(&UPDATES.to_be_bytes());
+            let k = Sha256::hash(&UPDATES.to_be_bytes());
             for i in 0u64..UPDATES {
-                let v = hash(&(i * 1000).to_be_bytes());
+                let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
             db.commit().await.unwrap();
@@ -1198,14 +1209,14 @@ pub(super) mod test {
             // insert & commit multiple batches to ensure repeated inactivity floor raising.
             for j in 0u64..ELEMENTS {
                 for i in 0u64..ELEMENTS {
-                    let k = hash(&(j * 1000 + i).to_be_bytes());
-                    let v = hash(&(i * 1000).to_be_bytes());
+                    let k = Sha256::hash(&(j * 1000 + i).to_be_bytes());
+                    let v = Sha256::hash(&(i * 1000).to_be_bytes());
                     db.update(k, v).await.unwrap();
                     map.insert(k, v);
                 }
                 db.commit().await.unwrap();
             }
-            let k = hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
+            let k = Sha256::hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
@@ -1243,20 +1254,20 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
-                let k = hash(&i.to_be_bytes());
-                let v = hash(&rng.next_u32().to_be_bytes());
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&rng.next_u32().to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
 
             // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
             // frequency.
             for _ in 0u64..ELEMENTS * 10 {
-                let rand_key = hash(&(rng.next_u64() % ELEMENTS).to_be_bytes());
+                let rand_key = Sha256::hash(&(rng.next_u64() % ELEMENTS).to_be_bytes());
                 if rng.next_u32() % 7 == 0 {
                     db.delete(rand_key).await.unwrap();
                     continue;
                 }
-                let v = hash(&rng.next_u32().to_be_bytes());
+                let v = Sha256::hash(&rng.next_u32().to_be_bytes());
                 db.update(rand_key, v).await.unwrap();
                 if rng.next_u32() % 20 == 0 {
                     // Commit every ~20 updates.
@@ -1316,7 +1327,7 @@ pub(super) mod test {
             // This loop checks that the expected true bits are true in the bitmap.
             for pos in db.inactivity_floor_loc..items {
                 let item = db.log.read(pos).await.unwrap();
-                let Some(item_key) = item.to_key() else {
+                let Some(item_key) = item.key() else {
                     // `item` is a commit
                     continue;
                 };
@@ -1495,64 +1506,6 @@ pub(super) mod test {
     }
 
     #[test]
-    fn test_any_db_historical_proof_size_too_large() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(10);
-            apply_ops(&mut db, ops).await;
-            db.commit().await.unwrap();
-            let op_count = db.op_count();
-
-            // Historical size > current database size is invalid
-            let result = db.historical_proof(op_count + 1, op_count, 5).await;
-            match result {
-                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooLarge(requested, actual))) => {
-                    assert_eq!(requested, leaf_num_to_pos(op_count + 1));
-                    assert_eq!(actual, leaf_num_to_pos(op_count));
-                }
-                _ => panic!("expected HistoricalSizeTooLarge error"),
-            }
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_any_db_historical_proof_size_too_small() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(10);
-            apply_ops(&mut db, ops).await;
-            db.commit().await.unwrap();
-            let op_count = db.op_count();
-
-            // Historical size == start location is invalid
-            let result = db.historical_proof(op_count, op_count, 5).await;
-            match result {
-                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooSmall(size, start_loc))) => {
-                    assert_eq!(size, leaf_num_to_pos(op_count));
-                    assert_eq!(start_loc, leaf_num_to_pos(op_count));
-                }
-                _ => panic!("expected HistoricalSizeTooSmall error"),
-            }
-
-            // Historical size < start location is invalid
-            let result = db.historical_proof(op_count, op_count + 1, 5).await;
-            match result {
-                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooSmall(size, start_loc))) => {
-                    assert_eq!(size, leaf_num_to_pos(op_count));
-                    assert_eq!(start_loc, leaf_num_to_pos(op_count + 1));
-                }
-                _ => panic!("expected HistoricalSizeTooSmall error"),
-            }
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
     fn test_any_db_historical_proof_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1570,13 +1523,13 @@ pub(super) mod test {
             // Changing the proof digests should cause verification to fail
             {
                 let mut proof = proof.clone();
-                proof.digests[0] = hash(b"invalid");
+                proof.digests[0] = Sha256::hash(b"invalid");
                 let root_hash = db.root(&mut hasher);
                 assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
             {
                 let mut proof = proof.clone();
-                proof.digests.push(hash(b"invalid"));
+                proof.digests.push(Sha256::hash(b"invalid"));
                 let root_hash = db.root(&mut hasher);
                 assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
@@ -1584,13 +1537,16 @@ pub(super) mod test {
             // Changing the ops should cause verification to fail
             {
                 let mut ops = ops.clone();
-                ops[0] = Operation::Update(hash(b"key1"), hash(b"value1"));
+                ops[0] = Operation::Update(Sha256::hash(b"key1"), Sha256::hash(b"value1"));
                 let root_hash = db.root(&mut hasher);
                 assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
             {
                 let mut ops = ops.clone();
-                ops.push(Operation::Update(hash(b"key1"), hash(b"value1")));
+                ops.push(Operation::Update(
+                    Sha256::hash(b"key1"),
+                    Sha256::hash(b"value1"),
+                ));
                 let root_hash = db.root(&mut hasher);
                 assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
@@ -1608,7 +1564,7 @@ pub(super) mod test {
                     &proof,
                     0,
                     &ops,
-                    &hash(b"invalid")
+                    &Sha256::hash(b"invalid")
                 ));
             }
 
@@ -1639,8 +1595,8 @@ pub(super) mod test {
 
             const NUM_OPERATIONS: u64 = 500;
             for i in 0..NUM_OPERATIONS {
-                let key = hash(&i.to_be_bytes());
-                let value = hash(&(i * 1000).to_be_bytes());
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(key, value).await.unwrap();
 
                 // Commit periodically to advance the inactivity floor
@@ -1731,8 +1687,8 @@ pub(super) mod test {
             // Apply identical operations to both databases
             const NUM_OPERATIONS: u64 = 200;
             for i in 0..NUM_OPERATIONS {
-                let key = hash(&i.to_be_bytes());
-                let value = hash(&(i * 1000).to_be_bytes());
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 1000).to_be_bytes());
 
                 db_no_delay.update(key, value).await.unwrap();
                 db_max_delay.update(key, value).await.unwrap();

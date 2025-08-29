@@ -5,6 +5,11 @@
 //! `commonware-collector` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;

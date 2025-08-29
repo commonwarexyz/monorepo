@@ -1,4 +1,4 @@
-//! Ed25519 implementation of the `Scheme` trait.
+//! Ed25519 implementation of the [crate::Verifier] and [crate::Signer] traits.
 //!
 //! This implementation uses the `ed25519-consensus` crate to adhere to a strict
 //! set of validation rules for Ed25519 signatures (which is necessary for
@@ -26,4 +26,6 @@
 
 mod scheme;
 
-pub use scheme::{Batch, PrivateKey, PublicKey, Signature};
+#[cfg(feature = "std")]
+pub use scheme::Batch;
+pub use scheme::{PrivateKey, PublicKey, Signature};

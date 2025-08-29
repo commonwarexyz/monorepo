@@ -79,7 +79,8 @@
 //!     assert_eq!(fetched_value.unwrap(), v);
 //!
 //!     // Commit the operation to make it persistent
-//!     store.commit().await.unwrap();
+//!     let metadata = Some(Digest::random(&mut ctx));
+//!     store.commit(metadata).await.unwrap();
 //!
 //!     // Delete the key's value
 //!     store.delete(k).await.unwrap();
@@ -89,7 +90,7 @@
 //!     assert!(fetched_value.is_none());
 //!
 //!     // Commit the operation to make it persistent
-//!     store.commit().await.unwrap();
+//!     store.commit(None).await.unwrap();
 //!
 //!     // Destroy the store
 //!     store.destroy().await.unwrap();
@@ -127,9 +128,9 @@ pub enum Error {
     #[error(transparent)]
     Journal(#[from] crate::journal::Error),
 
-    /// The requested key was not found in the snapshot.
-    #[error("key not found")]
-    KeyNotFound,
+    /// The requested operation has been pruned.
+    #[error("operation pruned")]
+    OperationPruned(u64),
 }
 
 /// Configuration for initializing a [Store] database.
@@ -262,9 +263,9 @@ where
     ///
     /// If the key does not exist, returns `Ok(None)`.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        for location in self.snapshot.get(key) {
-            let Operation::Update(k, v) = self.get_op(*location).await? else {
-                panic!("location ({location}) does not reference set operation",);
+        for &loc in self.snapshot.get(key) {
+            let Operation::Update(k, v) = self.get_op(loc).await? else {
+                unreachable!("location ({loc}) does not reference update operation");
             };
 
             if &k == key {
@@ -275,17 +276,27 @@ where
         Ok(None)
     }
 
+    /// Get the value of the operation with location `loc` in the db. Returns
+    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// otherwise assumed valid.
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.log_size);
+        let op = self.get_op(loc).await?;
+
+        Ok(op.into_value())
+    }
+
     /// Updates the value associated with the given key in the store.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
     /// uncommitted until [Store::commit] is called. Uncommitted operations will be rolled back
     /// if the store is closed without committing.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let new_location = self.log_size;
-        if let Some(old_location) = self.get_loc(&key).await? {
-            Self::update_loc(&mut self.snapshot, &key, old_location, new_location);
+        let new_loc = self.log_size;
+        if let Some(old_loc) = self.get_key_loc(&key).await? {
+            Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
         } else {
-            self.snapshot.insert(&key, new_location);
+            self.snapshot.insert(&key, new_loc);
         };
 
         self.apply_op(Operation::Update(key, value))
@@ -296,7 +307,7 @@ where
     /// Deletes the value associated with the given key in the store. If the key has no value,
     /// the operation is a no-op.
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.get_loc(&key).await? else {
+        let Some(old_loc) = self.get_key_loc(&key).await? else {
             // Key does not exist, so this is a no-op.
             return Ok(());
         };
@@ -307,13 +318,31 @@ where
     }
 
     /// Commits all uncommitted operations to the store, making them persistent and recoverable.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.raise_inactivity_floor(self.uncommitted_ops + 1)
+    /// Caller can associate an arbitrary `metadata` value with the commit.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
+        self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
 
         self.sync().await?;
         self.prune_inactive().await
+    }
+
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
+        let mut last_commit = self.op_count() - self.uncommitted_ops;
+        if last_commit == 0 {
+            return Ok(None);
+        }
+        last_commit -= 1;
+        let section = last_commit / self.log_items_per_section;
+        let offset = self.locations.read(last_commit).await?.into();
+        let Some(Operation::CommitFloor(metadata, _)) = self.log.get(section, offset).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit}");
+        };
+
+        Ok(Some((last_commit, metadata)))
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
@@ -429,7 +458,7 @@ where
 
                         match op {
                             Operation::Delete(key) => {
-                                let result = self.get_loc(&key).await?;
+                                let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
                                     uncommitted_ops.insert(key, (Some(old_loc), None));
                                 } else {
@@ -437,14 +466,14 @@ where
                                 }
                             }
                             Operation::Update(key, _) => {
-                                let result = self.get_loc(&key).await?;
+                                let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
                                     uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
                                 } else {
                                     uncommitted_ops.insert(key, (None, Some(loc)));
                                 }
                             }
-                            Operation::CommitFloor(loc) => {
+                            Operation::CommitFloor(_, loc) => {
                                 self.inactivity_floor_loc = loc;
 
                                 // Apply all uncommitted operations.
@@ -538,9 +567,9 @@ where
         Ok(offset)
     }
 
-    /// Gets the location of the most recent [Operation::Update] for the key, or [None] if
-    /// the key does not have a value.
-    async fn get_loc(&self, key: &K) -> Result<Option<u64>, Error> {
+    /// Gets the location of the most recent [Operation::Update] for the key, or [None] if the key
+    /// does not have a value.
+    async fn get_key_loc(&self, key: &K) -> Result<Option<u64>, Error> {
         for loc in self.snapshot.get(key) {
             match self.get_op(*loc).await {
                 Ok(Operation::Update(k, _)) => {
@@ -548,52 +577,61 @@ where
                         return Ok(Some(*loc));
                     }
                 }
-                Err(Error::KeyNotFound) => return Ok(None),
-                _ => continue,
+                Err(Error::OperationPruned(_)) => {
+                    unreachable!("invalid location in snapshot: loc={loc}")
+                }
+                _ => unreachable!("non-update operation referenced by snapshot: loc={loc}"),
             }
         }
 
         Ok(None)
     }
 
-    /// Gets a [Operation] from the log at the given location.
-    async fn get_op(&self, location: u64) -> Result<Operation<K, V>, Error> {
-        let section = location / self.log_items_per_section;
-        let offset = self.locations.read(location).await?.into();
+    /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
+    /// if the location precedes the oldest retained location. The location is otherwise assumed
+    /// valid.
+    async fn get_op(&self, loc: u64) -> Result<Operation<K, V>, Error> {
+        assert!(loc < self.log_size);
+        if loc < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        let section = loc / self.log_items_per_section;
+        let offset = self.locations.read(loc).await?.into();
 
         // Get the operation from the log at the specified section and offset.
         let Some(op) = self.log.get(section, offset).await? else {
-            return Err(Error::KeyNotFound);
+            panic!("invalid location {loc}");
         };
 
         Ok(op)
     }
 
     /// Updates the snapshot with the new operation location for the given key.
-    fn update_loc(snapshot: &mut Index<T, u64>, key: &K, old_location: u64, new_location: u64) {
+    fn update_loc(snapshot: &mut Index<T, u64>, key: &K, old_loc: u64, new_loc: u64) {
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return;
         };
 
         // Iterate over conflicts in the snapshot.
-        while let Some(location) = cursor.next() {
-            if *location == old_location {
+        while let Some(loc) = cursor.next() {
+            if *loc == old_loc {
                 // Update the cursor with the new location for this key.
-                cursor.update(new_location);
+                cursor.update(new_loc);
                 return;
             }
         }
     }
 
     /// Deletes items in the snapshot that point to the given location.
-    fn delete_loc(snapshot: &mut Index<T, u64>, key: &K, old_location: u64) {
+    fn delete_loc(snapshot: &mut Index<T, u64>, key: &K, old_loc: u64) {
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return;
         };
 
         // Iterate over conflicts in the snapshot.
-        while let Some(location) = cursor.next() {
-            if *location == old_location {
+        while let Some(loc) = cursor.next() {
+            if *loc == old_loc {
                 // Delete the element from the cursor.
                 cursor.delete();
                 return;
@@ -607,10 +645,10 @@ where
     async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
-        old_location: u64,
+        old_loc: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
-        let Some(key) = op.to_key() else {
+        let Some(key) = op.key() else {
             // `op` is not a key-related operation, so it is not active.
             return Ok(None);
         };
@@ -619,17 +657,17 @@ where
             return Ok(None);
         };
 
-        let new_location = self.log_size;
+        let new_loc = self.log_size;
 
         // Iterate over all conflicting keys in the snapshot.
-        while let Some(&location) = cursor.next() {
-            if location == old_location {
+        while let Some(&loc) = cursor.next() {
+            if loc == old_loc {
                 // Update the location of the operation in the snapshot.
-                cursor.update(new_location);
+                cursor.update(new_loc);
                 drop(cursor);
 
                 self.apply_op(op).await?;
-                return Ok(Some(old_location));
+                return Ok(Some(old_loc));
             }
         }
 
@@ -642,7 +680,11 @@ where
     /// operation to the tip and then advances over it.
     ///
     /// This method does not change the state of the db's snapshot.
-    async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
+    async fn raise_inactivity_floor(
+        &mut self,
+        metadata: Option<V>,
+        max_steps: u64,
+    ) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.log_size {
                 break;
@@ -653,7 +695,7 @@ where
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
+        self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await
             .map(|_| ())
     }
@@ -741,14 +783,14 @@ mod test {
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1);
             assert!(matches!(db.prune_inactive().await, Ok(())));
             let mut db = create_test_store(context.clone()).await;
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
                 assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
             }
 
@@ -796,6 +838,7 @@ mod test {
             assert_eq!(store.log_size, 0);
             assert_eq!(store.uncommitted_ops, 0);
             assert_eq!(store.inactivity_floor_loc, 0);
+            assert_eq!(store.get_metadata().await.unwrap(), None);
 
             // Insert a key-value pair
             store.update(key, value.clone()).await.unwrap();
@@ -805,7 +848,12 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 0);
 
             // Persist the changes
-            store.commit().await.unwrap();
+            let metadata = Some(vec![99, 100]);
+            store.commit(metadata.clone()).await.unwrap();
+            assert_eq!(
+                store.get_metadata().await.unwrap(),
+                Some((3, metadata.clone()))
+            );
 
             // Even though the store was pruned, the inactivity floor was raised by 2, and
             // the old operations remain in the same blob as an active operation, so they're
@@ -836,7 +884,11 @@ mod test {
             assert_eq!(store.uncommitted_ops, 2);
             assert_eq!(store.inactivity_floor_loc, 2);
 
-            store.commit().await.unwrap();
+            // Make sure we can still get metadata.
+            assert_eq!(store.get_metadata().await.unwrap(), Some((3, metadata)));
+
+            store.commit(None).await.unwrap();
+            assert_eq!(store.get_metadata().await.unwrap(), Some((8, None)));
 
             assert_eq!(store.log_size, 9);
             assert_eq!(store.uncommitted_ops, 0);
@@ -870,7 +922,7 @@ mod test {
             let iter = store.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
             store.close().await.unwrap();
 
             // Re-open the store to ensure it replays the log correctly.
@@ -912,7 +964,7 @@ mod test {
             assert_eq!(store.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(store.get(&k2).await.unwrap().unwrap(), v2);
 
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
             store.close().await.unwrap();
 
             // Re-open the store to ensure it builds the snapshot for the conflicting
@@ -950,7 +1002,7 @@ mod test {
             assert!(fetched_value.is_none());
 
             // Commit the changes
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
 
             // Re-open the store and ensure the key is still deleted
             let mut store = create_test_store(ctx.with_label("store")).await;
@@ -963,7 +1015,7 @@ mod test {
             assert_eq!(fetched_value.unwrap(), v);
 
             // Commit the changes
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
 
             // Re-open the store and ensure the snapshot restores the key, after processing
             // the delete and the subsequent set.
@@ -1003,7 +1055,7 @@ mod test {
             store.update(k_a, v_a.clone()).await.unwrap();
             store.update(k_b, v_b.clone()).await.unwrap();
 
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
             assert_eq!(store.op_count(), 6);
             assert_eq!(store.uncommitted_ops, 0);
             assert_eq!(store.inactivity_floor_loc, 3);
@@ -1012,7 +1064,7 @@ mod test {
             store.update(k_b, v_a.clone()).await.unwrap();
             store.update(k_a, v_c.clone()).await.unwrap();
 
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
             assert_eq!(store.op_count(), 9);
             assert_eq!(store.uncommitted_ops, 0);
             assert_eq!(store.inactivity_floor_loc, 6);
@@ -1048,7 +1100,7 @@ mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let op_count = db.op_count();
 
             // Update every 3rd key
@@ -1075,7 +1127,7 @@ mod test {
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let op_count = db.op_count();
             assert_eq!(op_count, 2561);
             assert_eq!(db.snapshot.items(), 1000);
@@ -1107,7 +1159,7 @@ mod test {
                 let k = hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             assert_eq!(db.op_count(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);

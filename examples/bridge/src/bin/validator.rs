@@ -233,7 +233,6 @@ fn main() {
                 reporter: mailbox.clone(),
                 supervisor,
                 partition: String::from("log"),
-                compression: Some(3),
                 namespace: consensus_namespace,
                 mailbox_size: 1024,
                 replay_buffer: NZUsize!(1024 * 1024),

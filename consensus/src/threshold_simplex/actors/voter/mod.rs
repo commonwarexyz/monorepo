@@ -33,7 +33,6 @@ pub struct Config<
     pub supervisor: S,
 
     pub partition: String,
-    pub compression: Option<u8>,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
@@ -62,7 +61,7 @@ mod tests {
             dkg::ops,
             primitives::{ops::threshold_signature_recover, variant::MinSig},
         },
-        ed25519, hash, PrivateKeyExt as _, Sha256,
+        ed25519, Hasher as _, PrivateKeyExt as _, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -150,7 +149,6 @@ mod tests {
                 reporter: supervisor.clone(),
                 supervisor,
                 partition: "test".to_string(),
-                compression: Some(3),
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
@@ -241,7 +239,7 @@ mod tests {
                 });
 
             // Send finalization over network (view 100)
-            let payload = hash(b"test");
+            let payload = Sha256::hash(b"test");
             let proposal = Proposal::new(100, 50, payload);
             let partials: Vec<_> = shares
                 .iter()
@@ -301,7 +299,7 @@ mod tests {
             }
 
             // Send old notarization from resolver that should be ignored (view 50)
-            let payload = hash(b"test2");
+            let payload = Sha256::hash(b"test2");
             let proposal = Proposal::new(50, 49, payload);
             let partials: Vec<_> = shares
                 .iter()
@@ -325,7 +323,7 @@ mod tests {
                 .await;
 
             // Send new finalization (view 300)
-            let payload = hash(b"test3");
+            let payload = Sha256::hash(b"test3");
             let proposal = Proposal::new(300, 100, payload);
             let partials: Vec<_> = shares
                 .iter()
@@ -460,7 +458,6 @@ mod tests {
                 reporter: supervisor.clone(),
                 supervisor: supervisor.clone(),
                 partition: format!("voter_actor_test_{validator}"),
-                compression: None,
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
@@ -558,7 +555,7 @@ mod tests {
             let journal_floor_target: View = lf_target - activity_timeout + 5;
 
             // Send Finalization to advance last_finalized
-            let proposal_lf = Proposal::new(lf_target, lf_target - 1, hash(b"test"));
+            let proposal_lf = Proposal::new(lf_target, lf_target - 1, Sha256::hash(b"test"));
             let finalization_lf_sigs = shares
                 .iter()
                 .take(threshold as usize)
@@ -627,7 +624,7 @@ mod tests {
             let proposal_jft = Proposal::new(
                 journal_floor_target,
                 journal_floor_target - 1,
-                hash(b"test2"),
+                Sha256::hash(b"test2"),
             );
             let notarization_jft_sigs = shares
                 .iter()
@@ -669,8 +666,11 @@ mod tests {
             // problematic_view (42) < journal_floor_target (45)
             // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
             let problematic_view: View = journal_floor_target - 3;
-            let proposal_bft =
-                Proposal::new(problematic_view, problematic_view - 1, hash(b"test3"));
+            let proposal_bft = Proposal::new(
+                problematic_view,
+                problematic_view - 1,
+                Sha256::hash(b"test3"),
+            );
             let notarization_bft_sigs = shares
                 .iter()
                 .take(threshold as usize)
@@ -707,7 +707,7 @@ mod tests {
             }
 
             // Send Finalization to new view (100)
-            let proposal_lf = Proposal::new(100, 99, hash(b"test4"));
+            let proposal_lf = Proposal::new(100, 99, Sha256::hash(b"test4"));
             let finalization_lf_sigs = shares
                 .iter()
                 .take(threshold as usize)
