@@ -523,7 +523,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pinned_nodes.push(digest);
         }
 
-        self.mem_mmr.re_init(vec![], new_size, pinned_nodes);
+        self.mmr = self.mem_mmr.re_init(vec![], new_size, pinned_nodes);
         Self::add_extra_pinned_nodes(
             &mut self.mem_mmr,
             &self.metadata,

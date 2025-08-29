@@ -220,11 +220,11 @@ impl<H: CHasher> Mmr<H> {
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
     pub fn re_init(
-        &mut self,
+        mut self,
         nodes: Vec<H::Digest>,
         pruned_to_pos: u64,
         pinned_nodes: Vec<H::Digest>,
-    ) {
+    ) -> Self {
         self.dirty_nodes.clear();
         self.nodes = VecDeque::from(nodes);
         self.pruned_to_pos = pruned_to_pos;
@@ -232,6 +232,8 @@ impl<H: CHasher> Mmr<H> {
         for (i, pos) in nodes_to_pin(pruned_to_pos).enumerate() {
             self.pinned_nodes.insert(pos, pinned_nodes[i]);
         }
+
+        self
     }
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added

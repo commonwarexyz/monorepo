@@ -102,7 +102,7 @@ impl<D: Digest> Default for Proof<D> {
 }
 
 impl<D: Digest> Proof<D> {
-    /// Return true if `proof` proves that `element` appears at position `element_pos` within the
+    /// Return true if this proof proves that `element` appears at position `element_pos` within the
     /// MMR with root digest `root`.
     pub fn verify_element_inclusion<I, H>(
         &self,
@@ -118,8 +118,8 @@ impl<D: Digest> Proof<D> {
         self.verify_range_inclusion(hasher, &[element], element_pos, root)
     }
 
-    /// Return true if `proof` proves that the `elements` appear consecutively starting at position
-    /// `start_element_pos` within the MMR with root digest `root`.
+    /// Return true if this proof proves that the `elements` appear consecutively starting at
+    /// position `start_element_pos` within the MMR with root digest `root`.
     pub fn verify_range_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
@@ -142,8 +142,8 @@ impl<D: Digest> Proof<D> {
         }
     }
 
-    /// Return true if `proof` proves that the elements at the specified positions are included in the MMR
-    /// with the root digest `root`.
+    /// Return true if this proof proves that the elements at the specified positions are included
+    /// in the MMR with the root digest `root`.
     ///
     /// The order of the elements does not affect the output.
     pub fn verify_multi_inclusion<I, H, E>(
