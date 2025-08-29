@@ -8,7 +8,7 @@ use commonware_storage::{
         any::fixed::{Any, Config},
         sync,
     },
-    mmr::hasher::Standard,
+    mmr::StandardHasher as Standard,
     store::operation::Fixed,
     translator::TwoCap,
 };
