@@ -393,7 +393,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     ?recipient,
                     "sender has zero bandwidth, skipping recipient"
                 );
-
                 continue;
             }
 
@@ -423,7 +422,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let transmission_duration = transmission_complete_at
                 .duration_since(now)
                 .unwrap_or(Duration::ZERO);
-
             trace!(
                 ?origin,
                 ?recipient,
