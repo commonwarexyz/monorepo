@@ -11,11 +11,12 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
 documentation = "https://docs.rs/commonware-storage"
 
 [dependencies]
-commonware-codec = {workspace = true}
-commonware-cryptography = {workspace = true}
+commonware-codec = {workspace = true, features = ["std"]}
+commonware-cryptography = {workspace = true, features = ["std"]}
 commonware-macros = { workspace = true }
 commonware-runtime = { workspace = true }
-commonware-utils = { workspace = true }
+commonware-storage-core = { workspace = true, features = ["std"] }
+commonware-utils = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
