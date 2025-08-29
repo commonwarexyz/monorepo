@@ -1,5 +1,8 @@
 use super::{Config, Error};
-use crate::journal::variable::{Config as JConfig, Journal};
+use crate::{
+    journal::variable::{Config as JConfig, Journal},
+    rmap::RMap,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
 use commonware_runtime::{Metrics, Storage};
@@ -59,6 +62,7 @@ pub struct Cache<E: Storage + Metrics, V: Codec> {
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
     indices: BTreeMap<u64, Location>,
+    intervals: RMap,
 
     items_tracked: Gauge,
     gets: Counter,
@@ -92,6 +96,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
 
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
+        let mut intervals = RMap::new();
         {
             debug!("initializing cache");
             let stream = journal.replay(cfg.replay_buffer).await?;
@@ -102,6 +107,9 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
 
                 // Store index
                 indices.insert(data.index, Location { offset, len });
+
+                // Store index in intervals
+                intervals.insert(data.index);
             }
             debug!(items = indices.len(), "cache initialized");
         }
@@ -128,6 +136,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
             pending: BTreeSet::new(),
             oldest_allowed: None,
             indices,
+            intervals,
             items_tracked,
             gets,
             has,
@@ -154,6 +163,16 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
             .await?
             .ok_or(Error::RecordCorrupted)?;
         Ok(Some(record.value))
+    }
+
+    /// Retrieve the next gap in the [Cache].
+    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.intervals.next_gap(index)
+    }
+
+    /// Get up to the next `max` missing items after `start`.
+    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
+        self.intervals.missing_items(start, max)
     }
 
     /// Check if an item exists in the [Cache].
@@ -204,6 +223,11 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
             self.indices.remove(&next).unwrap();
         }
 
+        // Remove all intervals that are less than min
+        if min > 0 {
+            self.intervals.remove(0, min - 1);
+        }
+
         // Update last pruned (to prevent reads from
         // pruned sections)
         self.oldest_allowed = Some(min);
@@ -233,6 +257,9 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
 
         // Store index
         self.indices.insert(index, Location { offset, len });
+
+        // Add index to intervals
+        self.intervals.insert(index);
 
         // Add section to pending
         self.pending.insert(section);

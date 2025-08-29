@@ -413,4 +413,389 @@ mod tests {
         let state2 = test_cache_restart(5_000);
         assert_eq!(state1, state2);
     }
+
+    #[test_traced]
+    fn test_cache_next_gap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut cache = Cache::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize cache");
+
+            // Insert values with gaps
+            cache.put(1, 1).await.unwrap();
+            cache.put(10, 10).await.unwrap();
+            cache.put(11, 11).await.unwrap();
+            cache.put(14, 14).await.unwrap();
+
+            // Check gaps
+            let (current_end, start_next) = cache.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next, Some(1));
+
+            let (current_end, start_next) = cache.next_gap(1);
+            assert_eq!(current_end, Some(1));
+            assert_eq!(start_next, Some(10));
+
+            let (current_end, start_next) = cache.next_gap(10);
+            assert_eq!(current_end, Some(11));
+            assert_eq!(start_next, Some(14));
+
+            let (current_end, start_next) = cache.next_gap(11);
+            assert_eq!(current_end, Some(11));
+            assert_eq!(start_next, Some(14));
+
+            let (current_end, start_next) = cache.next_gap(12);
+            assert!(current_end.is_none());
+            assert_eq!(start_next, Some(14));
+
+            let (current_end, start_next) = cache.next_gap(14);
+            assert_eq!(current_end, Some(14));
+            assert!(start_next.is_none());
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_missing_items() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut cache = Cache::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize cache");
+
+            // Test 1: Empty cache - should return no items
+            assert_eq!(cache.missing_items(0, 5), Vec::<u64>::new());
+            assert_eq!(cache.missing_items(100, 10), Vec::<u64>::new());
+
+            // Test 2: Insert values with gaps
+            cache.put(1, 1).await.unwrap();
+            cache.put(2, 2).await.unwrap();
+            cache.put(5, 5).await.unwrap();
+            cache.put(6, 6).await.unwrap();
+            cache.put(10, 10).await.unwrap();
+
+            // Test 3: Find missing items from the beginning
+            assert_eq!(cache.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(cache.missing_items(0, 6), vec![0, 3, 4, 7, 8, 9]);
+            assert_eq!(cache.missing_items(0, 7), vec![0, 3, 4, 7, 8, 9]);
+
+            // Test 4: Find missing items from within a gap
+            assert_eq!(cache.missing_items(3, 3), vec![3, 4, 7]);
+            assert_eq!(cache.missing_items(4, 2), vec![4, 7]);
+
+            // Test 5: Find missing items from within a range
+            assert_eq!(cache.missing_items(1, 3), vec![3, 4, 7]);
+            assert_eq!(cache.missing_items(2, 4), vec![3, 4, 7, 8]);
+            assert_eq!(cache.missing_items(5, 2), vec![7, 8]);
+
+            // Test 6: Find missing items after the last range (no more gaps)
+            assert_eq!(cache.missing_items(11, 5), Vec::<u64>::new());
+            assert_eq!(cache.missing_items(100, 10), Vec::<u64>::new());
+
+            // Test 7: Large gap scenario
+            cache.put(1000, 1000).await.unwrap();
+
+            // Gap between 10 and 1000
+            let items = cache.missing_items(11, 10);
+            assert_eq!(items, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+
+            // Request more items than available in gap
+            let items = cache.missing_items(990, 15);
+            assert_eq!(
+                items,
+                vec![990, 991, 992, 993, 994, 995, 996, 997, 998, 999]
+            );
+
+            // Test 8: After syncing (data should remain consistent)
+            cache.sync().await.unwrap();
+            assert_eq!(cache.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(cache.missing_items(3, 3), vec![3, 4, 7]);
+
+            // Test 9: Cross-section boundary scenario
+            cache.put(DEFAULT_ITEMS_PER_SECTION - 1, 99).await.unwrap();
+            cache.put(DEFAULT_ITEMS_PER_SECTION + 1, 101).await.unwrap();
+
+            // Find missing items across section boundary
+            let items = cache.missing_items(DEFAULT_ITEMS_PER_SECTION - 2, 5);
+            assert_eq!(items, vec![DEFAULT_ITEMS_PER_SECTION - 2, DEFAULT_ITEMS_PER_SECTION]);
+
+            cache.close().await.expect("Failed to close cache");
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_intervals_after_restart() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            // Insert data and close
+            {
+                let mut cache = Cache::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize cache");
+
+                cache.put(0, 0).await.expect("Failed to put data");
+                cache.put(100, 100).await.expect("Failed to put data");
+                cache.put(1000, 1000).await.expect("Failed to put data");
+
+                cache.close().await.expect("Failed to close cache");
+            }
+
+            // Reopen and verify intervals are preserved
+            {
+                let cache = Cache::<_, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize cache");
+
+                // Check gaps are preserved
+                let (current_end, start_next) = cache.next_gap(0);
+                assert_eq!(current_end, Some(0));
+                assert_eq!(start_next, Some(100));
+
+                let (current_end, start_next) = cache.next_gap(100);
+                assert_eq!(current_end, Some(100));
+                assert_eq!(start_next, Some(1000));
+
+                // Check missing items
+                let items = cache.missing_items(1, 5);
+                assert_eq!(items, vec![1, 2, 3, 4, 5]);
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_intervals_with_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(100), // Smaller sections for easier testing
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut cache = Cache::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize cache");
+
+            // Insert values across multiple sections
+            cache.put(50, 50).await.unwrap();
+            cache.put(150, 150).await.unwrap();
+            cache.put(250, 250).await.unwrap();
+            cache.put(350, 350).await.unwrap();
+
+            // Check gaps before pruning
+            let (current_end, start_next) = cache.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next, Some(50));
+
+            // Prune sections less than 200
+            cache.prune(200).await.expect("Failed to prune");
+
+            // Check that pruned indices are not accessible
+            assert!(!cache.has(50));
+            assert!(!cache.has(150));
+
+            // Check gaps after pruning - should not include pruned ranges
+            let (current_end, start_next) = cache.next_gap(200);
+            assert!(current_end.is_none());
+            assert_eq!(start_next, Some(250));
+
+            // Missing items should not include pruned ranges
+            let items = cache.missing_items(200, 5);
+            assert_eq!(items, vec![200, 201, 202, 203, 204]);
+
+            // Verify remaining data is still accessible
+            assert!(cache.has(250));
+            assert!(cache.has(350));
+            assert_eq!(cache.get(250).await.unwrap(), Some(250));
+            assert_eq!(cache.get(350).await.unwrap(), Some(350));
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_sparse_indices() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(100), // Smaller sections for testing
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut cache = Cache::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize cache");
+
+            // Insert sparse values
+            let indices = vec![
+                (0u64, 0),
+                (99u64, 99), // End of first section
+                (100u64, 100), // Start of second section
+                (500u64, 500), // Start of sixth section
+            ];
+
+            for (index, value) in &indices {
+                cache
+                    .put(*index, *value)
+                    .await
+                    .expect("Failed to put data");
+            }
+
+            // Check that intermediate indices don't exist
+            assert!(!cache.has(1));
+            assert!(!cache.has(50));
+            assert!(!cache.has(101));
+            assert!(!cache.has(499));
+
+            // Verify gap detection works correctly
+            let (current_end, start_next) = cache.next_gap(50);
+            assert!(current_end.is_none());
+            assert_eq!(start_next, Some(99));
+
+            let (current_end, start_next) = cache.next_gap(99);
+            assert_eq!(current_end, Some(100));
+            assert_eq!(start_next, Some(500));
+
+            // Sync and verify
+            cache.sync().await.expect("Failed to sync");
+
+            for (index, value) in &indices {
+                let retrieved = cache
+                    .get(*index)
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, *value);
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_intervals_edge_cases() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut cache = Cache::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize cache");
+
+            // Test edge case: single item
+            cache.put(42, 42).await.unwrap();
+            
+            let (current_end, start_next) = cache.next_gap(42);
+            assert_eq!(current_end, Some(42));
+            assert!(start_next.is_none());
+
+            let (current_end, start_next) = cache.next_gap(41);
+            assert!(current_end.is_none());
+            assert_eq!(start_next, Some(42));
+
+            let (current_end, start_next) = cache.next_gap(43);
+            assert!(current_end.is_none());
+            assert!(start_next.is_none());
+
+            // Test edge case: consecutive items
+            cache.put(43, 43).await.unwrap();
+            cache.put(44, 44).await.unwrap();
+
+            let (current_end, start_next) = cache.next_gap(42);
+            assert_eq!(current_end, Some(44));
+            assert!(start_next.is_none());
+
+            // Test edge case: boundary values
+            cache.put(u64::MAX - 1, 999).await.unwrap();
+            
+            let (current_end, start_next) = cache.next_gap(u64::MAX - 2);
+            assert!(current_end.is_none());
+            assert_eq!(start_next, Some(u64::MAX - 1));
+
+            let (current_end, start_next) = cache.next_gap(u64::MAX - 1);
+            assert_eq!(current_end, Some(u64::MAX - 1));
+            assert!(start_next.is_none());
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_intervals_duplicate_inserts() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut cache = Cache::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize cache");
+
+            // Insert initial value
+            cache.put(10, 10).await.unwrap();
+            assert!(cache.has(10));
+            assert_eq!(cache.get(10).await.unwrap(), Some(10));
+
+            // Try to insert duplicate - should be no-op
+            cache.put(10, 20).await.unwrap();
+            assert!(cache.has(10));
+            assert_eq!(cache.get(10).await.unwrap(), Some(10)); // Should still be original value
+
+            // Verify intervals are correct
+            let (current_end, start_next) = cache.next_gap(10);
+            assert_eq!(current_end, Some(10));
+            assert!(start_next.is_none());
+
+            // Insert adjacent values
+            cache.put(9, 9).await.unwrap();
+            cache.put(11, 11).await.unwrap();
+
+            // Verify intervals updated correctly
+            let (current_end, start_next) = cache.next_gap(9);
+            assert_eq!(current_end, Some(11));
+            assert!(start_next.is_none());
+        });
+    }
 }
