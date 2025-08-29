@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-bridge"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "clap",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "chrono",
  "clap",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "paste",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-fuzz"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding-fuzz"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "arbitrary",
  "commonware-coding",
@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1125,11 +1125,12 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "blake3",
  "blst",
  "bytes",
+ "cfg-if",
  "commonware-codec",
  "commonware-utils",
  "criterion",
@@ -1137,6 +1138,7 @@ dependencies = [
  "getrandom 0.2.15",
  "p256",
  "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "rayon",
  "sha2 0.10.8",
  "thiserror 2.0.12",
@@ -1145,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography-fuzz"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -1161,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1180,11 +1182,12 @@ dependencies = [
 
 [[package]]
 name = "commonware-estimator"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "clap",
  "colored",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -1203,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1225,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "chrono",
@@ -1250,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "futures",
  "futures-timer",
@@ -1263,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1285,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bimap",
  "bytes",
@@ -1307,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "async-lock",
  "axum",
@@ -1338,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime-fuzz"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "arbitrary",
  "commonware-runtime",
@@ -1348,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1372,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage-fuzz"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1386,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1406,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream-fuzz"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "arbitrary",
  "chacha20poly1305",
@@ -1421,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-sync"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "clap",
@@ -1443,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1456,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils-fuzz"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1469,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "clap",
@@ -1757,7 +1760,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f55bf8e7b65898637379c1b74eb1551107c8294ed26d855ceb9fd1a09cfc9bc0"
 dependencies = [
  "const-oid",
- "pem-rfc7468",
  "zeroize",
 ]
 
@@ -1859,9 +1861,8 @@ dependencies = [
  "curve25519-dalek-ng",
  "hex",
  "rand_core 0.6.4",
- "serde",
  "sha2 0.9.9",
- "thiserror 1.0.63",
+ "thiserror 1.0.69",
  "zeroize",
 ]
 
@@ -1899,7 +1900,6 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
- "pem-rfc7468",
  "pkcs8",
  "rand_core 0.6.4",
  "sec1",
@@ -3205,15 +3205,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
-name = "pem-rfc7468"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
-dependencies = [
- "base64ct",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4367,11 +4358,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.63"
+version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0342370b38b6a11b6cc11d6a805569958d54cfa061a29969c3b5ce2ea405724"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
 dependencies = [
- "thiserror-impl 1.0.63",
+ "thiserror-impl 1.0.69",
 ]
 
 [[package]]
@@ -4385,9 +4376,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.63"
+version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4558b58466b9ad7ca0f102865eccc95938dca1a74a856f2b57b6629050da261"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",

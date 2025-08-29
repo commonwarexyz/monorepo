@@ -1,15 +1,23 @@
-use crate::{Array, BatchVerifier, PrivateKeyExt};
+use crate::{Array, PrivateKeyExt};
+cfg_if::cfg_if! {
+    if #[cfg(feature = "std")] {
+        use crate::BatchVerifier;
+        use std::borrow::{Cow, ToOwned};
+        use rand::RngCore;
+    } else {
+        use alloc::borrow::ToOwned;
+    }
+}
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique, Span};
-use ed25519_consensus::{self, VerificationKey};
-use rand::{CryptoRng, Rng, RngCore};
-use std::{
-    borrow::Cow,
+use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
 };
+use ed25519_consensus::{self, VerificationKey};
+use rand::{CryptoRng, Rng};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";
@@ -94,13 +102,13 @@ impl PartialEq for PrivateKey {
 }
 
 impl Ord for PrivateKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.raw.cmp(&other.raw)
     }
 }
 
 impl PartialOrd for PrivateKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -126,13 +134,13 @@ impl From<ed25519_consensus::SigningKey> for PrivateKey {
 }
 
 impl Debug for PrivateKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for PrivateKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
@@ -181,8 +189,13 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = VerificationKey::try_from(raw)
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        let result = VerificationKey::try_from(raw);
+        #[cfg(feature = "std")]
+        let key = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        #[cfg(not(feature = "std"))]
+        let key = result
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+
         Ok(Self { raw, key })
     }
 }
@@ -216,13 +229,13 @@ impl From<VerificationKey> for PublicKey {
 }
 
 impl Debug for PublicKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for PublicKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
@@ -267,13 +280,13 @@ impl Hash for Signature {
 }
 
 impl Ord for Signature {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.raw.cmp(&other.raw)
     }
 }
 
 impl PartialOrd for Signature {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -302,22 +315,24 @@ impl From<ed25519_consensus::Signature> for Signature {
 }
 
 impl Debug for Signature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 impl Display for Signature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.raw))
     }
 }
 
 /// Ed25519 Batch Verifier.
+#[cfg(feature = "std")]
 pub struct Batch {
     verifier: ed25519_consensus::batch::Verifier,
 }
 
+#[cfg(feature = "std")]
 impl BatchVerifier<PublicKey> for Batch {
     fn new() -> Self {
         Batch {
