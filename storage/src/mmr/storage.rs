@@ -2,7 +2,7 @@
 //! uniformly accessed.
 
 use crate::mmr::{
-    bitmap::Bitmap,
+    bitmap::MerkleizedBitmap,
     hasher::{source_pos, Hasher, Standard},
     iterator::{pos_to_height, PeakIterator},
     journaled::Mmr as JournaledMmr,
@@ -46,7 +46,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Journaled
     }
 }
 
-impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
+impl<H: CHasher, const N: usize> Storage<H::Digest> for MerkleizedBitmap<H, N> {
     fn size(&self) -> u64 {
         self.size()
     }

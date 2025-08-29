@@ -12,7 +12,7 @@ use crate::{
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
-        bitmap::Bitmap,
+        bitmap::MerkleizedBitmap,
         hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
@@ -157,7 +157,7 @@ impl<
             start_leaf_num,
             &log,
             &mut snapshot,
-            None::<&mut Bitmap<H, UNUSED_N>>,
+            None::<&mut MerkleizedBitmap<H, UNUSED_N>>,
         )
         .await?;
 
@@ -261,7 +261,7 @@ impl<
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
-        mut bitmap: Option<&mut Bitmap<H, N>>,
+        mut bitmap: Option<&mut MerkleizedBitmap<H, N>>,
     ) -> Result<u64, Error> {
         let mut inactivity_floor_loc = start_leaf_num;
         if let Some(ref bitmap) = bitmap {
@@ -1279,7 +1279,7 @@ pub(super) mod test {
             // Close the db, then replay its operations with a bitmap.
             let root = db.root(&mut hasher);
             // Create a bitmap based on the current db's pruned/inactive state.
-            let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
+            let mut bitmap = MerkleizedBitmap::<_, SHA256_SIZE>::new();
             let pruning_boundary = db.oldest_retained_loc().unwrap();
             for _ in 0..pruning_boundary {
                 bitmap.append(false);
