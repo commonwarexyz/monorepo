@@ -1,6 +1,7 @@
 #![no_main]
 
 mod mocks;
+use crate::mocks::check_invariants;
 use commonware_consensus::{
     simplex::{
         config::Config,
@@ -40,7 +41,6 @@ use std::{
     },
     time::Duration,
 };
-use crate::mocks::check_invariants;
 
 const VALID_PANICS: [&str; 2] = ["invalid view (in payload):", "invalid parent (in payload):"];
 
