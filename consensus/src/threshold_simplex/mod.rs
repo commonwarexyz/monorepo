@@ -365,8 +365,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -388,7 +388,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -581,6 +585,169 @@ mod tests {
         all_online::<MinSig>();
     }
 
+    fn observer<V: Variant>() {
+        // Create context
+        let n_active = 5;
+        let threshold = quorum(n_active);
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants (active)
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n_active {
+                let scheme = PrivateKey::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            schemes.sort_by_key(|s| s.public_key());
+            validators.sort();
+
+            // Add observer (no share)
+            let scheme_observer = PrivateKey::from_seed(n_active as u64);
+            let pk_observer = scheme_observer.public_key();
+            schemes.push(scheme_observer);
+
+            // Register all (including observer) with the network
+            let mut all_validators = validators.clone();
+            all_validators.push(pk_observer.clone());
+            all_validators.sort();
+            let mut registrations = register_validators(&mut oracle, &all_validators).await;
+
+            // Link all peers (including observer)
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
+
+            // Derive threshold
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n_active, threshold);
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                let is_observer = scheme.public_key() == pk_observer;
+
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Configure engine
+                let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                let share = if is_observer {
+                    None
+                } else {
+                    Some(shares[idx].clone())
+                };
+                participants.insert(0, (polynomial.clone(), validators.clone(), share));
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                    namespace: namespace.clone(),
+                    participants,
+                };
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                supervisors.push(supervisor.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    crypto: scheme,
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    supervisor,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine.start(pending, recovered, resolver);
+            }
+
+            // Wait for all  engines to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Sanity check
+            for supervisor in supervisors.iter() {
+                // Ensure no faults or invalid signatures
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+                {
+                    let invalid = supervisor.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+
+                // Ensure no blocked connections
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(blocked.is_empty());
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_observer() {
+        observer::<MinPk>();
+        observer::<MinSig>();
+    }
+
     fn unclean_shutdown<V: Variant>() {
         // Create context
         let n = 5;
@@ -634,8 +801,8 @@ mod tests {
 
                 // Link all validators
                 let link = Link {
-                    latency: 50.0,
-                    jitter: 50.0,
+                    latency: Duration::from_millis(50),
+                    jitter: Duration::from_millis(50),
                     success_rate: 1.0,
                 };
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -655,7 +822,11 @@ mod tests {
                     let mut participants = BTreeMap::new();
                     participants.insert(
                         0,
-                        (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                        (
+                            polynomial.clone(),
+                            validators.clone(),
+                            Some(shares[idx].clone()),
+                        ),
                     );
                     let supervisor_config = mocks::supervisor::Config::<_, V> {
                         namespace: namespace.clone(),
@@ -812,8 +983,8 @@ mod tests {
 
             // Link all validators except first
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(
@@ -849,7 +1020,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config {
@@ -917,8 +1088,8 @@ mod tests {
 
             // Degrade network connections for online peers
             let link = Link {
-                latency: 3_000.0,
-                jitter: 0.0,
+                latency: Duration::from_secs(3),
+                jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
             link_validators(
@@ -957,8 +1128,8 @@ mod tests {
 
             // Restore network connections for all online peers
             let link = Link {
-                latency: 10.0,
-                jitter: 2.5,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(3),
                 success_rate: 1.0,
             };
             link_validators(
@@ -973,7 +1144,11 @@ mod tests {
             let mut participants = BTreeMap::new();
             participants.insert(
                 0,
-                (polynomial.clone(), validators.clone(), shares[0].clone()),
+                (
+                    polynomial.clone(),
+                    validators.clone(),
+                    Some(shares[0].clone()),
+                ),
             );
             let supervisor_config = mocks::supervisor::Config::<_, V> {
                 namespace: namespace.clone(),
@@ -1081,8 +1256,8 @@ mod tests {
 
             // Link all validators except first
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(
@@ -1118,7 +1293,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -1348,8 +1523,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -1374,7 +1549,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -1537,8 +1712,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 3_000.0,
-                jitter: 0.0,
+                latency: Duration::from_secs(3),
+                jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -1560,7 +1735,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -1650,8 +1829,8 @@ mod tests {
 
             // Update links
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -1748,8 +1927,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
@@ -1771,7 +1950,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -1955,8 +2138,8 @@ mod tests {
 
             // Link all validators
             let degraded_link = Link {
-                latency: 200.0,
-                jitter: 150.0,
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
                 success_rate: 0.5,
             };
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
@@ -1978,7 +2161,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -2131,8 +2318,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2156,7 +2343,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -2325,8 +2512,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2350,7 +2537,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -2504,8 +2691,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2529,7 +2716,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -2682,8 +2869,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2707,7 +2894,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -2869,8 +3056,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2894,7 +3081,7 @@ mod tests {
                     (
                         polynomial.clone(),
                         validators.clone(),
-                        shares[idx_scheme].clone(),
+                        Some(shares[idx_scheme].clone()),
                     ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
@@ -3037,8 +3224,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 80.0,
-                jitter: 10.0,
+                latency: Duration::from_millis(80),
+                jitter: Duration::from_millis(10),
                 success_rate: 0.98,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -3060,7 +3247,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
@@ -3189,8 +3380,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 5.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(5),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -3214,7 +3405,11 @@ mod tests {
                 let mut participants = BTreeMap::new();
                 participants.insert(
                     0,
-                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx].clone()),
+                    ),
                 );
 
                 // Store first supervisor for monitoring

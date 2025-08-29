@@ -275,8 +275,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -471,6 +471,135 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_observer() {
+        // Create context
+        let n_active = 5;
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators_active = Vec::new();
+            for i in 0..n_active {
+                let scheme = PrivateKey::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators_active.push(pk);
+            }
+            validators_active.sort();
+
+            // Add observer not in participants
+            let scheme_observer = PrivateKey::from_seed(n_active as u64);
+            let pk_observer = scheme_observer.public_key();
+            schemes.push(scheme_observer);
+
+            // Register all (including observer) with the network
+            let mut all_validators = validators_active.clone();
+            all_validators.push(pk_observer.clone());
+            all_validators.sort();
+            let mut registrations = register_validators(&mut oracle, &all_validators).await;
+
+            // Link all peers (including observer)
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            let participants = BTreeMap::from_iter(vec![(0, validators_active.clone())]);
+            for scheme in schemes.into_iter() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Create supervisor
+                let supervisor_config = mocks::supervisor::Config {
+                    namespace: namespace.clone(),
+                    participants: participants.clone(),
+                };
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
+                supervisors.push(supervisor.clone());
+
+                // Configure application
+                let validator = scheme.public_key();
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+
+                // Configure engine
+                let cfg = config::Config {
+                    crypto: scheme,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    supervisor,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_participants: n_active as usize,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine.start(voter, resolver);
+            }
+
+            // Wait for all engines (including the observer) to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+        });
+    }
+
+    #[test_traced]
     fn test_unclean_shutdown() {
         // Create context
         let n = 5;
@@ -518,8 +647,8 @@ mod tests {
 
                 // Link all validators
                 let link = Link {
-                    latency: 50.0,
-                    jitter: 50.0,
+                    latency: Duration::from_millis(50),
+                    jitter: Duration::from_millis(50),
                     success_rate: 1.0,
                 };
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -679,8 +808,8 @@ mod tests {
 
             // Link all validators except first
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(
@@ -770,8 +899,8 @@ mod tests {
 
             // Degrade network connections for online peers
             let link = Link {
-                latency: 3_000.0,
-                jitter: 0.0,
+                latency: Duration::from_secs(3),
+                jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
             link_validators(
@@ -812,8 +941,8 @@ mod tests {
 
             // Restore network connections for all online peers
             let link = Link {
-                latency: 10.0,
-                jitter: 2.5,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(3),
                 success_rate: 1.0,
             };
             link_validators(
@@ -920,8 +1049,8 @@ mod tests {
 
             // Link all validators except first
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(
@@ -1148,8 +1277,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -1285,7 +1414,7 @@ mod tests {
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
-        let skip_timeout = 2;
+        let skip_timeout = 3;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(180));
         executor.start(|context| async move {
@@ -1317,8 +1446,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 3_000.0,
-                jitter: 0.0,
+                latency: Duration::from_secs(3),
+                jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -1420,8 +1549,8 @@ mod tests {
 
             // Update links
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -1504,8 +1633,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
@@ -1681,8 +1810,8 @@ mod tests {
 
             // Link all validators
             let degraded_link = Link {
-                latency: 200.0,
-                jitter: 150.0,
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
                 success_rate: 0.5,
             };
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
@@ -1834,8 +1963,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2006,8 +2135,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2170,8 +2299,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
@@ -2320,8 +2449,8 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: 80.0,
-                jitter: 10.0,
+                latency: Duration::from_millis(80),
+                jitter: Duration::from_millis(10),
                 success_rate: 0.98,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;

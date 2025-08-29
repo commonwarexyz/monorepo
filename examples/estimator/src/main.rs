@@ -13,7 +13,7 @@ use commonware_runtime::{
 };
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
-    mean, median, parse_task, std_dev, Command, Distribution, Latencies,
+    mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -33,12 +33,37 @@ const DEFAULT_CHANNEL: u32 = 0;
 /// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 
+/// The message type
+type Message = Vec<u8>;
+
+/// Create a message containing the ID encoded as a big-endian u32,
+/// padded to the given size.
+fn create_message(id: u32, target_size: Option<usize>) -> Message {
+    match target_size {
+        Some(size) => {
+            let mut message = Vec::with_capacity(size);
+            message.extend_from_slice(&id.to_be_bytes());
+            if size > 4 {
+                message.resize(size, 0);
+            }
+            message
+        }
+        None => id.to_be_bytes().to_vec(),
+    }
+}
+
+/// Extract the ID from a message.
+fn extract_id_from_message(message: &Message) -> u32 {
+    // Messages are always at least 4 bytes by construction
+    u32::from_be_bytes([message[0], message[1], message[2], message[3]])
+}
+
 /// All state for a given peer
 type PeerIdentity = (
     ed25519::PublicKey,
     String,
-    WrappedSender<Sender<ed25519::PublicKey>, u32>,
-    WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
+    WrappedSender<Sender<ed25519::PublicKey>, Message>,
+    WrappedReceiver<Receiver<ed25519::PublicKey>, Message>,
 );
 
 /// The result of a peer job execution
@@ -124,7 +149,19 @@ fn parse_arguments() -> Arguments {
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(String))
-                .help("Distribution of peers across regions in the form <region>:<count>, e.g. us-east-1:3,eu-west-1:2"),
+                .help(
+                    "Distribution of peers across regions:\n\
+                       <region>:<count> (unlimited bandwidth)\n\
+                       <region>:<count>:<egress>/<ingress> (asymmetric)\n\
+                       <region>:<count>:<bandwidth> (symmetric)\n\
+                     \n\
+                     Bandwidth is in bytes per second.\n\
+                     \n\
+                     Examples:\n\
+                       us-east-1:3 (3 peers, unlimited bandwidth)\n\
+                       us-east-1:3:1000/500 (1000 B/s egress, 500 B/s ingress)\n\
+                       eu-west-1:2:2000 (2000 B/s both ways)",
+                ),
         )
         .arg(
             Arg::new("reload")
@@ -146,7 +183,34 @@ fn parse_arguments() -> Arguments {
                 .expect("missing count")
                 .parse::<usize>()
                 .expect("invalid count");
-            (region, count)
+
+            let (egress_bps, ingress_bps) = match parts.next() {
+                Some(bandwidth) => {
+                    if bandwidth.contains('/') {
+                        let mut bw = bandwidth.split('/');
+                        let egress = bw.next().unwrap().parse::<usize>().expect("invalid egress");
+                        let ingress = bw
+                            .next()
+                            .unwrap()
+                            .parse::<usize>()
+                            .expect("invalid ingress");
+                        (Some(egress), Some(ingress))
+                    } else {
+                        let bw = bandwidth.parse::<usize>().expect("invalid bandwidth");
+                        (Some(bw), Some(bw))
+                    }
+                }
+                None => (None, None),
+            };
+
+            (
+                region,
+                RegionConfig {
+                    count,
+                    egress_bps,
+                    ingress_bps,
+                },
+            )
         })
         .collect();
 
@@ -168,7 +232,7 @@ fn parse_arguments() -> Arguments {
 /// Run simulations for all possible proposers and return results
 fn run_all_simulations(
     peers: usize,
-    region_counts: &BTreeMap<String, usize>,
+    distribution: &Distribution,
     dsl: &[(usize, Command)],
     latency_map: &Latencies,
     task_content: &str,
@@ -177,7 +241,7 @@ fn run_all_simulations(
     let mut results = Vec::new();
 
     for proposer_idx in proposers {
-        let result = run_single_simulation(proposer_idx, region_counts, dsl, latency_map);
+        let result = run_single_simulation(proposer_idx, distribution, dsl, latency_map);
         print_simulation_results(&result, task_content);
         results.push(result);
     }
@@ -269,17 +333,33 @@ async fn setup_network_identities(
     let peers = count_peers(distribution);
     let mut identities = Vec::with_capacity(peers);
     let mut peer_idx = 0;
-    for (region, count) in distribution {
-        for _ in 0..*count {
+
+    // Register all peers
+    for (region, config) in distribution {
+        for _ in 0..config.count {
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle
                 .register(identity.clone(), DEFAULT_CHANNEL)
                 .await
                 .unwrap();
-            let (sender, receiver) = wrap::<_, _, u32>((), sender, receiver);
+            let codec_config = (commonware_codec::RangeCfg::from(..), ());
+            let (sender, receiver) = wrap::<_, _, Message>(codec_config, sender, receiver);
             identities.push((identity, region.clone(), sender, receiver));
             peer_idx += 1;
         }
+    }
+
+    // Set bandwidth limits for each peer based on their region config
+    for (identity, region, _, _) in &identities {
+        let config = &distribution[region];
+        oracle
+            .set_bandwidth(
+                identity.clone(),
+                config.egress_bps.unwrap_or(usize::MAX),
+                config.ingress_bps.unwrap_or(usize::MAX),
+            )
+            .await
+            .unwrap();
     }
 
     identities
@@ -298,8 +378,8 @@ async fn setup_network_links(
             }
             let latency = latencies[region][other_region];
             let link = Link {
-                latency: latency.0,
-                jitter: latency.1,
+                latency: Duration::from_micros((latency.0 * 1000.0) as u64),
+                jitter: Duration::from_micros((latency.1 * 1000.0) as u64),
                 success_rate: DEFAULT_SUCCESS_RATE,
             };
             oracle
@@ -369,7 +449,8 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 
                 // Wait for incoming message
                 let (other_identity, message) = receiver.recv().await.unwrap();
-                let msg_id = message.unwrap();
+                let msg = message.unwrap();
+                let msg_id = extract_id_from_message(&msg);
                 received.entry(msg_id).or_default().insert(other_identity);
             }
 
@@ -474,16 +555,17 @@ async fn process_command<C: Spawner + Clock>(
     command_ctx: &mut CommandContext,
     current_index: &mut usize,
     command: &(usize, Command),
-    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, u32>,
+    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, Message>,
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {
     let is_proposer = command_ctx.identity == command_ctx.proposer_identity;
     match &command.1 {
-        Command::Propose(id) => {
+        Command::Propose(id, size) => {
             if is_proposer {
+                let message = create_message(*id, *size);
                 sender
-                    .send(commonware_p2p::Recipients::All, *id, true)
+                    .send(commonware_p2p::Recipients::All, message, true)
                     .await
                     .unwrap();
                 received
@@ -494,9 +576,10 @@ async fn process_command<C: Spawner + Clock>(
             *current_index += 1;
             true
         }
-        Command::Broadcast(id) => {
+        Command::Broadcast(id, size) => {
+            let message = create_message(*id, *size);
             sender
-                .send(commonware_p2p::Recipients::All, *id, true)
+                .send(commonware_p2p::Recipients::All, message, true)
                 .await
                 .unwrap();
             received
@@ -506,17 +589,18 @@ async fn process_command<C: Spawner + Clock>(
             *current_index += 1;
             true
         }
-        Command::Reply(id) => {
+        Command::Reply(id, size) => {
             if is_proposer {
                 received
                     .entry(*id)
                     .or_default()
                     .insert(command_ctx.identity.clone());
             } else {
+                let message = create_message(*id, *size);
                 sender
                     .send(
                         commonware_p2p::Recipients::One(command_ctx.proposer_identity.clone()),
-                        *id,
+                        message,
                         true,
                     )
                     .await

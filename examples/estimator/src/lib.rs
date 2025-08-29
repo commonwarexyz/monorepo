@@ -30,7 +30,16 @@ const MILLISECONDS_TO_SECONDS: f64 = 1000.0;
 // =============================================================================
 
 pub type Region = String;
-pub type Distribution = BTreeMap<Region, usize>;
+
+/// Regional configuration specifying peer count and optional bandwidth limits
+#[derive(Debug, Clone)]
+pub struct RegionConfig {
+    pub count: usize,
+    pub egress_bps: Option<usize>,
+    pub ingress_bps: Option<usize>,
+}
+
+pub type Distribution = BTreeMap<Region, RegionConfig>;
 pub type Behavior = (f64, f64); // (avg_latency_ms, jitter_ms)
 pub type Latencies = BTreeMap<Region, BTreeMap<Region, Behavior>>;
 
@@ -56,9 +65,9 @@ struct PeerState {
 
 #[derive(Clone)]
 pub enum Command {
-    Propose(u32),
-    Broadcast(u32),
-    Reply(u32),
+    Propose(u32, Option<usize>),   // id, size in bytes
+    Broadcast(u32, Option<usize>), // id, size in bytes
+    Reply(u32, Option<usize>),     // id, size in bytes
     Collect(u32, Threshold, Option<(Duration, Duration)>),
     Wait(u32, Threshold, Option<(Duration, Duration)>),
     Or(Box<Command>, Box<Command>),
@@ -181,9 +190,24 @@ fn parse_single_command(line: &str) -> Command {
     }
 
     match command {
-        "propose" => Command::Propose(id),
-        "broadcast" => Command::Broadcast(id),
-        "reply" => Command::Reply(id),
+        "propose" => {
+            let size = parsed_args
+                .get("size")
+                .map(|s| s.parse::<usize>().expect("Invalid size"));
+            Command::Propose(id, size)
+        }
+        "broadcast" => {
+            let size = parsed_args
+                .get("size")
+                .map(|s| s.parse::<usize>().expect("Invalid size"));
+            Command::Broadcast(id, size)
+        }
+        "reply" => {
+            let size = parsed_args
+                .get("size")
+                .map(|s| s.parse::<usize>().expect("Invalid size"));
+            Command::Reply(id, size)
+        }
         "collect" | "wait" => {
             let thresh = if let Some(thresh_str) = parsed_args.get("threshold") {
                 if thresh_str.ends_with('%') {
@@ -506,7 +530,7 @@ pub fn std_dev(data: &[f64]) -> Option<f64> {
 
 /// Calculate total number of peers across all regions
 pub fn count_peers(distribution: &Distribution) -> usize {
-    let peers = distribution.values().sum();
+    let peers = distribution.values().map(|config| config.count).sum();
     assert!(peers > 1, "must have at least 2 peers");
     peers
 }
@@ -514,9 +538,9 @@ pub fn count_peers(distribution: &Distribution) -> usize {
 /// Calculate which region a proposer belongs to based on their index
 pub fn calculate_proposer_region(proposer_idx: usize, distribution: &Distribution) -> String {
     let mut current = 0;
-    for (region, count) in distribution {
+    for (region, config) in distribution {
         let start = current;
-        current += *count;
+        current += config.count;
         if proposer_idx >= start && proposer_idx < current {
             return region.clone();
         }
@@ -540,9 +564,9 @@ pub fn can_command_advance(
     received: &BTreeMap<u32, BTreeSet<PublicKey>>,
 ) -> bool {
     match cmd {
-        Command::Propose(_) => true, // Propose always advances (proposer check handled by caller)
-        Command::Broadcast(_) => true, // Broadcast always advances
-        Command::Reply(_) => true,   // Reply always advances
+        Command::Propose(_, _) => true, // Propose always advances (proposer check handled by caller)
+        Command::Broadcast(_, _) => true, // Broadcast always advances
+        Command::Reply(_, _) => true,   // Reply always advances
         Command::Collect(id, thresh, _) => {
             if is_proposer {
                 let count = received.get(id).map_or(0, |s| s.len());
@@ -610,17 +634,17 @@ pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) ->
                 // If command advances, execute side effects (message sending, state updates)
                 if advanced {
                     match cmd {
-                        Command::Propose(id) => {
+                        Command::Propose(id, _) => {
                             if is_proposer {
                                 messages.push((p, Recipients::All, *id));
                                 state.received.entry(*id).or_default().insert(identity);
                             }
                         }
-                        Command::Broadcast(id) => {
+                        Command::Broadcast(id, _) => {
                             messages.push((p, Recipients::All, *id));
                             state.received.entry(*id).or_default().insert(identity);
                         }
-                        Command::Reply(id) => {
+                        Command::Reply(id, _) => {
                             let proposer_key = keys[proposer].clone();
                             if is_proposer {
                                 state.received.entry(*id).or_default().insert(identity);
@@ -778,17 +802,17 @@ reply{3}
         assert_eq!(commands.len(), 3);
 
         match &commands[0].1 {
-            Command::Propose(id) => assert_eq!(*id, 1),
+            Command::Propose(id, _) => assert_eq!(*id, 1),
             _ => panic!("Expected Propose command"),
         }
 
         match &commands[1].1 {
-            Command::Broadcast(id) => assert_eq!(*id, 2),
+            Command::Broadcast(id, _) => assert_eq!(*id, 2),
             _ => panic!("Expected Broadcast command"),
         }
 
         match &commands[2].1 {
-            Command::Reply(id) => assert_eq!(*id, 3),
+            Command::Reply(id, _) => assert_eq!(*id, 3),
             _ => panic!("Expected Reply command"),
         }
     }
@@ -1238,18 +1262,18 @@ broadcast{1}
                 match cmd1.as_ref() {
                     Command::And(and_cmd1, and_cmd2) => {
                         match and_cmd1.as_ref() {
-                            Command::Propose(id) => assert_eq!(*id, 1),
+                            Command::Propose(id, _) => assert_eq!(*id, 1),
                             _ => panic!("Expected Propose id=1"),
                         }
                         match and_cmd2.as_ref() {
-                            Command::Broadcast(id) => assert_eq!(*id, 2),
+                            Command::Broadcast(id, _) => assert_eq!(*id, 2),
                             _ => panic!("Expected Broadcast id=2"),
                         }
                     }
                     _ => panic!("Expected And command"),
                 }
                 match cmd2.as_ref() {
-                    Command::Reply(id) => assert_eq!(*id, 3),
+                    Command::Reply(id, _) => assert_eq!(*id, 3),
                     _ => panic!("Expected Reply id=3"),
                 }
             }
@@ -1269,5 +1293,50 @@ broadcast{1}
     fn test_parse_task_extra_closing_paren() {
         let content = "wait{1, threshold=1} && wait{2, threshold=1})";
         parse_task(content);
+    }
+
+    #[test]
+    fn test_parse_task_commands_with_message_sizes() {
+        let content = r#"
+propose{1, size=1024}
+broadcast{2, size=100}
+reply{3, size=64}
+reply{4}
+"#;
+
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 4);
+
+        match &commands[0].1 {
+            Command::Propose(id, size) => {
+                assert_eq!(*id, 1);
+                assert_eq!(*size, Some(1024));
+            }
+            _ => panic!("Expected Propose command with size"),
+        }
+
+        match &commands[1].1 {
+            Command::Broadcast(id, size) => {
+                assert_eq!(*id, 2);
+                assert_eq!(*size, Some(100));
+            }
+            _ => panic!("Expected Broadcast command with size"),
+        }
+
+        match &commands[2].1 {
+            Command::Reply(id, size) => {
+                assert_eq!(*id, 3);
+                assert_eq!(*size, Some(64));
+            }
+            _ => panic!("Expected Reply command with size"),
+        }
+
+        match &commands[3].1 {
+            Command::Reply(id, size) => {
+                assert_eq!(*id, 4);
+                assert_eq!(*size, None);
+            }
+            _ => panic!("Expected Reply command without size"),
+        }
     }
 }
