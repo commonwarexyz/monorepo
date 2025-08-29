@@ -1,7 +1,8 @@
 //! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
-    simplex::types::{Finalize, Notarize, Proposal, View, Voter},
+    simplex::types::{Finalize, Notarize, Proposal, Voter},
+    types::View,
     Supervisor, Viewable,
 };
 use commonware_codec::{Decode, Encode};
