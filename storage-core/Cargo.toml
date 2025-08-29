@@ -28,5 +28,8 @@ rayon = { workspace = true, optional = true }
 [dev-dependencies]
 commonware-storage-core = { path = ".", features = ["std"] }
 
+[package.metadata.cargo-udeps.ignore]
+development = ["commonware-storage-core"]
+
 [lib]
 bench = false
