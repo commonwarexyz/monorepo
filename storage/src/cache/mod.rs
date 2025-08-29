@@ -3,7 +3,7 @@
 //! Data is stored in [crate::journal::variable::Journal] (an append-only log) and the location of
 //! written data is tracked in-memory by index to enable **single-read lookups** for cached data.
 //!
-//! Unlike [crate::archive::prunable::Archive], the [Cache] is optimized for simplicity and does
+//! Unlike [crate::archive::Archive], the [Cache] is optimized for simplicity and does
 //! not support key-based lookups (only index-based access is provided). This makes it ideal for
 //! caching sequential data where you know the exact index of the item you want to retrieve.
 //!
