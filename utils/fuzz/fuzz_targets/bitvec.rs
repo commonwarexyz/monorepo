@@ -133,18 +133,14 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::GetUnchecked(bools, index) => {
+            FuzzInput::GetUnchecked(bools, index) => unsafe {
                 let v = BitVec::from_bools(&bools);
+                // Caller must ensure `index` is less than the length of the BitVec.
                 if index >= v.len() {
                     return;
                 }
-                let result = v.get(index);
-                if index < v.len() {
-                    assert!(result.is_some());
-                } else {
-                    assert!(result.is_none());
-                }
-            }
+                v.get_unchecked(index);
+            },
 
             FuzzInput::Set(bools, index) => {
                 let mut v = BitVec::from_bools(&bools);

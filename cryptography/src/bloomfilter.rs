@@ -12,7 +12,7 @@ use commonware_codec::{
     EncodeSize, FixedSize,
 };
 use commonware_utils::BitVec;
-use std::num::{NonZeroU8, NonZeroUsize};
+use core::num::{NonZeroU8, NonZeroUsize};
 
 /// The length of a half of a [Digest].
 const HALF_DIGEST_LEN: usize = 16;
