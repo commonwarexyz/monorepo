@@ -677,7 +677,6 @@ impl<H: CHasher> Mmr<H> {
         );
         // Recompute the set of older nodes to retain.
         self.pinned_nodes = self.nodes_to_pin(pos);
-        println!("pinned_nodes: {:?}", self.pinned_nodes);
         let retained_nodes = self.pos_to_index(pos);
         self.nodes.drain(0..retained_nodes);
         self.pruned_to_pos = pos;
@@ -749,7 +748,6 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_runtime::{create_pool, deterministic, tokio, Runner};
     use commonware_utils::hex;
-    use std::println;
 
     /// Test empty MMR behavior.
     #[test]
@@ -863,11 +861,6 @@ mod tests {
 
             // After pruning up to a peak, we shouldn't be able to prove any elements before it.
             assert!(matches!(mmr.proof(0), Err(ElementPruned(_))));
-            println!(
-                "proof(11): {:?} {:?}",
-                mmr.proof(11),
-                proof::Proof::<commonware_cryptography::sha256::Digest>::nodes_required_for_range_proof(mmr.size(), 11, 11)
-            );
             assert!(matches!(mmr.proof(11), Err(ElementPruned(_))));
             // We should still be able to prove any leaf following this peak, the first of which is
             // at position 15.
