@@ -429,7 +429,7 @@ pub struct Storage<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait
 impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
     Storage<'a, H, S1, S2>
 {
-    /// Creates a new [Grafting] Storage instance.
+    /// Creates a new grafted [Storage] instance.
     pub fn new(peak_tree: &'a S1, base_mmr: &'a S2, height: u32) -> Self {
         Self {
             peak_tree,

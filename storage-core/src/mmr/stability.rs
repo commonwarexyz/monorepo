@@ -1,32 +1,9 @@
-use crate::mmr::{
-    hasher::{Hasher, Standard},
-    Mmr,
-};
+use crate::mmr::{hasher::Hasher, Mmr};
 use commonware_cryptography::{Hasher as CHasher, Sha256};
-use commonware_utils::hex;
-
-/// Build the MMR corresponding to the stability test `ROOTS` and confirm the
-/// roots match that from the builder's root computation
-pub fn build_and_check_test_roots_mmr(mmr: &mut Mmr<Sha256>) {
-    let mut hasher: Standard<Sha256> = Standard::new();
-    for i in 0u64..199 {
-        hasher.inner().update(&i.to_be_bytes());
-        let element = hasher.inner().finalize();
-        let root = mmr.root(&mut hasher);
-        let expected_root = ROOTS[i as usize];
-        assert_eq!(hex(&root), expected_root, "at: {i}");
-        mmr.add(&mut hasher, &element);
-    }
-    assert_eq!(
-        hex(&mmr.root(&mut hasher)),
-        ROOTS[199],
-        "Root after 200 elements"
-    );
-}
 
 /// Build an MMR for testing with 199 elements whose root should always equal
 /// `ROOTS[199]`.
-pub fn build_test_mmr<H: CHasher>(hasher: &mut impl Hasher<H>, mmr: &mut Mmr<H>) {
+pub fn build_test_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256>) {
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
@@ -35,22 +12,7 @@ pub fn build_test_mmr<H: CHasher>(hasher: &mut impl Hasher<H>, mmr: &mut Mmr<H>)
     mmr.sync(hasher);
 }
 
-pub fn build_batched_and_check_test_roots(mmr: &mut Mmr<Sha256>) {
-    let mut hasher: Standard<Sha256> = Standard::new();
-    for i in 0u64..199 {
-        hasher.inner().update(&i.to_be_bytes());
-        let element = hasher.inner().finalize();
-        mmr.add_batched(&mut hasher, &element);
-    }
-    mmr.sync(&mut hasher);
-    assert_eq!(
-        hex(&mmr.root(&mut hasher)),
-        ROOTS[199],
-        "Root after 200 elements"
-    );
-}
-
-/// Roots for all MMRs with 0..200 elements for testing stability of root computation across
+/// Sha256 roots for all MMRs with 0..200 elements for testing stability of root computation across
 /// different MMR implementations.
 pub const ROOTS: [&str; 200] = [
     "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",

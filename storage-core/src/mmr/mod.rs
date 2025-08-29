@@ -1,13 +1,71 @@
-//! A basic MMR where all nodes are stored in-memory.
+//! A Merkle Mountain Range (MMR) is an append-only data structure that allows for efficient
+//! verification of the inclusion of an element, or some range of consecutive elements, in a list.
 //!
 //! # Terminology
 //!
-//! Nodes in this structure are either _retained_, _pruned_, or _pinned_. Retained nodes are nodes
-//! that have not yet been pruned, and have digests stored explicitly within the tree structure.
-//! Pruned nodes are those whose positions precede that of the _oldest retained_ node, for which no
-//! digests are maintained. Pinned nodes are nodes that would otherwise be pruned based on their
-//! position, but whose digests remain required for proof generation. The digests for pinned nodes
-//! are stored in an auxiliary map, and are at most O(log2(n)) in number.
+//! An MMR is a list of perfect binary trees (aka "mountains") of strictly decreasing height. The
+//! roots of these trees are called the "peaks" of the MMR. Each "element" stored in the MMR is
+//! represented by some leaf node in one of these perfect trees, storing a positioned hash of the
+//! element. Non-leaf nodes store a positioned hash of their children.
+//!
+//! The "size" of an MMR is the total number of nodes summed over all trees.
+//!
+//! The nodes of the MMR are ordered by a post-order traversal of the MMR trees, starting from the
+//! from tallest tree to shortest. The "position" of a node in the MMR is defined as the 0-based
+//! index of the node in this ordering. This implies the positions of elements, which are always
+//! leaves, may not be contiguous even if they were consecutively added. An element's "number" is
+//! its 0-based index in the order of element insertion. In the example below, the right-most
+//! element has position 18 and number 10.
+//!
+//! As the MMR is an append-only data structure, node positions never change and can be used as
+//! stable identifiers.
+//!
+//! The "height" of a node is 0 for a leaf, 1 for the parent of 2 leaves, and so on.
+//!
+//! The "root digest" (or just "root") of an MMR is the result of hashing together the size of the
+//! MMR and the digests of every peak in decreasing order of height.
+//!
+//! # Examples
+//!
+//! (Borrowed from <https://docs.grin.mw/wiki/chain-state/merkle-mountain-range/>): After adding 11
+//! elements to an MMR, it will have 19 nodes total with 3 peaks corresponding to 3 perfect binary
+//! trees as pictured below, with nodes identified by their positions:
+//!
+//! ```text
+//!    Height
+//!      3              14
+//!                   /    \
+//!                  /      \
+//!                 /        \
+//!                /          \
+//!      2        6            13
+//!             /   \        /    \
+//!      1     2     5      9     12     17
+//!           / \   / \    / \   /  \   /  \
+//!      0   0   1 3   4  7   8 10  11 15  16 18
+//!
+//! Number   0   1 2   3  4   5  6   7  8   9 10
+//! ```
+//!
+//! The root hash in this example is computed as:
+//!
+//! ```text
+//!
+//! Hash(19,
+//!   Hash(14,                                                  // first peak
+//!     Hash(6,
+//!       Hash(2, Hash(0, element_0), Hash(1, element_1)),
+//!       Hash(5, Hash(3, element_2), Hash(4, element_4))
+//!     )
+//!     Hash(13,
+//!       Hash(9, Hash(7, element_7), Hash(8, element_8)),
+//!       Hash(12, Hash(10, element_10), Hash(11, element_11))
+//!     )
+//!   )
+//!   Hash(17, Hash(15, element_15), Hash(16, element_16))      // second peak
+//!   Hash(18, element_18)                                      // third peak
+//! )
+//! ```
 
 pub mod hasher;
 pub mod iterator;
@@ -71,12 +129,21 @@ pub struct Config<H: CHasher> {
     pub pool: Option<ThreadPool>,
 }
 
-/// Implementation of `Mmr`.
+/// A basic MMR where all nodes are stored in-memory.
+///
+/// # Terminology
+///
+/// Nodes in this structure are either _retained_, _pruned_, or _pinned_. Retained nodes are nodes
+/// that have not yet been pruned, and have digests stored explicitly within the tree structure.
+/// Pruned nodes are those whose positions precede that of the _oldest retained_ node, for which no
+/// digests are maintained. Pinned nodes are nodes that would otherwise be pruned based on their
+/// position, but whose digests remain required for proof generation. The digests for pinned nodes
+/// are stored in an auxiliary map, and are at most O(log2(n)) in number.
 ///
 /// # Max Capacity
 ///
-/// The maximum number of elements that can be stored is usize::MAX
-/// (u32::MAX on 32-bit architectures).
+/// The maximum number of elements that can be stored is usize::MAX (u32::MAX on 32-bit
+/// architectures).
 pub struct Mmr<H: CHasher> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
     /// starting from the from tallest tree to shortest.
@@ -113,6 +180,7 @@ impl<H: CHasher> Default for Mmr<H> {
 #[cfg(feature = "std")]
 const MIN_TO_PARALLELIZE: usize = 20;
 
+/// Implementation of `Mmr`.
 impl<H: CHasher> Mmr<H> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
@@ -177,6 +245,7 @@ impl<H: CHasher> Mmr<H> {
         self.nodes.len() as u64 + self.pruned_to_pos
     }
 
+    /// Return the position of the last leaf in the MMR, or None if the MMR is empty.
     pub fn last_leaf_pos(&self) -> Option<u64> {
         if self.size() == 0 {
             return None;
@@ -201,6 +270,8 @@ impl<H: CHasher> Mmr<H> {
         Some(self.pruned_to_pos)
     }
 
+    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
+    /// be pruned, but whose digests remain required for proof generation.
     pub fn pinned_nodes(&self) -> BTreeMap<u64, H::Digest> {
         self.pinned_nodes.clone()
     }
@@ -239,15 +310,21 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the index of the element in the current nodes vector given its position in the MMR.
     ///
-    /// Will underflow if `pos` precedes the oldest retained position.
+    /// # Panics
+    ///
+    /// Panics if `pos` precedes the oldest retained position.
     fn pos_to_index(&self, pos: u64) -> usize {
+        assert!(
+            pos >= self.pruned_to_pos,
+            "pos precedes oldest retained position"
+        );
         (pos - self.pruned_to_pos) as usize
     }
 
     /// Add `element` to the MMR and return its position in the MMR. The element can be an arbitrary
     /// byte slice, and need not be converted to a digest first.
     ///
-    /// # Warning
+    /// # Panics
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> u64 {
@@ -287,7 +364,7 @@ impl<H: CHasher> Mmr<H> {
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
     /// MMR's structure.
     ///
-    /// # Warning
+    /// # Panics
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<H>, mut digest: H::Digest) {
@@ -312,7 +389,7 @@ impl<H: CHasher> Mmr<H> {
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
     /// ElementPruned errors otherwise.
     ///
-    /// # Warning
+    /// # Panics
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn pop(&mut self) -> Result<u64, Error> {
@@ -343,7 +420,7 @@ impl<H: CHasher> Mmr<H> {
     /// Change the digest of any retained leaf. This is useful if you want to use the MMR
     /// implementation as an updatable binary Merkle tree, and otherwise should be avoided.
     ///
-    /// # Warning
+    /// # Panics
     ///
     /// - Panics if `pos` does not correspond to a leaf, or if the leaf has been pruned.
     ///
@@ -389,7 +466,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Batch update the digests of multiple retained leaves.
     ///
-    /// # Warning
+    /// # Panics
     ///
     /// Panics if any of the updated leaves has been pruned.
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
@@ -445,9 +522,9 @@ impl<H: CHasher> Mmr<H> {
 
     /// Batch update the digests of multiple retained leaves using multiple threads.
     ///
-    /// # Warning
+    /// # Panics
     ///
-    /// Assumes `self.pool` is non-None and panics otherwise.
+    /// Panics if `self.pool` is None.
     #[cfg(feature = "std")]
     fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
         &mut self,
@@ -630,7 +707,7 @@ impl<H: CHasher> Mmr<H> {
     /// Return an inclusion proof for the specified element. Returns ElementPruned error if some
     /// element needed to generate the proof has been pruned.
     ///
-    /// # Warning
+    /// # Panics
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn range_proof(&self, start_pos: u64, end_pos: u64) -> Result<Proof<H::Digest>, Error> {
@@ -667,7 +744,7 @@ impl<H: CHasher> Mmr<H> {
     /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
     /// them required for proof generation.
     ///
-    /// # Warning
+    /// # Panics
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn prune_to_pos(&mut self, pos: u64) {
@@ -712,7 +789,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// Runtime is Log_2(n) in the number of elements even if the original MMR is never pruned.
     ///
-    /// # Warning
+    /// # Panics
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn clone_pruned(&self) -> Self {
@@ -740,14 +817,44 @@ impl<H: CHasher> Mmr<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        hasher::Standard,
-        iterator::leaf_num_to_pos,
-        stability::{build_and_check_test_roots_mmr, build_batched_and_check_test_roots, ROOTS},
-    };
+    use crate::mmr::{hasher::Standard, iterator::leaf_num_to_pos, stability::ROOTS};
     use commonware_cryptography::Sha256;
     use commonware_runtime::{create_pool, deterministic, tokio, Runner};
     use commonware_utils::hex;
+
+    /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
+    fn build_and_check_test_roots_mmr(mmr: &mut Mmr<Sha256>) {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        for i in 0u64..199 {
+            hasher.inner().update(&i.to_be_bytes());
+            let element = hasher.inner().finalize();
+            let root = mmr.root(&mut hasher);
+            let expected_root = ROOTS[i as usize];
+            assert_eq!(hex(&root), expected_root, "at: {i}");
+            mmr.add(&mut hasher, &element);
+        }
+        assert_eq!(
+            hex(&mmr.root(&mut hasher)),
+            ROOTS[199],
+            "Root after 200 elements"
+        );
+    }
+
+    /// Same as `build_and_check_test_roots` but uses `add_batched` + `sync` instead of `add`.
+    pub fn build_batched_and_check_test_roots(mmr: &mut Mmr<Sha256>) {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        for i in 0u64..199 {
+            hasher.inner().update(&i.to_be_bytes());
+            let element = hasher.inner().finalize();
+            mmr.add_batched(&mut hasher, &element);
+        }
+        mmr.sync(&mut hasher);
+        assert_eq!(
+            hex(&mmr.root(&mut hasher)),
+            ROOTS[199],
+            "Root after 200 elements"
+        );
+    }
 
     /// Test empty MMR behavior.
     #[test]
