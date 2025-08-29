@@ -32,6 +32,11 @@
 //! can be changed between initializations of [Cache], however, it must remain populated if any
 //! data was written with compression enabled.
 //!
+//! # Querying for Gaps
+//!
+//! [Cache] tracks gaps in the index space to enable the caller to efficiently fetch unknown keys
+//! using `next_gap`. This is a very common pattern when syncing blocks in a blockchain.
+//!
 //! # Example
 //!
 //! ```rust
@@ -535,7 +540,10 @@ mod tests {
 
             // Find missing items across section boundary
             let items = cache.missing_items(DEFAULT_ITEMS_PER_SECTION - 2, 5);
-            assert_eq!(items, vec![DEFAULT_ITEMS_PER_SECTION - 2, DEFAULT_ITEMS_PER_SECTION]);
+            assert_eq!(
+                items,
+                vec![DEFAULT_ITEMS_PER_SECTION - 2, DEFAULT_ITEMS_PER_SECTION]
+            );
 
             cache.close().await.expect("Failed to close cache");
         });
@@ -662,16 +670,13 @@ mod tests {
             // Insert sparse values
             let indices = vec![
                 (0u64, 0),
-                (99u64, 99), // End of first section
+                (99u64, 99),   // End of first section
                 (100u64, 100), // Start of second section
                 (500u64, 500), // Start of sixth section
             ];
 
             for (index, value) in &indices {
-                cache
-                    .put(*index, *value)
-                    .await
-                    .expect("Failed to put data");
+                cache.put(*index, *value).await.expect("Failed to put data");
             }
 
             // Check that intermediate indices don't exist
@@ -722,7 +727,7 @@ mod tests {
 
             // Test edge case: single item
             cache.put(42, 42).await.unwrap();
-            
+
             let (current_end, start_next) = cache.next_gap(42);
             assert_eq!(current_end, Some(42));
             assert!(start_next.is_none());
@@ -745,7 +750,7 @@ mod tests {
 
             // Test edge case: boundary values
             cache.put(u64::MAX - 1, 999).await.unwrap();
-            
+
             let (current_end, start_next) = cache.next_gap(u64::MAX - 2);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(u64::MAX - 1));
