@@ -178,7 +178,7 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
+        ed25519::{self, PrivateKey, PublicKey},
         PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::select;
@@ -1135,8 +1135,6 @@ mod tests {
 
     #[test]
     fn test_many_to_one_bandwidth_sharing() {
-        use commonware_cryptography::ed25519;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
@@ -1228,8 +1226,6 @@ mod tests {
     fn test_one_to_many_fast_sender() {
         // Test that 1 fast sender (100KB/s) sending to 10 receivers (10KB/s each)
         // should complete all sends in ~1s and all messages received in ~1s
-        use commonware_cryptography::ed25519;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
@@ -1330,8 +1326,6 @@ mod tests {
     fn test_many_slow_senders_to_fast_receiver() {
         // Test that 10 slow senders (1KB/s each) sending to a fast receiver (10KB/s)
         // should complete all transfers in ~1s
-        use commonware_cryptography::ed25519;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
@@ -1430,8 +1424,6 @@ mod tests {
         //
         // 3 senders to 1 receiver, starting at different times
         // Receiver has 30KB/s, senders each have 30KB/s
-        use commonware_cryptography::ed25519;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
@@ -1570,8 +1562,6 @@ mod tests {
     fn test_dynamic_bandwidth_varied_sizes() {
         // Test dynamic allocation with different message sizes arriving simultaneously
         // This tests that smaller messages complete first when bandwidth is shared
-        use commonware_cryptography::ed25519;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
