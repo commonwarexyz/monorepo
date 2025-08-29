@@ -8,6 +8,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
+/// Location of a record in `Journal`.
 struct Location {
     offset: u32,
     len: u32,
@@ -71,9 +72,9 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         (index / self.items_per_section) * self.items_per_section
     }
 
-    /// Initialize a new `Archive` instance.
+    /// Initialize a new `Cache` instance.
     ///
-    /// The in-memory index for `Archive` is populated during this call
+    /// The in-memory index for `Cache` is populated during this call
     /// by replaying the journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
@@ -120,7 +121,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         context.register("syncs", "Number of syncs called", syncs.clone());
         items_tracked.set(indices.len() as i64);
 
-        // Return populated archive
+        // Return populated cache
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),
             journal,
@@ -134,6 +135,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         })
     }
 
+    /// Retrieve an item from the [Cache].
     pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
@@ -154,6 +156,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         Ok(Some(record.value))
     }
 
+    /// Check if an item exists in the [Cache].
     pub fn has(&self, index: u64) -> bool {
         // Update metrics
         self.has.inc();
@@ -162,8 +165,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.indices.contains_key(&index)
     }
 
-    /// Prune `Archive` to the provided `min` (masked by the configured
-    /// section mask).
+    /// Prune [Cache] to the provided `min`.
     ///
     /// If this is called with a min lower than the last pruned, nothing
     /// will happen.
@@ -179,7 +181,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
                 return Ok(());
             }
         }
-        debug!(min, "pruning archive");
+        debug!(min, "pruning cache");
 
         // Prune journal
         self.journal.prune(min).await.map_err(Error::Journal)?;
@@ -209,6 +211,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         Ok(())
     }
 
+    /// Store an item in the [Cache].
     pub async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
@@ -237,6 +240,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         Ok(())
     }
 
+    /// Sync all pending writes.
     pub async fn sync(&mut self) -> Result<(), Error> {
         let mut syncs = Vec::with_capacity(self.pending.len());
         for section in self.pending.iter() {
@@ -248,10 +252,14 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         Ok(())
     }
 
+    /// Close the [Cache].
+    ///
+    /// Any pending writes will be synced prior to closing.
     pub async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
     }
 
+    /// Remove all persistent data created by this [Cache].
     pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
     }

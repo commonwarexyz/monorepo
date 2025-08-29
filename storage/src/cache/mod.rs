@@ -5,7 +5,7 @@ use thiserror::Error;
 mod storage;
 pub use storage::Cache;
 
-/// Errors that can occur when interacting with the archive.
+/// Errors that can occur when interacting with the cache.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("journal error: {0}")]
@@ -40,6 +40,6 @@ pub struct Config<C> {
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
     pub replay_buffer: NonZeroUsize,
 
-    /// The buffer pool to use for the archive's [crate::journal] storage.
+    /// The buffer pool to use for the cache's [crate::journal] storage.
     pub buffer_pool: PoolRef,
 }
