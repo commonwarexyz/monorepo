@@ -1218,9 +1218,7 @@ mod tests {
                 assert!(
                     recv_time >= Duration::from_millis(950)
                         && recv_time <= Duration::from_millis(1100),
-                    "Message {} received at {:?}, expected ~1s",
-                    i,
-                    recv_time
+                    "Message {i} received at {recv_time:?}, expected ~1s",
                 );
             }
         });
@@ -1309,8 +1307,7 @@ mod tests {
             // Sender should send all 100KB in ~1s at 100KB/s
             assert!(
                 send_time >= Duration::from_millis(950) && send_time <= Duration::from_millis(1100),
-                "Sender took {:?} to send 100KB, expected ~1s",
-                send_time
+                "Sender took {send_time:?} to send 100KB, expected ~1s",
             );
 
             // Each receiver should receive their 10KB message in ~1s (10KB at 10KB/s)
@@ -1323,9 +1320,7 @@ mod tests {
                 assert!(
                     recv_time >= Duration::from_millis(950)
                         && recv_time <= Duration::from_millis(1100),
-                    "Receiver {} received at {:?}, expected ~1s",
-                    i,
-                    recv_time
+                    "Receiver {i} received at {recv_time:?}, expected ~1s",
                 );
             }
         });
@@ -1422,9 +1417,7 @@ mod tests {
                 assert!(
                     recv_time >= Duration::from_millis(950)
                         && recv_time <= Duration::from_millis(1100),
-                    "Message {} received at {:?}, expected ~1s",
-                    i,
-                    recv_time
+                    "Message {i} received at {recv_time:?}, expected ~1s",
                 );
             }
         });
@@ -1535,8 +1528,7 @@ mod tests {
             let t0 = context.current().duration_since(start).unwrap();
             assert!(
                 t0 >= Duration::from_millis(1000) && t0 <= Duration::from_millis(1100),
-                "Message 0 received at {:?}, expected ~1s",
-                t0
+                "Message 0 received at {t0:?}, expected ~1s",
             );
 
             // The algorithm may deliver messages in a different order based on
@@ -1564,14 +1556,12 @@ mod tests {
             // Both should complete between 1.5s and 2.5s
             assert!(
                 t1 >= Duration::from_millis(1500) && t1 <= Duration::from_millis(2600),
-                "Message 1 received at {:?}, expected between 1.5s-2.6s",
-                t1
+                "Message 1 received at {t1:?}, expected between 1.5s-2.6s",
             );
 
             assert!(
                 t2 >= Duration::from_millis(1500) && t2 <= Duration::from_millis(2600),
-                "Message 2 received at {:?}, expected between 1.5s-2.6s",
-                t2
+                "Message 2 received at {t2:?}, expected between 1.5s-2.6s",
             );
         });
     }
@@ -1678,8 +1668,7 @@ mod tests {
             let max_time = messages.iter().map(|&(_, _, t)| t).max().unwrap();
             assert!(
                 max_time >= Duration::from_millis(2000),
-                "Total time {:?} should be at least 2s for 60KB at 30KB/s",
-                max_time
+                "Total time {max_time:?} should be at least 2s for 60KB at 30KB/s",
             );
         });
     }
@@ -1874,8 +1863,7 @@ mod tests {
             assert!(
                 msg1_time >= Duration::from_millis(1999)
                     && msg1_time <= Duration::from_millis(2010),
-                "First message should take ~2s, got {:?}",
-                msg1_time
+                "First message should take ~2s, got {msg1_time:?}",
             );
 
             // Change bandwidth to 2 KB/s
@@ -1899,8 +1887,7 @@ mod tests {
             assert!(
                 msg2_time >= Duration::from_millis(4999)
                     && msg2_time <= Duration::from_millis(5010),
-                "Second message should take ~5s at reduced bandwidth, got {:?}",
-                msg2_time
+                "Second message should take ~5s at reduced bandwidth, got {msg2_time:?}",
             );
         });
     }
@@ -2025,8 +2012,7 @@ mod tests {
             // When receiver bandwidth is 0, should still use sender bandwidth (10KB/s)
             assert!(
                 send_time >= Duration::from_millis(999) && send_time <= Duration::from_millis(1010),
-                "With receiver bandwidth 0, should still use sender bandwidth (~1s), got {:?}",
-                send_time
+                "With receiver bandwidth 0, should still use sender bandwidth (~1s), got {send_time:?}",
             );
 
             // Message should never arrive
