@@ -720,7 +720,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Prune historical operations that are behind the inactivity floor. This does not affect the
     /// db's root or current snapshot.
-    pub async fn prune_inactive(&mut self, loc: Option<u64>) -> Result<(), Error> {
+    pub async fn prune(&mut self, loc: Option<u64>) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.oldest_retained_loc() else {
             return Ok(());
         };
@@ -862,7 +862,7 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
-            assert!(matches!(db.prune_inactive(None).await, Ok(())));
+            assert!(matches!(db.prune(None).await, Ok(())));
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
@@ -879,7 +879,7 @@ pub(super) mod test {
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1); // floor op added
             let root = db.root(&mut hasher);
-            assert!(matches!(db.prune_inactive(None).await, Ok(())));
+            assert!(matches!(db.prune(None).await, Ok(())));
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
 
@@ -1003,7 +1003,7 @@ pub(super) mod test {
 
             // Pruning inactive ops should not affect current state or root
             let root = db.root(&mut hasher);
-            db.prune_inactive(None).await.unwrap();
+            db.prune(None).await.unwrap();
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
 
@@ -1074,7 +1074,7 @@ pub(super) mod test {
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
             db.raise_inactivity_floor(None, 3000).await.unwrap();
-            db.prune_inactive(None).await.unwrap();
+            db.prune(None).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 4478);
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
