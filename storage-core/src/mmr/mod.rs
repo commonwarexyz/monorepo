@@ -139,6 +139,7 @@ pub struct Config<H: CHasher> {
 ///
 /// The maximum number of elements that can be stored is usize::MAX (u32::MAX on 32-bit
 /// architectures).
+#[derive(Clone, Debug)]
 pub struct Mmr<H: CHasher> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
     /// starting from the from tallest tree to shortest.
@@ -220,11 +221,11 @@ impl<H: CHasher> Mmr<H> {
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
     pub fn re_init(
-        mut self,
+        &mut self,
         nodes: Vec<H::Digest>,
         pruned_to_pos: u64,
         pinned_nodes: Vec<H::Digest>,
-    ) -> Self {
+    ) {
         self.dirty_nodes.clear();
         self.nodes = VecDeque::from(nodes);
         self.pruned_to_pos = pruned_to_pos;
@@ -232,8 +233,6 @@ impl<H: CHasher> Mmr<H> {
         for (i, pos) in nodes_to_pin(pruned_to_pos).enumerate() {
             self.pinned_nodes.insert(pos, pinned_nodes[i]);
         }
-
-        self
     }
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added

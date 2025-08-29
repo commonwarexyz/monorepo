@@ -2,7 +2,7 @@
 name = "commonware-storage-core"
 edition = "2021"
 publish = true
-version = "0.0.59"
+version = "0.0.60"
 license = "MIT OR Apache-2.0"
 description = "Core no_std storage primitives for Commonware."
 readme = "README.md"

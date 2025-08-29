@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage-core"
-version = "0.0.59"
+version = "0.0.60"
 dependencies = [
  "bytes",
  "commonware-codec",
