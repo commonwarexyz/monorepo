@@ -277,14 +277,15 @@ pub fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Sha256, Mmr};
+    use crate::mmr::{hasher::Standard, Mmr};
+    use commonware_cryptography::Sha256;
 
     #[test]
     fn test_leaf_num_calculation() {
         // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
         // its number and back again.
-        let mut mmr: Mmr = Mmr::new();
-        let mut hasher = Sha256::new();
+        let mut mmr: Mmr<Sha256> = Mmr::new();
+        let mut hasher = Standard::<Sha256>::new();
         let mut num_to_pos = Vec::new();
         let digest = [1u8; 32];
         for _ in 0u64..1000 {

@@ -1,7 +1,7 @@
 use crate::mmr::{
-    hasher::Standard,
     iterator::leaf_num_to_pos,
     verification::{Proof, ProofStore},
+    StandardHasher as Standard,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};

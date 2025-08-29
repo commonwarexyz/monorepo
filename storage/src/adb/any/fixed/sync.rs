@@ -3,7 +3,7 @@ use crate::{
     index::Index,
     journal::fixed,
     mmr::{
-        hasher::{self, Standard},
+        core::hasher::{self, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
     },
     store::operation::Fixed,
@@ -321,8 +321,8 @@ mod tests {
         },
         journal::{self, fixed},
         mmr::{
-            hasher::Standard,
             iterator::{leaf_num_to_pos, nodes_to_pin},
+            StandardHasher as Standard,
         },
         store::operation::Fixed,
         translator::TwoCap,

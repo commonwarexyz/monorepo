@@ -67,61 +67,41 @@
 //! )
 //! ```
 
-use crate::mmr::hasher::Hasher;
-use commonware_cryptography::Hasher as CHasher;
-use std::future::Future;
 use thiserror::Error;
 
 pub mod bitmap;
-pub mod hasher;
-// Re-export iterator from storage-core instead of having our own module
-pub use commonware_storage_core::mmr::iterator;
+pub mod grafting;
+// Re-export storage-core modules.
+pub use commonware_storage_core::mmr as core;
+pub use core::{hasher::Standard as StandardHasher, iterator, Hasher};
 pub mod journaled;
-pub mod mem;
-pub mod storage;
-#[cfg(test)]
-mod tests;
 pub mod verification;
-
-/// A trait for building an MMR and computing the root.
-pub trait Builder<H: CHasher>: Send + Sync {
-    /// Add `element` to the MMR and return its position within it. The element can be an arbitrary
-    /// byte slice, and need not be converted to a digest first.
-    fn add(
-        &mut self,
-        hasher: &mut impl Hasher<H>,
-        element: &[u8],
-    ) -> impl Future<Output = Result<u64, Error>>;
-
-    /// Return the root hash of the MMR.
-    fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest;
-}
 
 /// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("an element required for this operation has been pruned: {0}")]
-    ElementPruned(u64),
+    #[error("core mmr error: {0}")]
+    CoreMmr(#[from] core::Error),
     #[error("metadata error: {0}")]
     MetadataError(#[from] crate::metadata::Error),
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),
-    #[error("missing node: {0}")]
-    MissingNode(u64),
-    #[error("MMR is empty")]
-    Empty,
-    #[error("invalid update")]
-    InvalidUpdate,
-    #[error("invalid proof length")]
-    InvalidProofLength,
-    #[error("proof missing digest at position: {0}")]
-    MissingDigest(u64),
-    #[error("invalid size: {0}")]
-    InvalidSize(u64),
-    #[error("root mismatch")]
-    RootMismatch,
-    #[error("invalid proof")]
-    InvalidProof,
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    #[error("missing node: {0}")]
+    MissingNode(u64),
+    #[error("invalid proof")]
+    InvalidProof,
+    #[error("root mismatch")]
+    RootMismatch,
+    #[error("element pruned: {0}")]
+    ElementPruned(u64),
+    #[error("missing digest: {0}")]
+    MissingDigest(u64),
+    #[error("invalid proof length")]
+    InvalidProofLength,
+    #[error("invalid size: {0}")]
+    InvalidSize(u64),
+    #[error("empty")]
+    Empty,
 }

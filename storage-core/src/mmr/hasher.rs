@@ -1,83 +1,107 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
-use crate::mmr::Digest;
-use sha2::{Digest as Sha2Digest, Sha256 as Sha2Hasher};
+
+use commonware_cryptography::Hasher as CHasher;
 
 /// A trait for computing the various digests of an MMR.
-pub trait Hasher {
+pub trait Hasher<H: CHasher>: Send + Sync {
     /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> Digest;
+    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest;
 
     /// Computes the digest for a node given its position and the digests of its children.
-    fn node_digest(&mut self, pos: u64, left: &Digest, right: &Digest) -> Digest;
+    fn node_digest(&mut self, pos: u64, left: &H::Digest, right: &H::Digest) -> H::Digest;
 
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
-    fn root<'a>(&mut self, size: u64, peak_digests: impl Iterator<Item = &'a Digest>) -> Digest;
+    fn root<'a>(
+        &mut self,
+        size: u64,
+        peak_digests: impl Iterator<Item = &'a H::Digest>,
+    ) -> H::Digest;
 
     /// Compute the digest of a byte slice.
-    fn digest(&mut self, data: &[u8]) -> Digest;
+    fn digest(&mut self, data: &[u8]) -> H::Digest;
+
+    /// Access the inner [CHasher] hasher.
+    fn inner(&mut self) -> &mut H;
 
     /// Fork the hasher to provide equivalent functionality in another thread. This is different
     /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
     /// state with the hasher from which it was forked.
-    fn fork(&self) -> impl Hasher;
+    fn fork(&self) -> impl Hasher<H>;
 }
 
-/// The standard SHA256 hasher to use with an MMR for computing leaf, node and root digests.
-#[derive(Clone)]
-pub struct Sha256 {
-    hasher: Sha2Hasher,
+/// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
+/// external data.
+pub struct Standard<H: CHasher> {
+    hasher: H,
 }
 
-impl Sha256 {
-    /// Creates a new [Sha256] hasher.
+impl<H: CHasher> Standard<H> {
+    /// Creates a new [Standard] hasher.
     pub fn new() -> Self {
-        Self {
-            hasher: Sha2Hasher::new(),
-        }
+        Self { hasher: H::new() }
     }
 
-    /// Returns a mutable reference to the underlying [Sha2Hasher].
-    pub fn inner(&mut self) -> &mut Sha2Hasher {
-        &mut self.hasher
+    pub fn update_with_pos(&mut self, pos: u64) {
+        self.hasher.update(&pos.to_be_bytes());
+    }
+
+    pub fn update_with_digest(&mut self, digest: &H::Digest) {
+        self.hasher.update(digest.as_ref());
+    }
+
+    pub fn update_with_element(&mut self, element: &[u8]) {
+        self.hasher.update(element);
+    }
+
+    pub fn finalize(&mut self) -> H::Digest {
+        self.hasher.finalize()
     }
 }
 
-impl Default for Sha256 {
+impl<H: CHasher> Default for Standard<H> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Hasher for Sha256 {
-    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> Digest {
-        self.hasher.update(pos.to_be_bytes());
-        self.hasher.update(element);
-        self.hasher.finalize_reset().into()
+impl<H: CHasher> Hasher<H> for Standard<H> {
+    fn inner(&mut self) -> &mut H {
+        &mut self.hasher
     }
 
-    fn node_digest(&mut self, pos: u64, left: &Digest, right: &Digest) -> Digest {
-        self.hasher.update(pos.to_be_bytes());
-        self.hasher.update(left);
-        self.hasher.update(right);
-        self.hasher.finalize_reset().into()
+    fn fork(&self) -> impl Hasher<H> {
+        Standard { hasher: H::new() }
     }
 
-    fn root<'a>(&mut self, size: u64, peak_digests: impl Iterator<Item = &'a Digest>) -> Digest {
-        self.hasher.update(size.to_be_bytes());
+    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
+        self.update_with_pos(pos);
+        self.update_with_element(element);
+        self.finalize()
+    }
+
+    fn node_digest(&mut self, pos: u64, left: &H::Digest, right: &H::Digest) -> H::Digest {
+        self.update_with_pos(pos);
+        self.update_with_digest(left);
+        self.update_with_digest(right);
+        self.finalize()
+    }
+
+    fn root<'a>(
+        &mut self,
+        size: u64,
+        peak_digests: impl Iterator<Item = &'a H::Digest>,
+    ) -> H::Digest {
+        self.update_with_pos(size);
         for digest in peak_digests {
-            self.hasher.update(digest);
+            self.update_with_digest(digest);
         }
-        self.hasher.finalize_reset().into()
+        self.finalize()
     }
 
-    fn digest(&mut self, data: &[u8]) -> Digest {
+    fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.update(data);
-        self.hasher.finalize_reset().into()
-    }
-
-    fn fork(&self) -> impl Hasher {
-        self.clone()
+        self.finalize()
     }
 }
 
@@ -85,16 +109,37 @@ impl Hasher for Sha256 {
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+    use commonware_cryptography::{Hasher as CHasher, Sha256};
 
     #[test]
-    fn test_leaf_digest() {
-        let mut mmr_hasher = Sha256::new();
+    fn test_leaf_digest_sha256() {
+        test_leaf_digest::<Sha256>();
+    }
+
+    #[test]
+    fn test_node_digest_sha256() {
+        test_node_digest::<Sha256>();
+    }
+
+    #[test]
+    fn test_root_sha256() {
+        test_root::<Sha256>();
+    }
+
+    fn test_digest<H: CHasher>(value: u8) -> H::Digest {
+        let mut hasher = H::new();
+        hasher.update(&[value]);
+        hasher.finalize()
+    }
+
+    fn test_leaf_digest<H: CHasher>() {
+        let mut mmr_hasher: Standard<H> = Standard::new();
         // input hashes to use
-        let digest1 = [1u8; 32];
-        let digest2 = [2u8; 32];
+        let digest1 = test_digest::<H>(1);
+        let digest2 = test_digest::<H>(2);
 
         let out = mmr_hasher.leaf_digest(0, &digest1);
-        assert_ne!(out, [0u8; 32], "hash should be non-zero");
+        assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
         let mut out2 = mmr_hasher.leaf_digest(0, &digest1);
         assert_eq!(out, out2, "hash should be re-computed consistently");
@@ -106,17 +151,16 @@ mod tests {
         assert_ne!(out, out2, "hash should change with different input digest");
     }
 
-    #[test]
-    fn test_node_digest() {
-        let mut mmr_hasher = Sha256::new();
+    fn test_node_digest<H: CHasher>() {
+        let mut mmr_hasher: Standard<H> = Standard::new();
         // input hashes to use
 
-        let d1 = [1u8; 32];
-        let d2 = [2u8; 32];
-        let d3 = [3u8; 32];
+        let d1 = test_digest::<H>(1);
+        let d2 = test_digest::<H>(2);
+        let d3 = test_digest::<H>(3);
 
         let out = mmr_hasher.node_digest(0, &d1, &d2);
-        assert_ne!(out, [0u8; 32], "hash should be non-zero");
+        assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
         let mut out2 = mmr_hasher.node_digest(0, &d1, &d2);
         assert_eq!(out, out2, "hash should be re-computed consistently");
@@ -143,22 +187,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_root() {
-        let mut mmr_hasher = Sha256::new();
+    fn test_root<H: CHasher>() {
+        let mut mmr_hasher: Standard<H> = Standard::new();
         // input digests to use
-        let d1 = [1u8; 32];
-        let d2 = [2u8; 32];
-        let d3 = [3u8; 32];
-        let d4 = [4u8; 32];
+        let d1 = test_digest::<H>(1);
+        let d2 = test_digest::<H>(2);
+        let d3 = test_digest::<H>(3);
+        let d4 = test_digest::<H>(4);
 
-        let empty_vec: Vec<Digest> = Vec::new();
+        let empty_vec: Vec<H::Digest> = Vec::new();
         let empty_out = mmr_hasher.root(0, empty_vec.iter());
-        assert_ne!(empty_out, [0u8; 32], "root of empty MMR should be non-zero");
+        assert_ne!(
+            empty_out,
+            test_digest::<H>(0),
+            "root of empty MMR should be non-zero"
+        );
 
         let digests = [d1, d2, d3, d4];
         let out = mmr_hasher.root(10, digests.iter());
-        assert_ne!(out, [0u8; 32], "root should be non-zero");
+        assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
         assert_ne!(out, empty_out, "root should differ from empty MMR");
 
         let mut out2 = mmr_hasher.root(10, digests.iter());

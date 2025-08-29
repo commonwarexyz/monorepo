@@ -12,10 +12,10 @@ use crate::{
     index::Index,
     mmr::{
         bitmap::Bitmap,
-        hasher::{Grafting, GraftingVerifier, Hasher, Standard},
+        grafting::{Hasher as Grafting, Storage as GStorage, Verifier as GraftingVerifier},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        storage::Grafting as GStorage,
         verification::Proof,
+        Hasher, StandardHasher as Standard,
     },
     store::operation::Fixed,
     translator::Translator,

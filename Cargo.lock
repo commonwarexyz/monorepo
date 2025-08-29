@@ -1378,8 +1378,15 @@ dependencies = [
 name = "commonware-storage-core"
 version = "0.0.59"
 dependencies = [
- "sha2 0.10.8",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-runtime",
+ "commonware-storage-core",
+ "commonware-utils",
+ "rayon",
  "thiserror 2.0.12",
+ "tracing",
 ]
 
 [[package]]
