@@ -150,7 +150,6 @@ fn fuzzer(input: FuzzInput) {
                 relay: application.clone(),
                 reporter: supervisor.clone(),
                 partition: validator.to_string(),
-                compression: Some(3),
                 supervisor: supervisor.clone(),
                 mailbox_size: 1024,
                 namespace: namespace.clone(),
