@@ -71,21 +71,14 @@ where
         .await?;
 
         // Prune the journal to the sync range
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
-        let (size, new_oldest_retained_loc) = prune_journal(
+        let size = prune_journal(
             &mut journal,
             &mut metadata,
             lower_bound,
             upper_bound,
-            oldest_retained_loc,
             config.log_items_per_section,
         )
         .await?;
-
-        // Update the metadata with the new oldest retained location
-        if new_oldest_retained_loc != oldest_retained_loc {
-            write_oldest_retained_loc(&mut metadata, new_oldest_retained_loc);
-        }
 
         // Create the sync journal wrapper
         Journal::new(journal, config.log_items_per_section, metadata, size).await
@@ -138,12 +131,13 @@ where
         // Create the database instance
         let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
         let (log, metadata) = journal.into_inner();
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
         let db = any::variable::Any {
             mmr,
             log,
             log_size: upper_bound + 1,
             inactivity_floor_loc: lower_bound,
-            oldest_retained_loc: lower_bound,
+            oldest_retained_loc,
             metadata,
             locations,
             log_items_per_section: db_config.log_items_per_section.get(),
@@ -183,21 +177,14 @@ where
         }
 
         let (mut journal, mut metadata) = journal.into_inner();
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
-
-        let (next_write_loc, new_oldest_retained_loc) = prune_journal(
+        let next_write_loc = prune_journal(
             &mut journal,
             &mut metadata,
             lower_bound,
             upper_bound,
-            oldest_retained_loc,
             config.log_items_per_section,
         )
         .await?;
-
-        if new_oldest_retained_loc != oldest_retained_loc {
-            write_oldest_retained_loc(&mut metadata, new_oldest_retained_loc);
-        }
 
         Journal::new(
             journal,
@@ -626,9 +613,8 @@ pub async fn prune_journal<E, V>(
     metadata: &mut Metadata<E, U64, u64>,
     lower_bound: u64,
     upper_bound: u64,
-    mut oldest_retained_loc: u64,
     items_per_section: NonZeroU64,
-) -> Result<(u64, u64), crate::journal::Error>
+) -> Result<u64, crate::journal::Error>
 where
     E: Storage + Metrics + Clock,
     V: Codec,
@@ -640,6 +626,7 @@ where
         ));
     }
 
+    let mut oldest_retained_loc = read_oldest_retained_loc(metadata);
     let items_per_section_val = items_per_section.get();
     let lower_section = lower_bound / items_per_section_val;
     let upper_section = upper_bound / items_per_section_val;
@@ -660,8 +647,10 @@ where
         debug!(lower_section, "removing sections before lower_section");
         // Update metadata before pruning to ensure recovery is possible
         // if we crash during pruning.
-        write_oldest_retained_loc(metadata, lower_section_start);
-        metadata.sync().await?;
+        if oldest_retained_loc < lower_section_start {
+            write_oldest_retained_loc(metadata, lower_section_start);
+            metadata.sync().await?;
+        }
         journal.prune(lower_section).await?;
     }
     // If the oldest_retained_loc was just pruned, we need to update it
@@ -694,8 +683,10 @@ where
         debug!(lower_section, "pruning lower section");
         // Update metadata before pruning to ensure recovery is possible
         // if we crash during pruning.
-        write_oldest_retained_loc(metadata, lower_bound);
-        metadata.sync().await?;
+        if oldest_retained_loc < lower_bound {
+            write_oldest_retained_loc(metadata, lower_bound);
+            metadata.sync().await?;
+        }
         prune_lower(journal, lower_bound, items_per_section, oldest_retained_loc).await?;
     }
 
@@ -705,11 +696,10 @@ where
     // Step 5: Compute the next location to write and the new oldest_retained_loc
     // If journal is empty, return (lower_bound, lower_bound)
     if journal.blobs.is_empty() {
-        return Ok((lower_bound, lower_bound));
+        // The first element we write will be at lower_bound.
+        write_oldest_retained_loc(metadata, lower_bound);
+        return Ok(lower_bound);
     }
-
-    // If oldest_retained_loc was before lower_bound, we've now pruned up to lower_bound.
-    oldest_retained_loc = lower_bound.max(oldest_retained_loc);
 
     let last_section = journal
         .blobs
@@ -725,7 +715,7 @@ where
     .await?;
     let last_section_start = last_section * items_per_section_val;
     let next_loc = last_section_start + items_in_last_section as u64;
-    Ok((next_loc, oldest_retained_loc))
+    Ok(next_loc)
 }
 
 #[cfg(test)]
@@ -2724,15 +2714,14 @@ mod tests {
 
             let lower_bound = 10;
             let upper_bound = 20;
-            let oldest_retained_loc = 0;
+            write_oldest_retained_loc(&mut metadata, 0);
             let items_per_section = NZU64!(5);
 
-            let (next_loc, new_oldest_retained) = prune_journal(
+            let next_loc = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await
@@ -2740,7 +2729,8 @@ mod tests {
 
             // Empty journal should return (lower_bound, lower_bound)
             assert_eq!(next_loc, lower_bound);
-            assert_eq!(new_oldest_retained, lower_bound);
+            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+            assert_eq!(new_oldest_retained_loc, lower_bound);
             assert!(journal.blobs.is_empty());
         });
     }
@@ -2783,14 +2773,13 @@ mod tests {
 
             let lower_bound = 15; // Section 3
             let upper_bound = 25; // Section 5
-            let oldest_retained_loc = 0;
+            write_oldest_retained_loc(&mut metadata, 0);
 
-            let (next_loc, new_oldest_retained) = prune_journal(
+            let next_loc = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await
@@ -2798,7 +2787,8 @@ mod tests {
 
             // All data is before lower_bound, should be pruned
             assert_eq!(next_loc, lower_bound);
-            assert_eq!(new_oldest_retained, lower_bound); // Empty journal
+            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+            assert_eq!(new_oldest_retained_loc, lower_bound); // Empty journal
             assert!(journal.blobs.is_empty());
         });
     }
@@ -2841,14 +2831,13 @@ mod tests {
 
             let lower_bound = 7; // Middle of section 1
             let upper_bound = 20; // Section 4
-            let oldest_retained_loc = 0;
+            write_oldest_retained_loc(&mut metadata, 0);
 
-            let (next_loc, new_oldest_retained) = prune_journal(
+            let next_loc = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await
@@ -2856,7 +2845,8 @@ mod tests {
 
             // Should have data from locations 7-14 (rest of section 1 and all of section 2)
             assert_eq!(next_loc, 15);
-            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning
+            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+            assert_eq!(new_oldest_retained_loc, lower_bound); // Should be lower_bound after pruning
 
             // Section 0 should be removed
             assert!(!journal.blobs.contains_key(&0));
@@ -2905,14 +2895,13 @@ mod tests {
 
             let lower_bound = 5; // Section 1
             let upper_bound = 25; // Section 5
-            let oldest_retained_loc = 10; // Start of section 2
+            write_oldest_retained_loc(&mut metadata, 10); // Start of section 2
 
-            let (next_loc, new_oldest_retained) = prune_journal(
+            let next_loc = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await
@@ -2920,7 +2909,8 @@ mod tests {
 
             // Should have data from locations 10-19
             assert_eq!(next_loc, 20);
-            assert_eq!(new_oldest_retained, oldest_retained_loc);
+            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+            assert_eq!(new_oldest_retained_loc, 10);
 
             // Sections 2 and 3 should remain
             assert!(journal.blobs.contains_key(&2));
@@ -2966,14 +2956,13 @@ mod tests {
 
             let lower_bound = 5; // Section 1
             let upper_bound = 22; // Middle of section 4
-            let oldest_retained_loc = 10; // Start of section 2
+            write_oldest_retained_loc(&mut metadata, 10); // Start of section 2
 
-            let (next_loc, new_oldest_retained) = prune_journal(
+            let next_loc = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await
@@ -2981,7 +2970,8 @@ mod tests {
 
             // Should have data from locations 10-22
             assert_eq!(next_loc, 23);
-            assert_eq!(new_oldest_retained, oldest_retained_loc);
+            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+            assert_eq!(new_oldest_retained_loc, 10);
 
             // Section 5 should be removed
             assert!(!journal.blobs.contains_key(&5));
@@ -3031,14 +3021,13 @@ mod tests {
 
             let lower_bound = 7; // Middle of section 1
             let upper_bound = 17; // Middle of section 3
-            let oldest_retained_loc = 5; // Start of section 1
+            write_oldest_retained_loc(&mut metadata, 5); // Start of section 1
 
-            let (next_loc, new_oldest_retained) = prune_journal(
+            let next_loc = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await
@@ -3046,7 +3035,8 @@ mod tests {
 
             // Should have data from location 7 to 17
             assert_eq!(next_loc, 18);
-            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning after pruning lower section
+            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+            assert_eq!(new_oldest_retained_loc, lower_bound); // Should be lower_bound after pruning after pruning lower section
 
             // Sections 0 and 4 should be removed
             assert!(!journal.blobs.contains_key(&0));
@@ -3097,14 +3087,13 @@ mod tests {
 
             let lower_bound = 12; // Within section 1
             let upper_bound = 17; // Also within section 1
-            let oldest_retained_loc = 0;
+            write_oldest_retained_loc(&mut metadata, 0);
 
-            let (next_loc, new_oldest_retained) = prune_journal(
+            let next_loc = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await
@@ -3112,7 +3101,8 @@ mod tests {
 
             // Should only keep elements 12-17 from section 1
             assert_eq!(next_loc, 18);
-            assert_eq!(new_oldest_retained, lower_bound);
+            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+            assert_eq!(new_oldest_retained_loc, lower_bound);
 
             // Only section 1 should remain
             assert!(!journal.blobs.contains_key(&0));
@@ -3159,14 +3149,13 @@ mod tests {
 
             let lower_bound = 10; // Start of section 2
             let upper_bound = 19; // End of section 3
-            let oldest_retained_loc = 0;
+            write_oldest_retained_loc(&mut metadata, 0);
 
-            let (next_loc, new_oldest_retained) = prune_journal(
+            let next_loc = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await
@@ -3174,7 +3163,8 @@ mod tests {
 
             // Should have data from location 10 to 19
             assert_eq!(next_loc, 20);
-            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning at start of section 2
+            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+            assert_eq!(new_oldest_retained_loc, lower_bound); // Should be lower_bound after pruning at start of section 2
 
             // Sections 0, 1, and 4 should be removed
             assert!(!journal.blobs.contains_key(&0));
@@ -3225,14 +3215,13 @@ mod tests {
 
             let lower_bound = 13; // Middle of section 1
             let upper_bound = 25; // Middle of section 2
-            let oldest_retained_loc = 10; // Start of section 1
+            write_oldest_retained_loc(&mut metadata, 10); // Start of section 1
 
-            let (next_loc, new_oldest_retained) = prune_journal(
+            let next_loc = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await
@@ -3240,6 +3229,7 @@ mod tests {
 
             // Should have data from locations 13-25
             assert_eq!(next_loc, 26);
+            let new_oldest_retained = read_oldest_retained_loc(&metadata);
             assert_eq!(new_oldest_retained, 13); // First element after pruning within section 1
 
             // Section 3 should be removed
@@ -3250,7 +3240,7 @@ mod tests {
             assert!(journal.blobs.contains_key(&2));
 
             // Verify oldest_retained_loc was updated even though no full sections were removed
-            assert!(new_oldest_retained > oldest_retained_loc);
+            assert!(new_oldest_retained > 10);
             assert_eq!(new_oldest_retained, lower_bound); // Should equal lower_bound since we pruned up to it
         });
     }
@@ -3284,7 +3274,7 @@ mod tests {
 
             let lower_bound = 20;
             let upper_bound = 10; // Invalid: lower > upper
-            let oldest_retained_loc = 0;
+            write_oldest_retained_loc(&mut metadata, 0);
             let items_per_section = NZU64!(5);
 
             let result = prune_journal(
@@ -3292,7 +3282,6 @@ mod tests {
                 &mut metadata,
                 lower_bound,
                 upper_bound,
-                oldest_retained_loc,
                 items_per_section,
             )
             .await;
