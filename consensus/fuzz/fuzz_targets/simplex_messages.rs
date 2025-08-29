@@ -40,6 +40,8 @@ use std::{
     },
     time::Duration,
 };
+use crate::mocks::check_invariants;
+
 const VALID_PANICS: [&str; 2] = ["invalid view (in payload):", "invalid parent (in payload):"];
 
 static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
@@ -191,6 +193,8 @@ fn fuzzer(input: FuzzInput) {
                 context.sleep(Duration::from_secs(10)).await;
             }
         }
+
+        check_invariants(n, supervisors);
     });
 }
 

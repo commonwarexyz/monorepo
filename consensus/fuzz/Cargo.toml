@@ -21,6 +21,7 @@ governor = { workspace = true }
 futures-timer = "3.0.3"
 futures = { workspace = true }
 bytes = { workspace = true }
+log = "0.4.22"
 
 [dependencies.commonware-consensus]
 path = ".."
