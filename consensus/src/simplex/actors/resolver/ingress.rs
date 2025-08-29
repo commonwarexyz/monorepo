@@ -1,4 +1,7 @@
-use crate::simplex::types::{Notarization, Nullification, View};
+use crate::{
+    simplex::types::{Notarization, Nullification},
+    types::View,
+};
 use commonware_cryptography::{Digest, Signature};
 use futures::{channel::mpsc, SinkExt};
 

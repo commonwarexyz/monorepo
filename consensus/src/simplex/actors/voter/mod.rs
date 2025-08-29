@@ -2,7 +2,8 @@ mod actor;
 mod ingress;
 
 use crate::{
-    simplex::types::{Activity, Context, View},
+    simplex::types::{Activity, Context},
+    types::{Epoch, View},
     Automaton, Relay, Reporter, Supervisor,
 };
 pub use actor::Actor;
@@ -14,7 +15,7 @@ use std::{num::NonZeroUsize, time::Duration};
 pub struct Config<
     C: Signer,
     D: Digest,
-    A: Automaton<Context = Context<D>, Digest = D>,
+    A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View>,
@@ -26,6 +27,7 @@ pub struct Config<
     pub supervisor: S,
 
     pub partition: String,
+    pub epoch: Epoch,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
@@ -129,6 +131,7 @@ mod tests {
                 reporter: supervisor.clone(),
                 supervisor,
                 partition: "test".to_string(),
+                epoch: 0,
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
@@ -325,6 +328,7 @@ mod tests {
                 reporter: supervisor.clone(),
                 supervisor,
                 partition: "test".to_string(),
+                epoch: 0,
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),

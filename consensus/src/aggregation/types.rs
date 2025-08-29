@@ -1,5 +1,6 @@
 //! Types used in [aggregation](super).
 
+use crate::types::Epoch;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
@@ -70,10 +71,6 @@ impl Error {
         matches!(self, Error::PeerMismatch | Error::InvalidAckSignature)
     }
 }
-
-/// Epoch represents a configuration period in the aggregation protocol.
-/// Validators may change between epochs, requiring new threshold signatures.
-pub type Epoch = u64;
 
 /// Index represents the sequential position of items being aggregated.
 /// Indices are monotonically increasing within each epoch.

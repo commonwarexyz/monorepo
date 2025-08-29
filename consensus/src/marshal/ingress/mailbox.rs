@@ -1,5 +1,6 @@
 use crate::{
     threshold_simplex::types::{Activity, Finalization, Notarization},
+    types::Round,
     Block, Reporter,
 };
 use commonware_cryptography::bls12381::primitives::variant::Variant;
@@ -26,7 +27,7 @@ pub(crate) enum Message<V: Variant, B: Block> {
     Subscribe {
         /// The view in which the block was notarized. This is an optimization
         /// to help locate the block.
-        view: Option<u64>,
+        round: Option<Round>,
         /// The digest of the block to retrieve.
         commitment: B::Commitment,
         /// A channel to send the retrieved block.
@@ -39,8 +40,8 @@ pub(crate) enum Message<V: Variant, B: Block> {
     },
     /// A notification that a block has been verified by the application.
     Verified {
-        /// The view in which the block was verified.
-        view: u64,
+        /// The round in which the block was verified.
+        round: Round,
         /// The verified block.
         block: B,
     },
@@ -99,14 +100,14 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub async fn subscribe(
         &mut self,
-        view: Option<u64>,
+        round: Option<Round>,
         commitment: B::Commitment,
     ) -> oneshot::Receiver<B> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
             .send(Message::Subscribe {
-                view,
+                round,
                 commitment,
                 response: tx,
             })
@@ -131,10 +132,10 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 
     /// Notifies the actor that a block has been verified.
-    pub async fn verified(&mut self, view: u64, block: B) {
+    pub async fn verified(&mut self, round: Round, block: B) {
         if self
             .sender
-            .send(Message::Verified { view, block })
+            .send(Message::Verified { round, block })
             .await
             .is_err()
         {
