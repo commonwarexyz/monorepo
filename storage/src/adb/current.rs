@@ -12,6 +12,7 @@ use crate::{
     index::Index,
     mmr::{
         bitmap::Bitmap,
+        core::proof,
         grafting::{Hasher as Grafting, Storage as GStorage, Verifier as GraftingVerifier},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         verification, Hasher, Proof, StandardHasher as Standard,
@@ -531,7 +532,7 @@ impl<
         let last_chunk_digest = proof.digests.pop().unwrap();
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_pos) {
+        let mmr_root = match proof::reconstruct_root(&proof, &mut verifier, &elements, start_pos) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -649,7 +650,7 @@ impl<
         }
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof.reconstruct_root(&mut verifier, &[element], pos) {
+        let mmr_root = match proof::reconstruct_root(&proof, &mut verifier, &[element], pos) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");

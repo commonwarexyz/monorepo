@@ -1,6 +1,9 @@
 use crate::mmr::{
-    core, iterator::leaf_num_to_pos, verification, verification::ProofStore, Proof,
-    StandardHasher as Standard,
+    core,
+    core::{iterator::leaf_num_to_pos, proof},
+    verification,
+    verification::ProofStore,
+    Proof, StandardHasher as Standard,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
@@ -31,7 +34,7 @@ pub fn extract_pinned_nodes<D: Digest>(
 ) -> Result<Vec<D>, core::Error> {
     let start_pos_mmr = leaf_num_to_pos(start_loc);
     let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
-    proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr)
+    proof::extract_pinned_nodes(proof, start_pos_mmr, end_pos_mmr)
 }
 
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their positions)
@@ -50,7 +53,13 @@ where
 {
     let start_pos = leaf_num_to_pos(start_loc);
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion_and_extract_digests(hasher, &elements, start_pos, target_root)
+    proof::verify_range_inclusion_and_extract_digests(
+        proof,
+        hasher,
+        &elements,
+        start_pos,
+        target_root,
+    )
 }
 
 /// Calculate the digests required to construct a [Proof] for a range of operations.
@@ -58,7 +67,7 @@ pub fn digests_required_for_proof<D: Digest>(size: u64, start_loc: u64, end_loc:
     let size = leaf_num_to_pos(size);
     let start_pos = leaf_num_to_pos(start_loc);
     let end_pos = leaf_num_to_pos(end_loc);
-    Proof::<D>::nodes_required_for_range_proof(size, start_pos, end_pos)
+    proof::nodes_required_for_range_proof(size, start_pos, end_pos)
 }
 
 /// Create a [Proof] from a size and a list of digests.

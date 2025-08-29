@@ -69,7 +69,7 @@
 
 mod hasher;
 pub mod iterator;
-mod proof;
+pub mod proof;
 pub mod stability;
 
 use crate::mmr::{
@@ -722,8 +722,7 @@ impl<H: CHasher> Mmr<H> {
             "dirty nodes must be processed before computing proofs"
         );
         let size = self.size();
-        let positions =
-            Proof::<H::Digest>::nodes_required_for_range_proof(size, start_pos, end_pos);
+        let positions = proof::nodes_required_for_range_proof(size, start_pos, end_pos);
         let digests = positions
             .into_iter()
             .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))

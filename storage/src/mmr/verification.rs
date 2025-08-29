@@ -11,7 +11,7 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::mmr::{storage::Storage, Error, Hasher, Proof};
+use crate::mmr::{core::proof, storage::Storage, Error, Hasher, Proof};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap};
@@ -39,7 +39,8 @@ impl<D: Digest> ProofStore<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let digests = proof.verify_range_inclusion_and_extract_digests(
+        let digests = proof::verify_range_inclusion_and_extract_digests(
+            proof,
             hasher,
             elements,
             start_element_pos,
@@ -50,7 +51,7 @@ impl<D: Digest> ProofStore<D> {
     }
 
     /// Create a new [ProofStore] from the result of calling
-    /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
+    /// [proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
     pub fn new_from_digests(size: u64, digests: Vec<(u64, D)>) -> Self {
         Self {
@@ -105,8 +106,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     assert!(end_element_pos < mmr.size());
 
     let mut digests: Vec<D> = Vec::new();
-    let positions =
-        Proof::<D>::nodes_required_for_range_proof(size, start_element_pos, end_element_pos);
+    let positions = proof::nodes_required_for_range_proof(size, start_element_pos, end_element_pos);
 
     let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
     let hash_results = try_join_all(node_futures).await?;
@@ -121,8 +121,8 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     Ok(Proof { size, digests })
 }
 
-/// Return an inclusion proof for the specified positions. This is analogous to range_proof
-/// but supports non-contiguous positions.
+/// Return an inclusion proof for the specified positions. This is analogous to range_proof but
+/// supports non-contiguous positions.
 ///
 /// The order of positions does not affect the output (sorted internally).
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
@@ -139,7 +139,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     }
 
     // Collect all required node positions
-    let node_positions: BTreeSet<_> = Proof::<D>::nodes_required_for_multi_proof(size, positions);
+    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, positions);
 
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions

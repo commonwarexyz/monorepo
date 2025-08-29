@@ -13,7 +13,7 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        core::{Config, Mmr},
+        core::{proof, Config, Mmr},
         iterator::{leaf_num_to_pos, nodes_to_pin},
         storage::Storage,
         verification, Error,
@@ -623,7 +623,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], leaf_pos) {
+        let mmr_root = match proof::reconstruct_root(&mmr_proof, hasher, &[chunk], leaf_pos) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
