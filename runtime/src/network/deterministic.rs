@@ -43,8 +43,13 @@ impl crate::Listener for Listener {
     type Stream = Stream;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
-        Ok((socket, Sink { sender }, Stream { receiver }))
+        match self.listener.next().await {
+            Some((socket, sender, receiver)) => Ok((socket, Sink { sender }, Stream { receiver })),
+            None => Err(Error::ReadFailed(Box::new(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "listener channel closed",
+            )))),
+        }
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
