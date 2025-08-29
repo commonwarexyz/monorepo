@@ -75,6 +75,7 @@
 //! // Configure network
 //! let p2p_cfg = Config {
 //!     max_size: 1024 * 1024, // 1MB
+//!     ignore_blocks: true,
 //! };
 //!
 //! // Start context
@@ -131,8 +132,8 @@
 //! });
 //! ```
 
-pub mod helpers;
 mod bandwidth;
+pub mod helpers;
 mod ingress;
 mod metrics;
 mod network;
@@ -859,7 +860,7 @@ mod tests {
                 500,        // message size
                 500,        // expected duration in ms
             )
-                .await;
+            .await;
 
             // Sender has lower bandwidth (500 B/s) than receiver (2000 B/s)
             // Should be limited by sender's 500 B/s
@@ -872,7 +873,7 @@ mod tests {
                 250,        // message size
                 500,        // expected duration in ms
             )
-                .await;
+            .await;
 
             // Sender has higher bandwidth (2000 B/s) than receiver (500 B/s)
             // Should be limited by receiver's 500 B/s
@@ -885,7 +886,7 @@ mod tests {
                 250,        // message size
                 500,        // expected duration in ms
             )
-                .await;
+            .await;
 
             // Unlimited sender, limited receiver
             // Should be limited by receiver's 1000 B/s
@@ -898,7 +899,7 @@ mod tests {
                 500,        // message size
                 500,        // expected duration in ms
             )
-                .await;
+            .await;
 
             // Limited sender, unlimited receiver
             // Should be limited by sender's 1000 B/s
@@ -911,7 +912,7 @@ mod tests {
                 500,        // message size
                 500,        // expected duration in ms
             )
-                .await;
+            .await;
 
             // Unlimited sender, unlimited receiver
             // Delivery should be (almost) instant
@@ -923,7 +924,7 @@ mod tests {
                 500,  // message size
                 0,    // expected duration in ms
             )
-                .await;
+            .await;
         });
     }
 
@@ -1013,7 +1014,7 @@ mod tests {
                         .unwrap()
                 })
             }))
-                .await;
+            .await;
 
             let elapsed = context.current().duration_since(start).unwrap();
 
@@ -1052,7 +1053,7 @@ mod tests {
                         .unwrap()
                 })
             }))
-                .await;
+            .await;
 
             // Collect all messages at the main peer
             let mut received_from = HashSet::new();

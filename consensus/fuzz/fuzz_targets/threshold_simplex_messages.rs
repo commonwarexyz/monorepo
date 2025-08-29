@@ -112,7 +112,11 @@ fn fuzzer(input: FuzzInput) {
         let mut participants = BTreeMap::new();
         participants.insert(
             0,
-            (polynomial.clone(), validators.clone(), Some(shares[0].clone())),
+            (
+                polynomial.clone(),
+                validators.clone(),
+                Some(shares[0].clone()),
+            ),
         );
 
         let supervisor_config = supervisor::Config::<_, MinPk> {
