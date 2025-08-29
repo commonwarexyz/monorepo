@@ -85,7 +85,7 @@ use commonware_cryptography::Hasher as CHasher;
 #[cfg(feature = "std")]
 use commonware_runtime::ThreadPool;
 pub use hasher::{Hasher, Standard as StandardHasher};
-pub use proof::Proof;
+pub use proof::{Proof, ReconstructionError};
 #[cfg(feature = "std")]
 use rayon::prelude::*;
 use thiserror::Error;

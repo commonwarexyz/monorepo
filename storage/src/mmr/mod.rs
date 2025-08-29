@@ -1,5 +1,5 @@
-//! This module re-exports the MMR module from storage-core, and adds some additional MMR types such
-//! as [Bitmap] and [Journaled].
+//! This module re-exports the MMR module from storage-core, and builds upon it with some additional
+//! types such as [bitmap::Bitmap] and [journaled::Mmr].
 
 use thiserror::Error;
 

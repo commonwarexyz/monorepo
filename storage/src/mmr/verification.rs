@@ -1,5 +1,6 @@
-//! Defines the inclusion [Proof] structure, functions for generating them from any MMR implementing
-//! the [Storage] trait, and functions for verifying them against a root digest.
+//! Defines functions for generating various [Proof] types from any MMR implementing the [Storage]
+//! trait. Also defines a [ProofStore] type that can be used to generate proofs over any sub-range
+//! of the original range.
 //!
 //! ## Historical Proof Generation
 //!
@@ -7,8 +8,8 @@
 //! - [range_proof] generates proofs against the current MMR state
 //! - [historical_range_proof] generates proofs against historical MMR states
 //!
-//! Historical proofs are essential for sync operations where we need to prove elements
-//! against a past state of the MMR rather than its current state.
+//! Historical proofs are essential for sync operations where we need to prove elements against a
+//! past state of the MMR rather than its current state.
 
 use crate::mmr::{storage::Storage, Error, Hasher, Proof};
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -56,6 +57,18 @@ impl<D: Digest> ProofStore<D> {
             size,
             digests: digests.into_iter().collect(),
         }
+    }
+
+    pub async fn range_proof(
+        &self,
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Result<Proof<D>, Error> {
+        range_proof(self, start_element_pos, end_element_pos).await
+    }
+
+    pub async fn multi_proof(&self, positions: &[u64]) -> Result<Proof<D>, Error> {
+        multi_proof(self, positions).await
     }
 }
 
@@ -117,17 +130,15 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     positions: &[u64],
 ) -> Result<Proof<D>, Error> {
     // If there are no positions, return an empty proof
+    let size = mmr.size();
     if positions.is_empty() {
         return Ok(Proof {
-            size: mmr.size(),
+            size,
             digests: vec![],
         });
     }
 
     // Collect all required node positions
-    //
-    // TODO(#1472): Optimize this loop
-    let size = mmr.size();
     let node_positions: BTreeSet<_> = Proof::<D>::nodes_required_for_multi_proof(size, positions);
 
     // Fetch all required digests in parallel and collect with positions
@@ -199,13 +210,13 @@ mod tests {
                 let mut subrange_end = range_end;
                 while subrange_start <= subrange_end {
                     // Verify a proof over a sub-range of the original range.
-                    let sub_range_proof = crate::mmr::verification::range_proof(
-                        &proof_store,
-                        element_positions[subrange_start],
-                        element_positions[subrange_end],
-                    )
-                    .await
-                    .unwrap();
+                    let sub_range_proof = proof_store
+                        .range_proof(
+                            element_positions[subrange_start],
+                            element_positions[subrange_end],
+                        )
+                        .await
+                        .unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
                         &elements[subrange_start..subrange_end + 1],
