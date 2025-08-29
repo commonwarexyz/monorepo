@@ -630,8 +630,8 @@ mod tests {
 
             // Link all peers (including observer)
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
