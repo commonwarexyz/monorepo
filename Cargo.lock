@@ -1140,7 +1140,6 @@ dependencies = [
  "futures-timer",
  "governor",
  "libfuzzer-sys",
- "log",
  "rand 0.8.5",
 ]
 
