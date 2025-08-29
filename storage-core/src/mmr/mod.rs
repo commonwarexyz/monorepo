@@ -67,14 +67,13 @@
 //! )
 //! ```
 
-pub mod hasher;
+mod hasher;
 pub mod iterator;
-pub mod proof;
+mod proof;
 pub mod stability;
 
 use crate::mmr::{
     iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
-    proof::Proof,
     Error::*,
 };
 use alloc::{
@@ -85,34 +84,30 @@ use alloc::{
 use commonware_cryptography::Hasher as CHasher;
 #[cfg(feature = "std")]
 use commonware_runtime::ThreadPool;
-pub use hasher::Hasher;
+pub use hasher::{Hasher, Standard as StandardHasher};
+pub use proof::Proof;
 #[cfg(feature = "std")]
 use rayon::prelude::*;
 use thiserror::Error;
 
-/// Errors that can occur when interacting with an MMR.
+/// Errors produced by this module.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("an element required for this operation has been pruned: {0}")]
     ElementPruned(u64),
-    #[error("missing node: {0}")]
-    MissingNode(u64),
     #[error("MMR is empty")]
     Empty,
-    #[error("invalid update")]
-    InvalidUpdate,
     #[error("invalid proof length")]
     InvalidProofLength,
     #[error("proof missing digest at position: {0}")]
     MissingDigest(u64),
-    #[error("invalid size: {0}")]
-    InvalidSize(u64),
     #[error("root mismatch")]
     RootMismatch,
     #[error("invalid proof")]
     InvalidProof,
 }
 
+/// Configuration for initializing an [Mmr].
 pub struct Config<H: CHasher> {
     /// The retained nodes of the MMR.
     pub nodes: Vec<H::Digest>,
@@ -531,7 +526,11 @@ impl<H: CHasher> Mmr<H> {
         hasher: &mut impl Hasher<H>,
         updates: &[(u64, T)],
     ) {
-        let pool = self.thread_pool.as_ref().unwrap().clone();
+        let pool = self
+            .thread_pool
+            .as_ref()
+            .expect("pool must be non-None")
+            .clone();
         pool.install(|| {
             let digests: Vec<(u64, H::Digest)> = updates
                 .par_iter()
@@ -597,9 +596,9 @@ impl<H: CHasher> Mmr<H> {
     /// remaining digest computations is less than the `min_to_parallelize`, it switches to the
     /// serial implementation.
     ///
-    /// # Warning
+    /// # Panics
     ///
-    /// Assumes `self.pool` is non-None and panics otherwise.
+    /// Panics if `self.pool` is None.
     #[cfg(feature = "std")]
     fn sync_parallel(&mut self, hasher: &mut impl Hasher<H>, min_to_parallelize: usize) {
         let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
@@ -651,7 +650,11 @@ impl<H: CHasher> Mmr<H> {
         height: u32,
     ) {
         let two_h = 1 << height;
-        let pool = self.thread_pool.as_ref().unwrap().clone();
+        let pool = self
+            .thread_pool
+            .as_ref()
+            .expect("pool must be non-None")
+            .clone();
         pool.install(|| {
             let computed_digests: Vec<(usize, H::Digest)> = same_height
                 .par_iter()

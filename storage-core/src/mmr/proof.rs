@@ -1324,8 +1324,8 @@ mod tests {
         ));
 
         // Empty multi-proof
-        let empty_multi = Proof::<Digest>::nodes_required_for_multi_proof(mmr.size(), &[]);
-        assert_eq!(empty_multi.len(), mmr.size() as usize);
+        let empty_multi = Proof::<Digest>::nodes_required_for_multi_proof(0, &[]);
+        assert_eq!(empty_multi.len(), 0);
         assert!(empty_multi.is_empty());
 
         let empty_mmr = Mmr::new();

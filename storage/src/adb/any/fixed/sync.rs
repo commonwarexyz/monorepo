@@ -3,8 +3,8 @@ use crate::{
     index::Index,
     journal::fixed,
     mmr::{
-        core::hasher::{self, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        StandardHasher,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -91,7 +91,7 @@ where
         };
 
         // Apply the missing operations from the log to the MMR.
-        let mut hasher = Standard::<H>::new();
+        let mut hasher = StandardHasher::<H>::new();
         let log_size = log.size().await?;
         for i in mmr_ops..log_size {
             let op = log.read(i).await?;
@@ -119,7 +119,7 @@ where
             snapshot,
             inactivity_floor_loc,
             uncommitted_ops: 0,
-            hasher: hasher::Standard::<H>::new(),
+            hasher: StandardHasher::<H>::new(),
             pruning_delay: db_config.pruning_delay,
         };
         db.sync().await?;
@@ -127,7 +127,7 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        any::fixed::Any::root(self, &mut hasher::Standard::<H>::new())
+        any::fixed::Any::root(self, &mut StandardHasher::<H>::new())
     }
 
     async fn resize_journal(
@@ -548,7 +548,6 @@ mod tests {
             };
 
             let result: Result<AnyTest, _> = sync::sync(config).await;
-            println!("{:?}", result.as_ref().err());
             assert!(matches!(
                 result,
                 Err(sync::Error::InvalidTarget {
