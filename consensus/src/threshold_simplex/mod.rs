@@ -722,7 +722,7 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Verify observer observed the same notarizations/nullifications/finalizations
+            // Sanity check
             for supervisor in supervisors.iter() {
                 // Ensure no faults or invalid signatures
                 {
