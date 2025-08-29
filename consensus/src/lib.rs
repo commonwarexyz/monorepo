@@ -78,6 +78,7 @@ cfg_if::cfg_if! {
             /// Hash of an arbitrary payload.
             type Digest: Digest;
 
+            /// Epoch of the consensus engine.
             type Epoch;
 
             /// Payload used to initialize the consensus engine.
