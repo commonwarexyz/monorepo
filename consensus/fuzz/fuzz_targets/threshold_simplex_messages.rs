@@ -85,8 +85,8 @@ fn fuzzer(input: FuzzInput) {
         // Link all validators
         // The first validator is byzantine.
         let link = Link {
-            latency: 0.0,
-            jitter: 0.0,
+            latency: Duration::from_millis(0),
+            jitter: Duration::from_millis(0),
             success_rate: 1.0,
         };
         link_peers(
@@ -112,8 +112,9 @@ fn fuzzer(input: FuzzInput) {
         let mut participants = BTreeMap::new();
         participants.insert(
             0,
-            (polynomial.clone(), validators.clone(), shares[0].clone()),
+            (polynomial.clone(), validators.clone(), Some(shares[0].clone())),
         );
+
         let supervisor_config = supervisor::Config::<_, MinPk> {
             namespace: namespace.clone(),
             participants,
@@ -142,7 +143,7 @@ fn fuzzer(input: FuzzInput) {
                 (
                     polynomial.clone(),
                     validators.clone(),
-                    shares[idx + 1].clone(),
+                    Some(shares[idx + 1].clone()),
                 ),
             );
             let supervisor_config = supervisor::Config::<_, MinPk> {

@@ -84,8 +84,8 @@ fn fuzzer(input: FuzzInput) {
         // Link all validators
         // The first validator is byzantine.
         let link = Link {
-            latency: 0.0,
-            jitter: 0.0,
+            latency: Duration::from_millis(0),
+            jitter: Duration::from_millis(0),
             success_rate: 1.0,
         };
         link_peers(

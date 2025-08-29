@@ -131,7 +131,7 @@
 //! });
 //! ```
 
-mod helpers;
+pub mod helpers;
 mod bandwidth;
 mod ingress;
 mod metrics;
