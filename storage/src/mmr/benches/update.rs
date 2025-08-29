@@ -3,7 +3,10 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
 };
-use commonware_storage::mmr::{core::Config as MemConfig, core::Mmr, StandardHasher};
+use commonware_storage::mmr::{
+    core::{Config as MemConfig, Mmr},
+    StandardHasher,
+};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashMap, time::Instant};

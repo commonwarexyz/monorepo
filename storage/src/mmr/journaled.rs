@@ -772,8 +772,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_storage_core::mmr::stability::ROOTS;
-    use commonware_storage_core::mmr::Hasher as _;
+    use commonware_storage_core::mmr::{stability::ROOTS, Hasher as _};
     use commonware_utils::{hex, NZUsize, NZU64};
 
     fn test_digest(v: usize) -> Digest {

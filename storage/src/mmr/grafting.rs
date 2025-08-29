@@ -59,8 +59,7 @@
 //! base MMR, yielding node 13 as its grafting point.
 
 use crate::mmr::{
-    iterator::PeakIterator,
-    iterator::{leaf_num_to_pos, leaf_pos_to_num, pos_to_height},
+    iterator::{leaf_num_to_pos, leaf_pos_to_num, pos_to_height, PeakIterator},
     storage::Storage as StorageTrait,
     Error, Hasher as HasherTrait, StandardHasher as Standard,
 };
@@ -480,8 +479,10 @@ mod tests {
     use commonware_cryptography::{Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
-    use commonware_storage_core::mmr::stability::{build_test_mmr, ROOTS};
-    use commonware_storage_core::mmr::Hasher as _;
+    use commonware_storage_core::mmr::{
+        stability::{build_test_mmr, ROOTS},
+        Hasher as _,
+    };
     use commonware_utils::hex;
 
     #[test]
