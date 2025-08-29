@@ -71,14 +71,14 @@ where
     K: Array,
     V: Codec,
 {
-    type Op = Variable<K, V>;
+    type Data = Variable<K, V>;
     type Error = crate::journal::Error;
 
     async fn size(&self) -> Result<u64, Self::Error> {
         Ok(self.size)
     }
 
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
+    async fn append(&mut self, op: Self::Data) -> Result<(), Self::Error> {
         let section = self.size / self.items_per_section;
         self.inner.append(section, op).await?;
         self.size += 1;
