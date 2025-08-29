@@ -7,7 +7,7 @@ module main {
         N = 6,
         F = 1,
         CORRECT = Set("n0", "n1", "n2", "n3", "n4"),
-        FAULTY = Set("n5"),
+        BYZANTINE = Set("n5"),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set("inval_0", "inval_1"),
         VIEWS = 0.to(6),
