@@ -17,7 +17,7 @@
 //!
 //! [Cache] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
 //! called on a `section`, all interaction with a `section` less than the pruned `section` will
-//! return an error. The pruning granularity is determined by `items_per_section` in the configuration.
+//! return an error. The pruning granularity is determined by `items_per_blob` in the configuration.
 //!
 //! # Single Operation Reads
 //!
@@ -51,7 +51,7 @@
 //!         partition: "cache".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
-//!         items_per_section: NZU64!(1024),
+//!         items_per_blob: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
 //!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
@@ -109,7 +109,7 @@ pub struct Config<C> {
     pub codec_config: C,
 
     /// The number of items per section (the granularity of pruning).
-    pub items_per_section: NonZeroU64,
+    pub items_per_blob: NonZeroU64,
 
     /// The amount of bytes that can be buffered in a section before being written to a
     /// [commonware_runtime::Blob].
@@ -133,7 +133,7 @@ mod tests {
     use rand::Rng;
     use std::collections::BTreeMap;
 
-    const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
+    const DEFAULT_ITEMS_PER_BLOB: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -151,7 +151,7 @@ mod tests {
                 compression: Some(3),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
@@ -173,7 +173,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let result = Cache::<_, i32>::init(context, cfg.clone()).await;
@@ -196,7 +196,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
@@ -216,7 +216,7 @@ mod tests {
             cache.close().await.expect("Failed to close cache");
 
             // Corrupt the value
-            let section = (index / DEFAULT_ITEMS_PER_SECTION) * DEFAULT_ITEMS_PER_SECTION;
+            let section = (index / DEFAULT_ITEMS_PER_BLOB) * DEFAULT_ITEMS_PER_BLOB;
             let (blob, _) = context
                 .open("test_partition", &section.to_be_bytes())
                 .await
@@ -234,7 +234,7 @@ mod tests {
                     compression: None,
                     write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                     replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                    items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                    items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -261,7 +261,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(1), // no mask - each item is its own section
+                items_per_blob: NZU64!(1), // no mask - each item is its own section
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
@@ -313,14 +313,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Initialize the cache
-            let items_per_section = 256u64;
+            let items_per_blob = 256u64;
             let cfg = Config {
                 partition: "test_partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(items_per_section),
+                items_per_blob: NZU64!(items_per_blob),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
@@ -363,7 +363,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(items_per_section),
+                items_per_blob: NZU64!(items_per_blob),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::<_, [u8; 1024]>::init(context.clone(), cfg.clone())
@@ -385,7 +385,7 @@ mod tests {
             cache.prune(min).await.expect("Failed to prune");
 
             // Ensure all items can be retrieved that haven't been pruned
-            let min = (min / items_per_section) * items_per_section;
+            let min = (min / items_per_blob) * items_per_blob;
             let mut removed = 0;
             for (index, data) in items {
                 if index >= min {
@@ -435,7 +435,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
@@ -485,7 +485,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
@@ -541,14 +541,14 @@ mod tests {
             assert_eq!(cache.missing_items(3, 3), vec![3, 4, 7]);
 
             // Test 9: Cross-section boundary scenario
-            cache.put(DEFAULT_ITEMS_PER_SECTION - 1, 99).await.unwrap();
-            cache.put(DEFAULT_ITEMS_PER_SECTION + 1, 101).await.unwrap();
+            cache.put(DEFAULT_ITEMS_PER_BLOB - 1, 99).await.unwrap();
+            cache.put(DEFAULT_ITEMS_PER_BLOB + 1, 101).await.unwrap();
 
             // Find missing items across section boundary
-            let items = cache.missing_items(DEFAULT_ITEMS_PER_SECTION - 2, 5);
+            let items = cache.missing_items(DEFAULT_ITEMS_PER_BLOB - 2, 5);
             assert_eq!(
                 items,
-                vec![DEFAULT_ITEMS_PER_SECTION - 2, DEFAULT_ITEMS_PER_SECTION]
+                vec![DEFAULT_ITEMS_PER_BLOB - 2, DEFAULT_ITEMS_PER_BLOB]
             );
 
             cache.close().await.expect("Failed to close cache");
@@ -565,7 +565,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
@@ -614,7 +614,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(100), // Smaller sections for easier testing
+                items_per_blob: NZU64!(100), // Smaller sections for easier testing
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
@@ -666,7 +666,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(100), // Smaller sections for testing
+                items_per_blob: NZU64!(100), // Smaller sections for testing
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
@@ -724,7 +724,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
@@ -777,7 +777,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
