@@ -1,3 +1,70 @@
+//! A prunable cache for ordered data with index-based lookups.
+//!
+//! Data is stored in [crate::journal::variable::Journal] (an append-only log) and the location of
+//! written data is tracked in-memory by index to enable **single-read lookups** for cached data.
+//!
+//! Unlike [crate::archive::prunable::Archive], the [Cache] is optimized for simplicity and does
+//! not support key-based lookups (only index-based access is provided). This makes it ideal for
+//! caching sequential data where you know the exact index of the item you want to retrieve.
+//!
+//! # Memory Overhead
+//!
+//! [Cache] maintains a single in-memory map to track the location of each index item. The memory
+//! used to track each item is `8 + 4 + 4` bytes (where `8` is the index, `4` is the offset, and
+//! `4` is the length). This results in approximately `16` bytes of memory overhead per cached item.
+//!
+//! # Pruning
+//!
+//! [Cache] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
+//! called on a `section`, all interaction with a `section` less than the pruned `section` will
+//! return an error. The pruning granularity is determined by `items_per_section` in the configuration.
+//!
+//! # Single Operation Reads
+//!
+//! To enable single operation reads (i.e. reading all of an item in a single call to
+//! [commonware_runtime::Blob]), [Cache] stores the length of each item in its in-memory index.
+//! This ensures that reading a cached item requires only one disk operation.
+//!
+//! # Compression
+//!
+//! [Cache] supports compressing data before storing it on disk. This can be enabled by setting
+//! the `compression` field in the `Config` struct to a valid `zstd` compression level. This setting
+//! can be changed between initializations of [Cache], however, it must remain populated if any
+//! data was written with compression enabled.
+//!
+//! # Example
+//!
+//! ```rust
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
+//! use commonware_storage::cache::{Cache, Config};
+//! use commonware_utils::{NZUsize, NZU64};
+//!
+//! let executor = deterministic::Runner::default();
+//! executor.start(|context| async move {
+//!     // Create a cache
+//!     let cfg = Config {
+//!         partition: "cache".into(),
+//!         compression: Some(3),
+//!         codec_config: (),
+//!         items_per_section: NZU64!(1024),
+//!         write_buffer: NZUsize!(1024 * 1024),
+//!         replay_buffer: NZUsize!(4096),
+//!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!     };
+//!     let mut cache = Cache::init(context, cfg).await.unwrap();
+//!
+//!     // Put data at index
+//!     cache.put(1, "cached_data").await.unwrap();
+//!
+//!     // Get data by index
+//!     let data: Option<&str> = cache.get(1).await.unwrap();
+//!     assert_eq!(data, Some("cached_data"));
+//!
+//!     // Close the cache (also closes the journal)
+//!     cache.close().await.unwrap();
+//! });
+//! ```
+
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
@@ -83,10 +150,7 @@ mod tests {
             // Put the data
             let index = 1u64;
             let data = 1;
-            cache
-                .put(index, data)
-                .await
-                .expect("Failed to put data");
+            cache.put(index, data).await.expect("Failed to put data");
 
             // Close the cache
             cache.close().await.expect("Failed to close cache");
@@ -194,19 +258,10 @@ mod tests {
                 .expect("Failed to initialize cache");
 
             // Insert multiple items across different sections
-            let items = vec![
-                (1u64, 1),
-                (2u64, 2),
-                (3u64, 3),
-                (4u64, 4),
-                (5u64, 5),
-            ];
+            let items = vec![(1u64, 1), (2u64, 2), (3u64, 3), (4u64, 4), (5u64, 5)];
 
             for (index, data) in &items {
-                cache
-                    .put(*index, *data)
-                    .await
-                    .expect("Failed to put data");
+                cache.put(*index, *data).await.expect("Failed to put data");
             }
 
             // Check metrics
@@ -218,10 +273,7 @@ mod tests {
 
             // Ensure items 1 and 2 are no longer present
             for (index, data) in items {
-                let retrieved = cache
-                    .get(index)
-                    .await
-                    .expect("Failed to get data");
+                let retrieved = cache.get(index).await.expect("Failed to get data");
                 if index < 3 {
                     assert!(retrieved.is_none());
                 } else {
@@ -272,10 +324,7 @@ mod tests {
                 context.fill(&mut data);
                 items.insert(index, data);
 
-                cache
-                    .put(index, data)
-                    .await
-                    .expect("Failed to put data");
+                cache.put(index, data).await.expect("Failed to put data");
             }
 
             // Ensure all items can be retrieved
@@ -336,10 +385,7 @@ mod tests {
                         .expect("Data not found");
                     assert_eq!(retrieved, data);
                 } else {
-                    let retrieved = cache
-                        .get(index)
-                        .await
-                        .expect("Failed to get data");
+                    let retrieved = cache.get(index).await.expect("Failed to get data");
                     assert!(retrieved.is_none());
                     removed += 1;
                 }

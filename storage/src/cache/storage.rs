@@ -212,6 +212,8 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
     }
 
     /// Store an item in the [Cache].
+    ///
+    /// If the index already exists, put does nothing and returns.
     pub async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
