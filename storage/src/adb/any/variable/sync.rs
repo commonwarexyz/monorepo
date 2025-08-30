@@ -527,7 +527,7 @@ where
     // Find which section contains the lower_bound item
     let lower_section = lower_bound / items_per_section.get();
 
-    let Some(_blob) = journal.blobs.get(&lower_section) else {
+    if journal.blobs.get(&lower_section).is_none() {
         return Ok(()); // Section doesn't exist, nothing to prune
     };
 
@@ -648,7 +648,7 @@ where
 /// Prune a journal to contain only elements within [lower_bound, upper_bound].
 ///
 /// 1. Remove all sections before the one containing lower_bound
-/// 2. Prune the lower section if needed (when lower_bound is not contiguous with the section)
+/// 2. Prune the lower section, if needed, to make contiguous with range starting at lower_bound
 /// 3. Remove all sections after the one containing upper_bound  
 /// 4. Truncate the upper section to remove elements after upper_bound
 ///
@@ -722,7 +722,7 @@ where
     }
 
     // Prune the lower section if needed
-    if lower_bound > lower_section_start && journal.blobs.contains_key(&lower_section) {
+    if lower_bound > lower_section_start {
         debug!(lower_section, "pruning lower section");
         prune_lower(journal, metadata, lower_bound, items_per_section).await?;
     }
