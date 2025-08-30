@@ -1,0 +1,41 @@
+[package]
+name = "commonware-consensus-fuzz"
+version = "0.0.57"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-utils = { workspace = true }
+arbitrary = { workspace = true, features = ["derive"] }
+libfuzzer-sys = { workspace = true }
+rand = { workspace = true }
+governor = { workspace = true }
+futures-timer = "3.0.3"
+futures = { workspace = true }
+bytes = { workspace = true }
+
+[dependencies.commonware-consensus]
+path = ".."
+features = ["fuzz"]
+
+[[bin]]
+name = "simplex_messages"
+path = "fuzz_targets/simplex_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "threshold_simplex_messages"
+path = "fuzz_targets/threshold_simplex_messages.rs"
+test = false
+doc = false
+bench = false

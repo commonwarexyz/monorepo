@@ -33,6 +33,8 @@ type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
     pub max_size: usize,
+    /// Whether to ignore block operations.
+    pub ignore_blocks: bool,
 }
 
 /// Implementation of a simulated network.
@@ -41,6 +43,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
 
     // Maximum size of a message that can be sent over the network
     max_size: usize,
+
+    // Whether to ignore block operations
+    ignore_blocks: bool,
 
     // Next socket address to assign to a new peer
     // Incremented for each new peer
@@ -95,6 +100,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             Self {
                 context,
                 max_size: cfg.max_size,
+                ignore_blocks: cfg.ignore_blocks,
                 next_addr,
                 ingress: oracle_receiver,
                 sender,
@@ -247,7 +253,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 send_result(result, Ok(()))
             }
             ingress::Message::Block { from, to } => {
-                self.blocks.insert((from, to));
+                if !self.ignore_blocks {
+                    self.blocks.insert((from, to));
+                }
             }
             ingress::Message::Blocked { result } => {
                 send_result(result, Ok(self.blocks.iter().cloned().collect()))
@@ -347,10 +355,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             // Determine if the sender or recipient has blocked the other
             let o_r = (origin.clone(), recipient.clone());
-            let r_o = (recipient.clone(), origin.clone());
-            if self.blocks.contains(&o_r) || self.blocks.contains(&r_o) {
-                trace!(?origin, ?recipient, reason = "blocked", "dropping message");
-                continue;
+            if !self.ignore_blocks {
+                let r_o = (recipient.clone(), origin.clone());
+                if self.blocks.contains(&o_r) || self.blocks.contains(&r_o) {
+                    trace!(?origin, ?recipient, reason = "blocked", "dropping message");
+                    continue;
+                }
             }
 
             // Determine if there is a link between the sender and recipient
@@ -871,6 +881,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                ignore_blocks: true,
             };
             let network_context = context.with_label("network");
             let (network, mut oracle) = Network::new(network_context.clone(), cfg);
@@ -915,6 +926,7 @@ mod tests {
     fn test_get_next_socket() {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
+            ignore_blocks: true,
         };
         let runner = deterministic::Runner::default();
 

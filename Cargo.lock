@@ -1124,6 +1124,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-consensus-fuzz"
+version = "0.0.57"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "futures-timer",
+ "governor",
+ "libfuzzer-sys",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "commonware-cryptography"
 version = "0.0.60"
 dependencies = [
@@ -1268,6 +1288,7 @@ dependencies = [
 name = "commonware-p2p"
 version = "0.0.60"
 dependencies = [
+ "arbitrary",
  "bytes",
  "commonware-codec",
  "commonware-cryptography",

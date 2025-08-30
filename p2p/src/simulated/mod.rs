@@ -75,6 +75,7 @@
 //! // Configure network
 //! let p2p_cfg = Config {
 //!     max_size: 1024 * 1024, // 1MB
+//!     ignore_blocks: true,
 //! };
 //!
 //! // Start context
@@ -132,6 +133,7 @@
 //! ```
 
 mod bandwidth;
+pub mod helpers;
 mod ingress;
 mod metrics;
 mod network;
@@ -198,6 +200,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -314,6 +317,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -354,6 +358,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -391,6 +396,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -416,6 +422,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -455,6 +462,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -528,6 +536,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -580,6 +589,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -649,6 +659,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
 
@@ -834,6 +845,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -925,6 +937,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1084,6 +1097,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1141,6 +1155,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1232,6 +1247,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1332,6 +1348,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1430,6 +1447,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1568,6 +1586,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1673,6 +1692,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1805,6 +1825,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1891,6 +1912,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -1957,6 +1979,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
