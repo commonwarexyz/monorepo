@@ -218,7 +218,10 @@ impl<
         }
         if rewind_leaf_num != log_size {
             let op_count = log_size - rewind_leaf_num;
-            warn!(op_count, "rewinding over uncommitted log operations");
+            warn!(
+                log_size,
+                op_count, "rewinding over uncommitted log operations"
+            );
             log.rewind(rewind_leaf_num).await?;
             log.sync().await?;
             log_size = rewind_leaf_num;
@@ -228,7 +231,7 @@ impl<
         let mut next_mmr_leaf_num = leaf_pos_to_num(mmr.size()).unwrap();
         if next_mmr_leaf_num > log_size {
             let op_count = next_mmr_leaf_num - log_size;
-            warn!(op_count, "popping uncommitted MMR operations");
+            warn!(log_size, op_count, "popping uncommitted MMR operations");
             mmr.pop(op_count as usize).await?;
             next_mmr_leaf_num = log_size;
         }
@@ -236,7 +239,10 @@ impl<
         // If the MMR is behind, replay log operations to catch up.
         if next_mmr_leaf_num < log_size {
             let op_count = log_size - next_mmr_leaf_num;
-            warn!(op_count, "MMR lags behind log, replaying log to catch up");
+            warn!(
+                log_size,
+                op_count, "MMR lags behind log, replaying log to catch up"
+            );
             while next_mmr_leaf_num < log_size {
                 let op = log.read(next_mmr_leaf_num).await?;
                 mmr.add_batched(hasher, &op.encode()).await?;
@@ -559,23 +565,25 @@ impl<
         self.raise_inactivity_floor(self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
-        self.sync().await?;
+        self.mmr.process_updates(&mut self.hasher);
 
-        // TODO: Make the frequency with which we prune known inactive items configurable in case
-        // this turns out to be a significant part of commit overhead, or the user wants to ensure
-        // the log is backed up externally before discarding.
-        self.prune_inactive().await
+        self.log.sync().await.map_err(Error::Journal)
     }
 
-    /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
-    /// parallelized if a thread pool is provided.
-    pub(crate) async fn sync(&mut self) -> Result<(), Error> {
+    /// Sync the db to disk ensuring the current state is fully persisted, then prune inactive
+    /// operations if `prune` is true. Batch operations will be parallelized if a thread pool is
+    /// provided.
+    pub async fn sync(&mut self, prune: bool) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
         )?;
 
-        Ok(())
+        if prune {
+            self.prune_inactive().await
+        } else {
+            Ok(())
+        }
     }
 
     // Moves the given operation to the tip of the log if it is active, rendering its old location
@@ -856,7 +864,9 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 1); // floor op added
             let root = db.root(&mut hasher);
             assert!(matches!(db.prune_inactive().await, Ok(())));
+            //db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(&mut hasher), root);
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
@@ -905,13 +915,13 @@ pub(super) mod test {
             assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.inactivity_floor_loc, 0);
-            db.sync().await.unwrap();
+            db.sync(false).await.unwrap();
 
             // Advance over 3 inactive operations.
             db.raise_inactivity_floor(3).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 3);
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
-            db.sync().await.unwrap();
+            db.sync(false).await.unwrap();
 
             // Delete all keys.
             db.delete(d1).await.unwrap();
@@ -921,7 +931,7 @@ pub(super) mod test {
             assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
             assert_eq!(db.inactivity_floor_loc, 3);
 
-            db.sync().await.unwrap();
+            db.sync(false).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
@@ -933,7 +943,7 @@ pub(super) mod test {
             let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
             assert!(db.delete(d3).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8);
-            db.sync().await.unwrap();
+            db.sync(false).await.unwrap();
             assert_eq!(db.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
@@ -1031,8 +1041,9 @@ pub(super) mod test {
             assert_eq!(db.oldest_retained_loc().unwrap(), 0); // no pruning yet
             assert_eq!(db.snapshot.items(), 857);
 
-            // Test that commit will raise the activity floor.
+            // Test that commit + sync w/ pruning will raise the activity floor.
             db.commit().await.unwrap();
+            db.sync(true).await.unwrap();
             assert_eq!(db.op_count(), 2336);
             assert_eq!(
                 db.oldest_retained_loc().unwrap(),
@@ -1080,7 +1091,7 @@ pub(super) mod test {
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(100).await.unwrap();
-            db.sync().await.unwrap();
+            db.sync(false).await.unwrap();
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
@@ -1107,7 +1118,7 @@ pub(super) mod test {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
-            db.sync().await.unwrap();
+            db.sync(false).await.unwrap();
             let halfway_root = db.root(&mut hasher);
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
@@ -1160,7 +1171,7 @@ pub(super) mod test {
                 .apply_op(Operation::CommitFloor(new_db.inactivity_floor_loc))
                 .await
                 .unwrap();
-            new_db.sync().await.unwrap();
+            new_db.sync(false).await.unwrap();
             assert_eq!(new_db.op_count(), 2001);
             assert_eq!(new_db.root(&mut hasher), root);
 
@@ -1427,7 +1438,7 @@ pub(super) mod test {
             let mut single_db = create_test_db(context.clone()).await;
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             // Don't commit - this changes the root due to commit operations
-            single_db.sync().await.unwrap();
+            single_db.sync(false).await.unwrap();
             let single_root = single_db.root(&mut hasher);
 
             assert!(verify_proof(
@@ -1480,7 +1491,7 @@ pub(super) mod test {
                 let mut ref_db = create_test_db(context.clone()).await;
                 apply_ops(&mut ref_db, ops[0..end_loc as usize].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
-                ref_db.sync().await.unwrap();
+                ref_db.sync(false).await.unwrap();
 
                 let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
                 assert_eq!(ref_proof.size, historical_proof.size);
@@ -1612,7 +1623,8 @@ pub(super) mod test {
             // Get the root digest
             let original_root = db.root(&mut hasher);
 
-            // Verify the pruning boundary is correct
+            // Verify the pruning boundary after sync/ w/ prune is correct
+            db.sync(true).await.unwrap();
             let oldest_retained = db.oldest_retained_loc().unwrap();
             let inactivity_floor = db.inactivity_floor_loc;
             assert_eq!(
@@ -1704,6 +1716,8 @@ pub(super) mod test {
             // Final commit
             db_no_delay.commit().await.unwrap();
             db_max_delay.commit().await.unwrap();
+            db_no_delay.sync(true).await.unwrap();
+            db_no_delay.sync(true).await.unwrap();
             let inactivity_floor = db_no_delay.inactivity_floor_loc;
 
             // Get roots from both databases
