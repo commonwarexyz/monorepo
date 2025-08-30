@@ -1,5 +1,9 @@
 use crate::{
-    adb::{self, any::fixed::Any, immutable::Immutable},
+    adb::{
+        self,
+        any::{fixed::Any, variable::Any as VarAny},
+        immutable::Immutable,
+    },
     mmr::verification::Proof,
     store::operation::{Fixed, Variable},
     translator::Translator,
@@ -180,26 +184,83 @@ where
     }
 }
 
+impl<E, K, V, H, T> Resolver for Arc<VarAny<E, K, V, H, T>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: commonware_codec::Codec + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = Variable<K, V>;
+    type Error = adb::Error;
+
+    async fn get_operations(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        self.historical_proof(size, start_loc, max_ops.get())
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
+impl<E, K, V, H, T> Resolver for Arc<RwLock<VarAny<E, K, V, H, T>>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: commonware_codec::Codec + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = Variable<K, V>;
+    type Error = adb::Error;
+
+    async fn get_operations(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        let db = self.read().await;
+        db.historical_proof(size, start_loc, max_ops.get())
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use std::marker::PhantomData;
 
     #[derive(Clone)]
-    pub struct FailResolver<D, K, V> {
+    pub struct FailResolver<D, Op> {
         _digest: PhantomData<D>,
-        _key: PhantomData<K>,
-        _value: PhantomData<V>,
+        _op: PhantomData<Op>,
     }
 
-    impl<D, K, V> Resolver for FailResolver<D, K, V>
+    impl<D, Op> Resolver for FailResolver<D, Op>
     where
         D: Digest,
-        K: Array,
-        V: CodecFixed<Cfg = ()> + Clone + Send + Sync + 'static,
+        Op: Send + Sync + Clone + 'static,
     {
         type Digest = D;
-        type Op = Fixed<K, V>;
+        type Op = Op;
         type Error = adb::Error;
 
         async fn get_operations(
@@ -212,12 +273,11 @@ pub(crate) mod tests {
         }
     }
 
-    impl<D, K, V> FailResolver<D, K, V> {
+    impl<D, Op> FailResolver<D, Op> {
         pub fn new() -> Self {
             Self {
                 _digest: PhantomData,
-                _key: PhantomData,
-                _value: PhantomData,
+                _op: PhantomData,
             }
         }
     }
