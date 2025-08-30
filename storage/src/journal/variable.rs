@@ -210,7 +210,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             context,
             cfg,
 
-            oldest_allowed: None,
+            oldest_allowed: blobs.first_key_value().map(|(section, _)| *section),
 
             blobs,
             tracked,
@@ -383,24 +383,29 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(item)
     }
 
-    /// Returns an ordered stream of all items in the journal, each as a tuple of (section, offset,
-    /// size, item).
+    /// Returns an ordered stream of all items in the journal starting with the item at the given
+    /// `start_section` and `offset`. Each item is returned as a tuple of (section, offset, size,
+    /// item).
     ///
     /// # Repair
     ///
-    /// Like [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-    /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be
-    /// truncated to the last valid item).
+    /// Like
+    /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+    /// and
+    /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+    /// the first invalid data read will be considered the new end of the journal (and the
+    /// underlying [Blob] will be truncated to the last valid item).
     pub async fn replay(
         &self,
+        start_section: u64,
+        mut offset: u32,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let codec_config = self.cfg.codec_config.clone();
         let compressed = self.cfg.compression.is_some();
         let mut blobs = Vec::with_capacity(self.blobs.len());
-        for (section, blob) in self.blobs.iter() {
+        for (section, blob) in self.blobs.range(start_section..) {
             let blob_size = blob.size().await;
             let max_offset = compute_next_offset(blob_size)?;
             blobs.push((
@@ -415,15 +420,23 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Replay all blobs in order and stream items as they are read (to avoid occupying too much
         // memory with buffered data)
-        Ok(
-            stream::iter(blobs).flat_map(
-                move |(section, blob, max_offset, blob_size, codec_config, compressed)| {
-                    // Created buffered reader
-                    let reader = Read::new(blob, blob_size, buffer);
+        Ok(stream::iter(blobs).flat_map(
+            move |(section, blob, max_offset, blob_size, codec_config, compressed)| {
+                // Created buffered reader
+                let mut reader = Read::new(blob, blob_size, buffer);
+                if section == start_section && offset != 0 {
+                    if let Err(err) = reader.seek_to(offset as u64 * ITEM_ALIGNMENT) {
+                        warn!(section, offset, ?err, "failed to seek to offset");
+                        // Return early with the error to terminate the entire stream
+                        return stream::once(async move { Err(err.into()) }).left_stream();
+                    }
+                } else {
+                    offset = 0;
+                }
 
-                    // Read over the blob
-                    stream::unfold(
-                        (section, reader, 0u32, 0u64, codec_config, compressed),
+                // Read over the blob
+                stream::unfold(
+                        (section, reader, offset, 0u64, codec_config, compressed),
                         move |(
                             section,
                             mut reader,
@@ -466,7 +479,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     // fully synced to disk).
                                     warn!(
                                         blob = section,
-                                        new_offset = offset,
+                                        bad_offset = offset,
                                         new_size = valid_size,
                                         expected,
                                         found,
@@ -481,7 +494,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     // pending data is not fully synced to disk).
                                     warn!(
                                         blob = section,
-                                        new_offset = offset,
+                                        bad_offset = offset,
                                         new_size = valid_size,
                                         "trailing bytes detected: truncating"
                                     );
@@ -511,10 +524,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                 }
                             }
                         },
-                    )
-                },
-            ),
-        )
+                    ).right_stream()
+            },
+        ))
     }
 
     /// Appends an item to `Journal` in a given `section`, returning the offset
@@ -755,9 +767,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob.sync().await.map_err(Error::Runtime)
     }
 
-    /// Prunes all `sections` less than `min`.
-    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+    /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
+    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         // Prune any blobs that are smaller than the minimum
+        let mut pruned = false;
         while let Some((&section, _)) = self.blobs.first_key_value() {
             // Stop pruning if we reach the minimum
             if section >= min {
@@ -770,6 +783,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             drop(blob);
 
             // Remove blob from storage
+            pruned = true;
             self.context
                 .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await?;
@@ -780,7 +794,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Update oldest allowed
         self.oldest_allowed = Some(min);
-        Ok(())
+        Ok(pruned)
     }
 
     /// Syncs and closes all open sections.
@@ -791,6 +805,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             debug!(blob = section, size, "synced blob");
         }
         Ok(())
+    }
+
+    pub fn oldest_section(&self) -> Option<u64> {
+        self.oldest_allowed
     }
 
     /// Remove any underlying blobs created by the journal.
@@ -877,7 +895,7 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::new();
             let stream = journal
-                .replay(NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -947,7 +965,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1035,7 +1053,7 @@ mod tests {
             let mut items = Vec::<(u64, u64)>::new();
             {
                 let stream = journal
-                    .replay(NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1142,7 +1160,7 @@ mod tests {
 
             // Attempt to replay the journal
             let stream = journal
-                .replay(NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1199,7 +1217,7 @@ mod tests {
 
             // Attempt to replay the journal
             let stream = journal
-                .replay(NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1266,7 +1284,7 @@ mod tests {
             //
             // This will truncate the leftover bytes from our manual write.
             let stream = journal
-                .replay(NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1338,7 +1356,7 @@ mod tests {
             // Attempt to replay the journal
             {
                 let stream = journal
-                    .replay(NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1418,7 +1436,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1456,7 +1474,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1508,7 +1526,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1589,7 +1607,7 @@ mod tests {
             let mut items = Vec::<(u64, u64)>::new();
             {
                 let stream = journal
-                    .replay(NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1641,7 +1659,7 @@ mod tests {
             let mut items = Vec::<(u64, u64)>::new();
             {
                 let stream = journal
-                    .replay(NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1722,7 +1740,7 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, i32)>::new();
             let stream = journal
-                .replay(NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024))
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);

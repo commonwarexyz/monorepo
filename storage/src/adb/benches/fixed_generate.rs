@@ -82,6 +82,8 @@ async fn gen_random_any(ctx: Context, num_elements: u64, num_operations: u64) ->
     }
 
     db.commit().await.unwrap();
+    db.sync().await.unwrap();
+    db.prune(db.inactivity_floor_loc()).await.unwrap();
 
     db
 }
@@ -107,7 +109,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                         let ctx = context::get::<Context>();
                         let start = Instant::now();
                         for _ in 0..iters {
-                            let db = gen_random_any(ctx.clone(), elements, operations).await;
+                            let mut db = gen_random_any(ctx.clone(), elements, operations).await;
+                            db.sync().await.unwrap();
                             db.destroy().await.unwrap();
                         }
                         start.elapsed()
