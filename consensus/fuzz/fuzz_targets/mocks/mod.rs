@@ -1,6 +1,11 @@
 use arbitrary::Arbitrary;
-use commonware_consensus::simplex::mocks::supervisor::Supervisor;
-use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
+use commonware_consensus::{
+    simplex::mocks::supervisor::Supervisor as SimplexSupervisor,
+    threshold_simplex::mocks::supervisor::Supervisor as ThresholdSimplexSupervisor,
+};
+use commonware_cryptography::{
+    bls12381::primitives::variant::MinPk, ed25519::PublicKey, sha256::Digest as Sha256Digest,
+};
 use commonware_p2p::simulated::helpers::PartitionStrategy;
 use commonware_utils::{quorum, NZUsize};
 use std::{
@@ -38,31 +43,51 @@ pub struct FuzzInput {
     pub partition: PartitionStrategy,
 }
 
+// Generic data structures for invariant checking
+pub struct Notarization {
+    pub payload: Sha256Digest,
+    pub signature_count: Option<usize>, // Some for Simplex, None for Threshold Simplex
+}
+
+pub struct Nullification {
+    pub signature_count: Option<usize>, // Some for simplex, None for Threshold Simplex
+}
+
+pub struct Finalization {
+    pub payload: Sha256Digest,
+    pub signature_count: Option<usize>, // Some for simplex, None for Threshold Simplex
+}
+
+type View = u64;
+
+pub type ReplicaState = (
+    HashMap<View, Notarization>,
+    HashMap<View, Nullification>,
+    HashMap<View, Finalization>,
+);
+
+// Single unified function for checking invariants
 #[allow(dead_code)]
-pub fn check_invariants(n: u32, correct_replicas: Vec<Supervisor<PublicKey, Sha256Digest>>) {
+pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
     let threshold = quorum(n) as usize;
 
     // Invariant: agreement
     // Finalized digests must be the same
     {
-        let all_views: HashSet<u64> = correct_replicas
+        let all_views: HashSet<u64> = replicas
             .iter()
-            .flat_map(|replica| {
-                let finalizations = replica.finalizations.lock().unwrap();
-                finalizations.keys().cloned().collect::<Vec<_>>()
-            })
+            .flat_map(|(_, _, finalizations)| finalizations.keys().cloned())
             .collect();
 
         // For each view, check that all existing finalizations are the same
         for view in all_views {
-            let finalizations_for_view: Vec<(usize, Sha256Digest)> = correct_replicas
+            let finalizations_for_view: Vec<(usize, Sha256Digest)> = replicas
                 .iter()
                 .enumerate()
-                .filter_map(|(replica_idx, replica)| {
-                    let finalizations = replica.finalizations.lock().unwrap();
+                .filter_map(|(replica_idx, (_, _, finalizations))| {
                     finalizations
                         .get(&view)
-                        .map(|cert| (replica_idx, cert.proposal.payload))
+                        .map(|data| (replica_idx, data.payload))
                 })
                 .collect();
 
@@ -80,14 +105,12 @@ pub fn check_invariants(n: u32, correct_replicas: Vec<Supervisor<PublicKey, Sha2
 
     // Invariant: safe_finalization = no_nullification_in_finalized_view and no_notarization_in_finalized_view
     {
-        let finalized_views: HashMap<u64, Sha256Digest> = correct_replicas
+        let finalized_views: HashMap<View, Sha256Digest> = replicas
             .iter()
-            .flat_map(|replica| {
-                let finalizations = replica.finalizations.lock().unwrap();
+            .flat_map(|(_, _, finalizations)| {
                 finalizations
                     .iter()
-                    .map(|(&view, cert)| (view, cert.proposal.payload))
-                    .collect::<Vec<_>>()
+                    .map(|(&view, data)| (view, data.payload))
             })
             .collect();
 
@@ -95,9 +118,7 @@ pub fn check_invariants(n: u32, correct_replicas: Vec<Supervisor<PublicKey, Sha2
         // If there is a finalized block in a view v, there is no nullification in the same view.
 
         for finalized_view in finalized_views.keys() {
-            for (replica_idx, replica) in correct_replicas.iter().enumerate() {
-                let nullifications = replica.nullifications.lock().unwrap();
-
+            for (replica_idx, (_, nullifications, _)) in replicas.iter().enumerate() {
                 assert!(
                     !nullifications.contains_key(finalized_view),
                     "Replica {replica_idx} has nullified view {finalized_view} but this view is finalized by some replica",
@@ -108,12 +129,10 @@ pub fn check_invariants(n: u32, correct_replicas: Vec<Supervisor<PublicKey, Sha2
         // Invariant: no_notarization_in_finalized_view
         // If there is a finalized block in a view v, there is no notarization for another block in the same view.
 
-        for (replica_idx, replica) in correct_replicas.iter().enumerate() {
-            let notarizations = replica.notarizations.lock().unwrap();
-
-            for (&notarized_view, notarized_cert) in notarizations.iter() {
+        for (replica_idx, (notarizations, _, _)) in replicas.iter().enumerate() {
+            for (&notarized_view, notarized_data) in notarizations.iter() {
                 if let Some(&finalized_digest) = finalized_views.get(&notarized_view) {
-                    let notarized_digest = notarized_cert.proposal.payload;
+                    let notarized_digest = notarized_data.payload;
 
                     assert_eq!(
                         finalized_digest, notarized_digest,
@@ -124,36 +143,91 @@ pub fn check_invariants(n: u32, correct_replicas: Vec<Supervisor<PublicKey, Sha2
         }
     }
 
-    for replica in correct_replicas.iter() {
-        let notarizations = replica.notarizations.lock().unwrap();
-        let nullifications = replica.nullifications.lock().unwrap();
-        let finalizations = replica.finalizations.lock().unwrap();
+    // Invariant: no two quorum notarizations for different payloads in the same view
+    {
+        let mut per_view: HashMap<View, HashSet<Sha256Digest>> = HashMap::new();
+        for (notarizations, _, _) in replicas.iter() {
+            for (v, d) in notarizations {
+                let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
+                if is_quorum {
+                    per_view.entry(*v).or_default().insert(d.payload);
+                }
+            }
+        }
 
+        for (v, payloads) in per_view {
+            assert!(
+                payloads.len() <= 1,
+                "Conflicting quorum notarizations in view {v}: payloads={payloads:?}"
+            );
+        }
+    }
+
+    // Invariant: if a view is nullified anywhere, nobody should finalize that view.
+    {
+        let nullified: HashSet<View> = replicas
+            .iter()
+            .flat_map(|(_, nulls, _)| nulls.keys().cloned())
+            .collect();
+
+        for (replica_idx, (_, _, finals)) in replicas.iter().enumerate() {
+            for v in finals.keys() {
+                assert!(
+                    !nullified.contains(v),
+                    "Replica {replica_idx} finalized view {v} which is nullified elsewhere"
+                );
+            }
+        }
+    }
+
+    // Invariant: finalization requires a notarization for the same (view, payload)
+    // Any finalization seen anywhere must be backed by some notarization for the same (view, payload) by any replica.
+    {
+        let notarized: HashSet<(View, Sha256Digest)> = replicas
+            .iter()
+            .flat_map(|(notarizations, _, _)| notarizations.iter().map(|(&v, d)| (v, d.payload)))
+            .collect();
+
+        for (_, _, finalizations) in replicas.iter() {
+            for (&v, d) in finalizations.iter() {
+                assert!(
+                    notarized.contains(&(v, d.payload)),
+                    "Finalization without matching notarization: view {v}, payload={:?}",
+                    d.payload
+                );
+            }
+        }
+    }
+
+    for (notarizations, nullifications, finalizations) in replicas.iter() {
         // Invariant: certificates_are_valid_inv
-        // certificates have correct number of signatures
+        // certificates have correct number of signatures (only for simplex, not threshold)
         {
-            for (view, cert) in nullifications.iter() {
-                assert!(
-                    cert.signatures.len() >= threshold,
-                    "Nullification certificate in view {view} has {} signatures but needs >= {threshold}: {cert:?}",
-                    cert.signatures.len()
-                );
+            for (view, data) in nullifications.iter() {
+                if let Some(sig_count) = data.signature_count {
+                    assert!(
+                        sig_count >= threshold,
+                        "Nullification certificate in view {view} has {sig_count} signatures but needs >= {threshold}",
+                    );
+                }
             }
 
-            for (view, cert) in notarizations.iter() {
-                assert!(
-                    cert.signatures.len() >= threshold,
-                    "Notarization certificate in view {view} has {} signatures but needs >= {threshold}: {cert:?}",
-                    cert.signatures.len()
-                );
+            for (view, data) in notarizations.iter() {
+                if let Some(sig_count) = data.signature_count {
+                    assert!(
+                        sig_count >= threshold,
+                        "Notarization certificate in view {view} has {sig_count} signatures but needs >= {threshold}",
+                    );
+                }
             }
 
-            for (view, cert) in finalizations.iter() {
-                assert!(
-                    cert.signatures.len() >= threshold,
-                    "Finalization certificate in view {view} has {} signatures but needs >= {threshold}: {cert:?}",
-                    cert.signatures.len()
-                );
+            for (view, data) in finalizations.iter() {
+                if let Some(sig_count) = data.signature_count {
+                    assert!(
+                        sig_count >= threshold,
+                        "Finalization certificate in view {view} has {sig_count} signatures but needs >= {threshold}",
+                    );
+                }
             }
         }
 
@@ -183,4 +257,110 @@ pub fn check_invariants(n: u32, correct_replicas: Vec<Supervisor<PublicKey, Sha2
             }
         }
     }
+}
+
+#[allow(dead_code)]
+pub fn extract_threshold_simplex_state(
+    supervisors: Vec<ThresholdSimplexSupervisor<PublicKey, MinPk, Sha256Digest>>,
+) -> Vec<ReplicaState> {
+    supervisors
+        .into_iter()
+        .map(|supervisor| {
+            let notarizations = supervisor.notarizations.lock().unwrap();
+            let notarization_data = notarizations
+                .iter()
+                .map(|(&view, cert)| {
+                    (
+                        view,
+                        Notarization {
+                            payload: cert.proposal.payload,
+                            signature_count: None, // Threshold signatures don't have count
+                        },
+                    )
+                })
+                .collect();
+
+            let nullifications = supervisor.nullifications.lock().unwrap();
+            let nullification_data = nullifications
+                .iter()
+                .map(|(&view, _cert)| {
+                    (
+                        view,
+                        Nullification {
+                            signature_count: None, // Threshold signatures don't have count
+                        },
+                    )
+                })
+                .collect();
+
+            let finalizations = supervisor.finalizations.lock().unwrap();
+            let finalization_data = finalizations
+                .iter()
+                .map(|(&view, cert)| {
+                    (
+                        view,
+                        Finalization {
+                            payload: cert.proposal.payload,
+                            signature_count: None, // Threshold signatures don't have count
+                        },
+                    )
+                })
+                .collect();
+
+            (notarization_data, nullification_data, finalization_data)
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+pub fn extract_simplex_state(
+    supervisors: Vec<SimplexSupervisor<PublicKey, Sha256Digest>>,
+) -> Vec<ReplicaState> {
+    supervisors
+        .into_iter()
+        .map(|supervisor| {
+            let notarizations = supervisor.notarizations.lock().unwrap();
+            let notarization_data = notarizations
+                .iter()
+                .map(|(&view, cert)| {
+                    (
+                        view,
+                        Notarization {
+                            payload: cert.proposal.payload,
+                            signature_count: Some(cert.signatures.len()),
+                        },
+                    )
+                })
+                .collect();
+
+            let nullifications = supervisor.nullifications.lock().unwrap();
+            let nullification_data = nullifications
+                .iter()
+                .map(|(&view, cert)| {
+                    (
+                        view,
+                        Nullification {
+                            signature_count: Some(cert.signatures.len()),
+                        },
+                    )
+                })
+                .collect();
+
+            let finalizations = supervisor.finalizations.lock().unwrap();
+            let finalization_data = finalizations
+                .iter()
+                .map(|(&view, cert)| {
+                    (
+                        view,
+                        Finalization {
+                            payload: cert.proposal.payload,
+                            signature_count: Some(cert.signatures.len()),
+                        },
+                    )
+                })
+                .collect();
+
+            (notarization_data, nullification_data, finalization_data)
+        })
+        .collect()
 }

@@ -1,7 +1,7 @@
 #![no_main]
 
 mod mocks;
-use crate::mocks::check_invariants;
+use crate::mocks::{check_invariants, extract_simplex_state};
 use commonware_consensus::{
     simplex::{
         config::Config,
@@ -193,7 +193,8 @@ fn fuzzer(input: FuzzInput) {
             }
         }
 
-        check_invariants(n, supervisors);
+        let replica_states = extract_simplex_state(supervisors);
+        check_invariants(n, replica_states);
     });
 }
 

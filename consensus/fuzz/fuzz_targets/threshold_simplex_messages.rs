@@ -1,6 +1,7 @@
 #![no_main]
 
 mod mocks;
+use crate::mocks::{check_invariants, extract_threshold_simplex_state};
 use commonware_consensus::{
     threshold_simplex::{
         config::Config,
@@ -216,6 +217,10 @@ fn fuzzer(input: FuzzInput) {
                 context.sleep(Duration::from_secs(10)).await;
             }
         }
+
+        // Extract data from supervisors and convert to generic format
+        let replica_data = extract_threshold_simplex_state(supervisors);
+        check_invariants(n, replica_data);
     });
 }
 
