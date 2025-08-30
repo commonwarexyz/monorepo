@@ -266,6 +266,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 orphaned_leaf = Some(item);
             }
             journal.rewind(last_valid_size).await?;
+            journal.sync().await?;
             journal_size = last_valid_size
         }
 
@@ -483,7 +484,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     }
 
     /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
-    /// return Empty or ElementPruned errors.
+    /// return Empty or ElementPruned errors. The backing journal is synced to disk before
+    /// returning.
     ///
     /// # Warning
     ///
@@ -522,6 +524,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
 
         self.journal.rewind(new_size).await?;
+        self.journal.sync().await?;
         self.journal_size = new_size;
 
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
@@ -561,10 +564,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// Process all batched updates and sync the MMR to disk. If `pool` is non-null, then it will be
     /// used to parallelize the sync.
     pub async fn sync(&mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
-        if self.size() == 0 {
-            return Ok(());
-        }
-
         // Write the nodes cached in the memory-resident MMR to the journal.
         self.mem_mmr.sync(h);
 
@@ -852,6 +851,20 @@ mod tests {
             assert!(mmr.prune_to_pos(&mut hasher, 0).await.is_ok());
             assert!(mmr.sync(&mut hasher).await.is_ok());
             assert!(matches!(mmr.pop(1).await, Err(Error::Empty)));
+
+            mmr.add(&mut hasher, &test_digest(0)).await.unwrap();
+            assert_eq!(mmr.size(), 1);
+            mmr.sync(&mut hasher).await.unwrap();
+            assert!(mmr.get_node(0).await.is_ok());
+            assert!(mmr.pop(1).await.is_ok());
+            assert_eq!(mmr.size(), 0);
+            mmr.sync(&mut hasher).await.unwrap();
+
+            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+            assert_eq!(mmr.size(), 0);
+
             mmr.destroy().await.unwrap();
         });
     }

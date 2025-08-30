@@ -531,6 +531,7 @@ where
                 "rewinding uncommitted locations"
             );
             self.locations.rewind(self.log_size).await?;
+            self.locations.sync().await?;
         }
 
         // Confirm post-conditions hold.

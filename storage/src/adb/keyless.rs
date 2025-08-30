@@ -146,6 +146,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 locations_size, "rewinding misaligned locations journal"
             );
             locations.rewind(mmr_leaves).await?;
+            locations.sync().await?;
             locations_size = mmr_leaves;
         } else if mmr_leaves > locations_size {
             warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
@@ -195,6 +196,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                     "rewinding to last commit point"
                 );
                 locations.rewind(last_commit_loc + 1).await?;
+                locations.sync().await?;
                 mmr.pop((locations_size - last_commit_loc - 1) as usize)
                     .await?;
                 locations_size = last_commit_loc + 1;
@@ -203,6 +205,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 let rewind_point = rewind_point.expect("no rewind point found");
                 let section = rewind_point.0 / cfg.log_items_per_section.get();
                 log.rewind_to_offset(section, rewind_point.1).await?;
+                log.sync(section).await?;
             }
         } else if locations_size > 0 {
             warn!(
@@ -210,9 +213,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 "no commit point found, rewinding to start"
             );
             locations.rewind(0).await?;
+            locations.sync().await?;
             mmr.pop(locations_size as usize).await?;
             locations_size = 0;
             log.rewind_section(0, 0).await?;
+            log.sync(0).await?;
         }
 
         Ok(Self {

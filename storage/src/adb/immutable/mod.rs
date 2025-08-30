@@ -297,6 +297,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 locations_size, "rewinding misaligned locations map"
             );
             locations.rewind(mmr_leaves).await?;
+            locations.sync().await?;
         }
         if mmr_leaves > locations_size {
             warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
@@ -391,6 +392,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Pop any MMR elements that are ahead of the last log commit point.
         if mmr_leaves > log_size {
             locations.rewind(log_size).await?;
+            locations.sync().await?;
 
             let op_count = mmr_leaves - log_size;
             warn!(op_count, "popping uncommitted MMR operations");
