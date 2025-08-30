@@ -214,6 +214,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
             );
         journal.prune(lower_bound).await?;
         journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
+        journal.sync().await?;
         journal
     };
     let journal_size = journal.size().await?;
