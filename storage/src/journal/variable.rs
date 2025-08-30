@@ -654,9 +654,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Rewinds the journal to the given `section` and `offset`, removing any data beyond it.
     ///
     /// # Warnings
-    ///   - This operation is not guaranteed to survive restarts until sync is called.
-    ///   - This operation is not atomic, but it will always leave the journal in a consistent state
-    ///     in the event of failure since blobs are always removed in reverse order of section.
+    ///
+    /// * This operation is not guaranteed to survive restarts until sync is called.
+    /// * This operation is not atomic, but it will always leave the journal in a consistent state
+    ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind_to_offset(&mut self, section: u64, offset: u32) -> Result<(), Error> {
         self.rewind(section, offset as u64 * ITEM_ALIGNMENT).await
     }
@@ -666,9 +667,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// This removes any data beyond the specified `section` and `size`.
     ///
     /// # Warnings
-    ///   - This operation is not guaranteed to survive restarts until sync is called.
-    ///   - This operation is not atomic, but it will always leave the journal in a consistent state
-    ///     in the event of failure since blobs are always removed in reverse order of section.
+    ///
+    /// * This operation is not guaranteed to survive restarts until sync is called.
+    /// * This operation is not atomic, but it will always leave the journal in a consistent state
+    ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section, false)?;
 
