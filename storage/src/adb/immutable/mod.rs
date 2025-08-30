@@ -302,6 +302,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         if mmr_leaves > locations_size {
             warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
             mmr.pop((mmr_leaves - locations_size) as usize).await?;
+            mmr.sync(hasher).await?;
             mmr_leaves = locations_size;
         }
 

@@ -122,7 +122,8 @@ where
             hasher: hasher::Standard::<H>::new(),
             pruning_delay: db_config.pruning_delay,
         };
-        db.sync().await?;
+        db.sync(false).await?;
+
         Ok(db)
     }
 
@@ -742,8 +743,8 @@ mod tests {
             target_db.commit().await.unwrap();
             sync_db.commit().await.unwrap();
 
-            target_db.sync().await.unwrap();
-            sync_db.sync().await.unwrap();
+            target_db.sync(true).await.unwrap();
+            sync_db.sync(true).await.unwrap();
 
             // Close sync_db
             sync_db.close().await.unwrap();
@@ -1747,6 +1748,7 @@ mod tests {
             target_db.commit().await.unwrap();
             apply_ops(&mut sync_db, original_ops.clone()).await;
             sync_db.commit().await.unwrap();
+            sync_db.sync(true).await.unwrap();
             let sync_db_original_size = sync_db.op_count();
 
             // Get pinned nodes before closing the database

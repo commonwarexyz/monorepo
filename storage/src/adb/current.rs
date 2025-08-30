@@ -312,7 +312,7 @@ impl<
         self.raise_inactivity_floor(self.any.uncommitted_ops + 1)
             .await?;
         self.any.uncommitted_ops = 0;
-        self.any.sync().await
+        self.any.sync(false).await
     }
 
     /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit

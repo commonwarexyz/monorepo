@@ -561,12 +561,17 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.mem_mmr.root(h)
     }
 
+    /// Process all batched updates without syncing to disk.
+    pub fn process_updates(&mut self, h: &mut impl Hasher<H>) {
+        self.mem_mmr.sync(h)
+    }
+
     /// Process all batched updates and sync the MMR to disk. If `pool` is non-null, then it will be
     /// used to parallelize the sync.
     pub async fn sync(&mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
-        // Write the nodes cached in the memory-resident MMR to the journal.
-        self.mem_mmr.sync(h);
+        self.process_updates(h);
 
+        // Write the nodes cached in the memory-resident MMR to the journal.
         for i in self.journal_size..self.size() {
             let node = *self.mem_mmr.get_node_unchecked(i);
             self.journal.append(node).await?;
