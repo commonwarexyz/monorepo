@@ -730,11 +730,12 @@ where
     // Prune the upper section if needed
     prune_upper(journal, upper_bound, items_per_section_val).await?;
 
-    // Step 5: Compute the next location to write and the new oldest_retained_loc
+    // Compute the next location to write and the new oldest_retained_loc
     // If journal is empty, return (lower_bound, lower_bound)
     if journal.blobs.is_empty() {
         // The first element we write will be at lower_bound.
         write_oldest_retained_loc(metadata, lower_bound);
+        metadata.sync().await?;
         return Ok(lower_bound);
     }
 

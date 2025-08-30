@@ -727,7 +727,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.log.sync(section).map_err(Error::Journal),
             self.locations.sync().map_err(Error::Journal),
-            self.metadata.sync().map_err(Error::Metadata),
+            // Don't sync metadata -- it should have been synced before
+            // we synced it when we last wrote oldest_retained_loc
         )?;
 
         Ok(())
@@ -854,7 +855,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
             self.log.close().map_err(Error::Journal),
             self.locations.close().map_err(Error::Journal),
-            self.metadata.sync().map_err(Error::Metadata),
+            // Don't sync metadata -- it should have been synced before
+            // we synced it when we last wrote oldest_retained_loc
         )?;
 
         Ok(())
@@ -878,7 +880,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         sync_mmr: bool,
         sync_locations: bool,
         sync_log: bool,
-        sync_metadata: bool,
     ) -> Result<(), Error> {
         let section = self.current_section();
         if sync_mmr {
@@ -889,9 +890,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
         if sync_locations {
             self.locations.sync().await?;
-        }
-        if sync_metadata {
-            self.metadata.sync().await?;
         }
         Ok(())
     }
@@ -1294,9 +1292,7 @@ pub(super) mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false, false, false, false)
-                .await
-                .unwrap();
+            db.simulate_failure(false, false, false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
 
@@ -1320,9 +1316,7 @@ pub(super) mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false, false, false, false)
-                .await
-                .unwrap();
+            db.simulate_failure(false, false, false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
 
@@ -1348,9 +1342,7 @@ pub(super) mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false, false, false, false)
-                .await
-                .unwrap();
+            db.simulate_failure(false, false, false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
 
@@ -1444,9 +1436,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v).await.unwrap();
             }
-            db.simulate_failure(true, false, false, false)
-                .await
-                .unwrap();
+            db.simulate_failure(true, false, false).await.unwrap();
 
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
@@ -1475,9 +1465,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 9) as usize];
                 db.update(k, v).await.unwrap();
             }
-            db.simulate_failure(false, false, true, false)
-                .await
-                .unwrap();
+            db.simulate_failure(false, false, true).await.unwrap();
 
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
@@ -1497,9 +1485,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 10) as usize];
                 db.update(k, v).await.unwrap();
             }
-            db.simulate_failure(false, false, false, false)
-                .await
-                .unwrap();
+            db.simulate_failure(false, false, false).await.unwrap();
 
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
