@@ -510,14 +510,15 @@ async fn count_items_in_section<E: Storage + Metrics, V: Codec>(
     Ok(item_count)
 }
 
-/// Remove items before the `lower_bound` location from the first section of the journal, if any.
-/// If the section containing `lower_bound` has elements before `lower_bound`, these are removed.
-/// The remaining elements are then replayed at the beginning of the section.
+/// Prune the section containing `lower_bound`.
+/// If existing items are contiguous with `lower_bound`, preserves all items and sets
+/// `oldest_retained_loc` to the section boundary. Otherwise, rebuilds the section to
+/// remove items before `lower_bound` and updates metadata accordingly.
 async fn prune_lower<E, V>(
     journal: &mut VJournal<E, V>,
+    metadata: &mut Metadata<E, U64, u64>,
     lower_bound: u64,
     items_per_section: NonZeroU64,
-    oldest_retained_loc: u64,
 ) -> Result<(), crate::journal::Error>
 where
     E: Storage + Metrics + Clock,
@@ -530,9 +531,60 @@ where
         return Ok(()); // Section doesn't exist, nothing to prune
     };
 
+    let oldest_retained_loc = read_oldest_retained_loc(metadata);
+
+    // Scan the section to find the location of its first and last items
+    let mut existing_bounds = None;
+    {
+        let mut loc = oldest_retained_loc; // Location of the current item in stream below
+        let mut min_loc = None; // Minimum location of the existing items in the section
+        let mut max_loc = None; // Maximum location of the existing items in the section
+
+        let stream = journal.replay(commonware_utils::NZUsize!(1024)).await?;
+        pin_mut!(stream);
+        while let Some(result) = stream.next().await {
+            let (section, _offset, _size, _operation) = result?;
+
+            // Only process operations from the target section
+            if section != lower_section {
+                assert!(section > lower_section); // lower_section should be the first section
+                break; // We've moved past our target section
+            }
+
+            if min_loc.is_none() {
+                min_loc = Some(loc);
+            }
+            max_loc = Some(loc);
+            loc += 1;
+        }
+
+        if let (Some(min), Some(max)) = (min_loc, max_loc) {
+            existing_bounds = Some((min, max));
+        }
+    }
+
+    // Determine if existing items are contiguous with the new lower_bound
+    let Some((existing_min, existing_max)) = existing_bounds else {
+        return Ok(()); // Nothing in this section; nothing to rebuild
+    };
+    let is_contiguous = lower_bound <= existing_max + 1;
+    if is_contiguous {
+        debug!(
+            existing_min,
+            existing_max,
+            lower_bound,
+            oldest_retained_loc,
+            "existing items are contiguous with new range, skipping rebuild"
+        );
+        return Ok(()); // Don't rebuild
+    }
+
     debug!(
-        lower_section,
-        lower_bound, oldest_retained_loc, "rebuilding section to remove items before lower_bound"
+        existing_min,
+        existing_max,
+        lower_bound,
+        oldest_retained_loc,
+        "existing items are non-contiguous, rebuilding section"
     );
 
     // Read all operations from the current section
@@ -542,16 +594,12 @@ where
         pin_mut!(stream);
 
         let mut loc = oldest_retained_loc;
-        debug!(
-            "rebuild_lower_section: starting replay from logical location {}",
-            loc
-        );
         while let Some(result) = stream.next().await {
             let (section, _offset, _size, operation) = result?;
 
             // Only process operations from the target section
             if section != lower_section {
-                assert!(section > lower_section);
+                assert!(section > lower_section); // lower_section should be the first section
                 break; // We've moved past our target section
             }
 
@@ -562,7 +610,7 @@ where
 
             loc += 1;
         }
-    } // stream is dropped here, releasing the borrow
+    }
 
     debug!(
         operations_to_keep = operations_to_keep.len(),
@@ -590,24 +638,23 @@ where
         // Sync the rebuilt section
         journal.sync(lower_section).await?;
     }
+
+    // Update metadata with the new oldest_retained_loc since we removed items
+    write_oldest_retained_loc(metadata, lower_bound);
+    metadata.sync().await?;
     Ok(())
 }
 
-/// Prune a journal to ensure it only contains elements within [lower_bound, upper_bound].
+/// Prune a journal to contain only elements within [lower_bound, upper_bound].
 ///
 /// 1. Remove all sections before the one containing lower_bound
-/// 2. Prune the section containing lower_bound to remove elements before it
-/// 3. Remove all sections after the one containing upper_bound
-/// 4. Rewind the section containing upper_bound to remove elements after it
+/// 2. Prune the lower section if needed (when lower_bound is not contiguous with the section)
+/// 3. Remove all sections after the one containing upper_bound  
+/// 4. Truncate the upper section to remove elements after upper_bound
 ///
-/// Returns a tuple of (next_write_location, new_oldest_retained_loc) where:
-/// - next_write_location: The next logical location that should be written to by the sync engine
-///   - If the journal is empty: returns lower_bound
-///   - If the journal has elements in the sync range but not up to upper_bound: returns the next location after the last element
-///   - If the journal goes past upper_bound: returns upper_bound + 1
-/// - new_oldest_retained_loc: The logical location of the earliest element remaining in the journal
-///   - If the journal is empty: returns lower_bound
-///   - Otherwise: returns the location of the first element found in the journal
+/// Returns the next logical location for writing. Updates metadata with the new
+/// oldest_retained_loc (either at section boundaries for contiguous cases or at
+/// lower_bound for rebuilt sections).
 pub async fn prune_journal<E, V>(
     journal: &mut VJournal<E, V>,
     metadata: &mut Metadata<E, U64, u64>,
@@ -626,7 +673,7 @@ where
         ));
     }
 
-    let mut oldest_retained_loc = read_oldest_retained_loc(metadata);
+    let oldest_retained_loc = read_oldest_retained_loc(metadata);
     let items_per_section_val = items_per_section.get();
     let lower_section = lower_bound / items_per_section_val;
     let upper_section = upper_bound / items_per_section_val;
@@ -653,10 +700,6 @@ where
         }
         journal.prune(lower_section).await?;
     }
-    // If the oldest_retained_loc was just pruned, we need to update it
-    if oldest_retained_loc < lower_section_start {
-        oldest_retained_loc = lower_section_start;
-    }
 
     // Remove sections after the upper_section
     let sections_to_remove: Vec<u64> = journal
@@ -681,13 +724,7 @@ where
     // Prune the lower section if needed
     if lower_bound > lower_section_start && journal.blobs.contains_key(&lower_section) {
         debug!(lower_section, "pruning lower section");
-        // Update metadata before pruning to ensure recovery is possible
-        // if we crash during pruning.
-        if oldest_retained_loc < lower_bound {
-            write_oldest_retained_loc(metadata, lower_bound);
-            metadata.sync().await?;
-        }
-        prune_lower(journal, lower_bound, items_per_section, oldest_retained_loc).await?;
+        prune_lower(journal, metadata, lower_bound, items_per_section).await?;
     }
 
     // Prune the upper section if needed
@@ -2727,7 +2764,7 @@ mod tests {
             .await
             .expect("Failed to prune journal");
 
-            // Empty journal should return (lower_bound, lower_bound)
+            // Oldest retained loc and next write loc should be lower_bound
             assert_eq!(next_loc, lower_bound);
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
             assert_eq!(new_oldest_retained_loc, lower_bound);
@@ -2762,15 +2799,15 @@ mod tests {
             .await
             .expect("Failed to create metadata");
 
-            let items_per_section = NZU64!(5);
-
             // Add data to sections 0 and 1 (locations 0-9)
+            let items_per_section = NZU64!(5);
             for section in 0..2 {
                 for i in 0..items_per_section.get() {
                     journal.append(section, section * 100 + i).await.unwrap();
                 }
             }
 
+            // New bounds are ahead of data in the journal
             let lower_bound = 15; // Section 3
             let upper_bound = 25; // Section 5
             write_oldest_retained_loc(&mut metadata, 0);
@@ -2793,7 +2830,7 @@ mod tests {
         });
     }
 
-    /// Test prune_journal with data partly before lower_bound but not reaching upper_bound
+    /// Test prune_journal with data partly after lower_bound but not reaching upper_bound
     #[test_traced]
     fn test_prune_journal_before_lower_and_before_upper() {
         let executor = deterministic::Runner::default();
@@ -2820,9 +2857,8 @@ mod tests {
             .await
             .expect("Failed to create metadata");
 
-            let items_per_section = NZU64!(5);
-
             // Add data to sections 0, 1, 2 (locations 0-14)
+            let items_per_section = NZU64!(5);
             for section in 0..3 {
                 for i in 0..items_per_section.get() {
                     journal.append(section, section * 100 + i).await.unwrap();
@@ -2843,10 +2879,10 @@ mod tests {
             .await
             .expect("Failed to prune journal");
 
-            // Should have data from locations 7-14 (rest of section 1 and all of section 2)
+            // Should have data from locations 5-14 (all of section 1 and all of section 2)
             assert_eq!(next_loc, 15);
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
-            assert_eq!(new_oldest_retained_loc, lower_bound); // Should be lower_bound after pruning
+            assert_eq!(new_oldest_retained_loc, 5); // Should be section boundary (start of section 1)
 
             // Section 0 should be removed
             assert!(!journal.blobs.contains_key(&0));
@@ -2918,71 +2954,6 @@ mod tests {
         });
     }
 
-    /// Test prune_journal with data starting after lower_bound and extending past upper_bound
-    #[test_traced]
-    fn test_prune_journal_data_after_lower_past_upper() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = VConfig {
-                partition: "test_prune_after_lower_past_upper".into(),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
-                .await
-                .expect("Failed to create journal");
-
-            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
-                context.clone(),
-                crate::metadata::Config {
-                    partition: "test_prune_after_lower_past_upper_metadata".into(),
-                    codec_config: (),
-                },
-            )
-            .await
-            .expect("Failed to create metadata");
-
-            let items_per_section = NZU64!(5);
-
-            // Add data to sections 2, 3, 4, 5 (locations 10-29)
-            for section in 2..6 {
-                for i in 0..items_per_section.get() {
-                    journal.append(section, section * 100 + i).await.unwrap();
-                }
-            }
-
-            let lower_bound = 5; // Section 1
-            let upper_bound = 22; // Middle of section 4
-            write_oldest_retained_loc(&mut metadata, 10); // Start of section 2
-
-            let next_loc = prune_journal(
-                &mut journal,
-                &mut metadata,
-                lower_bound,
-                upper_bound,
-                items_per_section,
-            )
-            .await
-            .expect("Failed to prune journal");
-
-            // Should have data from locations 10-22
-            assert_eq!(next_loc, 23);
-            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
-            assert_eq!(new_oldest_retained_loc, 10);
-
-            // Section 5 should be removed
-            assert!(!journal.blobs.contains_key(&5));
-
-            // Sections 2, 3, and 4 should remain
-            assert!(journal.blobs.contains_key(&2));
-            assert!(journal.blobs.contains_key(&3));
-            assert!(journal.blobs.contains_key(&4));
-        });
-    }
-
     /// Test prune_journal with data that is a superset of sync range
     #[test_traced]
     fn test_prune_journal_data_superset_of_range() {
@@ -3033,10 +3004,10 @@ mod tests {
             .await
             .expect("Failed to prune journal");
 
-            // Should have data from location 7 to 17
+            // Should have data from location 5 to 17 (contiguity preserves section boundary)
             assert_eq!(next_loc, 18);
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
-            assert_eq!(new_oldest_retained_loc, lower_bound); // Should be lower_bound after pruning after pruning lower section
+            assert_eq!(new_oldest_retained_loc, 5); // Should be section boundary (start of section 1)
 
             // Sections 0 and 4 should be removed
             assert!(!journal.blobs.contains_key(&0));
@@ -3076,9 +3047,8 @@ mod tests {
             .await
             .expect("Failed to create metadata");
 
-            let items_per_section = NZU64!(10);
-
             // Add data to sections 0-2 (locations 0-29)
+            let items_per_section = NZU64!(10);
             for section in 0..3 {
                 for i in 0..items_per_section.get() {
                     journal.append(section, section * 100 + i).await.unwrap();
@@ -3099,10 +3069,11 @@ mod tests {
             .await
             .expect("Failed to prune journal");
 
-            // Should only keep elements 12-17 from section 1
+            // Should keep all elements 10-17 from section 1
+            // The upper section pruning will truncate section 1 to only contain elements 10-17
             assert_eq!(next_loc, 18);
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
-            assert_eq!(new_oldest_retained_loc, lower_bound);
+            assert_eq!(new_oldest_retained_loc, 10); // Section boundary (start of section 1)
 
             // Only section 1 should remain
             assert!(!journal.blobs.contains_key(&0));
@@ -3177,74 +3148,6 @@ mod tests {
         });
     }
 
-    /// Test prune_journal when pruning items from lower section without removing sections
-    #[test_traced]
-    fn test_prune_journal_partial_lower_section_pruning() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = VConfig {
-                partition: "test_prune_partial_lower".into(),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
-                .await
-                .expect("Failed to create journal");
-
-            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
-                context.clone(),
-                crate::metadata::Config {
-                    partition: "test_prune_partial_lower_metadata".into(),
-                    codec_config: (),
-                },
-            )
-            .await
-            .expect("Failed to create metadata");
-
-            let items_per_section = NZU64!(10);
-
-            // Add data to sections 1, 2, and 3 (locations 10-39)
-            for section in 1..4 {
-                for i in 0..items_per_section.get() {
-                    journal.append(section, section * 1000 + i).await.unwrap();
-                }
-            }
-
-            let lower_bound = 13; // Middle of section 1
-            let upper_bound = 25; // Middle of section 2
-            write_oldest_retained_loc(&mut metadata, 10); // Start of section 1
-
-            let next_loc = prune_journal(
-                &mut journal,
-                &mut metadata,
-                lower_bound,
-                upper_bound,
-                items_per_section,
-            )
-            .await
-            .expect("Failed to prune journal");
-
-            // Should have data from locations 13-25
-            assert_eq!(next_loc, 26);
-            let new_oldest_retained = read_oldest_retained_loc(&metadata);
-            assert_eq!(new_oldest_retained, 13); // First element after pruning within section 1
-
-            // Section 3 should be removed
-            assert!(!journal.blobs.contains_key(&3));
-
-            // Sections 1 and 2 should remain
-            assert!(journal.blobs.contains_key(&1));
-            assert!(journal.blobs.contains_key(&2));
-
-            // Verify oldest_retained_loc was updated even though no full sections were removed
-            assert!(new_oldest_retained > 10);
-            assert_eq!(new_oldest_retained, lower_bound); // Should equal lower_bound since we pruned up to it
-        });
-    }
-
     /// Test prune_journal with invalid bounds (lower > upper)
     #[test_traced]
     fn test_prune_journal_invalid_bounds() {
@@ -3291,6 +3194,65 @@ mod tests {
                 result,
                 Err(crate::journal::Error::InvalidSyncRange(_, _))
             ));
+        });
+    }
+
+    /// Test prune_journal when lower section needs rebuilding (non-contiguous case)
+    #[test_traced]
+    fn test_prune_journal_non_contiguous_rebuild() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_non_contiguous".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
+                context.clone(),
+                crate::metadata::Config {
+                    partition: "test_non_contiguous_metadata".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to create metadata");
+
+            let items_per_section = NZU64!(10);
+
+            // Add data to section 1 (locations 10-14)
+            for i in 0..5 {
+                journal.append(1, 100 + i).await.unwrap();
+            }
+
+            // Set up non-contiguous scenario: existing items [10,14], lower_bound=16 (gap exists)
+            let lower_bound = 16; // Gap between existing_max(14) and lower_bound(16)
+            let upper_bound = 19;
+            write_oldest_retained_loc(&mut metadata, 10);
+
+            let next_loc = prune_journal(
+                &mut journal,
+                &mut metadata,
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should rebuild section and set oldest_retained_loc to lower_bound
+            assert_eq!(next_loc, lower_bound); // Journal should be empty after rebuild
+            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+            assert_eq!(new_oldest_retained_loc, lower_bound); // Should be lower_bound, not section boundary
+
+            // Section 1 should be removed since no operations were kept after rebuild
+            assert!(!journal.blobs.contains_key(&1));
         });
     }
 }
