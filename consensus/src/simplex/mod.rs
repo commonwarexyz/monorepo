@@ -2532,8 +2532,6 @@ mod tests {
         // Nodes 0,1,2 are correct and nodes 3, 4 are byzantine nodes, twins, meaning that they have the same private key.
         // So, we model n=4, f=1 scenario.
         let n = 5;
-        let threshold = 3;
-        let max_exceptions = 10;
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2670,8 +2668,6 @@ mod tests {
     }
 
     pub fn check_invariants(n: u32, replicas: Vec<Supervisor<PublicKey, Sha256Digest>>) {
-        let threshold = quorum(n) as usize;
-
         let finalizations: Vec<HashMap<u64, _>> = replicas
             .into_iter()
             .map(|supervisor| {
