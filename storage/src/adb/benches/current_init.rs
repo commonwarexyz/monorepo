@@ -55,7 +55,6 @@ fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
         translator: EightCap,
         thread_pool: pool,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        pruning_delay: 10,
     }
 }
 

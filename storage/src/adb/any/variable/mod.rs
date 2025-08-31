@@ -639,10 +639,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(Some((last_commit, metadata)))
     }
 
-    /// Sync the db to disk ensuring the current state is fully persisted, then prune inactive
-    /// operations if `prune` is true. Batch operations will be parallelized if a thread pool is
-    /// provided.
-    pub async fn sync(&mut self, prune: bool) -> Result<(), Error> {
+    /// Sync the db to disk ensuring the current state is fully persisted. Batch operations will be
+    /// parallelized if a thread pool is provided.
+    pub async fn sync(&mut self) -> Result<(), Error> {
         let section = self.current_section();
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
@@ -650,11 +649,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.locations.sync().map_err(Error::Journal),
         )?;
 
-        if prune {
-            self.prune_inactive().await
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     // Moves the given operation to the tip of the log if it is active, rendering its old location
@@ -934,13 +929,13 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.inactivity_floor_loc, 0);
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
 
             // Advance over 3 inactive operations.
             db.raise_inactivity_floor(None, 3).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 3);
             assert_eq!(db.op_count(), 6); // 4 updates, 1 deletion, 1 commit
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
 
             // Delete all keys.
             db.delete(d1).await.unwrap();
@@ -950,7 +945,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 8); // 4 updates, 3 deletions, 1 commit
             assert_eq!(db.inactivity_floor_loc, 3);
 
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
 
             // Multiple deletions of the same key should be a no-op.
             db.delete(d1).await.unwrap();
@@ -1062,7 +1057,8 @@ pub(super) mod test {
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.inactivity_floor_loc, 1478);
-            db.sync(true).await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
             assert_eq!(db.snapshot.items(), 857);
 
@@ -1105,7 +1101,7 @@ pub(super) mod test {
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(None, 100).await.unwrap();
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
@@ -1272,7 +1268,8 @@ pub(super) mod test {
             assert_eq!(leaf_pos_to_num(db.mmr.size()), Some(2787));
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
-            db.sync(true).await.unwrap(); // test pruning boundary after sync w/ prune
+            db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
             assert_eq!(db.snapshot.items(), 857);
             db.close().await.unwrap();

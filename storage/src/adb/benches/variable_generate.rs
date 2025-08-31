@@ -89,7 +89,8 @@ async fn gen_random_any(ctx: Context, num_elements: u64, num_operations: u64) ->
         }
     }
     db.commit(None).await.unwrap();
-    db.sync(true).await.unwrap();
+    db.sync().await.unwrap();
+    db.prune(db.inactivity_floor_loc()).await.unwrap();
 
     db
 }
