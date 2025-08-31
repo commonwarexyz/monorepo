@@ -30,7 +30,6 @@ pub fn create_config() -> fixed::Config<Translator> {
         translator: Translator::default(),
         thread_pool: None,
         buffer_pool: buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-        pruning_delay: 1024,
     }
 }
 

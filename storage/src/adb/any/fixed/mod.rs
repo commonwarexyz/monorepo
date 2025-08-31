@@ -74,12 +74,6 @@ pub struct Config<T: Translator> {
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
-
-    /// The number of operations to keep below the inactivity floor before pruning.
-    /// This creates a gap between the inactivity floor and the pruning boundary,
-    /// which is useful for serving state sync clients, who may request operations
-    /// below the inactivity floor.
-    pub pruning_delay: u64,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -127,12 +121,6 @@ pub struct Any<
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     pub(crate) hasher: Standard<H>,
-
-    /// The number of operations to keep below the inactivity floor before pruning.
-    /// This creates a gap between the inactivity floor and the pruning boundary,
-    /// which is useful for serving state sync clients, who may request operations
-    /// below the inactivity floor.
-    pub(crate) pruning_delay: u64,
 }
 
 impl<
@@ -149,7 +137,6 @@ impl<
         let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let mut hasher = Standard::<H>::new();
-        let pruning_delay = cfg.pruning_delay;
         let (mmr, log) = Self::init_mmr_and_log(context, cfg, &mut hasher).await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
@@ -168,7 +155,6 @@ impl<
             inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher,
-            pruning_delay,
         };
 
         Ok(db)
@@ -573,17 +559,13 @@ impl<
     /// Sync the db to disk ensuring the current state is fully persisted, then prune inactive
     /// operations if `prune` is true. Batch operations will be parallelized if a thread pool is
     /// provided.
-    pub async fn sync(&mut self, prune: bool) -> Result<(), Error> {
+    pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
         )?;
 
-        if prune {
-            self.prune_inactive().await
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     // Moves the given operation to the tip of the log if it is active, rendering its old location
@@ -643,15 +625,19 @@ impl<
         Ok(())
     }
 
-    /// Prune historical operations that are > `pruning_delay` steps behind the inactivity floor.
-    /// This does not affect the db's root or current snapshot.
-    pub(crate) async fn prune_inactive(&mut self) -> Result<(), Error> {
+    /// Prune historical operations prior to `target_prune_loc`. This does not affect the db's root
+    /// or current snapshot.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {
             return Ok(());
         };
+        assert!(target_prune_loc <= self.inactivity_floor_loc);
 
         // Calculate the target pruning position: inactivity_floor_loc - pruning_delay
-        let target_prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_delay);
         let ops_to_prune = target_prune_loc.saturating_sub(oldest_retained_loc);
         if ops_to_prune == 0 {
             return Ok(());
@@ -765,7 +751,6 @@ pub(super) mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            pruning_delay: 10,
         }
     }
 
@@ -791,7 +776,6 @@ pub(super) mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            pruning_delay: 10,
         }
     }
 
@@ -846,7 +830,7 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
-            assert!(matches!(db.prune_inactive().await, Ok(())));
+            assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
@@ -863,7 +847,7 @@ pub(super) mod test {
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 1); // floor op added
             let root = db.root(&mut hasher);
-            assert!(matches!(db.prune_inactive().await, Ok(())));
+            assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             //db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1);
@@ -915,13 +899,13 @@ pub(super) mod test {
             assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.inactivity_floor_loc, 0);
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
 
             // Advance over 3 inactive operations.
             db.raise_inactivity_floor(3).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 3);
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
 
             // Delete all keys.
             db.delete(d1).await.unwrap();
@@ -931,7 +915,7 @@ pub(super) mod test {
             assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
             assert_eq!(db.inactivity_floor_loc, 3);
 
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
             let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
@@ -943,7 +927,7 @@ pub(super) mod test {
             let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
             assert!(db.delete(d3).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8);
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
@@ -984,13 +968,10 @@ pub(super) mod test {
 
             // Pruning inactive ops should not affect current state or root
             let root = db.root(&mut hasher);
-            db.prune_inactive().await.unwrap();
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(
-                db.inactivity_floor_loc.saturating_sub(db.pruning_delay),
-                db.oldest_retained_loc().unwrap()
-            );
+            assert_eq!(db.inactivity_floor_loc, db.oldest_retained_loc().unwrap());
 
             db.destroy().await.unwrap();
         });
@@ -1043,12 +1024,10 @@ pub(super) mod test {
 
             // Test that commit + sync w/ pruning will raise the activity floor.
             db.commit().await.unwrap();
-            db.sync(true).await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.op_count(), 2336);
-            assert_eq!(
-                db.oldest_retained_loc().unwrap(),
-                1478_u64.saturating_sub(10)
-            ); // 1478 - pruning_delay
+            assert_eq!(db.oldest_retained_loc().unwrap(), 1478_u64);
             assert_eq!(db.inactivity_floor_loc, 1478);
             assert_eq!(db.snapshot.items(), 857);
 
@@ -1063,7 +1042,7 @@ pub(super) mod test {
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
             db.raise_inactivity_floor(3000).await.unwrap();
-            db.prune_inactive().await.unwrap();
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 4478);
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
@@ -1091,7 +1070,7 @@ pub(super) mod test {
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(100).await.unwrap();
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
@@ -1118,7 +1097,7 @@ pub(super) mod test {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
-            db.sync(false).await.unwrap();
+            db.sync().await.unwrap();
             let halfway_root = db.root(&mut hasher);
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
@@ -1171,7 +1150,7 @@ pub(super) mod test {
                 .apply_op(Operation::CommitFloor(new_db.inactivity_floor_loc))
                 .await
                 .unwrap();
-            new_db.sync(false).await.unwrap();
+            new_db.sync().await.unwrap();
             assert_eq!(new_db.op_count(), 2001);
             assert_eq!(new_db.root(&mut hasher), root);
 
@@ -1302,7 +1281,6 @@ pub(super) mod test {
 
             // Initialize the db's mmr/log.
             let cfg = any_db_config("partition");
-            let pruning_delay = cfg.pruning_delay;
             let (mmr, log) = AnyTest::init_mmr_and_log(context.clone(), cfg, &mut hasher)
                 .await
                 .unwrap();
@@ -1328,7 +1306,6 @@ pub(super) mod test {
                 inactivity_floor_loc,
                 uncommitted_ops: 0,
                 hasher: Standard::<Sha256>::new(),
-                pruning_delay,
             };
             assert_eq!(db.root(&mut hasher), root);
 
@@ -1438,7 +1415,7 @@ pub(super) mod test {
             let mut single_db = create_test_db(context.clone()).await;
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             // Don't commit - this changes the root due to commit operations
-            single_db.sync(false).await.unwrap();
+            single_db.sync().await.unwrap();
             let single_root = single_db.root(&mut hasher);
 
             assert!(verify_proof(
@@ -1491,7 +1468,7 @@ pub(super) mod test {
                 let mut ref_db = create_test_db(context.clone()).await;
                 apply_ops(&mut ref_db, ops[0..end_loc as usize].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
-                ref_db.sync(false).await.unwrap();
+                ref_db.sync().await.unwrap();
 
                 let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
                 assert_eq!(ref_proof.size, historical_proof.size);
@@ -1589,182 +1566,6 @@ pub(super) mod test {
             }
 
             db.destroy().await.unwrap();
-        });
-    }
-
-    // Test that the`pruning_delay` works as expected.
-    #[test_traced("WARN")]
-    fn test_any_db_pruning_delay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create database with enough operations to trigger pruning
-            let mut hasher = Standard::<Sha256>::new();
-            let db_config = any_db_config("pruning_boundary_test");
-
-            let mut db = AnyTest::init(context.clone(), db_config.clone())
-                .await
-                .unwrap();
-
-            const NUM_OPERATIONS: u64 = 500;
-            for i in 0..NUM_OPERATIONS {
-                let key = Sha256::hash(&i.to_be_bytes());
-                let value = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(key, value).await.unwrap();
-
-                // Commit periodically to advance the inactivity floor
-                if i % 100 == 99 {
-                    db.commit().await.unwrap();
-                }
-            }
-
-            // Final commit to establish the inactivity floor
-            db.commit().await.unwrap();
-
-            // Get the root digest
-            let original_root = db.root(&mut hasher);
-
-            // Verify the pruning boundary after sync/ w/ prune is correct
-            db.sync(true).await.unwrap();
-            let oldest_retained = db.oldest_retained_loc().unwrap();
-            let inactivity_floor = db.inactivity_floor_loc;
-            assert_eq!(
-                oldest_retained,
-                inactivity_floor.saturating_sub(db_config.pruning_delay)
-            );
-
-            // Get proof of items below inactivity floor but after pruning boundary
-            let proof_start = oldest_retained;
-            let proof_end = std::cmp::min(inactivity_floor, oldest_retained + 10);
-            let max_ops = proof_end - proof_start;
-
-            let (original_proof, original_ops) = db.proof(proof_start, max_ops).await.unwrap();
-
-            // Verify the proof works
-            assert!(verify_proof(
-                &mut hasher,
-                &original_proof,
-                proof_start,
-                &original_ops,
-                &original_root
-            ));
-
-            // Close and reopen the database
-            db.close().await.unwrap();
-            let db = AnyTest::init(context.clone(), db_config).await.unwrap();
-
-            // Confirm root is identical after restart
-            let reopened_root = db.root(&mut hasher);
-            assert_eq!(original_root, reopened_root,);
-
-            // Get proof of items below inactivity floor again
-            let (reopened_proof, reopened_ops) = db.proof(proof_start, max_ops).await.unwrap();
-
-            // Verify the proof still works and is identical
-            assert_eq!(original_proof.size, reopened_proof.size);
-            assert_eq!(original_proof.digests, reopened_proof.digests);
-            assert_eq!(original_ops, reopened_ops);
-
-            assert!(verify_proof(
-                &mut hasher,
-                &reopened_proof,
-                proof_start,
-                &reopened_ops,
-                &reopened_root
-            ));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    // Test that databases with different `pruning_delay` values generate the same root.
-    #[test_traced("WARN")]
-    fn test_any_db_different_pruning_delays_same_root() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-
-            // Create two databases with different pruning delays
-            let mut db_config_no_delay = any_db_config("no_delay_test");
-            db_config_no_delay.pruning_delay = 0;
-
-            let mut db_config_max_delay = any_db_config("max_delay_test");
-            db_config_max_delay.pruning_delay = u64::MAX;
-
-            let mut db_no_delay = AnyTest::init(context.clone(), db_config_no_delay.clone())
-                .await
-                .unwrap();
-            let mut db_max_delay = AnyTest::init(context.clone(), db_config_max_delay.clone())
-                .await
-                .unwrap();
-
-            // Apply identical operations to both databases
-            const NUM_OPERATIONS: u64 = 200;
-            for i in 0..NUM_OPERATIONS {
-                let key = Sha256::hash(&i.to_be_bytes());
-                let value = Sha256::hash(&(i * 1000).to_be_bytes());
-
-                db_no_delay.update(key, value).await.unwrap();
-                db_max_delay.update(key, value).await.unwrap();
-
-                // Commit periodically
-                if i % 50 == 49 {
-                    db_no_delay.commit().await.unwrap();
-                    db_max_delay.commit().await.unwrap();
-                }
-            }
-
-            // Final commit
-            db_no_delay.commit().await.unwrap();
-            db_max_delay.commit().await.unwrap();
-            db_no_delay.sync(true).await.unwrap();
-            db_no_delay.sync(true).await.unwrap();
-            let inactivity_floor = db_no_delay.inactivity_floor_loc;
-
-            // Get roots from both databases
-            let root_no_delay = db_no_delay.root(&mut hasher);
-            let root_max_delay = db_max_delay.root(&mut hasher);
-
-            // Verify they generate the same roots
-            assert_eq!(root_no_delay, root_max_delay,);
-
-            // Verify different pruning behaviors
-            let oldest_no_delay = db_no_delay.oldest_retained_loc().unwrap();
-            let oldest_max_delay = db_max_delay.oldest_retained_loc().unwrap();
-
-            // With pruning_delay=0, more operations should be pruned
-            // With pruning_delay=u64::MAX, no operations should be pruned (oldest retained should be 0)
-            assert_eq!(oldest_no_delay, inactivity_floor);
-            assert_eq!(oldest_max_delay, 0);
-
-            // Close both databases
-            db_no_delay.close().await.unwrap();
-            db_max_delay.close().await.unwrap();
-
-            // Restart both databases
-            let db_no_delay = AnyTest::init(context.clone(), db_config_no_delay)
-                .await
-                .unwrap();
-            let db_max_delay = AnyTest::init(context.clone(), db_config_max_delay)
-                .await
-                .unwrap();
-
-            // Get roots after restart
-            let root_no_delay_restart = db_no_delay.root(&mut hasher);
-            let root_max_delay_restart = db_max_delay.root(&mut hasher);
-
-            // Ensure roots still match after restart
-            assert_eq!(root_no_delay, root_no_delay_restart);
-            assert_eq!(root_max_delay, root_max_delay_restart);
-
-            // Verify pruning boundaries are still different
-            let oldest_no_delay_restart = db_no_delay.oldest_retained_loc().unwrap();
-            let oldest_max_delay_restart = db_max_delay.oldest_retained_loc().unwrap();
-
-            assert_eq!(oldest_no_delay_restart, inactivity_floor);
-            assert_eq!(oldest_max_delay_restart, 0);
-
-            db_no_delay.destroy().await.unwrap();
-            db_max_delay.destroy().await.unwrap();
         });
     }
 }
