@@ -1,5 +1,5 @@
 //! This client binary creates or opens an [commonware_storage::adb::any] database and
-//! synchronizes it to a remote server's state. It uses the [Resolver] to fetch operations and
+//! synchronizes it to a remote server's state. It uses the [Resolver] to fetch data and
 //! sync target updates from the server, and continuously syncs to demonstrate that sync works
 //! with both empty and already-initialized databases.
 
@@ -38,16 +38,16 @@ struct Config {
     database_type: DatabaseType,
     /// Server address to connect to.
     server: SocketAddr,
-    /// Batch size for fetching operations.
+    /// Batch size for fetching data.
     batch_size: NonZeroU64,
     /// Storage directory.
     storage_dir: String,
     /// Port on which metrics are exposed.
     metrics_port: u16,
     /// Interval for requesting target updates.
-    target_update_interval: Duration,
-    /// Interval between sync operations.
-    sync_interval: Duration,
+    target_update_frequency: Duration,
+    /// Interval between sync data.
+    sync_frequency: Duration,
     /// Maximum number of outstanding requests.
     max_outstanding_requests: usize,
 }
@@ -112,7 +112,7 @@ where
     let mut iteration = 0u32;
     loop {
         let resolver =
-            Resolver::<any::Operation, Digest>::connect(context.clone(), config.server).await?;
+            Resolver::<any::Data, Digest>::connect(context.clone(), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
@@ -122,41 +122,40 @@ where
         let target_update_handle = {
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
-            let target_update_interval = config.target_update_interval;
+            let target_update_frequency = config.target_update_frequency;
             context.with_label("target-update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
                     update_sender,
-                    target_update_interval,
+                    target_update_frequency,
                     initial_target_clone,
                 )
             })
         };
 
-        let sync_config =
-            sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
-                context: context.clone(),
-                db_config,
-                fetch_batch_size: config.batch_size,
-                target: initial_target,
-                resolver,
-                apply_batch_size: 1024,
-                max_outstanding_requests: config.max_outstanding_requests,
-                update_rx: Some(update_receiver),
-            };
+        let sync_config = sync::engine::Config::<any::Database<_>, Resolver<any::Data, Digest>> {
+            context: context.clone(),
+            db_config,
+            fetch_batch_size: config.batch_size,
+            target: initial_target,
+            resolver,
+            apply_batch_size: 1024,
+            max_outstanding_requests: config.max_outstanding_requests,
+            update_rx: Some(update_receiver),
+        };
 
         let database: any::Database<_> = sync::sync(sync_config).await?;
         let got_root = database.root(&mut hasher::Standard::new());
         info!(
             sync_iteration = iteration,
             root = %got_root,
-            sync_interval = ?config.sync_interval,
+            sync_frequency = ?config.sync_frequency,
             "✅ Any sync completed successfully"
         );
         database.close().await?;
         target_update_handle.abort();
-        context.sleep(config.sync_interval).await;
+        context.sleep(config.sync_frequency).await;
         iteration += 1;
     }
 }
@@ -170,7 +169,7 @@ where
     let mut iteration = 0u32;
     loop {
         let resolver =
-            Resolver::<immutable::Operation, Key>::connect(context.clone(), config.server).await?;
+            Resolver::<immutable::Data, Key>::connect(context.clone(), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
@@ -180,20 +179,20 @@ where
         let target_update_handle = {
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
-            let target_update_interval = config.target_update_interval;
+            let target_update_frequency = config.target_update_frequency;
             context.with_label("target-update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
                     update_sender,
-                    target_update_interval,
+                    target_update_frequency,
                     initial_target_clone,
                 )
             })
         };
 
         let sync_config =
-            sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
+            sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Data, Key>> {
                 context: context.clone(),
                 db_config,
                 fetch_batch_size: config.batch_size,
@@ -209,12 +208,12 @@ where
         info!(
             sync_iteration = iteration,
             root = %got_root,
-            sync_interval = ?config.sync_interval,
+            sync_frequency = ?config.sync_frequency,
             "✅ Immutable sync completed successfully"
         );
         database.close().await?;
         target_update_handle.abort();
-        context.sleep(config.sync_interval).await;
+        context.sleep(config.sync_frequency).await;
         iteration += 1;
     }
 }
@@ -244,7 +243,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .short('b')
                 .long("batch-size")
                 .value_name("SIZE")
-                .help("Batch size for fetching operations")
+                .help("Batch size for fetching data")
                 .default_value("50"),
         )
         .arg(
@@ -264,19 +263,19 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .default_value("9091"),
         )
         .arg(
-            Arg::new("target-update-interval")
+            Arg::new("target-update-frequency")
                 .short('t')
-                .long("target-update-interval")
+                .long("target-update-frequency")
                 .value_name("DURATION")
-                .help("Interval for requesting target updates ('ms', 's', 'm', 'h')")
+                .help("Frequency at which sync target is updated ('ms', 's', 'm', 'h')")
                 .default_value("1s"),
         )
         .arg(
-            Arg::new("sync-interval")
-                .short('i')
-                .long("sync-interval")
+            Arg::new("sync-frequency")
+                .short('f')
+                .long("sync-frequency")
                 .value_name("DURATION")
-                .help("Interval between sync operations ('ms', 's', 'm', 'h')")
+                .help("Frequency at which database is re-synced ('ms', 's', 'm', 'h')")
                 .default_value("10s"),
         )
         .arg(
@@ -327,12 +326,15 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("Invalid metrics port: {e}"))?;
 
-    let target_update_interval =
-        parse_duration(matches.get_one::<String>("target-update-interval").unwrap())
-            .map_err(|e| format!("Invalid target update interval: {e}"))?;
+    let target_update_frequency = parse_duration(
+        matches
+            .get_one::<String>("target-update-frequency")
+            .unwrap(),
+    )
+    .map_err(|e| format!("Invalid target update frequency: {e}"))?;
 
-    let sync_interval = parse_duration(matches.get_one::<String>("sync-interval").unwrap())
-        .map_err(|e| format!("Invalid sync interval: {e}"))?;
+    let sync_frequency = parse_duration(matches.get_one::<String>("sync-frequency").unwrap())
+        .map_err(|e| format!("Invalid sync frequency: {e}"))?;
 
     let max_outstanding_requests = matches
         .get_one::<String>("max-outstanding-requests")
@@ -346,8 +348,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         batch_size,
         storage_dir,
         metrics_port,
-        target_update_interval,
-        sync_interval,
+        target_update_frequency,
+        sync_frequency,
         max_outstanding_requests,
     })
 }
@@ -363,8 +365,8 @@ fn main() {
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
         metrics_port = config.metrics_port,
-        target_update_interval = ?config.target_update_interval,
-        sync_interval = ?config.sync_interval,
+        target_update_frequency = ?config.target_update_frequency,
+        sync_frequency = ?config.sync_frequency,
         max_outstanding_requests = config.max_outstanding_requests,
         "client starting with configuration"
     );
