@@ -133,11 +133,11 @@ pub mod mocks;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Monitor;
+    use crate::{simplex::mocks::supervisor::Supervisor, Monitor};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, PublicKey as CPublicKey, Sha256, Signer as _,
+        Digest, PrivateKeyExt as _, PublicKey as CPublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -148,7 +148,7 @@ mod tests {
     use governor::Quota;
     use rand::Rng as _;
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::{BTreeMap, HashMap, HashSet},
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
@@ -2524,5 +2524,196 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test_traced]
+    fn test_basic_twins() {
+        // Create context - Testing Twins approach
+        // Nodes 0,1,2 are correct and nodes 3, 4 are byzantine nodes, twins, meaning that they have the same private key.
+        // So, we model n=4, f=1 scenario.
+        let n = 5;
+        let threshold = 3;
+        let max_exceptions = 10;
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants with Twins approach
+            // Nodes 0,1,2,3 have normal keys, node 4 is a twin of node 3
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            let mut scheme_validator_pairs = Vec::new();
+
+            // Create nodes 0,1,2,3 normally
+            for i in 0..4 {
+                let scheme = PrivateKey::from_seed(i as u64);
+                let pk = scheme.public_key();
+                scheme_validator_pairs.push((scheme.clone(), pk.clone()));
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+
+            // Create node 4 as a twin of node 3
+            // It uses the same private key as node 3 but needs a different public key for registration
+            let twin_scheme = PrivateKey::from_seed(3_u64); // Same seed as node 3
+
+            // For registration, we need a unique public key for the twin
+            // We'll use a different seed just for generating a unique validator ID
+            let twin_registration_key = PrivateKey::from_seed(3_u64 + 0xffffffffffffffed);
+            let twin_validator_id = twin_registration_key.public_key();
+
+            scheme_validator_pairs.push((twin_scheme.clone(), twin_validator_id.clone()));
+            schemes.push(twin_scheme);
+            validators.push(twin_validator_id);
+
+            assert_eq!(schemes[3], schemes[4], "twins private keys are the same");
+
+            // Sort validators for consistent ordering
+            validators.sort();
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (scheme, validator) in scheme_validator_pairs.into_iter() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", validator));
+
+                // Start engine - use the paired validator ID, not scheme.public_key()
+                // This allows the twin to have a different validator ID while using the same signing key
+                let supervisor_config = mocks::supervisor::Config {
+                    namespace: namespace.clone(),
+                    participants: view_validators.clone(),
+                };
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
+                supervisors.push(supervisor.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let cfg = config::Config {
+                    crypto: scheme,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    supervisor,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    max_participants: n as usize,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(voter, resolver));
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+            check_invariants(4, supervisors);
+        });
+    }
+
+    pub fn check_invariants(n: u32, replicas: Vec<Supervisor<PublicKey, Sha256Digest>>) {
+        let threshold = quorum(n) as usize;
+
+        let finalizations: Vec<HashMap<u64, _>> = replicas
+            .into_iter()
+            .map(|supervisor| {
+                let finalizations = supervisor.finalizations.lock().unwrap();
+                let finalization_data =
+                    finalizations.iter().map(|(&k, v)| (k, v.clone())).collect();
+
+                finalization_data
+            })
+            .collect();
+
+        // Invariant: agreement
+        // Finalized digests must be the same
+        {
+            let all_views: HashSet<u64> = finalizations
+                .iter()
+                .flat_map(|finalizations| finalizations.keys())
+                .copied()
+                .collect();
+
+            // For each view, check that all existing finalizations are the same
+            for view in all_views {
+                let finalizations_for_view: Vec<(usize, Sha256Digest)> = finalizations
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(replica_idx, finalizations)| {
+                        finalizations
+                            .get(&view)
+                            .map(|data| (replica_idx, data.proposal.payload))
+                    })
+                    .collect();
+
+                // If there are any finalizations for this view, they must all be the same
+                if let Some((first_replica_idx, first_digest)) = finalizations_for_view.first() {
+                    for (replica_idx, digest) in &finalizations_for_view[1..] {
+                        assert_eq!(
+                            digest, first_digest,
+                            "finalized digest mismatch in view {view}: replica {replica_idx} has {digest:?} but replica {first_replica_idx} has {first_digest:?}",
+                        );
+                    }
+                }
+            }
+        }
     }
 }
