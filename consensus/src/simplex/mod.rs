@@ -137,7 +137,7 @@ mod tests {
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        Digest, PrivateKeyExt as _, PublicKey as CPublicKey, Sha256, Signer as _,
+        PrivateKeyExt as _, PublicKey as CPublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -2663,11 +2663,11 @@ mod tests {
                 }));
             }
             join_all(finalizers).await;
-            check_invariants(4, supervisors);
+            check_invariants(supervisors);
         });
     }
 
-    pub fn check_invariants(n: u32, replicas: Vec<Supervisor<PublicKey, Sha256Digest>>) {
+    pub fn check_invariants(replicas: Vec<Supervisor<PublicKey, Sha256Digest>>) {
         let finalizations: Vec<HashMap<u64, _>> = replicas
             .into_iter()
             .map(|supervisor| {
