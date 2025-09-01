@@ -638,7 +638,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Proof::<H::Digest>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
     }
 
-    /// Analagous to range_proof but for a previous database state.
+    /// Analogous to range_proof but for a previous database state.
     /// Specifically, the state when the MMR had `size` elements.
     pub async fn historical_range_proof(
         &self,
