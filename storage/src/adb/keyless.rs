@@ -13,7 +13,7 @@ use crate::{
     },
     mmr::{
         hasher::Standard,
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        iterator::leaf_num_to_pos,
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
     },
@@ -141,30 +141,28 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        // Align the size of the locations journal with the MMR.
-        let mut locations_size = locations.size().await?;
-        let mmr_leaves = leaf_pos_to_num(mmr.size()).expect("invalid mmr size");
-        if locations_size > mmr_leaves {
-            warn!(
-                mmr_leaves,
-                locations_size, "rewinding misaligned locations journal"
-            );
-            locations.rewind(mmr_leaves).await?;
-            locations.sync().await?;
-            locations_size = mmr_leaves;
-        } else if mmr_leaves > locations_size {
-            warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
-            mmr.pop((mmr_leaves - locations_size) as usize).await?;
-        }
-
-        let (start_section, start_offset) = if locations_size > 0 {
-            (
-                (locations_size - 1) / cfg.log_items_per_section.get(),
-                locations.read(locations_size - 1).await?,
-            )
-        } else {
-            (0, 0)
+        // Align the sizes of the locations journal and MMR.
+        let mut size = {
+            let locations_size = locations.size().await?;
+            let mmr_leaves = mmr.leaves();
+            if locations_size > mmr_leaves {
+                warn!(
+                    mmr_leaves,
+                    locations_size, "rewinding misaligned locations journal"
+                );
+                locations.rewind(mmr_leaves).await?;
+                locations.sync().await?;
+                mmr_leaves
+            } else if mmr_leaves > locations_size {
+                warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
+                mmr.pop((mmr_leaves - locations_size) as usize).await?;
+                locations_size
+            } else {
+                locations_size // happy path
+            }
         };
+        assert_eq!(size, locations.size().await?);
+        assert_eq!(size, mmr.leaves());
 
         let mut log = VJournal::<E, Operation<V>>::init(
             context.with_label("log"),
@@ -179,57 +177,75 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         .await?;
 
         // Find the very last operation referenced by locations in the log, and replay all
-        // operations following it (if any) to align them.
-        let found_last_op = {
-            let stream = log
-                .replay(start_section, start_offset, REPLAY_BUFFER_SIZE)
-                .await?;
-            pin_mut!(stream);
-            match stream.next().await {
-                Some(Ok((_, offset, _, op))) => {
-                    if locations_size == 0 {
-                        warn!("adding initial operation to MMR/location map");
-                        mmr.add_batched(&mut hasher, &op.encode()).await?;
-                        locations.append(offset).await?;
-                        locations_size += 1;
-                    }
-                    while let Some(Ok((section, offset, _, op))) = stream.next().await {
-                        warn!(
-                            locations_size,
-                            section, offset, "adding missing operation to MMR/location map"
-                        );
-                        mmr.add_batched(&mut hasher, &op.encode()).await?;
-                        locations.append(offset).await?;
-                        locations_size += 1;
-                    }
-                    mmr.sync(&mut hasher).await?;
-                    locations.sync().await?;
-                    true
-                }
-                Some(Err(e)) => return Err(Error::Journal(e)),
-                None => false,
-            }
-        };
+        // operations following it (if any) to add them to mmr+locations in order to align them with
+        // the log's contents.
+        let mut last_op = None;
 
-        if !found_last_op {
-            // If the log is empty, then the locations map/mmr must be empty as well since these
-            // structures should *never* be in front of the log.
-            assert_eq!(locations_size, 0);
-            assert_eq!(mmr_leaves, 0);
+        {
+            // Location, section and offset of the "current operation".
+            let (mut location, section, offset) = if size > 0 {
+                (
+                    size - 1,
+                    (size - 1) / cfg.log_items_per_section.get(),
+                    locations.read(size - 1).await?,
+                )
+            } else {
+                (0, 0, 0)
+            };
+
+            let stream = log.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
+            pin_mut!(stream);
+            while let Some(Ok((section, offset, _, op))) = stream.next().await {
+                let encoded_op = op.encode();
+                last_op = Some((offset, op));
+                if location < size {
+                    // If locations is non-empty then it should already contain the very first op in the stream, so do
+                    // not add it.
+                    location += 1;
+                    continue;
+                }
+                warn!(
+                    location,
+                    section, offset, "adding missing operation to MMR/location map"
+                );
+                mmr.add_batched(&mut hasher, &encoded_op).await?;
+                locations.append(offset).await?;
+                location += 1;
+                size += 1;
+            }
+            mmr.sync(&mut hasher).await?;
+            locations.sync().await?;
         }
 
+        let Some((mut offset, mut op)) = last_op else {
+            // If the log is empty, then the locations map/mmr must be empty as well since these
+            // structures should *never* be in front of the log.
+            assert_eq!(locations.size().await?, 0);
+            assert_eq!(mmr.leaves(), 0);
+            return Ok(Self {
+                mmr,
+                log,
+                size: 0,
+                log_items_per_section: cfg.log_items_per_section.get(),
+                locations,
+                hasher,
+                last_commit: None,
+            });
+        };
+
+        // Ensure we still have alignment.
+        assert!(size > 0);
+        assert_eq!(locations.size().await?, size);
+        assert_eq!(mmr.leaves(), size);
+
         // Rewind to the last commit point if necessary.
-        let mut op_index = locations_size;
+        let mut op_index = size - 1;
         // The most recent commit point (if any).
         let mut last_commit_loc = None;
         // The location of the first append operation to follow the last known commit, and the
         // offset it wraps.
         let mut rewind_point = None;
-        while op_index > 0 {
-            op_index -= 1;
-            let offset = locations.read(op_index).await?;
-            let section = op_index / cfg.log_items_per_section.get();
-            let op = log.get(section, offset).await?.expect("no operation found");
+        loop {
             match op {
                 Operation::Commit(_) => {
                     last_commit_loc = Some(op_index);
@@ -239,20 +255,26 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                     rewind_point = Some((op_index, offset));
                 }
             }
+            if op_index == 0 {
+                break;
+            }
+            op_index -= 1;
+            offset = locations.read(op_index).await?;
+            let section = op_index / cfg.log_items_per_section.get();
+            op = log.get(section, offset).await?.expect("no operation found");
         }
         if let Some(last_commit_loc) = last_commit_loc {
-            if last_commit_loc != locations_size - 1 {
+            if last_commit_loc != size - 1 {
                 // There's at least one append operation to rewind.
                 warn!(
-                    old_size = locations_size,
+                    old_size = size,
                     new_size = last_commit_loc + 1,
                     "rewinding to last commit point"
                 );
                 locations.rewind(last_commit_loc + 1).await?;
                 locations.sync().await?;
-                mmr.pop((locations_size - last_commit_loc - 1) as usize)
-                    .await?;
-                locations_size = last_commit_loc + 1;
+                mmr.pop((size - last_commit_loc - 1) as usize).await?;
+                size = last_commit_loc + 1;
                 // Rewind the operations log last to ensure the locations journal always references
                 // valid data in the event of failures.
                 let rewind_point = rewind_point.expect("no rewind point found");
@@ -260,23 +282,23 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 log.rewind_to_offset(section, rewind_point.1).await?;
                 log.sync(section).await?;
             }
-        } else if locations_size > 0 {
-            warn!(
-                old_size = locations_size,
-                "no commit point found, rewinding to start"
-            );
+        } else if size > 0 {
+            warn!(old_size = size, "no commit point found, rewinding to start");
             locations.rewind(0).await?;
             locations.sync().await?;
-            mmr.pop(locations_size as usize).await?;
-            locations_size = 0;
+            mmr.pop(size as usize).await?;
+            size = 0;
             log.rewind(0, 0).await?;
             log.sync(0).await?;
         }
 
+        // Final alignment check.
+        assert_eq!(locations.size().await?, mmr.leaves());
+
         Ok(Self {
             mmr,
             log,
-            size: locations_size,
+            size,
             locations,
             log_items_per_section: cfg.log_items_per_section.get(),
             hasher,

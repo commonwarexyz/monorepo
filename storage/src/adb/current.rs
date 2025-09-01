@@ -424,14 +424,14 @@ impl<
     /// looking at the length of the returned operations vector. Also returns the bitmap chunks
     /// required to verify the proof.
     ///
-    /// # Warning
+    /// # Panics
     ///
-    /// Panics if there are uncommitted operations.
+    /// Panics if there are uncommitted operations or if `start_loc` is invalid.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>, Vec<[u8; N]>), Error> {
         assert!(
             !self.status.is_dirty(),
@@ -439,12 +439,18 @@ impl<
         );
         let mmr = &self.any.mmr;
         let start_pos = leaf_num_to_pos(start_loc);
-        let end_pos_last = mmr.last_leaf_pos().unwrap();
-        let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
+        let leaves = mmr.leaves();
+        assert!(start_loc < leaves, "start_loc is invalid");
+
+        let end_pos_last = mmr.last_leaf_pos().expect("MMR is empty");
+        let end_pos_max = leaf_num_to_pos(start_loc + max_ops.get() - 1);
         let (end_pos, end_loc) = if end_pos_last < end_pos_max {
-            (end_pos_last, leaf_pos_to_num(end_pos_last).unwrap())
+            (
+                end_pos_last,
+                leaf_pos_to_num(end_pos_last).expect("invalid end pos"),
+            )
         } else {
-            (end_pos_max, start_loc + max_ops - 1)
+            (end_pos_max, start_loc + max_ops.get() - 1)
         };
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, mmr, height);
@@ -1013,8 +1019,10 @@ pub mod test {
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
 
             for i in start_loc..end_loc {
-                let (proof, ops, chunks) =
-                    db.range_proof(hasher.inner(), i, max_ops).await.unwrap();
+                let (proof, ops, chunks) = db
+                    .range_proof(hasher.inner(), i, NZU64!(max_ops))
+                    .await
+                    .unwrap();
                 assert!(
                     CurrentTest::verify_range_proof(&mut hasher, &proof, i, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
