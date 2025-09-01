@@ -2665,7 +2665,256 @@ mod tests {
                     }
                 }));
             }
+
             join_all(finalizers).await;
+
+            for supervisor in supervisors.iter() {
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(!faults.is_empty());
+                }
+            }
+
+            check_invariants(supervisors);
+        });
+    }
+
+    #[test_traced]
+    fn test_twins_with_dynamic_partitioning() {
+        // Create context
+        let n = 5;
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants with Twins approach
+            // Nodes 0,1,2,3 have normal keys, node 4 is a twin of node 3
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            let mut scheme_validator_pairs = Vec::new();
+
+            // Map validator indices to names for partitioning
+            let validator_names = vec!["Alice", "Bob", "Carol", "David", "Alice_twin"];
+
+            // Create nodes 0,1,2,3 normally
+            for i in 0..4 {
+                let scheme = PrivateKey::from_seed(i as u64);
+                let pk = scheme.public_key();
+                scheme_validator_pairs.push((scheme.clone(), pk.clone()));
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+
+            // Create node 4 as a twin of node 0 (Alice's twin)
+            // It uses the same private key as node 0 but needs a different public key for registration
+            let twin_scheme = PrivateKey::from_seed(0_u64); // Same seed as node 0 (Alice)
+
+            // For registration, we need a unique public key for the twin
+            let twin_registration_key = PrivateKey::from_seed(0_u64 + 0xffffffffffffffed);
+            let twin_validator_id = twin_registration_key.public_key();
+
+            scheme_validator_pairs.push((twin_scheme.clone(), twin_validator_id.clone()));
+            schemes.push(twin_scheme);
+            validators.push(twin_validator_id);
+
+            assert_eq!(schemes[0], schemes[4], "twins private keys are the same");
+
+            // Sort validators for consistent ordering
+            validators.sort();
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Initial link - all connected
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx, (scheme, validator)) in scheme_validator_pairs.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", validator_names[idx]));
+
+                // Start engine
+                let supervisor_config = mocks::supervisor::Config {
+                    namespace: namespace.clone(),
+                    participants: view_validators.clone(),
+                };
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
+                supervisors.push(supervisor.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let cfg = config::Config {
+                    crypto: scheme,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    supervisor,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    max_participants: n as usize,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(voter, resolver));
+            }
+
+            // Run initial phase - all connected for first 20 containers
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < 20 {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Phase 1: Isolate node 0.
+            // Partition: [1,2,3,4] [0]
+            fn partition_isolate_node_0(_n: usize, a: usize, b: usize) -> bool {
+                let isolated_idx = 0;
+                (a != isolated_idx && b != isolated_idx) || (a == isolated_idx && b == isolated_idx)
+            }
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::Update(link.clone()),
+                Some(partition_isolate_node_0),
+            )
+            .await;
+
+            // Continue for 20 more containers
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < 40 {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Phase 2: Isolate Twin node (node 4)
+            // Partition: [0,1,2,3] [3_twin]
+            fn partition_isolate_node_4(_n: usize, a: usize, b: usize) -> bool {
+                let isolated_idx = 4;
+                (a != isolated_idx && b != isolated_idx) || (a == isolated_idx && b == isolated_idx)
+            }
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::Update(link.clone()),
+                Some(partition_isolate_node_4),
+            )
+            .await;
+
+            // Continue for 20 more containers
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < 60 {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Phase 3: Isolate node 3
+            // Partition: Multiple isolated nodes
+            fn partition_isolate_node_3(_n: usize, a: usize, b: usize) -> bool {
+                let isolated_idx = 3;
+                (a != isolated_idx && b != isolated_idx) || (a == isolated_idx && b == isolated_idx)
+            }
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::Update(link.clone()),
+                Some(partition_isolate_node_3),
+            )
+            .await;
+
+            // Continue for 20 more containers
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < 80 {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Phase 4: Restore full connectivity
+            link_validators(&mut oracle, &validators, Action::Update(link.clone()), None).await;
+
+            // Finish remaining containers
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            for supervisor in supervisors.iter() {
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(!faults.is_empty());
+                }
+            }
             check_invariants(supervisors);
         });
     }
