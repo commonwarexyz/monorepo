@@ -22,9 +22,13 @@ use crate::{
 use commonware_codec::{Codec, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use futures::{future::TryFutureExt, try_join};
+use commonware_utils::NZUsize;
+use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
+
+/// The size of the read buffer to use for replaying the operations log during recovery.
+const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
@@ -153,6 +157,15 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             mmr.pop((mmr_leaves - locations_size) as usize).await?;
         }
 
+        let (start_section, start_offset) = if locations_size > 0 {
+            (
+                (locations_size - 1) / cfg.log_items_per_section.get(),
+                locations.read(locations_size - 1).await?,
+            )
+        } else {
+            (0, 0)
+        };
+
         let mut log = VJournal::<E, Operation<V>>::init(
             context.with_label("log"),
             VConfig {
@@ -164,6 +177,46 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             },
         )
         .await?;
+
+        // Find the very last operation referenced by locations in the log, and replay all
+        // operations following it (if any) to align them.
+        let found_last_op = {
+            let stream = log
+                .replay(start_section, start_offset, REPLAY_BUFFER_SIZE)
+                .await?;
+            pin_mut!(stream);
+            match stream.next().await {
+                Some(Ok((_, offset, _, op))) => {
+                    if locations_size == 0 {
+                        warn!("adding initial operation to MMR/location map");
+                        mmr.add_batched(&mut hasher, &op.encode()).await?;
+                        locations.append(offset).await?;
+                        locations_size += 1;
+                    }
+                    while let Some(Ok((section, offset, _, op))) = stream.next().await {
+                        warn!(
+                            locations_size,
+                            section, offset, "adding missing operation to MMR/location map"
+                        );
+                        mmr.add_batched(&mut hasher, &op.encode()).await?;
+                        locations.append(offset).await?;
+                        locations_size += 1;
+                    }
+                    mmr.sync(&mut hasher).await?;
+                    locations.sync().await?;
+                    true
+                }
+                Some(Err(e)) => return Err(Error::Journal(e)),
+                None => false,
+            }
+        };
+
+        if !found_last_op {
+            // If the log is empty, then the locations map/mmr must be empty as well since these
+            // structures should *never* be in front of the log.
+            assert_eq!(locations_size, 0);
+            assert_eq!(mmr_leaves, 0);
+        }
 
         // Rewind to the last commit point if necessary.
         let mut op_index = locations_size;
@@ -216,7 +269,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations.sync().await?;
             mmr.pop(locations_size as usize).await?;
             locations_size = 0;
-            log.rewind_section(0, 0).await?;
+            log.rewind(0, 0).await?;
             log.sync(0).await?;
         }
 
@@ -259,10 +312,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Return the oldest location that remains retrievable.
     pub async fn oldest_retained_loc(&self) -> Result<Option<u64>, Error> {
-        self.locations
-            .oldest_retained_pos()
-            .await
-            .map_err(Error::Journal)
+        if let Some(oldest_section) = self.log.oldest_section() {
+            Ok(Some(oldest_section * self.log_items_per_section))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Prunes the db of up to all operations that have location less than `loc`. The actual number
@@ -274,17 +328,17 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
         assert!(loc <= self.size);
 
-        // Prune the locations journal first. This ensures that if pruning fails, we never have
-        // location entries without corresponding data in the other structures.
-        self.locations.prune(loc).await?;
+        // Prune the log first since it's always the source of truth.
+        let section = loc / self.log_items_per_section;
+        self.log.prune(section).await?;
 
-        // Prune the MMR and operations log to the corresponding positions.
-        let prune_to_section = loc / self.log_items_per_section;
+        // Prune locations and the MMR to the corresponding positions.
+        let prune_loc = section * self.log_items_per_section;
         try_join!(
             self.mmr
-                .prune_to_pos(&mut self.hasher, leaf_num_to_pos(loc))
+                .prune_to_pos(&mut self.hasher, leaf_num_to_pos(prune_loc))
                 .map_err(Error::Mmr),
-            self.log.prune(prune_to_section).map_err(Error::Journal),
+            self.locations.prune(prune_loc).map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -315,28 +369,38 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<u64, Error> {
         let loc = self.size;
         let section = self.current_section();
-        let operation = Operation::Commit(metadata);
-        self.last_commit = Some(loc);
 
         // We must update & sync the operations log before writing the commit operation to locations
         // to ensure all committed locations will reference valid data in the event of a failure.
+        let operation = Operation::Commit(metadata);
         let encoded_operation = operation.encode();
         let (offset, _) = self.log.append(section, operation).await?;
         self.log.sync(section).await?;
+        self.last_commit = Some(loc);
 
+        // Append to locations & MMR but don't sync them, since any failures would be corrected by
+        // recovery.
         self.locations.append(offset).await?;
         self.size += 1;
 
         self.mmr
             .add_batched(&mut self.hasher, &encoded_operation)
             .await?;
+        self.mmr.process_updates(&mut self.hasher); // ensures `root()` will be valid.
 
+        Ok(loc)
+    }
+
+    /// Sync the db to disk ensuring the current state is fully persisted.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        let section = self.current_section();
         try_join!(
             self.locations.sync().map_err(Error::Journal),
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.log.sync(section).map_err(Error::Journal),
         )?;
 
-        Ok(loc)
+        Ok(())
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
@@ -441,37 +505,24 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     #[cfg(test)]
-    /// Simulate failures during commit.
+    /// Simulate failure by consuming the db but without syncing / closing the various structures.
     pub(super) async fn simulate_failure(
         mut self,
         sync_log: bool,
         sync_mmr: bool,
         sync_locations: bool,
     ) -> Result<(), Error> {
-        let operation = Operation::Commit(None);
-
         // We must update & sync the operations log before writing the commit operation to locations
         // to ensure all committed locations will reference valid data in the event of a failure.
-        let encoded_operation = operation.encode();
-        let offset = if sync_log {
+        if sync_log {
             let section = self.current_section();
-            let (offset, _) = self.log.append(section, operation).await?;
             self.log.sync(section).await?;
-            offset
-        } else {
-            assert!(!sync_mmr, "can't sync mmr without syncing log");
-            assert!(!sync_locations, "can't sync locations without syncing log");
-            0
-        };
+        }
 
         if sync_mmr {
-            self.mmr
-                .add_batched(&mut self.hasher, &encoded_operation)
-                .await?;
             self.mmr.sync(&mut self.hasher).await?;
         }
         if sync_locations {
-            self.locations.append(offset).await?;
             self.locations.sync().await?;
         }
 
@@ -507,7 +558,7 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             locations_journal_partition: format!("locations_journal_{suffix}"),
-            locations_items_per_blob: NZU64!(7),
+            locations_items_per_blob: NZU64!(13),
             locations_write_buffer: NZUsize!(1024),
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
@@ -624,7 +675,7 @@ mod test {
                 db.append(v.clone()).await.unwrap();
             }
 
-            // Simulate a failed commit and test that we rollback to the previous empty-db root.
+            // Simulate a failure before committing and test that we rollback to the previous root.
             db.simulate_failure(false, false, false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
@@ -643,7 +694,7 @@ mod test {
                 db.append(v.clone()).await.unwrap();
             }
 
-            // Simulate a failed commit (mode 1) and test that we rollback to the previous root.
+            // Simulate a failure (mode 1) and test that we rollback to the previous root.
             db.simulate_failure(false, false, false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));

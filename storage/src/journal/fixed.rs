@@ -535,22 +535,24 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
     /// such items in order to preserve blob boundaries, but the amount of such items will always be
-    /// less than the configured number of items per blob.
+    /// less than the configured number of items per blob. Returns true if any items were pruned.
     ///
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
-    pub async fn prune(&mut self, min_item_pos: u64) -> Result<(), Error> {
+    pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
         let oldest_blob_index = self.oldest_blob_index();
         let new_oldest_blob =
             std::cmp::min(min_item_pos / self.cfg.items_per_blob, self.tail_index);
 
+        let mut pruned = false;
         for index in oldest_blob_index..new_oldest_blob {
+            pruned = true;
             let blob = self.blobs.remove(&index).unwrap();
             self.remove_blob(index, blob).await?;
             self.pruned.inc();
         }
 
-        Ok(())
+        Ok(pruned)
     }
 
     /// Safely removes any previously tracked blob from underlying storage.
