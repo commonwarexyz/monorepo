@@ -2706,9 +2706,6 @@ mod tests {
             let mut validators = Vec::new();
             let mut scheme_validator_pairs = Vec::new();
 
-            // Map validator indices to names for partitioning
-            let validator_names = vec!["Alice", "Bob", "Carol", "David", "Alice_twin"];
-
             // Create nodes 0,1,2,3 normally
             for i in 0..4 {
                 let scheme = PrivateKey::from_seed(i as u64);
@@ -2718,19 +2715,19 @@ mod tests {
                 validators.push(pk);
             }
 
-            // Create node 4 as a twin of node 0 (Alice's twin)
-            // It uses the same private key as node 0 but needs a different public key for registration
-            let twin_scheme = PrivateKey::from_seed(0_u64); // Same seed as node 0 (Alice)
+            // Create node 4 as a twin of node 3
+            // It uses the same private key as node 3 but needs a different public key for registration
+            let twin_scheme = PrivateKey::from_seed(3_u64); // Same seed as node 3
 
             // For registration, we need a unique public key for the twin
-            let twin_registration_key = PrivateKey::from_seed(0_u64 + 0xffffffffffffffed);
+            let twin_registration_key = PrivateKey::from_seed(3_u64 + 0xffffffffffffffed);
             let twin_validator_id = twin_registration_key.public_key();
 
             scheme_validator_pairs.push((twin_scheme.clone(), twin_validator_id.clone()));
             schemes.push(twin_scheme);
             validators.push(twin_validator_id);
 
-            assert_eq!(schemes[0], schemes[4], "twins private keys are the same");
+            assert_eq!(schemes[3], schemes[4], "twins private keys are the same");
 
             // Sort validators for consistent ordering
             validators.sort();
@@ -2749,9 +2746,9 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let mut engine_handlers = Vec::new();
-            for (idx, (scheme, validator)) in scheme_validator_pairs.into_iter().enumerate() {
+            for (scheme, validator) in scheme_validator_pairs.into_iter() {
                 // Create scheme context
-                let context = context.with_label(&format!("validator-{}", validator_names[idx]));
+                let context = context.with_label(&format!("validator-{}", validator));
 
                 // Start engine
                 let supervisor_config = mocks::supervisor::Config {
