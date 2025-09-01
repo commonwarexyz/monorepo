@@ -572,7 +572,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn proof(
         &self,
         start_index: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_index, max_ops)
             .await
@@ -583,14 +583,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
         if start_loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(start_loc));
         }
 
         let start_pos = leaf_num_to_pos(start_loc);
-        let end_loc = std::cmp::min(size - 1, start_loc + max_ops - 1);
+        let end_loc = std::cmp::min(size - 1, start_loc + max_ops.get() - 1);
         let end_pos = leaf_num_to_pos(end_loc);
         let mmr_size = leaf_num_to_pos(size);
 
@@ -914,7 +914,7 @@ pub(super) mod test {
 
             // Make sure all ranges of 5 operations are provable, including truncated ranges at the
             // end.
-            let max_ops = 5;
+            let max_ops = NZU64!(5);
             for i in 0..db.op_count() {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
                 assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
@@ -1126,7 +1126,7 @@ pub(super) mod test {
 
             // Confirm behavior of trying to create a proof of pruned items is as expected.
             let pruned_pos = ELEMENTS / 2;
-            let proof_result = db.proof(pruned_pos, pruned_pos + 100).await;
+            let proof_result = db.proof(pruned_pos, NZU64!(pruned_pos + 100)).await;
             assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
 
             db.destroy().await.unwrap();

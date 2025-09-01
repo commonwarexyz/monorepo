@@ -251,6 +251,11 @@ impl<
         self.any.oldest_retained_loc()
     }
 
+    /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
+    pub fn inactivity_floor_loc(&self) -> u64 {
+        self.any.inactivity_floor_loc()
+    }
+
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.any.get(key).await
@@ -373,10 +378,16 @@ impl<
         Ok(())
     }
 
+    /// Sync data to disk, ensuring clean recovery.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.any.sync().await
     }
 
+    /// Prune all operations prior to `target_prune_loc` from the db.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
         self.any.prune(target_prune_loc).await
     }
@@ -437,26 +448,26 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
+
+        // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
         let start_pos = leaf_num_to_pos(start_loc);
         let leaves = mmr.leaves();
         assert!(start_loc < leaves, "start_loc is invalid");
-
-        let end_pos_last = mmr.last_leaf_pos().expect("MMR is empty");
-        let end_pos_max = leaf_num_to_pos(start_loc + max_ops.get() - 1);
-        let (end_pos, end_loc) = if end_pos_last < end_pos_max {
-            (
-                end_pos_last,
-                leaf_pos_to_num(end_pos_last).expect("invalid end pos"),
-            )
+        let max_loc = start_loc + max_ops.get();
+        let end_loc = if max_loc > leaves {
+            leaves - 1
         } else {
-            (end_pos_max, start_loc + max_ops.get() - 1)
+            max_loc - 1
         };
+        let end_pos = leaf_num_to_pos(end_loc);
+
+        // Generate the proof from the grafted MMR.
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, mmr, height);
-
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, start_pos, end_pos).await?;
 
+        // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
             .map(|i| self.any.log.read(i))

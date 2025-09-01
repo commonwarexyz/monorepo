@@ -168,7 +168,7 @@ fn fuzz(data: FuzzInput) {
                         if let Some(oldest_loc) = db.oldest_retained_loc() {
                             if adjusted_start >= oldest_loc {
                                 let (proof, ops, chunks) = db
-                                    .range_proof(hasher.inner(), adjusted_start, adjusted_max_ops)
+                                    .range_proof(hasher.inner(), adjusted_start, NZU64!(adjusted_max_ops))
                                     .await
                                     .expect("Range proof should not fail");
 
