@@ -410,6 +410,16 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.mem_mmr.size()
     }
 
+    /// Return the total number of leaves in the MMR.
+    pub fn leaves(&self) -> u64 {
+        self.mem_mmr.leaves()
+    }
+
+    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
+    pub fn last_leaf_pos(&self) -> Option<u64> {
+        self.mem_mmr.last_leaf_pos()
+    }
+
     pub async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
         if let Some(node) = self.mem_mmr.get_node(position) {
             return Ok(Some(node));
@@ -420,12 +430,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::JournalError(e)),
         }
-    }
-
-    /// Return the position of the last leaf in an MMR with this MMR's size, or None if the MMR is
-    /// empty.
-    pub fn last_leaf_pos(&self) -> Option<u64> {
-        self.mem_mmr.last_leaf_pos()
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
