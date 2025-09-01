@@ -2526,11 +2526,14 @@ mod tests {
         })
     }
 
+    // Basic Twins test: n = 4, f = 1.
+    // Honest nodes: 0, 1, 2.
+    // Byzantine identity: node 3 has a twin (node 4); both share the same private key.
+    // We model byzantine behavior by running two nodes (3 and 4) with the same identity.
+    // There is no partitioning.
     #[test_traced]
     fn test_basic_twins() {
-        // Create context - Testing Twins approach
-        // Nodes 0,1,2 are correct and nodes 3, 4 are byzantine nodes, twins, meaning that they have the same private key.
-        // So, we model n=4, f=1 scenario.
+        // Create context
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
