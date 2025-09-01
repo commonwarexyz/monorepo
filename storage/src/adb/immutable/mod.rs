@@ -318,7 +318,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // operations that must be rolled back, and any log operations that need to be re-added to
         // the MMR & locations.
         {
-            let stream = log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
+            let stream = log
+                .replay(0, 0, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
+                .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {

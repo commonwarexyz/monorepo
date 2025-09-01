@@ -423,7 +423,10 @@ where
         let mut uncommitted_ops = HashMap::new();
         let mut oldest_retained_loc_found = false;
         {
-            let stream = self.log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
+            let stream = self
+                .log
+                .replay(0, 0, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
+                .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -726,10 +729,9 @@ where
         self.oldest_retained_loc = section * self.log_items_per_section;
 
         // Prune the locations map up to the oldest retained item in the log after pruning.
-        self.locations
-            .prune(self.oldest_retained_loc)
-            .await
-            .map_err(Error::Journal)
+        self.locations.prune(self.oldest_retained_loc).await?;
+
+        Ok(())
     }
 }
 
