@@ -9,6 +9,7 @@ use commonware_utils::Span;
 use std::future::Future;
 
 pub mod p2p;
+pub mod broadcast;
 
 /// Notified when data is available, and must validate it.
 pub trait Consumer: Clone + Send + 'static {
