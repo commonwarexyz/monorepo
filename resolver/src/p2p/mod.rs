@@ -74,7 +74,7 @@ pub trait Coordinator: Clone + Send + Sync + 'static {
     fn peer_set_id(&self) -> u64;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mocks"))]
 mod tests {
     use super::{
         mocks::{Consumer, Coordinator, CoordinatorMsg, Event, Key, Producer},

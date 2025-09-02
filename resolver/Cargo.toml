@@ -30,6 +30,11 @@ thiserror = { workspace = true }
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 
+# Enable mocks feature for tests
+[dev-dependencies.commonware-resolver]
+path = "."
+features = ["mocks"]
+
 [lib]
 bench = false
 

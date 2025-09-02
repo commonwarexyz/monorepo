@@ -104,7 +104,7 @@ impl<Key: Span> Read for Payload<Key> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mocks"))]
 mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;

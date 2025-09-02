@@ -1296,6 +1296,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
+ "commonware-resolver",
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
