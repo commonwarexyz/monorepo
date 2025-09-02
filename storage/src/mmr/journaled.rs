@@ -420,6 +420,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.mem_mmr.last_leaf_pos()
     }
 
+    /// Returns whether there are pending updates.
+    pub fn is_dirty(&self) -> bool {
+        self.mem_mmr.is_dirty()
+    }
+
     pub async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
         if let Some(node) = self.mem_mmr.get_node(position) {
             return Ok(Some(node));

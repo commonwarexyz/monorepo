@@ -277,7 +277,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 offset, "operation was missing from MMR/location map"
                             );
                             self.mmr.add(&mut self.hasher, &op.encode()).await?;
-                            self.locations.append(offset.into()).await?;
+                            self.locations.append(offset).await?;
                             mmr_leaves += 1;
                         }
 
@@ -493,8 +493,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
     }
 
-    /// Return the inactivity floor location.
-    /// This is the location before which all operations are inactive.
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive.
     pub fn inactivity_floor_loc(&self) -> u64 {
         self.inactivity_floor_loc
     }
@@ -541,16 +541,30 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        // Update the ops MMR.
-        self.mmr.add_batched(&mut self.hasher, &op.encode()).await?;
-        self.uncommitted_ops += 1;
-
+        let encoded_op = op.encode();
         let section = self.current_section();
-        let (offset, _) = self.log.append(section, op).await?;
-        self.log_size += 1;
-        self.locations.append(offset).await?;
 
-        if section != self.current_section() {
+        // Create a future that appends the operation to the log, then puts its resulting offset
+        // into locations.
+        let log_fut = async {
+            let (offset, _) = self.log.append(section, op).await?;
+            self.locations.append(offset).await?;
+
+            Ok::<(), Error>(())
+        };
+
+        // Run the log update future in parallel with adding the operation to the MMR.
+        try_join!(
+            self.mmr
+                .add_batched(&mut self.hasher, &encoded_op)
+                .map_err(Error::Mmr),
+            log_fut
+        )?;
+        self.uncommitted_ops += 1;
+        self.log_size += 1;
+
+        // Maintain invariant that all filled sections are synced and immutable.
+        if self.current_section() != section {
             self.log.sync(section).await?;
         }
 
@@ -614,10 +628,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // commit op that will be appended.
         self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
             .await?;
-        self.uncommitted_ops = 0;
-        self.mmr.process_updates(&mut self.hasher);
-        self.log.sync(self.current_section()).await?;
+
+        // Sync the log and process the updates to the MMR in parallel.
+        let section = self.current_section();
+        let mmr_fut = async {
+            self.mmr.process_updates(&mut self.hasher);
+            Ok::<(), Error>(())
+        };
+        try_join!(self.log.sync(section).map_err(Error::Journal), mmr_fut)?;
+
         debug!(log_size = self.log_size, "commit complete");
+        self.uncommitted_ops = 0;
 
         Ok(())
     }
@@ -677,7 +698,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 cursor.update(new_loc);
                 drop(cursor);
 
-                // Update the MMR with the operation.
+                // Apply the moved operation.
                 self.apply_op(op).await?;
                 return Ok(Some(old_loc));
             }
@@ -716,44 +737,45 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Prune historical operations that are behind the inactivity floor. This does not affect the
-    /// db's root or current snapshot.
+    /// Prune historical operations. This does not affect the db's root or current snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
-        let Some(oldest_retained_loc) = self.oldest_retained_loc() else {
-            return Ok(());
-        };
-
-        // Calculate the target pruning position: inactivity_floor_loc.
         assert!(target_prune_loc <= self.inactivity_floor_loc);
-        let ops_to_prune = target_prune_loc.saturating_sub(oldest_retained_loc);
-        if ops_to_prune == 0 {
+        if target_prune_loc <= self.oldest_retained_loc {
             return Ok(());
         }
-
-        // Determine if it is necessary to prune the MMR.
-        let section_with_target = target_prune_loc / self.log_items_per_section;
-        if oldest_retained_loc / self.log_items_per_section == section_with_target {
-            return Ok(());
-        }
-        debug!(
-            log_size = self.log_size,
-            ops_to_prune, target_prune_loc, "pruning inactive ops"
-        );
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
         // actual pruning boundary. This procedure ensures all log operations always have
         // corresponding MMR & location entries, even in the event of failures, with no need for
         // special recovery.
-        self.log.prune(section_with_target).await?;
+        let section_with_target = target_prune_loc / self.log_items_per_section;
+        if !self.log.prune(section_with_target).await? {
+            return Ok(());
+        }
         self.oldest_retained_loc = section_with_target * self.log_items_per_section;
 
+        debug!(
+            log_size = self.log_size,
+            oldest_retained_loc = self.oldest_retained_loc,
+            "pruned inactive ops"
+        );
+
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
-        self.locations.prune(self.oldest_retained_loc).await?;
-        self.mmr
-            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
-            .await
-            .map_err(Error::Mmr)
+        try_join!(
+            self.locations
+                .prune(self.oldest_retained_loc)
+                .map_err(Error::Journal),
+            self.mmr
+                .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
+                .map_err(Error::Mmr),
+        )?;
+
+        Ok(())
     }
 
     /// Close the db. Operations that have not been committed will be lost.

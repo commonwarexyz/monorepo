@@ -767,9 +767,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob.sync().await.map_err(Error::Runtime)
     }
 
-    /// Prunes all `sections` less than `min`.
-    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+    /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
+    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         // Prune any blobs that are smaller than the minimum
+        let mut pruned = false;
         while let Some((&section, _)) = self.blobs.first_key_value() {
             // Stop pruning if we reach the minimum
             if section >= min {
@@ -782,6 +783,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             drop(blob);
 
             // Remove blob from storage
+            pruned = true;
             self.context
                 .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await?;
@@ -792,7 +794,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Update oldest allowed
         self.oldest_allowed = Some(min);
-        Ok(())
+        Ok(pruned)
     }
 
     /// Syncs and closes all open sections.

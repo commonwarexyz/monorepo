@@ -397,8 +397,8 @@ impl<
             .map(|pos| leaf_pos_to_num(pos).unwrap())
     }
 
-    /// Return the inactivity floor location.
-    /// This is the location before which all operations are inactive.
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive.
     pub fn inactivity_floor_loc(&self) -> u64 {
         self.inactivity_floor_loc
     }
@@ -482,13 +482,19 @@ impl<
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
-    pub(crate) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u64, Error> {
-        // Update the ops MMR.
-        self.mmr.add_batched(&mut self.hasher, &op.encode()).await?;
+    pub(crate) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
+        let encoded_op = op.encode();
+
+        // Append operation to the log and update the MMR in parallel.
+        try_join!(
+            self.mmr
+                .add_batched(&mut self.hasher, &encoded_op)
+                .map_err(Error::Mmr),
+            self.log.append(op).map_err(Error::Journal)
+        )?;
         self.uncommitted_ops += 1;
 
-        // Append the operation to the log.
-        self.log.append(op).await.map_err(Error::Journal)
+        Ok(())
     }
 
     /// Generate and return:
@@ -550,10 +556,16 @@ impl<
         // commit op that will be appended.
         self.raise_inactivity_floor(self.uncommitted_ops + 1)
             .await?;
-        self.uncommitted_ops = 0;
-        self.mmr.process_updates(&mut self.hasher);
 
-        self.log.sync().await.map_err(Error::Journal)
+        // Sync the log and process the updates to the MMR in parallel.
+        let mmr_fut = async {
+            self.mmr.process_updates(&mut self.hasher);
+            Ok::<(), Error>(())
+        };
+        try_join!(self.log.sync().map_err(Error::Journal), mmr_fut)?;
+        self.uncommitted_ops = 0;
+
+        Ok(())
     }
 
     /// Sync the db to disk ensuring the current state is fully persisted, then prune inactive
