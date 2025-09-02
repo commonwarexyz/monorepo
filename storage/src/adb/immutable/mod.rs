@@ -545,13 +545,28 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
     pub(super) async fn apply_op(&mut self, op: Variable<K, V>) -> Result<(), Error> {
-        self.mmr.add_batched(&mut self.hasher, &op.encode()).await?;
-
         let section = self.current_section();
-        let (offset, _) = self.log.append(section, op).await?;
-        self.log_size += 1;
-        self.locations.append(offset.into()).await?;
+        let encoded_op = op.encode();
 
+        // Create a future that updates the MMR.
+        let mmr_fut = async {
+            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
+            Ok::<(), Error>(())
+        };
+
+        // Create a future that appends the operation to the log and writes the resulting offset
+        // locations.
+        let log_fut = async {
+            let (offset, _) = self.log.append(section, op).await?;
+            self.locations.append(offset.into()).await?;
+            Ok::<(), Error>(())
+        };
+
+        // Run the 2 futures in parallel.
+        try_join!(mmr_fut, log_fut)?;
+        self.log_size += 1;
+
+        // Maintain invariant that all filled sections are synced and immutable.
         if section != self.current_section() {
             self.log.sync(section).await?;
         }
@@ -616,8 +631,34 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// is provided. Caller can associate an arbitrary `metadata` value with the commit.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         self.last_commit = Some(self.log_size);
-        self.apply_op(Variable::Commit(metadata)).await?;
-        self.sync().await
+        let op = Variable::<K, V>::Commit(metadata);
+        let encoded_op = op.encode();
+        let section = self.current_section();
+
+        // Create a future that updates the MMR.
+        let mmr_fut = async {
+            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
+            self.mmr.process_updates(&mut self.hasher);
+            Ok::<(), Error>(())
+        };
+
+        // Create a future that appends the operation to the log, syncs it, and writes the resulting
+        // offset locations.
+        let log_fut = async {
+            let (offset, _) = self.log.append(section, op).await?;
+            // Sync the log and update locations in parallel.
+            try_join!(
+                self.log.sync(section).map_err(Error::Journal),
+                self.locations.append(offset.into()).map_err(Error::Journal),
+            )?;
+            Ok::<(), Error>(())
+        };
+
+        // Run the 2 futures in parallel.
+        try_join!(mmr_fut, log_fut)?;
+        self.log_size += 1;
+
+        Ok(())
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
