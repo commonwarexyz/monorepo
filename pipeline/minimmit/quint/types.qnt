@@ -3,8 +3,6 @@
 module types {
     import option.* from "./option"
 
-    type ReplicaId = str
-
     type Signature = str
 
     type Weight = int
@@ -14,6 +12,13 @@ module types {
     type Block = str
 
     type Kind = str
+
+    type ReplicaId = str
+
+    // Each replica id has a private/public key pair assigned to it.
+    // For testing purposes and for modeling byzantine behavior,
+    // several replica ids may have the private/key pair.
+    type ReplicaKey = str
 
     pure val GENESIS_BLOCK: Block = "GENESIS_BLOCK"
     pure val DUMMY_BLOCK: Block = "DUMMY_BLOCK"

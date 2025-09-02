@@ -17,13 +17,16 @@ module replica {
     const VALID_BLOCKS: Set[Block]
     // All replicas.
     pure val Replicas = CORRECT.union(BYZANTINE)
+    // The keys of the replicas, normally, one unique key per replica.
+    // For modeling byzantine behaviour via twin replicas use the same keys.
+    const REPLICA_KEYS: ReplicaId -> ReplicaKey
     
     // Quorums:
     pure val L = N - F;
     pure val M = 2*F + 1;
 
     // Produce replica's signature
-    pure def sig_of(id: str): str = id
+    pure def sig_of(id: ReplicaId): ReplicaKey = REPLICA_KEYS.get(id)
 
     const INVALID_BLOCKS: Set[Block]
     pure val AllBlocks = VALID_BLOCKS.union(INVALID_BLOCKS)
@@ -254,8 +257,7 @@ module replica {
     action step = {
         any {
             {
-                nondet id = oneOf(CORRECT)
-                replica_step(id)
+                correct_replica_step
             },
             all {
                 nondet id = oneOf(CORRECT)
@@ -267,14 +269,15 @@ module replica {
                 proposer_step(id, new_block, parent_block, parent_view),
             },
             all {
-                faulty_step,
+                byzantine_replica_step,
                 _unchanged_replica_state,
             }
         }
     }
 
     // A step by a correct replica, except for the proposer step.
-    action replica_step(id: ReplicaId): bool = all {
+    action correct_replica_step(): bool = all {
+        nondet id = oneOf(CORRECT)
         // Non‑deterministically pick one enabled internal action
         any {
             {
@@ -625,7 +628,7 @@ module replica {
     // Byzantine behavior (completely adversarial)
     // -------------------------------------------------
 
-    action faulty_step: bool = all {
+    action byzantine_replica_step: bool = all {
         BYZANTINE != Set(),
 
         // Adversary may inject arbitrary well-typed vote messages.
