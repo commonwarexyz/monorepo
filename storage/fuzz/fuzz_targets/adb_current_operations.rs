@@ -46,6 +46,7 @@ fn fuzz(data: FuzzInput) {
         let cfg = Config {
             mmr_journal_partition: "fuzz_current_mmr_journal".into(),
             mmr_metadata_partition: "fuzz_current_mmr_metadata".into(),
+            db_metadata_partition: "fuzz_current_db_metadata".into(),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: "fuzz_current_log_journal".into(),

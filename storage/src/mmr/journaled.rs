@@ -394,6 +394,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound)
                 .await?;
         }
+        metadata.sync().await?;
 
         Ok(Self {
             mem_mmr,
@@ -699,6 +700,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         self.journal.prune(pos).await?;
         self.mem_mmr.add_pinned_nodes(pinned_nodes);
+        println!("🔧 MMR prune_to_pos: Pruned to pos={}", pos);
         self.pruned_to_pos = pos;
 
         Ok(())

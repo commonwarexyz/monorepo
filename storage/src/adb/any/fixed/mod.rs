@@ -11,6 +11,7 @@ use crate::{
     adb::Error,
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
+    metadata::{self, Metadata},
     mmr::{
         bitmap::Bitmap,
         hasher::Standard,
@@ -24,7 +25,7 @@ use crate::{
 use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use commonware_utils::{Array, NZUsize};
+use commonware_utils::{sequence::prefixed_u64::U64, Array, NZUsize};
 use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
@@ -42,6 +43,29 @@ const UNUSED_N: usize = 0;
 /// snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
+/// Prefix used for the oldest_retained_loc key in metadata.
+const OLDEST_RETAINED_LOC_PREFIX: u8 = 0;
+
+/// Read the oldest_retained_loc from metadata, returning 0 if not found.
+pub(crate) fn read_oldest_retained_loc<E: Storage + Clock + Metrics>(
+    metadata: &Metadata<E, U64, u64>,
+) -> u64 {
+    let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+    match metadata.get(&key) {
+        Some(oldest_retained_loc) => *oldest_retained_loc,
+        None => 0,
+    }
+}
+
+/// Write the oldest_retained_loc to metadata.
+pub(crate) fn write_oldest_retained_loc<E: Storage + Clock + Metrics>(
+    metadata: &mut Metadata<E, U64, u64>,
+    value: u64,
+) {
+    let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+    metadata.put(key, value);
+}
+
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator> {
@@ -56,6 +80,9 @@ pub struct Config<T: Translator> {
 
     /// The name of the [Storage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
+
+    /// The name of the [Storage] partition used for the db's metadata.
+    pub db_metadata_partition: String,
 
     /// The name of the [Storage] partition used to persist the (pruned) log of operations.
     pub log_journal_partition: String,
@@ -111,6 +138,8 @@ pub struct Any<
     /// The location of the oldest operation in the log that remains readable.
     pub(crate) oldest_retained_loc: u64,
 
+    pub(crate) metadata: Metadata<E, U64, u64>,
+
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
@@ -139,19 +168,21 @@ impl<
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        let mut hasher = Standard::<H>::new();
-        let (mmr, log) = Self::init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
+        let mut hasher = Standard::<H>::new();
+        let (mmr, log, metadata) =
+            Self::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
+
+        // let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
         let inactivity_floor_loc = Self::build_snapshot_from_log(
-            start_leaf_num,
+            oldest_retained_loc,
             &log,
             &mut snapshot,
             None::<&mut Bitmap<H, UNUSED_N>>,
         )
         .await?;
 
-        let oldest_retained_loc = log.oldest_retained_pos().await?.unwrap_or(0);
         let db = Any {
             mmr,
             log,
@@ -160,6 +191,7 @@ impl<
             oldest_retained_loc,
             uncommitted_ops: 0,
             hasher,
+            metadata,
         };
 
         Ok(db)
@@ -172,7 +204,14 @@ impl<
         context: E,
         cfg: Config<T>,
         hasher: &mut Standard<H>,
-    ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
+    ) -> Result<
+        (
+            Mmr<E, H>,
+            Journal<E, Operation<K, V>>,
+            Metadata<E, U64, u64>,
+        ),
+        Error,
+    > {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
             hasher,
@@ -187,6 +226,16 @@ impl<
         )
         .await?;
 
+        let mut metadata = Metadata::init(
+            context.with_label("db_metadata"),
+            metadata::Config {
+                partition: cfg.db_metadata_partition.clone(),
+                codec_config: (),
+            },
+        )
+        .await?;
+        let metadata_oldest_retained_loc = read_oldest_retained_loc(&metadata);
+
         let mut log = Journal::init(
             context.with_label("log"),
             JConfig {
@@ -197,6 +246,19 @@ impl<
             },
         )
         .await?;
+
+        let expected_oldest_blob = metadata_oldest_retained_loc / cfg.log_items_per_blob.get();
+        if let Some(actual_oldest_blob) = log.blobs.first_key_value().map(|(k, _)| k) {
+            if expected_oldest_blob != *actual_oldest_blob {
+                warn!(
+                    expected_oldest_blob,
+                    actual_oldest_blob, "expected oldest blob does not match log's oldest blob"
+                );
+            }
+            let actual_oldest_loc = actual_oldest_blob * cfg.log_items_per_blob.get();
+            write_oldest_retained_loc(&mut metadata, actual_oldest_loc);
+            metadata.sync().await?;
+        }
 
         // Back up over / discard any uncommitted operations in the log.
         let mut log_size = log.size().await?;
@@ -245,7 +307,7 @@ impl<
         // At this point the MMR and log should be consistent.
         assert_eq!(log.size().await?, leaf_pos_to_num(mmr.size()).unwrap());
 
-        Ok((mmr, log))
+        Ok((mmr, log, metadata))
     }
 
     /// Builds the database's snapshot by replaying the log starting at `start_leaf_num`.
@@ -653,6 +715,10 @@ impl<
             return Ok(());
         };
 
+        // Update the metadata with the new oldest_retained_loc.
+        write_oldest_retained_loc(&mut self.metadata, target_prune_loc);
+        self.metadata.sync().await?;
+
         if !self.log.prune(target_prune_loc).await? {
             return Ok(());
         }
@@ -760,6 +826,7 @@ pub(super) mod test {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
+            db_metadata_partition: format!("db_metadata_{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
@@ -785,6 +852,7 @@ pub(super) mod test {
         Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
+            db_metadata_partition: format!("db_metadata_{seed}"),
             mmr_items_per_blob: NZU64!(1024),
             mmr_write_buffer: NZUsize!(64),
             log_journal_partition: format!("log_journal_{seed}"),
@@ -1287,7 +1355,8 @@ pub(super) mod test {
 
             // Initialize the db's mmr/log.
             let cfg = any_db_config("partition");
-            let (mmr, log) = AnyTest::init_mmr_and_log(context.clone(), cfg, &mut hasher)
+
+            let (mmr, log, metadata) = AnyTest::init_mmr_and_log(context.clone(), cfg, &mut hasher)
                 .await
                 .unwrap();
             let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
@@ -1313,6 +1382,7 @@ pub(super) mod test {
                 inactivity_floor_loc,
                 oldest_retained_loc,
                 uncommitted_ops: 0,
+                metadata,
                 hasher: Standard::<Sha256>::new(),
             };
             assert_eq!(db.root(&mut hasher), root);

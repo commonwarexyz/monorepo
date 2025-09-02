@@ -22,6 +22,7 @@ pub fn create_config() -> fixed::Config<Translator> {
     fixed::Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
+        db_metadata_partition: "db_metadata".into(),
         mmr_items_per_blob: NZU64!(4096),
         mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: "log_journal".into(),

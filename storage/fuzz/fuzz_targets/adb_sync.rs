@@ -41,6 +41,7 @@ fn test_config(test_name: &str) -> Config<TwoCap> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
+        db_metadata_partition: format!("{test_name}_db_meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: format!("{test_name}_log"),

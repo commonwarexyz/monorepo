@@ -38,6 +38,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     AConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        db_metadata_partition: format!("db_metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: NZU64!(ITEMS_PER_BLOB),
         mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
