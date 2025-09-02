@@ -311,7 +311,7 @@ mod tests {
             any::fixed::{
                 test::{
                     any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
-                    AnyTest, PAGE_CACHE_SIZE, PAGE_SIZE,
+                    AnyTest,
                 },
                 Any,
             },
@@ -346,6 +346,10 @@ mod tests {
         sync::Arc,
     };
     use test_case::test_case;
+
+    // Janky page & cache sizes to exercise boundary conditions.
+    const PAGE_SIZE: usize = 99;
+    const PAGE_CACHE_SIZE: usize = 3;
 
     fn test_hasher() -> Standard<Sha256> {
         Standard::<Sha256>::new()

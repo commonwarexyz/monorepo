@@ -411,12 +411,16 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         Ok(Some(oldest_blob_index * self.cfg.items_per_blob.get()))
     }
 
-    /// Read the item at the given position in the journal.
+    /// Read the item at the given position in the journal. Returns ItemPruned if a pruned item is
+    /// requested.
+    ///
+    ///
+    /// # Panics
+    ///
+    /// Panics if `item_pos` exceeds log size.
     pub async fn read(&self, item_pos: u64) -> Result<A, Error> {
         let blob_index = item_pos / self.cfg.items_per_blob.get();
-        if blob_index > self.tail_index {
-            return Err(Error::InvalidItem(item_pos));
-        }
+        assert!(blob_index <= self.tail_index);
 
         let blob = if blob_index == self.tail_index {
             &self.tail
@@ -448,9 +452,9 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 
     /// Returns an ordered stream of all items in the journal with position >= `start_pos`.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// `Error::InvalidItem` if `start_pos` is greater than the journal size.
+    /// Panics `start_pos` exceeds log size.
     ///
     /// # Integrity
     ///
@@ -460,9 +464,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
-        if start_pos > self.size().await? {
-            return Err(Error::InvalidItem(start_pos));
-        }
+        assert!(start_pos <= self.size().await?);
 
         // Collect all blobs to replay paired with their index.
         let items_per_blob = self.cfg.items_per_blob.get();
@@ -511,11 +513,18 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
                             let next_offset = offset + Self::CHUNK_SIZE_U64;
                             let result = Self::verify_integrity(&buf).map(|item| (item_pos, item));
                             if result.is_err() {
-                                debug!("corrupted item at {item_pos}");
+                                warn!("corrupted item at {item_pos}");
                             }
                             Some((result, (buf, reader, next_offset)))
                         }
-                        Err(err) => Some((Err(Error::Runtime(err)), (buf, reader, size))),
+                        Err(err) => {
+                            warn!(
+                                item_pos,
+                                err = err.to_string(),
+                                "error reading item during replay"
+                            );
+                            Some((Err(Error::Runtime(err)), (buf, reader, size)))
+                        }
                     }
                 },
             )

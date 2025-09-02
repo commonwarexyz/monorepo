@@ -487,8 +487,8 @@ impl<
         self.mmr.root(hasher)
     }
 
-    /// Update the operations MMR with the given operation, and append the operation to the log. The
-    /// `commit` method must be called to make any applied operation persistent & recoverable.
+    /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
+    /// until the next successful `commit`.
     pub(crate) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         let encoded_op = op.encode();
 
@@ -555,9 +555,7 @@ impl<
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
-    /// is provided.
+    /// upon return from this function. Also raises the inactivity floor according to the schedule.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
@@ -575,9 +573,7 @@ impl<
         Ok(())
     }
 
-    /// Sync the db to disk ensuring the current state is fully persisted, then prune inactive
-    /// operations if `prune` is true. Batch operations will be parallelized if a thread pool is
-    /// provided.
+    /// Sync the db to disk ensuring the current state is fully persisted.
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
@@ -651,33 +647,39 @@ impl<
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
-        if self.log.oldest_retained_pos().await?.is_none() {
+        assert!(target_prune_loc <= self.inactivity_floor_loc);
+        if self.mmr.size() == 0 {
+            // DB is empty, nothing to prune.
             return Ok(());
         };
-        assert!(target_prune_loc <= self.inactivity_floor_loc);
 
         if !self.log.prune(target_prune_loc).await? {
             return Ok(());
         }
 
+        // Get the actual (blob aligned) pruning boundary from the log.
         let oldest_retained_loc = self
             .log
             .oldest_retained_pos()
             .await?
-            .expect("oldest retained loc known to be non-none");
+            .expect("oldest retained loc known to be non-none since db is non-empty");
+        self.oldest_retained_loc = oldest_retained_loc;
+
         debug!(
             log_size = self.op_count(),
             oldest_retained_loc, "pruned inactive ops"
         );
+
+        // Align the MMR's pruning boundary with the log's.
         self.mmr
             .prune_to_pos(&mut self.hasher, leaf_num_to_pos(oldest_retained_loc))
             .await?;
-        self.oldest_retained_loc = oldest_retained_loc;
 
         Ok(())
     }
 
-    /// Close the db. Operations that have not been committed will be lost.
+    /// Close the db. Operations that have not been committed will be lost or rolled back on
+    /// restart.
     pub async fn close(mut self) -> Result<(), Error> {
         if self.uncommitted_ops > 0 {
             warn!(
@@ -686,10 +688,7 @@ impl<
             );
         }
 
-        try_join!(
-            self.log.close().map_err(Error::Journal),
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
-        )?;
+        self.sync().await?;
 
         Ok(())
     }
@@ -704,35 +703,31 @@ impl<
         Ok(())
     }
 
-    /// Simulate a failed commit that successfully writes the log to the commit point, but without
-    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
+    /// Simulate an unclean shutdown by consuming the db without syncing (or only partially syncing)
+    /// the log and/or mmr.
     #[cfg(test)]
-    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error> {
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
-            .await?;
-        self.log.close().await?;
-        self.mmr
-            .simulate_partial_sync(&mut self.hasher, write_limit)
-            .await?;
-
-        Ok(())
-    }
-
-    /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
-    /// fully committing the log, requiring rollback of the MMR and log upon reopening.
-    #[cfg(test)]
-    pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
-            .await?;
-        self.mmr.close(&mut self.hasher).await?;
-        // Rewind the operation log over the commit op to force rollback to the previous commit.
-        self.log.rewind(self.log.size().await? - 1).await?;
-        self.log.close().await?;
+    pub async fn simulate_failure(
+        mut self,
+        sync_log: bool,
+        sync_mmr: bool,
+        write_limit: usize,
+    ) -> Result<(), Error> {
+        if sync_log {
+            self.log.sync().await?;
+        }
+        if sync_mmr {
+            self.mmr.sync(&mut self.hasher).await?;
+        } else if write_limit > 0 {
+            self.mmr
+                .simulate_partial_sync(&mut self.hasher, write_limit)
+                .await?;
+        }
 
         Ok(())
     }
 }
 
+// pub(super) so helpers can be used by the sync module.
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
@@ -756,10 +751,12 @@ pub(super) mod test {
     use std::collections::{HashMap, HashSet};
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
-    pub const PAGE_SIZE: usize = 77;
-    pub const PAGE_CACHE_SIZE: usize = 9;
 
-    pub fn any_db_config(suffix: &str) -> Config<TwoCap> {
+    // Janky page & cache sizes to exercise boundary conditions.
+    const PAGE_SIZE: usize = 101;
+    const PAGE_CACHE_SIZE: usize = 11;
+
+    pub(super) fn any_db_config(suffix: &str) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -775,7 +772,7 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    pub type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    pub(super) type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
@@ -784,7 +781,7 @@ pub(super) mod test {
             .unwrap()
     }
 
-    pub(crate) fn create_test_config(seed: u64) -> Config<TwoCap> {
+    pub(super) fn create_test_config(seed: u64) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
@@ -800,7 +797,7 @@ pub(super) mod test {
     }
 
     /// Create a test database with unique partition names
-    pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
+    pub(super) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed);
         AnyTest::init(context, config).await.unwrap()
@@ -808,7 +805,7 @@ pub(super) mod test {
 
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
+    pub(super) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -826,7 +823,7 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(super) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(key, value) => {
@@ -843,7 +840,7 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
-    pub fn test_any_db_empty() {
+    fn test_any_fixed_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
@@ -853,12 +850,12 @@ pub(super) mod test {
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
 
-            // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
+            // Make sure closing/reopening gets us back to the same state, even after adding an
+            // uncommitted op, and even without a clean shutdown.
             let d1 = Sha256::fill(1u8);
             let d2 = Sha256::fill(2u8);
             let root = db.root(&mut hasher);
             db.update(d1, d2).await.unwrap();
-            db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.op_count(), 0);
@@ -868,7 +865,8 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 1); // floor op added
             let root = db.root(&mut hasher);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
-            //db.close().await.unwrap();
+
+            // Re-opening the DB without a clean shutdown should still recover the correct state.
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(&mut hasher), root);
@@ -884,7 +882,7 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
-    pub fn test_any_db_build_basic() {
+    fn test_any_fixed_db_build_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a db with 2 keys and make sure updates and deletions of those keys work as
@@ -998,7 +996,7 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
-    pub fn test_any_db_build_and_authenticate() {
+    fn test_any_fixed_db_build_and_authenticate() {
         let executor = deterministic::Runner::default();
         // Build a db with 1000 keys, some of which we update and some of which we delete, and
         // confirm that the end state of the db matches that of an identically updated hashmap.
@@ -1104,7 +1102,7 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
-    pub fn test_any_db_recovery() {
+    fn test_any_fixed_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1117,71 +1115,59 @@ pub(super) mod test {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
-            db.sync().await.unwrap();
-            let halfway_root = db.root(&mut hasher);
-
-            // Insert another 1000 keys then simulate a failed close and test recovery.
-            for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
-                db.update(k, v).await.unwrap();
-            }
-
-            // We partially write 101 of the cached MMR nodes to simulate a failure that leaves the
-            // MMR in a state with an orphaned leaf.
-            db.simulate_failed_commit_mmr(101).await.unwrap();
-
-            // Journaled MMR recovery should read the orphaned leaf & its parents, then log
-            // replaying will restore the rest.
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 2001);
+            db.commit().await.unwrap();
             let root = db.root(&mut hasher);
-            assert_ne!(root, halfway_root);
+            let op_count = db.op_count();
 
-            // Write some additional nodes, simulate failed log commit, and test we recover to the previous commit point.
-            for i in 0u64..100 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&((i + 2) * 10000).to_be_bytes());
-                db.update(k, v).await.unwrap();
-            }
-            db.simulate_failed_commit_log().await.unwrap();
-            let db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 2001);
+            // Reopen DB without clean shutdown and make sure the state is the same.
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(&mut hasher), root);
 
+            async fn apply_more_ops(db: &mut AnyTest) {
+                for i in 0u64..ELEMENTS {
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                    db.update(k, v).await.unwrap();
+                }
+            }
+
+            // Insert another 1000 keys then simulate failure (sync nothing).
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(false, false, 10).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // Insert another 1000 keys then simulate failure (sync only the log).
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(true, false, 10).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // Insert another 1000 keys then simulate failure (sync only the mmr).
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(false, false, 10).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            apply_more_ops(&mut db).await;
+
+            // One last check that re-open without proper shutdown still recovers the correct state.
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // Apply the ops one last time but fully commit them this time, then clean up.
+            apply_more_ops(&mut db).await;
+            db.commit().await.unwrap();
             db.destroy().await.unwrap();
-
-            // Recreate the database without any failures and make sure the roots match.
-            let mut new_db = open_db(context.clone()).await;
-            assert_eq!(new_db.op_count(), 0);
-            // Insert 1000 keys then sync.
-            for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                new_db.update(k, v).await.unwrap();
-            }
-            assert_eq!(new_db.op_count(), 1000);
-            for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
-                new_db.update(k, v).await.unwrap();
-            }
-            new_db
-                .apply_op(Operation::CommitFloor(new_db.inactivity_floor_loc))
-                .await
-                .unwrap();
-            new_db.sync().await.unwrap();
-            assert_eq!(new_db.op_count(), 2001);
-            assert_eq!(new_db.root(&mut hasher), root);
-
-            new_db.destroy().await.unwrap();
         });
     }
 
     // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
     // in the snapshot.
     #[test_traced("WARN")]
-    pub fn test_any_db_log_replay() {
+    fn test_any_fixed_db_log_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1209,7 +1195,7 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
-    pub fn test_any_db_multiple_commits_delete_gets_replayed() {
+    fn test_any_fixed_db_multiple_commits_delete_gets_replayed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1249,7 +1235,7 @@ pub(super) mod test {
     /// This test builds a random database, and makes sure that its state can be replayed by
     /// `build_snapshot_from_log` with a bitmap to correctly capture the active operations.
     #[test_traced("WARN")]
-    pub fn test_any_db_build_snapshot_with_bitmap() {
+    fn test_any_fixed_db_build_snapshot_with_bitmap() {
         // Number of elements to initially insert into the db.
         const ELEMENTS: u64 = 1000;
 
@@ -1364,7 +1350,7 @@ pub(super) mod test {
     }
 
     #[test]
-    fn test_any_db_historical_proof_basic() {
+    fn test_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
@@ -1423,7 +1409,7 @@ pub(super) mod test {
     }
 
     #[test]
-    fn test_any_db_historical_proof_edge_cases() {
+    fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
@@ -1471,7 +1457,7 @@ pub(super) mod test {
     }
 
     #[test]
-    fn test_any_db_historical_proof_different_historical_sizes() {
+    fn test_any_fixed_db_historical_proof_different_historical_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
@@ -1523,7 +1509,7 @@ pub(super) mod test {
     }
 
     #[test]
-    fn test_any_db_historical_proof_invalid() {
+    fn test_any_fixed_db_historical_proof_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
