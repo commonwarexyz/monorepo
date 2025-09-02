@@ -220,6 +220,7 @@ impl<
             let op_count = log_size - rewind_leaf_num;
             warn!(op_count, "rewinding over uncommitted log operations");
             log.rewind(rewind_leaf_num).await?;
+            log.sync().await?;
             log_size = rewind_leaf_num;
         }
 

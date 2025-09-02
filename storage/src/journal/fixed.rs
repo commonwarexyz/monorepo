@@ -362,11 +362,14 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         Ok(item_pos)
     }
 
-    /// Rewind the journal to the given `size`. Returns [Error::MissingBlob] if the rewind
-    /// point precedes the oldest retained element point. The journal is not synced after rewinding.
+    /// Rewind the journal to the given `size`. Returns [Error::MissingBlob] if the rewind point
+    /// precedes the oldest retained element point. The journal is not synced after rewinding.
     ///
-    /// Note that this operation is not atomic, but it will always leave the journal in a consistent
-    /// state in the event of failure since blobs are always removed from newest to oldest.
+    /// # Warnings
+    ///
+    /// * This operation is not guaranteed to survive restarts until sync is called.
+    /// * This operation is not atomic, but it will always leave the journal in a consistent state
+    ///   in the event of failure since blobs are always removed from newest to oldest.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         match size.cmp(&self.size().await?) {
             std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
