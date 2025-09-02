@@ -35,4 +35,7 @@ pub struct Config<
     pub validators: Vec<C::PublicKey>,
     pub muxer_size: usize,
     pub mailbox_size: usize,
+
+    // Optional indexer base URLs (e.g., http://127.0.0.1:4001)
+    pub indexers: Vec<String>,
 }

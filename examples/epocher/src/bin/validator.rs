@@ -4,11 +4,7 @@ use commonware_consensus::marshal;
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
-        primitives::{
-            group::{Element, Scalar, Share},
-            poly,
-            variant::{MinSig, Variant},
-        },
+        primitives::{poly, variant::MinSig},
     },
     ed25519, PrivateKeyExt as _, Signer as _,
 };
@@ -24,10 +20,6 @@ use std::{
     str::FromStr,
 };
 
-const TOTAL_VALIDATORS: u32 = 10;
-const ACTIVE_VALIDATORS: u32 = 4;
-const THRESHOLD: u32 = 3;
-
 fn main() {
     let matches = Command::new("epocher-validator")
         .about("run epocher validator")
@@ -35,6 +27,13 @@ fn main() {
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
+                .required(false)
+                .value_delimiter(',')
+                .value_parser(value_parser!(String)),
+        )
+        .arg(
+            Arg::new("indexer")
+                .long("indexer")
                 .required(false)
                 .value_delimiter(',')
                 .value_parser(value_parser!(String)),
@@ -163,6 +162,10 @@ fn main() {
             validators,
             muxer_size: 1024,
             mailbox_size: 1024,
+            indexers: matches
+                .get_many::<String>("indexer")
+                .map(|vals| vals.cloned().collect())
+                .unwrap_or_default(),
         };
         let (orchestrator_actor, orchestrator) =
             orchestrator::Orchestrator::new(context.with_label("orchestrator"), orchestrator_cfg);

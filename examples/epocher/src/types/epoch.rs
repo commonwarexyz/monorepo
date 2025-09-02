@@ -1,5 +1,4 @@
-/// Number of blocks per epoch.
-pub const BLOCKS_PER_EPOCH: u64 = 100;
+use crate::BLOCKS_PER_EPOCH;
 
 /// Returns `Some(epoch)` if the height is the last block in the epoch, `None` otherwise.
 pub fn is_last_block_in_epoch(height: u64) -> Option<u64> {

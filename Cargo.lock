@@ -1191,6 +1191,7 @@ dependencies = [
 name = "commonware-epocher"
 version = "0.0.58"
 dependencies = [
+ "axum",
  "bytes",
  "clap",
  "commonware-broadcast",
@@ -1205,6 +1206,8 @@ dependencies = [
  "futures",
  "governor",
  "rand 0.8.5",
+ "reqwest",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
