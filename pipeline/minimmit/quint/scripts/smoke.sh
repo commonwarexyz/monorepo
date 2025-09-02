@@ -7,10 +7,10 @@ SESSION_NAMES=("quint-run" "quint-verify" "quint-script-invariant" "quint-script
 
 # Commands to run in each session
 COMMANDS=(
-    "JVM_ARGS=-Xmx40G quint run --invariant=safe main_n6f0.qnt --max-samples 20000 --max-steps 50"
-    "JVM_ARGS=-Xmx40G quint verify --invariant=safe main_n6f0.qnt --max-steps 7"
-    "./scripts/invariant.sh run ./main_n6f1.qnt 15 --random-transitions"
-    "./scripts/verify.sh random ./main_n6f1.qnt safe 10 1 10"
+    "JVM_ARGS=-Xmx40G quint run --invariant=safe main_n6f1b1.qnt --max-samples 20000 --max-steps 50"
+    "JVM_ARGS=-Xmx40G quint verify --invariant=safe main_n6f1b0.qnt --max-steps 7"
+    "./scripts/invariant.sh run ./twins_n6f1b1.qnt 18 --random-transitions"
+    "./scripts/verify.sh random ./main_n6f1b0.qnt safe 10 1 10"
 )
 
 # Kill existing sessions if they exist
