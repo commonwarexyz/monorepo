@@ -24,7 +24,7 @@ use commonware_codec::{CodecFixed, Encode as _, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
-use futures::future::try_join_all;
+use futures::{future::try_join_all, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
@@ -223,11 +223,13 @@ impl<
                 .await?;
         }
 
+        let oldest_retained_loc = log.oldest_retained_pos().await?.unwrap_or(0);
         let any = Any {
             mmr,
             log,
             snapshot,
             inactivity_floor_loc,
+            oldest_retained_loc,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
         };
@@ -310,7 +312,16 @@ impl<
         // commit op that will be appended.
         self.raise_inactivity_floor(self.any.uncommitted_ops + 1)
             .await?;
+
+        // Sync the log and process the updates to the MMR in parallel.
+        let log_fut = async { self.any.log.sync().await.map_err(Error::Journal) };
+        let mmr_fut = async {
+            self.any.mmr.process_updates(&mut self.any.hasher);
+            Ok::<(), Error>(())
+        };
+        try_join!(log_fut, mmr_fut)?;
         self.any.uncommitted_ops = 0;
+
         self.any.sync().await
     }
 
@@ -351,9 +362,8 @@ impl<
     /// Leverages parallel Merkleization of the MMR structures if a thread pool is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Failure recovery relies on this specific order of these three disk-based operations:
-        //  (1) commit/sync the any db to disk (which raises the inactivity floor).
+        //  (1) commit the any db to disk (which raises the inactivity floor).
         //  (2) prune the bitmap to the updated pruning boundary and write its state to disk.
-        //  (3) prune the any db of inactive operations.
         self.commit_ops().await?; // (1)
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
@@ -370,10 +380,6 @@ impl<
                 &self.bitmap_metadata_partition,
             )
             .await?; // (2)
-
-        // Prune inactive elements from the any db. We do this last, because bitmap recovery could
-        // require access to the hashes of these inactive nodes due to node grafting.
-        self.any.prune(self.any.inactivity_floor_loc).await?; // (3)
 
         Ok(())
     }
@@ -1026,8 +1032,7 @@ pub mod test {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.op_count();
-            let start_pos = db.any.mmr.pruned_to_pos();
-            let start_loc = leaf_pos_to_num(start_pos).unwrap();
+            let start_loc = db.any.inactivity_floor_loc();
 
             for i in start_loc..end_loc {
                 let (proof, ops, chunks) = db
@@ -1061,7 +1066,7 @@ pub mod test {
             let res = db.key_value_proof(hasher.inner(), bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
-            let start = db.oldest_retained_loc().unwrap();
+            let start = db.inactivity_floor_loc();
             for i in start..db.status.bit_count() {
                 if !db.status.get_bit(i) {
                     continue;
@@ -1204,8 +1209,9 @@ pub mod test {
             let committed_root = db.root(&mut hasher).await.unwrap();
             let committed_op_count = db.op_count();
             let committed_inactivity_floor = db.any.inactivity_floor_loc;
+            db.prune(committed_inactivity_floor).await.unwrap();
             let committed_pruning_loc = db.any.oldest_retained_loc().unwrap();
-            assert_eq!(committed_pruning_loc, committed_inactivity_floor);
+            assert!(committed_pruning_loc <= committed_inactivity_floor);
 
             // Perform more random operations without committing any of them.
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
@@ -1219,8 +1225,12 @@ pub mod test {
             assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
             let recovered_pruning_loc = db.any.oldest_retained_loc().unwrap();
-            assert_eq!(recovered_pruning_loc, committed_pruning_loc);
-            assert_eq!(recovered_pruning_loc, db.any.inactivity_floor_loc);
+            println!(
+                "recovered_pruning_loc: {} <= {}",
+                recovered_pruning_loc, committed_pruning_loc
+            );
+            assert!(recovered_pruning_loc <= committed_pruning_loc);
+            assert!(recovered_pruning_loc <= db.any.inactivity_floor_loc());
 
             // Re-apply the exact same uncommitted operations.
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
@@ -1239,7 +1249,7 @@ pub mod test {
             let scenario_2_root = db.root(&mut hasher).await.unwrap();
             let scenario_2_pruning_loc = db.any.oldest_retained_loc().unwrap();
             let scenario_2_inactivity_floor = db.any.inactivity_floor_loc;
-            assert_eq!(scenario_2_pruning_loc, scenario_2_inactivity_floor);
+            assert!(scenario_2_pruning_loc <= scenario_2_inactivity_floor);
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
@@ -1252,11 +1262,12 @@ pub mod test {
                 .await
                 .unwrap();
             db.commit().await.unwrap();
+            db.prune(db.any.inactivity_floor_loc()).await.unwrap();
             // State & pruning boundary from scenario #2 should match that of a successful commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
             let successful_pruning_loc = db.any.oldest_retained_loc().unwrap();
             assert_eq!(successful_pruning_loc, scenario_2_pruning_loc);
-            assert_eq!(successful_pruning_loc, db.any.inactivity_floor_loc);
+            assert!(successful_pruning_loc <= db.any.inactivity_floor_loc());
             db.close().await.unwrap();
 
             // SCENARIO #3: Simulate a crash that happens after the any db has been committed and
