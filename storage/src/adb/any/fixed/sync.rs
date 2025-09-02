@@ -113,11 +113,13 @@ where
         >(lower_bound, &log, &mut snapshot, None)
         .await?;
 
+        let oldest_retained_loc = log.oldest_retained_pos().await?.unwrap_or(0);
         let mut db = any::fixed::Any {
             mmr,
             log,
             snapshot,
             inactivity_floor_loc,
+            oldest_retained_loc,
             uncommitted_ops: 0,
             hasher: hasher::Standard::<H>::new(),
         };

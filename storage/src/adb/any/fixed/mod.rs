@@ -108,6 +108,9 @@ pub struct Any<
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: u64,
 
+    /// The location of the oldest operation in the log that remains readable.
+    pub(crate) oldest_retained_loc: u64,
+
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
@@ -148,11 +151,13 @@ impl<
         )
         .await?;
 
+        let oldest_retained_loc = log.oldest_retained_pos().await?.unwrap_or(0);
         let db = Any {
             mmr,
             log,
             snapshot,
             inactivity_floor_loc,
+            oldest_retained_loc,
             uncommitted_ops: 0,
             hasher,
         };
@@ -392,9 +397,11 @@ impl<
 
     /// Return the oldest location that remains readable & provable.
     pub fn oldest_retained_loc(&self) -> Option<u64> {
-        self.mmr
-            .oldest_retained_pos()
-            .map(|pos| leaf_pos_to_num(pos).unwrap())
+        if self.mmr.size() == 0 {
+            None
+        } else {
+            Some(self.oldest_retained_loc)
+        }
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -644,27 +651,28 @@ impl<
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
-        let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {
+        if self.log.oldest_retained_pos().await?.is_none() {
             return Ok(());
         };
         assert!(target_prune_loc <= self.inactivity_floor_loc);
 
-        // Calculate the target pruning position: inactivity_floor_loc - pruning_delay
-        let ops_to_prune = target_prune_loc.saturating_sub(oldest_retained_loc);
-        if ops_to_prune == 0 {
+        if !self.log.prune(target_prune_loc).await? {
             return Ok(());
         }
-        debug!(ops_to_prune, target_prune_loc, "pruning inactive ops");
 
-        // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
-        let prune_to_pos = leaf_num_to_pos(target_prune_loc);
+        let oldest_retained_loc = self
+            .log
+            .oldest_retained_pos()
+            .await?
+            .expect("oldest retained loc known to be non-none");
+        debug!(
+            log_size = self.op_count(),
+            oldest_retained_loc, "pruned inactive ops"
+        );
         self.mmr
-            .prune_to_pos(&mut self.hasher, prune_to_pos)
+            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(oldest_retained_loc))
             .await?;
-
-        // Because the log's pruning boundary will be blob-size aligned, we cannot use it as a
-        // source of truth for the min provable element.
-        self.log.prune(target_prune_loc).await?;
+        self.oldest_retained_loc = oldest_retained_loc;
 
         Ok(())
     }
@@ -983,7 +991,7 @@ pub(super) mod test {
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.inactivity_floor_loc, db.oldest_retained_loc().unwrap());
+            assert!(db.inactivity_floor_loc >= db.oldest_retained_loc().unwrap());
 
             db.destroy().await.unwrap();
         });
@@ -1039,7 +1047,7 @@ pub(super) mod test {
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.op_count(), 2336);
-            assert_eq!(db.oldest_retained_loc().unwrap(), 1478_u64);
+            assert!(db.oldest_retained_loc().unwrap() <= 1478_u64);
             assert_eq!(db.inactivity_floor_loc, 1478);
             assert_eq!(db.snapshot.items(), 857);
 
@@ -1311,11 +1319,13 @@ pub(super) mod test {
             .unwrap();
 
             // Check the recovered state is correct.
+            let oldest_retained_loc = log.oldest_retained_pos().await.unwrap().unwrap_or(0);
             let db = AnyTest {
                 mmr,
                 log,
                 snapshot,
                 inactivity_floor_loc,
+                oldest_retained_loc,
                 uncommitted_ops: 0,
                 hasher: Standard::<Sha256>::new(),
             };
