@@ -2,7 +2,7 @@
 name = "commonware-estimator"
 edition = "2021"
 publish = true
-version = "0.0.59"
+version = "0.0.60"
 license = "MIT OR Apache-2.0"
 description = "Simulate mechanism performance under realistic network conditions."
 readme = "README.md"
@@ -11,6 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estim
 documentation = "https://docs.rs/commonware-estimator"
 
 [dependencies]
+commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }

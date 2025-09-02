@@ -121,6 +121,7 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::Rewind { size } => {
                     if *size <= journal_size && *size >= oldest_retained_pos {
                         journal.rewind(*size).await.unwrap();
+                        journal.sync().await.unwrap();
                         journal_size = *size;
                     }
                 }

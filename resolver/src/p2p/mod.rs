@@ -99,13 +99,13 @@ mod tests {
     const TIMEOUT: Duration = Duration::from_millis(400);
     const FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
     const LINK: Link = Link {
-        latency: 10.0,
-        jitter: 1.0,
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
     const LINK_UNRELIABLE: Link = Link {
-        latency: 10.0,
-        jitter: 1.0,
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
         success_rate: 0.5,
     };
 
