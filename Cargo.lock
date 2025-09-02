@@ -1358,6 +1358,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
+ "commonware-storage-core",
  "commonware-utils",
  "crc32fast",
  "criterion",
@@ -1371,6 +1372,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "commonware-storage-core"
+version = "0.0.60"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-runtime",
+ "commonware-storage-core",
+ "commonware-utils",
+ "rayon",
+ "thiserror 2.0.12",
+ "tracing",
 ]
 
 [[package]]

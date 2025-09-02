@@ -4,7 +4,7 @@ use commonware_codec::{
     DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
-use commonware_storage::{adb::sync::Target, mmr::verification::Proof};
+use commonware_storage::{adb::sync::Target, mmr::Proof};
 use std::num::NonZeroU64;
 
 /// Maximum number of digests in a proof.

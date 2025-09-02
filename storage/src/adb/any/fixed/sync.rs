@@ -3,8 +3,8 @@ use crate::{
     index::Index,
     journal::fixed,
     mmr::{
-        hasher::{self, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        StandardHasher,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -91,7 +91,7 @@ where
         };
 
         // Apply the missing operations from the log to the MMR.
-        let mut hasher = Standard::<H>::new();
+        let mut hasher = StandardHasher::<H>::new();
         let log_size = log.size().await?;
         for i in mmr_ops..log_size {
             let op = log.read(i).await?;
@@ -119,7 +119,7 @@ where
             snapshot,
             inactivity_floor_loc,
             uncommitted_ops: 0,
-            hasher: hasher::Standard::<H>::new(),
+            hasher: StandardHasher::<H>::new(),
             pruning_delay: db_config.pruning_delay,
         };
         db.sync().await?;
@@ -127,7 +127,7 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        any::fixed::Any::root(self, &mut hasher::Standard::<H>::new())
+        any::fixed::Any::root(self, &mut StandardHasher::<H>::new())
     }
 
     async fn resize_journal(
@@ -321,7 +321,10 @@ mod tests {
             },
         },
         journal::{self, fixed},
-        mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
+        mmr::{
+            iterator::{leaf_num_to_pos, nodes_to_pin},
+            StandardHasher as Standard,
+        },
         store::operation::Fixed,
         translator::TwoCap,
     };
@@ -546,7 +549,6 @@ mod tests {
             };
 
             let result: Result<AnyTest, _> = sync::sync(config).await;
-            println!("{:?}", result.as_ref().err());
             assert!(matches!(
                 result,
                 Err(sync::Error::InvalidTarget {
@@ -1549,7 +1551,7 @@ mod tests {
             let upper_bound_ops = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes_pos = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
+            let pinned_nodes_pos = nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
             let pinned_nodes =
                 join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
@@ -1673,7 +1675,7 @@ mod tests {
                 }
                 log.sync().await.unwrap();
 
-                let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound))
+                let pinned_nodes = nodes_to_pin(leaf_num_to_pos(lower_bound))
                     .map(|pos| source_db.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
                 let pinned_nodes = pinned_nodes
@@ -1751,10 +1753,9 @@ mod tests {
 
             // Get pinned nodes before closing the database
             let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
-            let pinned_nodes =
-                Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(sync_db_original_size))
-                    .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
-                    .collect::<Vec<_>>();
+            let pinned_nodes = nodes_to_pin(leaf_num_to_pos(sync_db_original_size))
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                .collect::<Vec<_>>();
 
             // Close the sync db
             sync_db.close().await.unwrap();
