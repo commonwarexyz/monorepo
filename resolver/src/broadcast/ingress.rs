@@ -2,21 +2,10 @@ use crate::Resolver;
 use commonware_utils::Span;
 use futures::{channel::mpsc, SinkExt};
 
-type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
-
 /// Messages that can be sent to the broadcast actor.
 pub enum Message<K> {
     /// Initiate a fetch request by key.
     Fetch { key: K },
-
-    /// Cancel a fetch request by key.
-    Cancel { key: K },
-
-    /// Cancel all fetch requests.
-    Clear,
-
-    /// Cancel all fetch requests that do not satisfy the predicate.
-    Retain { predicate: Predicate<K> },
 }
 
 /// A way to send messages to the broadcast actor.
@@ -36,7 +25,6 @@ impl<K> Mailbox<K> {
 impl<K: Span> Resolver for Mailbox<K> {
     type Key = K;
 
-    /// Send a fetch request to the actor.
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
             .send(Message::Fetch { key })
@@ -44,31 +32,15 @@ impl<K: Span> Resolver for Mailbox<K> {
             .expect("Failed to send fetch");
     }
 
-    /// Send a cancel request to the actor.
-    async fn cancel(&mut self, key: Self::Key) {
-        self.sender
-            .send(Message::Cancel { key })
-            .await
-            .expect("Failed to send cancel_fetch");
+    async fn cancel(&mut self, _key: Self::Key) {
+        unimplemented!()
     }
 
-    /// Send a retain request to the actor.
-    async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
-        self.sender
-            .send(Message::Retain {
-                predicate: Box::new(predicate),
-            })
-            .await
-            .expect("Failed to send retain");
+    async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
+        unimplemented!()
     }
 
-    /// Send a clear request to the broadcast actor.
     async fn clear(&mut self) {
-        self.sender
-            .send(Message::Clear)
-            .await
-            .expect("Failed to send cancel_all");
+        unimplemented!()
     }
 }
-
-

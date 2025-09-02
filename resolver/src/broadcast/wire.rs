@@ -2,34 +2,6 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::Span;
 
-/// Represents a message used by broadcast resolver.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Message<Key: Span> {
-    /// Payload is the data being sent.
-    pub payload: Payload<Key>,
-}
-
-impl<Key: Span> Write for Message<Key> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.payload.write(buf);
-    }
-}
-
-impl<Key: Span> EncodeSize for Message<Key> {
-    fn encode_size(&self) -> usize {
-        self.payload.encode_size()
-    }
-}
-
-impl<Key: Span> Read for Message<Key> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let payload = Payload::read(buf)?;
-        Ok(Message { payload })
-    }
-}
-
 /// Represents the contents of a message used by broadcast resolver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Payload<Key: Span> {
@@ -44,11 +16,11 @@ impl<Key: Span> Write for Payload<Key> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::Request(key) => {
-                buf.put_u8(0);
+                0u8.write(buf);
                 key.write(buf);
             }
             Payload::Response { key, data } => {
-                buf.put_u8(1);
+                1u8.write(buf);
                 key.write(buf);
                 data.write(buf);
             }

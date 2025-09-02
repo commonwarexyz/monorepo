@@ -1,15 +1,28 @@
-use super::{config::Config, ingress::{Mailbox, Message}, wire, Coordinator, Producer};
+use super::{
+    config::Config,
+    ingress::{Mailbox, Message},
+    wire, Coordinator, Producer,
+};
 use crate::Consumer;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
-use commonware_p2p::{utils::codec::{wrap, WrappedSender}, Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::codec::{wrap, WrappedSender},
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::Span;
-use futures::{channel::{mpsc, oneshot}, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    StreamExt,
+};
 use governor::clock::Clock as GClock;
 use rand::Rng;
-use std::{collections::{BTreeSet, HashMap}, marker::PhantomData};
+use std::{
+    collections::{BTreeSet, HashMap},
+    marker::PhantomData,
+};
 use tracing::{debug, error, trace, warn};
 
 /// Manages incoming and outgoing broadcast requests.
@@ -22,6 +35,7 @@ pub struct Engine<
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
+    H: commonware_cryptography::Hasher,
 > {
     /// Context used to spawn tasks, manage time, etc.
     context: E,
@@ -42,7 +56,7 @@ pub struct Engine<
     mailbox: mpsc::Receiver<Message<Key>>,
 
     /// Cache: for each key, set of seen digests to deduplicate notifications
-    seen_hashes: HashMap<Key, BTreeSet<[u8; 32]>>,
+    seen_hashes: HashMap<Key, BTreeSet<H::Digest>>,
 
     /// Tracks keys that should be ignored (canceled)
     canceled: BTreeSet<Key>,
@@ -75,7 +89,8 @@ impl<
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, Key, Con, Pro, NetS, NetR>
+        H: commonware_cryptography::Hasher,
+    > Engine<E, P, D, Key, Con, Pro, NetS, NetR, H>
 {
     /// Creates a new `Engine` with the given configuration and mailbox.
     pub fn new(context: E, cfg: Config<P, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
@@ -133,23 +148,6 @@ impl<
                             self.canceled.remove(&key);
                             self.broadcast_request(&mut sender, key).await;
                         }
-                        Message::Cancel { key } => {
-                            trace!(?key, "mailbox: cancel");
-                            self.canceled.insert(key.clone());
-                            self.seen_hashes.remove(&key);
-                            // Notify consumer of failure semantics
-                            self.consumer.failed(key, ()).await;
-                        }
-                        Message::Retain { predicate } => {
-                            trace!("mailbox: retain");
-                            self.seen_hashes.retain(|k, _| predicate(k));
-                            self.canceled.retain(|k| predicate(k));
-                        }
-                        Message::Clear => {
-                            trace!("mailbox: clear");
-                            self.seen_hashes.clear();
-                            self.canceled.clear();
-                        }
                     }
                 },
 
@@ -172,7 +170,7 @@ impl<
                         }
                     };
 
-                    match msg.payload {
+                    match msg {
                         wire::Payload::Request(key) => self.handle_network_request(&mut sender, peer, key).await,
                         wire::Payload::Response { key, data } => self.handle_network_response(peer, key, data).await,
                     }
@@ -181,7 +179,7 @@ impl<
                 serve = self.serves.next_completed() => {
                     let Serve { peer, key, result } = serve;
                     if let Ok(data) = result {
-                        let msg = wire::Message { payload: wire::Payload::Response { key, data } };
+                        let msg = wire::Payload::Response { key, data };
                         let result = sender.send(Recipients::One(peer.clone()), msg, self.priority_responses).await;
                         match result {
                             Err(err) => error!(?err, ?peer, "serve send failed"),
@@ -194,10 +192,16 @@ impl<
         }
     }
 
-    async fn broadcast_request(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>, key: Key) {
-        let msg = wire::Message { payload: wire::Payload::Request(key.clone()) };
+    async fn broadcast_request(
+        &mut self,
+        sender: &mut WrappedSender<NetS, wire::Payload<Key>>,
+        key: Key,
+    ) {
+        let msg = wire::Payload::Request(key.clone());
         // Broadcast to all peers
-        let result = sender.send(Recipients::All, msg, self.priority_requests).await;
+        let result = sender
+            .send(Recipients::All, msg, self.priority_requests)
+            .await;
         match result {
             Err(err) => error!(?err, "broadcast send failed"),
             Ok(to) if to.is_empty() => warn!("broadcast sent to empty set"),
@@ -205,7 +209,12 @@ impl<
         }
     }
 
-    async fn handle_network_request(&mut self, _sender: &mut WrappedSender<NetS, wire::Message<Key>>, peer: P, key: Key) {
+    async fn handle_network_request(
+        &mut self,
+        _sender: &mut WrappedSender<NetS, wire::Payload<Key>>,
+        peer: P,
+        key: Key,
+    ) {
         trace!(?peer, ?key, "peer request (broadcast)");
         let mut producer = self.producer.clone();
         self.serves.push(async move {
@@ -223,10 +232,10 @@ impl<
             return;
         }
 
-        // Compute 32-byte hash for dedupe (use blake3 via cryptography crate)
-        let digest = commonware_cryptography::blake3::hash(response.as_ref());
+        // Compute hash for dedupe (use Blake3 hasher)
+        let digest = H::hash(response.as_ref());
         let entry = self.seen_hashes.entry(key.clone()).or_default();
-        if !entry.insert(digest.0) {
+        if !entry.insert(digest) {
             // Already seen this content for this key; ignore
             return;
         }
@@ -235,5 +244,3 @@ impl<
         let _ = self.consumer.deliver(key, response).await;
     }
 }
-
-
