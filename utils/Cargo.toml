@@ -27,7 +27,7 @@ num-bigint = { version = "0.4.6", default-features = false }
 
 [features]
 default = ["std"]
-std = ["rand/std", "thiserror/std", "bytes/std", "commonware-codec/std", "futures"]
+std = ["rand/std", "rand/std_rng", "thiserror/std", "bytes/std", "commonware-codec/std", "futures"]
 
 [lib]
 bench = false
