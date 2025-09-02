@@ -11,23 +11,26 @@ Continuously simulate epochs with a small local network.
 
 To run this example, you must first install Rust.
 
-You can run all 10 validators either by opening multiple terminals or with a single command.
+You can run an indexer and all 10 validators either by opening multiple terminals or with a single command.
 
 ### One command (recommended)
 
-This starts one bootstrapper (key 1 on port 3001), then launches keys 2..10 on ports 3002..3010, all in the background, and tears them down cleanly on Ctrl-C.
+This starts one indexer (port 4001), one bootstrapper (key 1 on port 3001), then launches keys 2..10 on ports 3002..3010, all in the background, and tears them down cleanly on Ctrl-C.
 
 ```bash
 bash -c '
   set -euo pipefail
   trap "kill 0" EXIT INT TERM
   export RUST_LOG=info
-  cargo run -p commonware-epocher --release -- --me 1@3001 &
+  # Start indexer
+  cargo run -p commonware-epocher --release --bin commonware-epocher-indexer -- --me 1@4001 &
+  # Start validators (bootstrapper + joiners) and point to indexer
+  cargo run -p commonware-epocher --release --bin commonware-epocher -- --me 1@3001 --indexer http://127.0.0.1:4001 &
   sleep 1
   for i in {2..10}; do
     sleep 1
     port=$((3000 + i))
-    cargo run -p commonware-epocher --release -- --me ${i}@${port} --bootstrappers 1@127.0.0.1:3001 &
+    cargo run -p commonware-epocher --release --bin commonware-epocher -- --me ${i}@${port} --bootstrappers 1@127.0.0.1:3001 --indexer http://127.0.0.1:4001 &
   done
   wait
 '
@@ -40,23 +43,23 @@ Notes:
 
 ### Manual (10 terminals)
 
-Open ten terminals and start one bootstrapper, then nine joiners.
+Open terminals and start one indexer, one bootstrapper, then nine joiners.
+
+Indexer
+```bash
+cargo run -p commonware-epocher --release --bin commonware-epocher-indexer -- --me 1@4001
+```
 
 Validator 1 (Bootstrapper)
 ```bash
-cargo run -p commonware-epocher --release -- --me 1@3001
-```
-
-Validator 2
-```bash
-cargo run -p commonware-epocher --release -- --me 2@3002 --bootstrappers 1@127.0.0.1:3001
+cargo run -p commonware-epocher --release --bin commonware-epocher -- --me 1@3001 --indexer http://127.0.0.1:4001
 ```
 
 ...
 
 Validator 10
 ```bash
-cargo run -p commonware-epocher --release -- --me 10@3010 --bootstrappers 1@127.0.0.1:3001
+cargo run -p commonware-epocher --release --bin commonware-epocher -- --me 10@3010 --bootstrappers 1@127.0.0.1:3001 --indexer http://127.0.0.1:4001
 ```
 
 You should see logs indicating finalized blocks (e.g., `finalized-delivered-to-app`) and epoch transitions.
@@ -65,4 +68,19 @@ You should see logs indicating finalized blocks (e.g., `finalized-delivered-to-a
 
 - `--me KEY@PORT`: required. KEY must be an integer in 1..10. Binds to `127.0.0.1:PORT` and derives the node key from `KEY`.
 - `--bootstrappers KEY@HOST:PORT[,KEY@HOST:PORT...]`: optional. One or more known peers to initially connect to (use `1@127.0.0.1:3001` for local runs).
+ - `--indexer URL[,URL...]`: optional. One or more indexer base URLs to POST finalized `(Finalization, Block)` tuples to (e.g., `http://127.0.0.1:4001`).
+
+### Indexer endpoints
+
+- Start an indexer:
+  ```bash
+  cargo run -p commonware-epocher --release --bin commonware-epocher-indexer -- --me 1@4001
+  ```
+- Point validators at the indexer(s):
+  ```bash
+  cargo run -p commonware-epocher --release --bin commonware-epocher -- --me 2@3002 --bootstrappers 1@127.0.0.1:3001 --indexer http://127.0.0.1:4001
+  ```
+- Indexer API:
+  - `POST /upload` body is `(Finalization<MinSig, Sha256>, Block)` encoded as `application/octet-stream`
+  - `GET /latest` returns up to two most recent finalizations by epoch
 

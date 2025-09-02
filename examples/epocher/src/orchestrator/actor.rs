@@ -1,11 +1,14 @@
 use super::{Config, Mailbox, Message};
-use crate::types::block::{Block, GENESIS_BLOCK};
+use crate::{
+    reporter::Forwarder,
+    types::block::{Block, GENESIS_BLOCK},
+};
 use commonware_codec::EncodeFixed;
 use commonware_consensus::{
     marshal,
     threshold_simplex::{self, types::Context},
     types::Epoch,
-    Automaton, Relay,
+    Automaton, Relay, Reporters,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::MinSig},
@@ -46,6 +49,7 @@ pub struct Orchestrator<
     namespace: Vec<u8>,
     validators: Vec<C::PublicKey>,
     muxer_size: usize,
+    indexers: Vec<String>,
 
     // State
     epoch: Epoch,
@@ -74,6 +78,7 @@ impl<
                 namespace: cfg.namespace,
                 validators: cfg.validators,
                 muxer_size: cfg.muxer_size,
+                indexers: cfg.indexers,
 
                 epoch: 0,
                 consensus_engine: None,
@@ -205,6 +210,7 @@ impl<
             crate::supervisor::Supervisor::new(self.polynomial.clone(), participants, share);
 
         // Initialize consensus engine for this epoch
+        let indexers = self.indexers.clone();
         let engine = threshold_simplex::Engine::new(
             self.context.with_label(&format!("engine-epoch-{epoch}")),
             threshold_simplex::Config {
@@ -212,7 +218,10 @@ impl<
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
-                reporter: self.marshal.clone(),
+                reporter: Reporters::from((
+                    self.marshal.clone(),
+                    Forwarder::new(self.marshal.clone(), indexers),
+                )),
                 supervisor,
                 partition: format!("epocher-consensus-{}-{}", self.signer.public_key(), epoch),
                 mailbox_size: 1024,

@@ -5,8 +5,9 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher,
 };
 
-/// Genesis round and block.
+/// Genesis round.
 pub const GENESIS_ROUND: Round = Round::new(0, 0);
+/// Genesis block.
 pub const GENESIS_BLOCK: Block = Block::new(Sha256Digest([0; 32]), 0, 0);
 
 /// Block type.

@@ -27,10 +27,16 @@ clap = { workspace = true }
 governor = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+reqwest = { workspace = true }
 
 [[bin]]
 name = "commonware-epocher"
 bench = false
 path = "src/bin/validator.rs"
 
-
+[[bin]]
+name = "commonware-epocher-indexer"
+bench = false
+path = "src/bin/indexer.rs"
