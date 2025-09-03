@@ -1135,6 +1135,7 @@ dependencies = [
  "blst",
  "bytes",
  "cfg-if",
+ "chacha20poly1305",
  "commonware-codec",
  "commonware-utils",
  "criterion",
@@ -1147,6 +1148,7 @@ dependencies = [
  "rayon",
  "sha2 0.10.8",
  "thiserror 2.0.12",
+ "x25519-dalek",
  "zeroize",
 ]
 

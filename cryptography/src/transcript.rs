@@ -13,6 +13,8 @@ use rand_core::{
 };
 use zeroize::ZeroizeOnDrop;
 
+use crate::{Signer, Verifier};
+
 /// Provides an implementation of [CryptoRngCore].
 ///
 /// We intentionally don't expose this struct, to make the impl returned by
@@ -252,6 +254,17 @@ impl Transcript {
         Summary {
             hash: self.hasher.finalize(),
         }
+    }
+}
+
+// Utility methods which can be created using the other methods.
+impl Transcript {
+    pub fn sign<S: Signer>(&self, s: &S) -> <S as Signer>::Signature {
+        s.sign(None, self.summarize().hash.as_bytes())
+    }
+
+    pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
+        v.verify(None, self.summarize().hash.as_bytes(), sig)
     }
 }
 
