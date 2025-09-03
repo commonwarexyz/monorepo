@@ -558,7 +558,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // locations.
         let log_fut = async {
             let (offset, _) = self.log.append(section, op).await?;
-            self.locations.append(offset.into()).await?;
+            self.locations.append(offset).await?;
             Ok::<(), Error>(())
         };
 
@@ -649,7 +649,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             // Sync the log and update locations in parallel.
             try_join!(
                 self.log.sync(section).map_err(Error::Journal),
-                self.locations.append(offset.into()).map_err(Error::Journal),
+                self.locations.append(offset).map_err(Error::Journal),
             )?;
             Ok::<(), Error>(())
         };
