@@ -83,16 +83,6 @@ impl BitVec {
         result
     }
 
-    /// Creates a new `BitVec` from a slice of booleans.
-    #[inline]
-    pub fn from_bools(bools: &[bool]) -> Self {
-        let mut bv = Self::with_capacity(bools.len());
-        for &b in bools {
-            bv.push(b);
-        }
-        bv
-    }
-
     /// Returns the number of bits in the vector.
     #[inline]
     pub fn len(&self) -> usize {
@@ -404,27 +394,14 @@ impl Default for BitVec {
     }
 }
 
-impl From<Vec<bool>> for BitVec {
-    fn from(v: Vec<bool>) -> Self {
-        Self::from_bools(&v)
-    }
-}
-
-impl From<&[bool]> for BitVec {
-    fn from(s: &[bool]) -> Self {
-        Self::from_bools(s)
-    }
-}
-
-impl<const N: usize> From<[bool; N]> for BitVec {
-    fn from(arr: [bool; N]) -> Self {
-        Self::from_bools(&arr)
-    }
-}
-
-impl<const N: usize> From<&[bool; N]> for BitVec {
-    fn from(arr: &[bool; N]) -> Self {
-        Self::from_bools(arr)
+impl<T: AsRef<[bool]>> From<T> for BitVec {
+    fn from(t: T) -> Self {
+        let bools = t.as_ref();
+        let mut bv = Self::with_capacity(bools.len());
+        for &b in bools {
+            bv.push(b);
+        }
+        bv
     }
 }
 
@@ -645,9 +622,9 @@ mod tests {
             assert!(bv.get(i).unwrap());
         }
 
-        // Test from_bools()
+        // Test From()
         let bools = [true, false, true, false, true];
-        let bv = BitVec::from_bools(&bools);
+        let bv = BitVec::from(&bools);
         assert_eq!(bv.len(), 5);
         assert_eq!(bv.count_ones(), 3);
 
@@ -757,56 +734,41 @@ mod tests {
     #[test]
     fn test_bitwise_operations() {
         // Create test bitvecs
-        let a = BitVec::from_bools(&[true, false, true, false, true]);
-        let b = BitVec::from_bools(&[true, true, false, false, true]);
+        let a = BitVec::from(&[true, false, true, false, true]);
+        let b = BitVec::from(&[true, true, false, false, true]);
 
         // Test AND
         let mut result = a.clone();
         result.and(&b);
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[true, false, false, false, true])
-        );
+        assert_eq!(result, BitVec::from(&[true, false, false, false, true]));
 
         // Test OR
         let mut result = a.clone();
         result.or(&b);
-        assert_eq!(result, BitVec::from_bools(&[true, true, true, false, true]));
+        assert_eq!(result, BitVec::from(&[true, true, true, false, true]));
 
         // Test XOR
         let mut result = a.clone();
         result.xor(&b);
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[false, true, true, false, false])
-        );
+        assert_eq!(result, BitVec::from(&[false, true, true, false, false]));
 
         // Test INVERT
         let mut result = a.clone();
         result.invert();
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[false, true, false, true, false])
-        );
+        assert_eq!(result, BitVec::from(&[false, true, false, true, false]));
 
         // Test operator overloads
         let a_ref = &a;
         let b_ref = &b;
 
         let result = a_ref & b_ref;
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[true, false, false, false, true])
-        );
+        assert_eq!(result, BitVec::from(&[true, false, false, false, true]));
 
         let result = a_ref | b_ref;
-        assert_eq!(result, BitVec::from_bools(&[true, true, true, false, true]));
+        assert_eq!(result, BitVec::from(&[true, true, true, false, true]));
 
         let result = a_ref ^ b_ref;
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[false, true, true, false, false])
-        );
+        assert_eq!(result, BitVec::from(&[false, true, true, false, false]));
 
         // Test multi-block bitwise operations
         let mut bv_long1 = BitVec::zeroes(70);
@@ -874,7 +836,7 @@ mod tests {
     #[test]
     fn test_count_operations() {
         // Small BitVec
-        let bv = BitVec::from_bools(&[true, false, true, true, false, true]);
+        let bv = BitVec::from(&[true, false, true, true, false, true]);
         assert_eq!(bv.count_ones(), 4);
         assert_eq!(bv.count_zeros(), 2);
 
@@ -905,7 +867,7 @@ mod tests {
     #[test]
     fn test_clear_set_all_invert() {
         // Test on small BitVec
-        let mut bv = BitVec::from_bools(&[true, false, true, false, true]); // 5 bits
+        let mut bv = BitVec::from(&[true, false, true, false, true]); // 5 bits
 
         // Set all
         bv.set_all();
@@ -965,7 +927,7 @@ mod tests {
 
     #[test]
     fn test_codec_roundtrip() {
-        let original = BitVec::from_bools(&[true, false, true, false, true]);
+        let original = BitVec::from(&[true, false, true, false, true]);
         let mut buf = original.encode();
         let decoded = BitVec::decode_cfg(&mut buf, &(..).into()).unwrap();
         assert_eq!(original, decoded);
@@ -973,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_codec_error_invalid_length() {
-        let original = BitVec::from_bools(&[true, false, true, false, true]);
+        let original = BitVec::from(&[true, false, true, false, true]);
         let buf = original.encode();
 
         let mut buf_clone1 = buf.clone();
