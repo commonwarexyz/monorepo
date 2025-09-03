@@ -124,16 +124,19 @@
 //!
 //! ## Non-Uniform Distribution
 //!
-//! The Joint-Feldman DKG protocol does not guarantee a perfectly uniform secret key. An adversary
-//! can introduce O(lg N) bits of bias into the key with O(poly(N)) amount of computation. For uses
-//! like signing, threshold encryption, etc., where the security of the scheme reduces to that of
+//! The Joint-Feldman DKG protocol does not guarantee a uniformly random secret key is generated. An adversary
+//! can introduce `O(lg N)` bits of bias into the key with `O(poly(N))` amount of computation. For uses
+//! like signing, threshold encryption, where the security of the scheme reduces to that of
 //! the underlying assumption that cryptographic constructions using the curve are secure (i.e.
 //! that the Discrete Logarithm Problem, or stronger variants, are hard), then this caveat does
-//! not affect the security of the scheme. This has to be taken into account when integrating this
+//! not affect the security of the scheme. This must be taken into account when integrating this
 //! component into more esoteric schemes.
 //!
 //! This choice was explicitly made, because the best known protocols guaranteeing a uniform output
 //! require an extra round of broadcast.
+//!
+//! c.f. [GKJR02](https://www.researchgate.net/publication/2558744_Revisiting_the_Distributed_Key_Generation_for_Discrete-Log_Based_Cryptosystems),
+//! [BK25](https://eprint.iacr.org/2025/819.pdf).
 //!
 //! # Example
 //!
