@@ -178,7 +178,8 @@ impl Transcript {
         self
     }
 
-    /// Like [Self::commit], except that subsequent calls are considered part of the same message.
+    /// Like [Self::commit], except that subsequent calls to [Self::append] or [Self::commit] are
+    /// considered part of the same message.
     ///
     /// ```
     /// # use commonware_cryptography::transcript::Transcript;
@@ -225,8 +226,7 @@ impl Transcript {
         Rng::new(out.hasher.finalize_xof())
     }
 
-    /// Compress this transcript into a summary.
-    /// ! use commonware_cryptography::transcript::Transcript;
+    /// Extract a compact summary from this transcript.
     ///
     /// This can be used to compare transcripts for equality:
     /// ```
@@ -234,14 +234,6 @@ impl Transcript {
     /// let s1 = Transcript::new(b"test").commit(b"DATA".as_slice()).summarize();
     /// let s2 = Transcript::new(b"test").commit(b"DATA".as_slice()).summarize();
     /// assert_eq!(s1, s2);
-    /// ```
-    ///
-    /// This can also be used to turn a transcript into a serializable object, to resume later.
-    /// ```
-    /// # use commonware_cryptography::transcript::Transcript;
-    /// // This can be encoded, and, e.g. saved to disk.
-    /// let s = Transcript::new(b"test").commit(b"DATA".as_slice()).summarize();
-    /// let t = Transcript::resume(s);
     /// ```
     pub fn summarize(&self) -> Summary {
         self.assert_committed();
