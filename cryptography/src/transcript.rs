@@ -6,13 +6,6 @@ use rand_core::{
     CryptoRng, CryptoRngCore, RngCore,
 };
 
-fn encode_u64(x: u64) -> (usize, [u8; 9]) {
-    let x = UInt(x);
-    let mut out = [0u8; 9];
-    x.write(&mut out.as_mut_slice());
-    (x.encode_size(), out)
-}
-
 /// Exists to provide an implementation of [CryptoRngCore].
 ///
 /// We intentionally don't expose this struct, to make the impl returned by
@@ -109,8 +102,10 @@ impl Transcript {
     }
 
     fn flush(&mut self) {
-        let (n, bytes) = encode_u64(self.pending);
-        self.hasher.update(&bytes[..n]);
+        let mut pending_bytes = [0u8; 9];
+        let pending = UInt(self.pending);
+        pending.write(&mut &mut pending_bytes[..]);
+        self.hasher.update(&pending_bytes[..pending.encode_size()]);
         self.pending = 0;
     }
 
