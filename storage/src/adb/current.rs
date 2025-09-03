@@ -1233,4 +1233,83 @@ pub mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    #[test_traced("WARN")]
+    pub fn test_current_db_different_pruning_delays_same_root() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create two databases that are identical other than how they are pruned.
+            let db_config_no_pruning = current_db_config("no_pruning_test");
+
+            let db_config_pruning = current_db_config("pruning_test");
+
+            let mut db_no_pruning =
+                CurrentTest::init(context.clone(), db_config_no_pruning.clone())
+                    .await
+                    .unwrap();
+            let mut db_pruning = CurrentTest::init(context.clone(), db_config_pruning.clone())
+                .await
+                .unwrap();
+
+            // Apply identical operations to both databases, but only prune one.
+            const NUM_OPERATIONS: u64 = 1000;
+            for i in 0..NUM_OPERATIONS {
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 1000).to_be_bytes());
+
+                db_no_pruning.update(key, value).await.unwrap();
+                db_pruning.update(key, value).await.unwrap();
+
+                // Commit periodically
+                if i % 50 == 49 {
+                    db_no_pruning.commit().await.unwrap();
+                    db_pruning.commit().await.unwrap();
+                    db_pruning
+                        .prune(db_no_pruning.any.inactivity_floor_loc())
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Final commit
+            db_no_pruning.commit().await.unwrap();
+            db_pruning.commit().await.unwrap();
+
+            // Get roots from both databases
+            let root_no_pruning = db_no_pruning.root(&mut hasher).await.unwrap();
+            let root_pruning = db_pruning.root(&mut hasher).await.unwrap();
+
+            // Verify they generate the same roots
+            assert_eq!(root_no_pruning, root_pruning);
+
+            // Close both databases
+            db_no_pruning.close().await.unwrap();
+            db_pruning.close().await.unwrap();
+
+            // Restart both databases
+            let db_no_pruning = CurrentTest::init(context.clone(), db_config_no_pruning)
+                .await
+                .unwrap();
+            let db_pruning = CurrentTest::init(context.clone(), db_config_pruning)
+                .await
+                .unwrap();
+            assert_eq!(
+                db_no_pruning.inactivity_floor_loc(),
+                db_pruning.inactivity_floor_loc()
+            );
+
+            // Get roots after restart
+            let root_no_pruning_restart = db_no_pruning.root(&mut hasher).await.unwrap();
+            let root_pruning_restart = db_pruning.root(&mut hasher).await.unwrap();
+
+            // Ensure roots still match after restart
+            assert_eq!(root_no_pruning, root_no_pruning_restart);
+            assert_eq!(root_pruning, root_pruning_restart);
+
+            db_no_pruning.destroy().await.unwrap();
+            db_pruning.destroy().await.unwrap();
+        });
+    }
 }
