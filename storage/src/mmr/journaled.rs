@@ -364,38 +364,28 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             );
             journal.destroy().await?;
             init_journal_at_size(context.clone(), journal_config, cfg.lower_bound).await?
-        } else if journal_size <= cfg.upper_bound + 1 {
+        } else {
             debug!(
                 journal_size,
-                cfg.lower_bound,
-                cfg.upper_bound,
-                "Existing journal data within sync range, pruning to lower bound"
+                cfg.upper_bound, "Existing journal data within sync range, pruning to lower bound"
             );
 
-            // Write pinned nodes for new lower bound to metadata
-            let nodes_to_pin = Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound);
-            for pos in nodes_to_pin {
+            // Store pinned nodes for new lower bound to metadata before pruning
+            for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
                 let digest =
                     Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
                 metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
             }
+            journal.prune(cfg.lower_bound).await?;
 
-            journal.prune(cfg.lower_bound).await?;
-            journal
-        } else {
-            debug!(
+            if journal_size > cfg.upper_bound {
+                debug!(
                     journal_size,
-                    cfg.lower_bound,
                     cfg.upper_bound,
-                    "Existing journal data exceeds sync range, pruning to lower bound and rewinding to upper bound"
+                    "Existing journal data exceeds sync range, rewinding to upper bound"
                 );
-            let nodes_to_pin = Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound);
-            for pos in nodes_to_pin {
-                let digest = journal.read(pos).await?;
-                metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
+                journal.rewind(cfg.upper_bound + 1).await?; // +1 because upper_bound is inclusive
             }
-            journal.prune(cfg.lower_bound).await?;
-            journal.rewind(cfg.upper_bound + 1).await?; // +1 because upper_bound is inclusive
             journal.sync().await?;
             journal
         };
