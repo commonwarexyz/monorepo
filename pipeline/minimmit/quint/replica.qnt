@@ -71,7 +71,6 @@ module replica {
     pure def is_view_notarized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
         certificates.exists(v => v.kind == NotarizationKind and v.view == view),
-        // TODO verify this assumption
         certificates.exists(v => v.kind == FinalizationKind and v.view == view)
     }
 
@@ -450,11 +449,11 @@ module replica {
 
                 val certificates = store_certificate.get(id)
 
-                val was_finalized = is_view_finalized(view, certificates) or is_view_finalized_votes(view, store, block)
                 val was_notarized = is_view_notarized(view, certificates) or is_view_notarized_votes(view, store, block)
-                
-                val now_finalized = is_view_finalized_votes(view, new_store, block)
                 val now_notarized = is_view_notarized_votes(view, new_store, block)
+
+                val was_finalized = is_view_finalized(view, certificates) or is_view_finalized_votes(view, store, block)
+                val now_finalized = is_view_finalized_votes(view, new_store, block)
                 
                 val is_new_cert = or {
                     not(was_notarized) and now_notarized,
@@ -529,9 +528,9 @@ module replica {
             not(cert.in(store_certificate.get(id))),
 
             or {
-                cert.kind == FinalizationKind and cert.signatures.size() >= L and not(is_view_finalized(cert.view, certificates)),
-                cert.kind == NotarizationKind and cert.signatures.size() >= M and not(is_view_notarized(cert.view, certificates)),
-                cert.kind == NullificationKind and cert.signatures.size() >= M and not(is_view_nullified(cert.view, certificates))
+                cert.kind == NullificationKind and cert.signatures.size() >= M and not(is_view_nullified(cert.view, certificates)),
+                cert.kind == NotarizationKind  and cert.signatures.size() >= M and not(is_view_notarized(cert.view, certificates)),
+                cert.kind == FinalizationKind  and cert.signatures.size() >= L and not(is_view_finalized(cert.view, certificates)),
             },
             
             // is_new_cert set to true, because this is a certificate and at this moment the view is not nullified, notarized, or finalized
