@@ -1349,10 +1349,7 @@ mod tests {
             };
 
             assert_eq!(synced_db.op_count(), target_db.op_count());
-            assert_eq!(
-                synced_db.inactivity_floor_loc,
-                target_db.inactivity_floor_loc
-            );
+            assert_eq!(synced_db.inactivity_floor_loc, initial_lower_bound);
             assert_eq!(synced_db.inactivity_floor_loc, initial_lower_bound);
             assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
 

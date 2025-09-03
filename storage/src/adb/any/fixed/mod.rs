@@ -89,19 +89,19 @@ pub struct Any<
     ///
     /// # Invariant
     ///
-    /// The number of leaves in this MMR always equals the number of operations in the unpruned
-    /// `log`.
+    /// - The number of leaves in this MMR always equals the number of operations in the unpruned
+    ///   `log`.
+    /// - The MMR is never pruned beyond the inactivity floor.
     pub(crate) mmr: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
-    /// each operation in the log is called its _location_, which is a stable identifier. Pruning is
-    /// indicated by a non-zero value for `pruned_loc`, which provides the location of the first
-    /// operation in the log.
+    /// each operation in the log is called its _location_, which is a stable identifier.
     ///
-    /// # Invariant
+    /// # Invariants
     ///
-    /// An operation's location is always equal to the number of the MMR leaf storing the digest of
-    /// the operation.
+    /// - An operation's location is always equal to the number of the MMR leaf storing the digest
+    ///   of the operation.
+    /// - The log is never pruned beyond the inactivity floor.
     pub(crate) log: Journal<E, Operation<K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
