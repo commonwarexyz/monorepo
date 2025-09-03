@@ -320,7 +320,7 @@ impl<
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Failure recovery relies on this specific order of these three disk-based operations:
         //  (1) commit the any db to disk (which raises the inactivity floor).
-        //  (2) prune the bitmap to the updated pruning boundary and write its state to disk.
+        //  (2) prune the bitmap to the updated inactivity floor and write its state to disk.
         self.commit_ops().await?; // (1)
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());

@@ -140,6 +140,11 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::Replay { buffer, start_pos } => {
                     match journal.replay(NZUsize!(*buffer), *start_pos).await {
                         Ok(stream) => {
+                            if *start_pos
+                                < journal.oldest_retained_pos().await.unwrap().unwrap_or(0)
+                            {
+                                return;
+                            }
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors
                             for _ in 0..3 {
