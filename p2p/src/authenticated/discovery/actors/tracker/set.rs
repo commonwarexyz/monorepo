@@ -2,6 +2,8 @@ use commonware_cryptography::PublicKey;
 use commonware_utils::BitVec;
 use std::collections::HashMap;
 
+const CHUNK_SIZE: usize = 1;
+
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: PublicKey> {
     /// The list of peers, sorted.
@@ -11,7 +13,7 @@ pub struct Set<P: PublicKey> {
     order: HashMap<P, usize>,
 
     /// For each peer, whether I know their peer info or not.
-    knowledge: BitVec,
+    knowledge: BitVec<CHUNK_SIZE>,
 }
 
 impl<P: PublicKey> Set<P> {
@@ -33,7 +35,7 @@ impl<P: PublicKey> Set<P> {
     /// Marks the given peer as known or unknown.
     pub fn update(&mut self, peer: &P, known: bool) -> bool {
         if let Some(idx) = self.order.get(peer) {
-            self.knowledge.set_to(*idx, known);
+            self.knowledge.set_bit(*idx as u64, known);
             return true;
         }
         false
@@ -45,7 +47,7 @@ impl<P: PublicKey> Set<P> {
     }
 
     /// Returns the bit vector indicating which peers are known.
-    pub fn knowledge(&self) -> BitVec {
+    pub fn knowledge(&self) -> BitVec<CHUNK_SIZE> {
         self.knowledge.clone()
     }
 }

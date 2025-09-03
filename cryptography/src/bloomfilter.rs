@@ -20,6 +20,8 @@ const HALF_DIGEST_LEN: usize = 16;
 /// The length of a full [Digest].
 const FULL_DIGEST_LEN: usize = Digest::SIZE;
 
+const CHUNK_SIZE: usize = 1;
+
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
 /// This implementation uses the Kirsch-Mitzenmacher optimization to derive `k` hash functions
@@ -28,7 +30,7 @@ const FULL_DIGEST_LEN: usize = Digest::SIZE;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BloomFilter {
     hashers: u8,
-    bits: BitVec,
+    bits: BitVec<CHUNK_SIZE>,
 }
 
 impl BloomFilter {
@@ -101,7 +103,7 @@ impl Read for BloomFilter {
         if !hashers_cfg.contains(&(hashers as usize)) {
             return Err(CodecError::Invalid("BloomFilter", "invalid hashers"));
         }
-        let bits = BitVec::read_cfg(buf, bits_cfg)?;
+        let bits = BitVec::read_cfg(buf, &bits_cfg)?;
         Ok(Self { hashers, bits })
     }
 }
