@@ -24,7 +24,6 @@ enum CurrentOperation {
     Get { key: RawKey },
     Commit,
     OpCount,
-    OldestRetainedLoc,
     Root,
     RangeProof { start_loc: u64, max_ops: u64 },
     KeyValueProof { key: RawKey },
@@ -55,7 +54,6 @@ fn fuzz(data: FuzzInput) {
             translator: TwoCap,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,
-            pruning_delay: 10,
         };
 
         let mut db = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::init(context.clone(), cfg)
@@ -121,21 +119,6 @@ fn fuzz(data: FuzzInput) {
                         "Operation count mismatch: expected {expected_count}, got {actual_count}");
                 }
 
-                CurrentOperation::OldestRetainedLoc => {
-                    let oldest_loc = db.oldest_retained_loc();
-                    let current_op_count = db.op_count();
-
-                    if current_op_count == 0 {
-                        assert_eq!(oldest_loc, None, "Expected no oldest location when no operations exist");
-                    } else {
-                        assert!(oldest_loc.is_some(), "Expected Some oldest location when operations exist");
-                        if let Some(loc) = oldest_loc {
-                            assert!(loc <= current_op_count,
-                                "Oldest retained location {loc} should be <= op count {current_op_count}");
-                        }
-                    }
-                }
-
                 CurrentOperation::Commit => {
                     db.commit().await.expect("Commit should not fail");
                     last_committed_op_count = db.op_count();
@@ -166,10 +149,10 @@ fn fuzz(data: FuzzInput) {
                         let adjusted_start = *start_loc % current_op_count;
                         let adjusted_max_ops = (*max_ops % 50).max(1);
 
-                        if let Some(oldest_loc) = db.oldest_retained_loc() {
+                        let oldest_loc = db.inactivity_floor_loc();
                             if adjusted_start >= oldest_loc {
                                 let (proof, ops, chunks) = db
-                                    .range_proof(hasher.inner(), adjusted_start, adjusted_max_ops)
+                                    .range_proof(hasher.inner(), adjusted_start, NZU64!(adjusted_max_ops))
                                     .await
                                     .expect("Range proof should not fail");
 
@@ -179,13 +162,13 @@ fn fuzz(data: FuzzInput) {
                                         &proof,
                                         adjusted_start,
                                         &ops,
-                                        &chunks,
+                                            &chunks,
                                         &current_root
                                     ),
                                     "Range proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}"
                                 );
                             }
-                        }
+
                     }
                 }
 
