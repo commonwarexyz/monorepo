@@ -133,9 +133,7 @@
 //! component into more esoteric schemes.
 //!
 //! This choice was explicitly made, because the best known protocols guaranteeing a uniform output
-//! require an extra round of broadcast.
-//!
-//! c.f. ([GKJR02](https://www.researchgate.net/publication/2558744_Revisiting_the_Distributed_Key_Generation_for_Discrete-Log_Based_Cryptosystems),
+//! require an extra round of broadcast ([GKJR02](https://www.researchgate.net/publication/2558744_Revisiting_the_Distributed_Key_Generation_for_Discrete-Log_Based_Cryptosystems),
 //! [BK25](https://eprint.iacr.org/2025/819)).
 //!
 //! # Example
