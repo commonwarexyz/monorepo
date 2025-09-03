@@ -91,14 +91,17 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    fn start(tag: StartTag, initial_data: Option<&[u8]>) -> Self {
-        let mut hasher = blake3::Hasher::new();
+    fn start(tag: StartTag, summary: Option<Summary>) -> Self {
+        // By starting with an optional key, we basically get to hash in 32 bytes
+        // for free, since they won't affect the number of bytes we can process without
+        // a call to the compression function. So, in many cases where we want to
+        // link a new transcript to a previous history, we take an optional summary.
+        let mut hasher = match summary {
+            Some(s) => blake3::Hasher::new_keyed(s.hash.as_bytes()),
+            None => blake3::Hasher::new(),
+        };
         hasher.update(&[tag as u8]);
-        let mut out = Self { hasher, pending: 0 };
-        if let Some(data) = initial_data {
-            out.commit(data);
-        }
-        out
+        Self { hasher, pending: 0 }
     }
 
     fn flush(&mut self) {
@@ -131,7 +134,9 @@ impl Transcript {
     /// assert_ne!(s1, s2);
     /// ```
     pub fn new(namespace: &[u8]) -> Self {
-        Self::start(StartTag::New, Some(namespace))
+        let mut out = Self::start(StartTag::New, None);
+        out.commit(namespace);
+        out
     }
 
     /// Start a transcript from a summary.
@@ -145,7 +150,7 @@ impl Transcript {
     /// assert_ne!(s1, s2);
     /// ```
     pub fn resume(summary: Summary) -> Self {
-        Self::start(StartTag::Resume, Some(summary.hash.as_bytes()))
+        Self::start(StartTag::Resume, Some(summary))
     }
 
     /// Record data in this transcript.
@@ -201,7 +206,7 @@ impl Transcript {
     /// assert_ne!(t.fork(b"A").summarize(), t.fork(b"B").summarize());
     /// ```
     pub fn fork(&self, label: &'static [u8]) -> Self {
-        let mut out = Self::start(StartTag::Fork, Some(self.summarize().hash.as_bytes()));
+        let mut out = Self::start(StartTag::Fork, Some(self.summarize()));
         out.commit(label);
         out
     }
@@ -215,7 +220,7 @@ impl Transcript {
     /// The label will also affect the noise. Changing the label will change
     /// the stream of bytes generated.
     pub fn noise(&self, label: &'static [u8]) -> impl CryptoRngCore {
-        let mut out = Self::start(StartTag::Noise, Some(self.summarize().hash.as_bytes()));
+        let mut out = Self::start(StartTag::Noise, Some(self.summarize()));
         out.commit(label);
         Rng::new(out.hasher.finalize_xof())
     }
