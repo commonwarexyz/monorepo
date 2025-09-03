@@ -146,28 +146,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        // Align the sizes of the locations journal and MMR.
-        let aligned_size = {
-            let locations_size = locations.size().await?;
-            let mmr_leaves = mmr.leaves();
-            if locations_size > mmr_leaves {
-                warn!(
-                    mmr_leaves,
-                    locations_size, "rewinding misaligned locations journal"
-                );
-                locations.rewind(mmr_leaves).await?;
-                locations.sync().await?;
-                mmr_leaves
-            } else if mmr_leaves > locations_size {
-                warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
-                mmr.pop((mmr_leaves - locations_size) as usize).await?;
-                locations_size
-            } else {
-                locations_size // happy path
-            }
-        };
-        assert_eq!(aligned_size, locations.size().await?);
-        assert_eq!(aligned_size, mmr.leaves());
+        // Align the sizes of locations and mmr.
+        let aligned_size = super::align_mmr_and_locations(&mut mmr, &mut locations).await?;
 
         let mut log = VJournal::<E, Operation<V>>::init(
             context.with_label("log"),
@@ -181,8 +161,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        // Starting from the location corresponding to the last offset in locations, walk back until
-        // we find the first one that exists in the log.
+        // Trim any locations/mmr elements that do not have corresponding operations in log.
         let mut walked_back = 0;
         let mut section_offset = None;
         while aligned_size - walked_back > 0 {
@@ -210,68 +189,66 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             warn!(
                 size = aligned_size,
                 op_count = walked_back,
-                "rewinding locations/mmr elements ahead of log"
+                "trimming locations & mmr elements ahead of log"
             );
             locations.rewind(aligned_size - walked_back).await?;
             locations.sync().await?;
             mmr.pop(walked_back as usize).await?;
         }
 
+        // At this point, the tip of the locations journal & mmr, if they exist, correspond
+        // to a valid log location represented by `section_offset`.
+
         let mut size = aligned_size - walked_back;
         let (section, offset) = if let Some((s, o)) = section_offset {
             (s, o)
         } else {
-            match log.get(0, 0).await? {
-                Some(op) => {
-                    warn!("DB is not empty, but mmr/locations are");
-                    mmr.add_batched(&mut hasher, &op.encode()).await?;
-                    locations.append(0).await?;
-                    size += 1;
-                    (0, 0)
-                }
-                None => {
-                    warn!("DB is empty");
-                    assert!(section_offset.is_none());
-                    assert_eq!(aligned_size, 0);
-                    return Ok(Self {
-                        mmr,
-                        log,
-                        size: 0,
-                        log_items_per_section: cfg.log_items_per_section.get(),
-                        locations,
-                        hasher,
-                        last_commit: None,
-                    });
-                }
-            }
+            // Locations/mmr are empty, so we must replay the entire log to regenerate them.
+            (0, 0)
         };
 
         // Next, replay any log operations that are missing from the other structures, keeping track
         // of the very last operation in the log and its size.
-        let mut op = {
+        let op = {
             let stream = log.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
             pin_mut!(stream);
-            // The above code guarantees that the first operation in the stream must exist, and is
-            // the last op in locations and the MMR.
-            let mut op = stream.next().await.unwrap().unwrap().3;
-            while let Some(result) = stream.next().await {
-                let (section, offset, _, next_op) = result?;
-                let encoded_op = next_op.encode();
-                op = next_op;
-                warn!(
-                    location = size,
-                    section, offset, "adding missing operation to MMR/location map"
-                );
-                mmr.add_batched(&mut hasher, &encoded_op).await?;
-                locations.append(offset).await?;
-                size += 1;
+            let op = stream.next().await;
+            if let Some(op) = op {
+                let mut op = op.expect("operation already known valid").3;
+                while let Some(result) = stream.next().await {
+                    let (section, offset, _, next_op) = result?;
+                    let encoded_op = next_op.encode();
+                    op = next_op;
+                    warn!(
+                        location = size,
+                        section, offset, "adding missing operation to MMR/location map"
+                    );
+                    mmr.add_batched(&mut hasher, &encoded_op).await?;
+                    locations.append(offset).await?;
+                    size += 1;
+                }
+                if mmr.is_dirty() {
+                    mmr.sync(&mut hasher).await?;
+                    locations.sync().await?;
+                }
+                Some(op)
+            } else {
+                warn!("db is empty");
+                None
             }
-            if mmr.is_dirty() {
-                mmr.sync(&mut hasher).await?;
-                locations.sync().await?;
-            }
+        };
 
-            op
+        let Some(mut op) = op else {
+            warn!("db is empty");
+            return Ok(Self {
+                mmr,
+                log,
+                size,
+                locations,
+                log_items_per_section: cfg.log_items_per_section.get(),
+                hasher,
+                last_commit: None,
+            });
         };
 
         // Ensure we still have alignment.
