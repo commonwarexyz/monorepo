@@ -25,6 +25,7 @@ enum SyncOp {
     Update { key: [u8; 32], value: [u8; 32] },
     Delete { key: [u8; 32] },
     Commit,
+    Prune,
 
     // Sync scenarios
     SyncFull { fetch_batch_size: u64 },
@@ -120,6 +121,12 @@ fn fuzz(input: FuzzInput) {
 
                 SyncOp::Commit => {
                     src.commit().await.expect("Commit should not fail");
+                }
+
+                SyncOp::Prune => {
+                    src.prune(src.inactivity_floor_loc())
+                        .await
+                        .expect("Prune should not fail");
                 }
 
                 SyncOp::SyncFull { fetch_batch_size } => {
