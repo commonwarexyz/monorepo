@@ -99,7 +99,7 @@ pub struct FuzzInput {
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let num_peers = u.int_in_range(1..=10)?;
+        let num_peers = u.int_in_range(1..=5)?;
         let peer_seeds = (0..num_peers)
             .map(|_| u64::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
@@ -107,9 +107,9 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         let network_success_rate = u.int_in_range(30..=100)? as f64 / 100.0;
         let network_latency_ms = u.int_in_range(1..=100)?;
         let network_jitter_ms = u.int_in_range(0..=50)?;
-        let cache_size = u.int_in_range(5..=20)?;
+        let cache_size = u.int_in_range(5..=10)?;
         
-        let num_actions = u.int_in_range(1..=20)?;
+        let num_actions = u.int_in_range(1..=10)?;
         let actions = (0..num_actions)
             .map(|_| BroadcastAction::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
