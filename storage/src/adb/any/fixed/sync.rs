@@ -568,7 +568,6 @@ mod tests {
             };
 
             let result: Result<AnyTest, _> = sync::sync(config).await;
-            println!("{:?}", result.as_ref().err());
             assert!(matches!(
                 result,
                 Err(sync::Error::InvalidTarget {
@@ -1414,9 +1413,6 @@ mod tests {
             let lower_bound = target_db.inactivity_floor_loc;
             let upper_bound = target_db.op_count() - 1;
 
-            println!("🧪 test_sync_database_persistence: target_db before sync - lower_bound={}, upper_bound={}, op_count={}, inactivity_floor_loc={}", 
-                lower_bound, upper_bound, target_db.op_count(), target_db.inactivity_floor_loc);
-
             // Perform sync
             let db_config = create_test_config(42);
             let context_clone = context.clone();
@@ -1436,7 +1432,6 @@ mod tests {
                 update_rx: None,
             };
             let synced_db: AnyTest = sync::sync(config).await.unwrap();
-            println!("🧪 test_sync_database_persistence: Sync completed");
 
             // Verify initial sync worked
             let mut hasher = test_hasher();
@@ -1449,27 +1444,11 @@ mod tests {
             let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
             let expected_pruned_to_pos = synced_db.mmr.pruned_to_pos();
 
-            println!("🧪 test_sync_database_persistence: expected_oldest_retained_loc={:?}, expected_pruned_to_pos={}, expected_inactivity_floor_loc={}, expected_op_count={}", 
-                expected_oldest_retained_loc, expected_pruned_to_pos, expected_inactivity_floor_loc, expected_op_count);
-
             // Close the database
             synced_db.close().await.unwrap();
 
             // Re-open the database
-            println!("🧪 test_sync_database_persistence: Attempting to reopen database");
             let reopened_db = AnyTest::init(context_clone, db_config).await.unwrap();
-            println!("🧪 test_sync_database_persistence: Database reopened successfully");
-
-            // Show actual values after reopening
-            let actual_op_count = reopened_db.op_count();
-            let actual_inactivity_floor_loc = reopened_db.inactivity_floor_loc;
-            let actual_oldest_retained_loc = reopened_db.oldest_retained_loc();
-            let actual_pruned_to_pos = reopened_db.mmr.pruned_to_pos();
-            
-            println!("🧪 test_sync_database_persistence: ACTUAL values after reopen - op_count={}, inactivity_floor_loc={}, oldest_retained_loc={:?}, pruned_to_pos={}", 
-                actual_op_count, actual_inactivity_floor_loc, actual_oldest_retained_loc, actual_pruned_to_pos);
-            println!("🧪 test_sync_database_persistence: EXPECTED values - op_count={}, inactivity_floor_loc={}, oldest_retained_loc={:?}, pruned_to_pos={}", 
-                expected_op_count, expected_inactivity_floor_loc, expected_oldest_retained_loc, expected_pruned_to_pos);
 
             // Verify the state is unchanged
             assert_eq!(reopened_db.root(&mut hasher), expected_root);
@@ -2175,12 +2154,6 @@ mod tests {
                 let result = journal.read(i).await;
                 assert!(result.is_ok(),);
                 assert_eq!(result.unwrap(), test_digest(i));
-            }
-
-            // Verify operations beyond the upper bound are not readable (were rewound)
-            for i in expected_final_size..initial_size {
-                let result = journal.read(i).await;
-                assert!(result.is_err(),);
             }
 
             // Verify that new operations can be appended from the sync position

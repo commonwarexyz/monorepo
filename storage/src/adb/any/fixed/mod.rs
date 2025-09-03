@@ -174,7 +174,6 @@ impl<
             Self::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
         let oldest_retained_loc = read_oldest_retained_loc(&metadata);
 
-        // let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
         let inactivity_floor_loc = Self::build_snapshot_from_log(
             oldest_retained_loc,
             &log,
@@ -250,14 +249,16 @@ impl<
         let expected_oldest_blob = metadata_oldest_retained_loc / cfg.log_items_per_blob.get();
         if let Some(actual_oldest_blob) = log.blobs.first_key_value().map(|(k, _)| k) {
             if expected_oldest_blob != *actual_oldest_blob {
+                let actual_oldest_loc = actual_oldest_blob * cfg.log_items_per_blob.get();
                 warn!(
                     expected_oldest_blob,
-                    actual_oldest_blob, "expected oldest blob does not match log's oldest blob"
+                    actual_oldest_blob,
+                    actual_oldest_loc,
+                    "expected oldest blob does not match log's oldest blob; setting oldest_retained_loc"
                 );
+                write_oldest_retained_loc(&mut metadata, actual_oldest_loc);
+                metadata.sync().await?;
             }
-            let actual_oldest_loc = actual_oldest_blob * cfg.log_items_per_blob.get();
-            write_oldest_retained_loc(&mut metadata, actual_oldest_loc);
-            metadata.sync().await?;
         }
 
         // Back up over / discard any uncommitted operations in the log.
@@ -715,10 +716,19 @@ impl<
             return Ok(());
         };
 
-        // Update the metadata with the new oldest_retained_loc.
-        write_oldest_retained_loc(&mut self.metadata, target_prune_loc);
-        self.metadata.sync().await?;
+        if target_prune_loc <= self.oldest_retained_loc {
+            return Ok(());
+        }
 
+        // Update the metadata with the new oldest_retained_loc.
+        let target_blob = target_prune_loc / self.log.cfg.items_per_blob.get();
+        let target_blob_start = target_blob * self.log.cfg.items_per_blob.get();
+        if target_blob_start == self.oldest_retained_loc {
+            return Ok(());
+        }
+
+        write_oldest_retained_loc(&mut self.metadata, target_blob_start);
+        self.metadata.sync().await?;
         if !self.log.prune(target_prune_loc).await? {
             return Ok(());
         }
@@ -729,6 +739,7 @@ impl<
             .oldest_retained_pos()
             .await?
             .expect("oldest retained loc known to be non-none since db is non-empty");
+        assert_eq!(oldest_retained_loc, target_blob_start);
         self.oldest_retained_loc = oldest_retained_loc;
 
         debug!(

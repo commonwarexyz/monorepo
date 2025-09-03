@@ -5,9 +5,9 @@
 //! pruned.
 
 use crate::{
-    adb::any::fixed::sync::{init_journal, init_journal_at_size},
+    adb::any::fixed::sync::init_journal_at_size,
     journal::{
-        fixed::{Config as JConfig, Journal},
+        fixed::{self, Config as JConfig, Journal},
         Error as JError,
     },
     metadata::{Config as MConfig, Metadata},
@@ -236,6 +236,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             ),
             None => 0,
         };
+
         let oldest_retained_pos = journal.oldest_retained_pos().await?.unwrap_or(0);
         if metadata_prune_pos != oldest_retained_pos {
             assert!(metadata_prune_pos >= oldest_retained_pos);
@@ -340,27 +341,70 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///    - Sets in-memory MMR size to `upper_bound+1`
     ///    - Prunes the journal to `lower_bound`
     pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
-        let journal = init_journal(
-            context.with_label("mmr_journal"),
-            JConfig {
-                partition: cfg.config.journal_partition,
-                items_per_blob: cfg.config.items_per_blob,
-                write_buffer: cfg.config.write_buffer,
-                buffer_pool: cfg.config.buffer_pool.clone(),
-            },
-            cfg.lower_bound,
-            cfg.upper_bound,
-        )
-        .await?;
-        let journal_size = journal.size().await?;
-        assert!(journal_size <= cfg.upper_bound + 1);
-
         // Open the metadata.
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
         };
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+
+        let journal_config = JConfig {
+            partition: cfg.config.journal_partition,
+            items_per_blob: cfg.config.items_per_blob,
+            write_buffer: cfg.config.write_buffer,
+            buffer_pool: cfg.config.buffer_pool.clone(),
+        };
+        let mut journal =
+            fixed::Journal::<E, H::Digest>::init(context.clone(), journal_config.clone()).await?;
+        let journal_size = journal.size().await?;
+        let journal = if journal_size <= cfg.lower_bound {
+            debug!(
+                journal_size,
+                cfg.lower_bound, "Existing journal data is stale, re-initializing in pruned state"
+            );
+            journal.destroy().await?;
+            init_journal_at_size(context.clone(), journal_config, cfg.lower_bound).await?
+        } else if journal_size <= cfg.upper_bound + 1 {
+            debug!(
+                journal_size,
+                cfg.lower_bound,
+                cfg.upper_bound,
+                "Existing journal data within sync range, pruning to lower bound"
+            );
+
+            // Write pinned nodes for new lower bound to metadata
+            let nodes_to_pin = Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound);
+            for pos in nodes_to_pin {
+                let digest =
+                    Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
+            }
+
+            journal.prune(cfg.lower_bound).await?;
+            journal
+        } else {
+            debug!(
+                    journal_size,
+                    cfg.lower_bound,
+                    cfg.upper_bound,
+                    "Existing journal data exceeds sync range, pruning to lower bound and rewinding to upper bound"
+                );
+            let nodes_to_pin = Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound);
+            for pos in nodes_to_pin {
+                let digest = journal.read(pos).await?;
+                metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
+            }
+            journal.prune(cfg.lower_bound).await?;
+            journal.rewind(cfg.upper_bound + 1).await?; // +1 because upper_bound is inclusive
+            journal.sync().await?;
+            journal
+        };
+        let journal_size = journal.size().await?;
+        assert!(journal_size <= cfg.upper_bound + 1);
+        assert!(journal_size >= cfg.lower_bound);
+
+        let journal_size = journal.size().await?;
+        assert!(journal_size <= cfg.upper_bound + 1);
 
         // Write the pruning boundary.
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
@@ -700,7 +744,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         self.journal.prune(pos).await?;
         self.mem_mmr.add_pinned_nodes(pinned_nodes);
-        println!("🔧 MMR prune_to_pos: Pruned to pos={}", pos);
         self.pruned_to_pos = pos;
 
         Ok(())
