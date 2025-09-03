@@ -1466,6 +1466,7 @@ pub(super) mod test {
             .unwrap();
 
             // Check the recovered state is correct.
+            let oldest_retained_loc = log.oldest_retained_pos().await.unwrap().unwrap_or(0);
             let db = AnyTest {
                 mmr,
                 log,

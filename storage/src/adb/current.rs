@@ -1231,6 +1231,10 @@ pub mod test {
             assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
             let recovered_pruning_loc = db.any.oldest_retained_loc().unwrap();
+            println!(
+                "recovered_pruning_loc: {} <= {}",
+                recovered_pruning_loc, committed_pruning_loc
+            );
             assert!(recovered_pruning_loc <= committed_pruning_loc);
             assert!(recovered_pruning_loc <= db.any.inactivity_floor_loc());
 

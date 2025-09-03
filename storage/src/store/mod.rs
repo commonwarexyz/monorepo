@@ -108,7 +108,7 @@ use crate::{
 };
 use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
-use commonware_utils::{sequence::U32, Array, NZUsize};
+use commonware_utils::{Array, NZUsize};
 use futures::{pin_mut, try_join, StreamExt};
 use std::{
     collections::HashMap,
@@ -188,7 +188,7 @@ where
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
-    locations: FJournal<E, U32>,
+    locations: FJournal<E, u32>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -390,7 +390,7 @@ where
         }
         last_commit -= 1;
         let section = last_commit / self.log_items_per_section;
-        let offset = self.locations.read(last_commit).await?.into();
+        let offset = self.locations.read(last_commit).await?;
         let Some(Operation::CommitFloor(metadata, _)) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
@@ -500,7 +500,7 @@ where
 
                         if self.log_size > locations_size {
                             warn!(section, offset, "operation was missing from location map");
-                            self.locations.append(offset.into()).await?;
+                            self.locations.append(offset).await?;
                             locations_size += 1;
                         }
 
@@ -642,7 +642,7 @@ where
         }
 
         let section = loc / self.log_items_per_section;
-        let offset = self.locations.read(loc).await?.into();
+        let offset = self.locations.read(loc).await?;
 
         // Get the operation from the log at the specified section and offset.
         let Some(op) = self.log.get(section, offset).await? else {
