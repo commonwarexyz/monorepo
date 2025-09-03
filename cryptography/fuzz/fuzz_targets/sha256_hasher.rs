@@ -151,7 +151,7 @@ fn fuzz(input: FuzzInput) {
         3 => fuzz_diff_hash(&input.data),
         4 => fuzz_encode_decode(&input.data),
         5 => fuzz_default_clone(),
-        6 => fuzz_fill_and_format(input.data.get(0).copied().unwrap_or(0)),
+        6 => fuzz_fill_and_format(input.data.first().copied().unwrap_or(0)),
         7 => fuzz_empty(),
         8 => fuzz_zeroize(),
         _ => unreachable!(),
