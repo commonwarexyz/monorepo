@@ -270,7 +270,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     }
 }
 
-#[cfg(all(test, feature = "mocks"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
