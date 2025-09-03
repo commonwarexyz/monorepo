@@ -44,6 +44,7 @@ enum FuzzInput {
     BitOrOp(Vec<bool>, Vec<bool>),
     BitXorOp(Vec<bool>, Vec<bool>),
     Codec(Vec<bool>),
+    CodecWithTrailingBits(usize, Vec<u8>),
     IteratorOps(Vec<bool>),
 }
 
@@ -260,17 +261,29 @@ fn fuzz(input: Vec<FuzzInput>) {
             FuzzInput::FromArrayBool(bools) => {
                 let ln = bools.len();
                 if ln <= MAX_SIZE {
-                    let v: BitVec = bools.into();
+                    let v: BitVec = bools.clone().into();
                     assert_eq!(v.len(), ln);
+
+                    if ln >= 8 {
+                        let arr: [bool; 8] = bools[..8].try_into().unwrap();
+                        let v: BitVec = arr.into();
+                        assert_eq!(v.len(), 8);
+                    }
                 }
             }
 
             FuzzInput::FromRefArrayBool(bools) => {
                 let ln = bools.len();
                 if ln <= MAX_SIZE {
-                    let arr = bools;
+                    let arr = bools.clone();
                     let v: BitVec = (&(*arr)).into();
                     assert_eq!(v.len(), arr.len());
+
+                    if ln >= 65 {
+                        let arr: [bool; 65] = bools[..65].try_into().unwrap();
+                        let v: BitVec = (&arr).into();
+                        assert_eq!(v.len(), 65);
+                        }
                 }
             }
 
