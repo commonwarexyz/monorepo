@@ -19,7 +19,7 @@ use governor::Quota;
 use rand::{rngs::StdRng, SeedableRng};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    str::FromStr,
+    str::FromStr, time::Duration,
 };
 
 fn main() {
@@ -175,11 +175,15 @@ fn main() {
             orchestrator::Orchestrator::new(context.with_label("orchestrator"), orchestrator_cfg);
 
         // Start the indexer poller (if indexers configured)
+        let poller_cfg = poller::Config {
+            identity,
+            indexers: indexers.clone(),
+            orchestrator: orchestrator.clone(),
+            poll_interval: Duration::from_secs(15),
+        };
         let poller_actor = poller::Poller::new(
             context.with_label("poller"),
-            identity,
-            indexers,
-            orchestrator.clone(),
+            poller_cfg,
         );
 
         // Start the actors

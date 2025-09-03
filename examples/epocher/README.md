@@ -84,3 +84,16 @@ You should see logs indicating finalized blocks (e.g., `finalized-delivered-to-a
   - `POST /upload` body is `(Finalization<MinSig, Sha256>, Block)` encoded as `application/octet-stream`
   - `GET /latest` returns up to two most recent finalizations by epoch
 
+### Chaos restarts (random validator restarts)
+
+To simulate validators independently going offline/online and catching up via marshal + poller, use the chaos runner. It keeps the indexer and bootstrap validator (key 1) running, and randomly restarts validators 2..10 with independent 0–10 minute up/down cycles.
+
+```bash
+./examples/epocher/chaos.sh
+```
+
+Notes:
+- Uses ports 3001..3010 for validators and 4001 for the indexer, matching the defaults above.
+- Logs will show validators rejoining and resuming epochs; finalized blocks should continue progressing.
+- Stop with Ctrl-C; all child processes are cleaned up.
+
