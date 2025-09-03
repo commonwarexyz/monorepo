@@ -165,9 +165,9 @@ fn fuzz(input: Vec<FuzzInput>) {
 
             FuzzInput::PutSamePriority { items, priority } => {
                 // Insert multiple items with same priority to trigger Entry::partial_cmp
-                for item in items.iter().take(3) {
+                for item in items.into_iter().take(3) {
                     set.put(item.clone(), priority);
-                    expected_items.insert(item.clone());
+                    expected_items.insert(item);
                 }
             }
         }

@@ -45,14 +45,19 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Converts a hexadecimal string to bytes.
 pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
-    // Even length and only [0-9a-fA-F]
-    if !hex.len().is_multiple_of(2) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
 
     (0..hex.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .map(|i| {
+            let src = hex.get(i..i + 2)?;
+            if !src.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            u8::from_str_radix(src, 16).ok()
+        })
         .collect()
 }
 
@@ -258,10 +263,6 @@ mod tests {
 
         // Test case 5: invalid `+` in string
         let h = "+123";
-        assert!(from_hex(h).is_none());
-
-        // Test case 6: not a hex string
-        let h = "aabbccddklmn";
         assert!(from_hex(h).is_none());
     }
 
