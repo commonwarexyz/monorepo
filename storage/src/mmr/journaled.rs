@@ -5,7 +5,7 @@
 //! pruned.
 
 use crate::{
-    adb::any::fixed::sync::{init_journal, init_journal_at_size},
+    adb::any::fixed::sync::init_journal_at_size,
     journal::{
         fixed::{Config as JConfig, Journal},
         Error as JError,
@@ -236,6 +236,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             ),
             None => 0,
         };
+
         let oldest_retained_pos = journal.oldest_retained_pos().await?.unwrap_or(0);
         if metadata_prune_pos != oldest_retained_pos {
             assert!(metadata_prune_pos >= oldest_retained_pos);
@@ -340,27 +341,57 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///    - Sets in-memory MMR size to `upper_bound+1`
     ///    - Prunes the journal to `lower_bound`
     pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
-        let journal = init_journal(
-            context.with_label("mmr_journal"),
-            JConfig {
-                partition: cfg.config.journal_partition,
-                items_per_blob: cfg.config.items_per_blob,
-                write_buffer: cfg.config.write_buffer,
-                buffer_pool: cfg.config.buffer_pool.clone(),
-            },
-            cfg.lower_bound,
-            cfg.upper_bound,
-        )
-        .await?;
-        let journal_size = journal.size().await?;
-        assert!(journal_size <= cfg.upper_bound + 1);
-
         // Open the metadata.
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
         };
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+
+        let journal_config = JConfig {
+            partition: cfg.config.journal_partition,
+            items_per_blob: cfg.config.items_per_blob,
+            write_buffer: cfg.config.write_buffer,
+            buffer_pool: cfg.config.buffer_pool.clone(),
+        };
+        let mut journal =
+            Journal::<E, H::Digest>::init(context.clone(), journal_config.clone()).await?;
+        let journal_size = journal.size().await?;
+        let journal = if journal_size <= cfg.lower_bound {
+            debug!(
+                journal_size,
+                cfg.lower_bound, "Existing journal data is stale, re-initializing in pruned state"
+            );
+            journal.destroy().await?;
+            init_journal_at_size(context.clone(), journal_config, cfg.lower_bound).await?
+        } else {
+            debug!(
+                journal_size,
+                cfg.upper_bound, "Existing journal data within sync range, pruning to lower bound"
+            );
+
+            // Store pinned nodes for new lower bound to metadata before pruning
+            for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
+                let digest =
+                    Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
+            }
+            journal.prune(cfg.lower_bound).await?;
+
+            if journal_size > cfg.upper_bound {
+                debug!(
+                    journal_size,
+                    cfg.upper_bound,
+                    "Existing journal data exceeds sync range, rewinding to upper bound"
+                );
+                journal.rewind(cfg.upper_bound + 1).await?; // +1 because upper_bound is inclusive
+            }
+            journal.sync().await?;
+            journal
+        };
+        let journal_size = journal.size().await?;
+        assert!(journal_size <= cfg.upper_bound + 1);
+        assert!(journal_size >= cfg.lower_bound);
 
         // Write the pruning boundary.
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
@@ -394,6 +425,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound)
                 .await?;
         }
+        metadata.sync().await?;
 
         Ok(Self {
             mem_mmr,

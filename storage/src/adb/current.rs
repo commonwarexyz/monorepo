@@ -6,7 +6,7 @@
 
 use crate::{
     adb::{
-        any::fixed::{Any, Config as AConfig},
+        any::fixed::{read_oldest_retained_loc, Any, Config as AConfig},
         Error,
     },
     index::Index,
@@ -42,6 +42,9 @@ pub struct Config<T: Translator> {
 
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
+
+    /// The name of the [RStorage] partition used for the db's metadata.
+    pub db_metadata_partition: String,
 
     /// The name of the [RStorage] partition used to persist the (pruned) log of operations.
     pub log_journal_partition: String,
@@ -136,6 +139,7 @@ impl<
         let cfg = AConfig {
             mmr_journal_partition: config.mmr_journal_partition,
             mmr_metadata_partition: config.mmr_metadata_partition,
+            db_metadata_partition: config.db_metadata_partition,
             mmr_items_per_blob: config.mmr_items_per_blob,
             mmr_write_buffer: config.mmr_write_buffer,
             log_journal_partition: config.log_journal_partition,
@@ -157,8 +161,8 @@ impl<
 
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
-        let (mut mmr, log) =
-            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
+        let (mut mmr, log, metadata) =
+            Any::<_, _, _, _, T>::init_components(context.clone(), cfg, &mut hasher).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
         let mmr_pruned_pos = mmr.pruned_to_pos();
@@ -223,13 +227,14 @@ impl<
                 .await?;
         }
 
-        let oldest_retained_loc = log.oldest_retained_pos().await?.unwrap_or(0);
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
         let any = Any {
             mmr,
             log,
             snapshot,
             inactivity_floor_loc,
             oldest_retained_loc,
+            metadata,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
         };
@@ -782,6 +787,7 @@ pub mod test {
         Config {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
             mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            db_metadata_partition: format!("{partition_prefix}_db_metadata_partition"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("{partition_prefix}_partition_prefix"),
@@ -1225,10 +1231,7 @@ pub mod test {
             assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
             let recovered_pruning_loc = db.any.oldest_retained_loc().unwrap();
-            println!(
-                "recovered_pruning_loc: {} <= {}",
-                recovered_pruning_loc, committed_pruning_loc
-            );
+            println!("recovered_pruning_loc: {recovered_pruning_loc} <= {committed_pruning_loc}",);
             assert!(recovered_pruning_loc <= committed_pruning_loc);
             assert!(recovered_pruning_loc <= db.any.inactivity_floor_loc());
 

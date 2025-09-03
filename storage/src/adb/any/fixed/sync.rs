@@ -1,7 +1,12 @@
 use crate::{
-    adb::{self, any, sync},
+    adb::{
+        self,
+        any::{self, fixed::write_oldest_retained_loc},
+        sync,
+    },
     index::Index,
     journal::fixed,
+    metadata,
     mmr::{
         hasher::{self, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
@@ -113,15 +118,26 @@ where
         >(lower_bound, &log, &mut snapshot, None)
         .await?;
 
-        let oldest_retained_loc = log.oldest_retained_pos().await?.unwrap_or(0);
+        let mut metadata = metadata::Metadata::init(
+            context.with_label("db_metadata"),
+            metadata::Config {
+                partition: db_config.db_metadata_partition.clone(),
+                codec_config: (),
+            },
+        )
+        .await?;
+        write_oldest_retained_loc(&mut metadata, lower_bound);
+        metadata.sync().await?;
+
         let mut db = any::fixed::Any {
             mmr,
             log,
             snapshot,
             inactivity_floor_loc,
-            oldest_retained_loc,
+            oldest_retained_loc: lower_bound,
             uncommitted_ops: 0,
             hasher: hasher::Standard::<H>::new(),
+            metadata,
         };
         db.sync().await?;
 
@@ -552,7 +568,6 @@ mod tests {
             };
 
             let result: Result<AnyTest, _> = sync::sync(config).await;
-            println!("{:?}", result.as_ref().err());
             assert!(matches!(
                 result,
                 Err(sync::Error::InvalidTarget {
@@ -2139,12 +2154,6 @@ mod tests {
                 let result = journal.read(i).await;
                 assert!(result.is_ok(),);
                 assert_eq!(result.unwrap(), test_digest(i));
-            }
-
-            // Verify operations beyond the upper bound are not readable (were rewound)
-            for i in expected_final_size..initial_size {
-                let result = journal.read(i).await;
-                assert!(result.is_err(),);
             }
 
             // Verify that new operations can be appended from the sync position

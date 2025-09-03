@@ -50,6 +50,7 @@ fn fuzz(data: FuzzInput) {
             mmr_items_per_blob: NZU64!(500000),
             mmr_write_buffer: NZUsize!(1024),
             mmr_metadata_partition: "test_adb_mmr_metadata".into(),
+            db_metadata_partition: "test_adb_db_metadata".into(),
             log_journal_partition: "test_adb_log_journal".into(),
             log_items_per_blob: NZU64!(500000),
             log_write_buffer: NZUsize!(1024),
