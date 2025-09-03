@@ -4,6 +4,7 @@ use commonware_cryptography::sha256::Digest;
 
 pub mod application;
 pub mod orchestrator;
+pub mod poller;
 pub mod reporter;
 pub mod supervisor;
 pub mod types;

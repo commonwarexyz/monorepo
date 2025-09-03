@@ -27,5 +27,5 @@ pub fn height_in_epoch(height: u64, epoch: u64) -> bool {
 
 /// Returns the last height in the epoch.
 pub fn get_last_height(epoch: u64) -> u64 {
-    epoch.saturating_add(1) * BLOCKS_PER_EPOCH
+    epoch.checked_add(1).unwrap() * BLOCKS_PER_EPOCH
 }

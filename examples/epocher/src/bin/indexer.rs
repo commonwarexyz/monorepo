@@ -128,12 +128,14 @@ async fn latest(State(state): State<AppState>) -> impl IntoResponse {
     // Collect up-to the two most-recent finalizations by epoch
     let finals = {
         let guard = state.store.lock().unwrap();
-        guard
+        let mut finals = guard
             .iter()
             .rev()
             .take(2)
             .map(|(_, f)| f.clone())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        finals.sort_by_key(|f| f.proposal.round.epoch());
+        finals
     };
 
     let bytes = finals.encode().freeze();
