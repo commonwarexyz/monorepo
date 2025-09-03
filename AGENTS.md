@@ -506,7 +506,7 @@ pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 
 // Extension traits for additional functionality
 pub trait PrivateKeyExt: PrivateKey {
-    fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self;
+    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self;
 }
 ```
 
