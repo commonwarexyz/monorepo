@@ -70,11 +70,9 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::FromHex { hex_str } => {
             if !hex_str.is_empty() && !hex_str.chars().any(|c| c.is_ascii_hexdigit()) {
                 assert_eq!(from_hex(&hex_str), None)
-            } else {
-                if let Some(decoded) = from_hex(&hex_str) {
-                    let re_encoded = hex(&decoded);
-                    assert_eq!(from_hex(&re_encoded), Some(decoded));
-                }
+            } else if let Some(decoded) = from_hex(&hex_str) {
+                let re_encoded = hex(&decoded);
+                assert_eq!(from_hex(&re_encoded), Some(decoded));
             }
         }
 
