@@ -14,59 +14,15 @@ use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use bytes::{Buf, BufMut};
 use libfuzzer_sys::fuzz_target;
+use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, time::Duration};
 
-// Newtype wrapper for PublicKey to enable Arbitrary implementation
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FuzzPublicKey(PublicKey);
 
-impl From<PublicKey> for FuzzPublicKey {
-    fn from(pk: PublicKey) -> Self {
-        Self(pk)
-    }
-}
-
-impl From<FuzzPublicKey> for PublicKey {
-    fn from(fpk: FuzzPublicKey) -> Self {
-        fpk.0
-    }
-}
-
-impl<'a> arbitrary::Arbitrary<'a> for FuzzPublicKey {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let seed = u64::arbitrary(u)?; //change this seed to a u128 for bigger range
-        Ok(FuzzPublicKey(PrivateKey::from_seed(seed).public_key()))
-    }
-}
-
-// Specification for Recipients generation that uses peer indices
-#[derive(Clone, Debug)]
-pub enum FuzzRecipientsSpec {
+#[derive(Clone, Debug, Arbitrary)]
+pub enum RecipientPattern {
     All,
-    Some { peer_indices: Vec<usize> },
-    One { peer_index: usize },
-}
-
-impl<'a> arbitrary::Arbitrary<'a> for FuzzRecipientsSpec {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let variant = u.int_in_range(0..=2)?;
-        match variant {
-            0 => Ok(FuzzRecipientsSpec::All),
-            1 => {
-                // Generate Some variant with random peer indices (will be resolved later)
-                let subset_size = u.int_in_range(1..=4)?; // Max 4 peers in subset
-                let peer_indices = (0..subset_size)
-                    .map(|_| u.int_in_range(0..=3))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(FuzzRecipientsSpec::Some { peer_indices })
-            }
-            _ => {
-                // Generate One variant with random peer index
-                let peer_index = u.int_in_range(0..=3)?; // Will be clamped to actual peer count
-                Ok(FuzzRecipientsSpec::One { peer_index })
-            }
-        }
-    }
+    Some(u64),
+    One(u64),
 }
 
 
@@ -81,7 +37,9 @@ pub struct FuzzMessage {
 impl Digestible for FuzzMessage {
     type Digest = commonware_cryptography::sha256::Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(&self.content)
+        let mut combined = self.commitment.clone();
+        combined.extend_from_slice(&self.content);
+        Sha256::hash(&combined)
     }
 }
 
@@ -119,76 +77,15 @@ impl commonware_codec::Read for FuzzMessage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Arbitrary)]
 enum BroadcastAction {
-    SendMessage { peer_index: usize, recipients: FuzzRecipientsSpec, message: FuzzMessage },
+    SendMessage { peer_index: usize, recipients: RecipientPattern, message: FuzzMessage },
     Subscribe { peer_index: usize, sender: Option<usize>, commitment: Vec<u8>, digest: Option<Vec<u8>> },
     Get { peer_index: usize, sender: Option<usize>, commitment: Vec<u8>, digest: Option<Vec<u8>> },
     Sleep { duration_ms: u64 },
 }
 
 
-impl<'a> arbitrary::Arbitrary<'a> for BroadcastAction {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let action_type = u.int_in_range(0..=3)?;
-        match action_type {
-            0 => {
-                let peer_index = u.int_in_range(0..=3)?; // Will be clamped to actual peer count
-                let recipients = FuzzRecipientsSpec::arbitrary(u)?;
-                let message = FuzzMessage::arbitrary(u)?;
-                Ok(BroadcastAction::SendMessage { peer_index, recipients, message })
-            }
-            1 => {
-                let peer_index = u.int_in_range(0..=3)?; // Will be clamped to actual peer count
-                let sender = if u.int_in_range(0..=1)? == 0 {
-                    None
-                } else {
-                    Some(u.int_in_range(0..=3)?) // Sender peer index
-                };
-                let commitment_len = u.int_in_range(1..=64)?;
-                let commitment = (0..commitment_len)
-                    .map(|_| u8::arbitrary(u))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let digest = if u.int_in_range(0..=1)? == 0 {
-                    None
-                } else {
-                    let digest_len = u.int_in_range(1..=32)?;
-                    let digest = (0..digest_len)
-                        .map(|_| u8::arbitrary(u))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Some(digest)
-                };
-                Ok(BroadcastAction::Subscribe { peer_index, sender, commitment, digest })
-            }
-            2 => {
-                let peer_index = u.int_in_range(0..=3)?; // Will be clamped to actual peer count
-                let sender = if u.int_in_range(0..=1)? == 0 {
-                    None
-                } else {
-                    Some(u.int_in_range(0..=3)?) // Sender peer index
-                };
-                let commitment_len = u.int_in_range(1..=64)?;
-                let commitment = (0..commitment_len)
-                    .map(|_| u8::arbitrary(u))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let digest = if u.int_in_range(0..=1)? == 0 {
-                    None
-                } else {
-                    let digest_len = u.int_in_range(1..=32)?;
-                    let digest = (0..digest_len)
-                        .map(|_| u8::arbitrary(u))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Some(digest)
-                };
-                Ok(BroadcastAction::Get { peer_index, sender, commitment, digest })
-            }
-            _ => {
-                let duration_ms = u.int_in_range(1..=100)?;
-                Ok(BroadcastAction::Sleep { duration_ms })
-            }
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct FuzzInput {
@@ -202,15 +99,15 @@ pub struct FuzzInput {
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let num_peers = u.int_in_range(1..=4)?;
+        let num_peers = u.int_in_range(1..=10)?;
         let peer_seeds = (0..num_peers)
             .map(|_| u64::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-            
-        let network_success_rate = if u.int_in_range(0..=1)? == 0 { 0.5 } else { 1.0 };
+        //anywhere from 30 to 100% success rate    
+        let network_success_rate = u.int_in_range(30..=100)? as f64 / 100.0;
         let network_latency_ms = u.int_in_range(1..=100)?;
         let network_jitter_ms = u.int_in_range(0..=50)?;
-        let cache_size = u.int_in_range(1..=20)?;
+        let cache_size = u.int_in_range(5..=20)?;
         
         let num_actions = u.int_in_range(1..=20)?;
         let actions = (0..num_actions)
@@ -228,33 +125,24 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn resolve_recipients_spec(
-    spec: &FuzzRecipientsSpec,
-    peers: &[PublicKey],
-) -> Recipients<PublicKey> {
-    match spec {
-        FuzzRecipientsSpec::All => Recipients::All,
-        FuzzRecipientsSpec::Some { peer_indices } => {
-            let mut resolved_peers = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-            for &index in peer_indices {
-                let clamped_index = index % peers.len();
-                if seen.insert(clamped_index) {
-                    resolved_peers.push(peers[clamped_index].clone());
-                }
-            }
-            if resolved_peers.is_empty() {
-                // Fallback to first peer if no valid indices
-                Recipients::One(peers[0].clone())
-            } else if resolved_peers.len() == 1 {
-                Recipients::One(resolved_peers.into_iter().next().unwrap())
-            } else {
-                Recipients::Some(resolved_peers)
-            }
+
+fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipients<PublicKey> {
+    match pattern {
+        RecipientPattern::All => Recipients::All,
+        RecipientPattern::One(seed) => {
+            let index = (*seed as usize) % peers.len();
+            Recipients::One(peers[index].clone())
         }
-        FuzzRecipientsSpec::One { peer_index } => {
-            let clamped_index = peer_index % peers.len();
-            Recipients::One(peers[clamped_index].clone())
+        RecipientPattern::Some(seed) => {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(*seed);
+            let mut shuffled_peers = peers.to_vec();
+            shuffled_peers.shuffle(&mut rng);
+            
+            let count = (seed % peers.len() as u64) as usize;
+            let count = if count == 0 { 1 } else { count }; // Ensure at least 1 peer
+            
+            let peer_slice = shuffled_peers.into_iter().take(count).collect();
+            Recipients::Some(peer_slice)
         }
     }
 }
@@ -326,7 +214,7 @@ fn fuzz(input: FuzzInput) {
                     let peer = peers[clamped_peer_idx].clone();
                     
                     if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
-                        let resolved_recipients = resolve_recipients_spec(&recipients, &peers);
+                        let resolved_recipients = resolve_recipients(&recipients, &peers);
                         let _ = mailbox.broadcast(resolved_recipients, message).await;
                     }
                 }
