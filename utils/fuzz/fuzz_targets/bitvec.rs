@@ -172,7 +172,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             FuzzInput::SetTo(bools, index, value) => {
                 let mut v = BitVec::from(&bools);
                 if index < v.len() {
-                    v.set_bit(index as u64, value);
+                    v.set_bit(index, value);
                     assert_eq!(v.get(index), Some(value));
                 }
             }

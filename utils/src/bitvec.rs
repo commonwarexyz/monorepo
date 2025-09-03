@@ -47,11 +47,11 @@ pub struct BitVec<const CHUNK_SIZE: usize> {
 
     /// The total number of bits currently stored in this bit vector.
     /// This determines the logical length of the bit vector.
-    next_bit: u64,
+    next_bit: usize,
 }
 
 impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
-    pub const CHUNK_SIZE_BITS: u64 = CHUNK_SIZE as u64 * 8;
+    pub const CHUNK_SIZE_BITS: usize = CHUNK_SIZE * 8;
     const EMPTY_CHUNK: [u8; CHUNK_SIZE] = [0u8; CHUNK_SIZE];
     const FULL_CHUNK: [u8; CHUNK_SIZE] = [u8::MAX; CHUNK_SIZE];
 
@@ -95,7 +95,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
         }
         Self {
             storage,
-            next_bit: size as u64,
+            next_bit: size,
         }
     }
 
@@ -112,7 +112,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
         }
         Self {
             storage,
-            next_bit: size as u64,
+            next_bit: size,
         }
     }
 
@@ -140,19 +140,19 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
     ///
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
-    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; CHUNK_SIZE] {
+    pub fn get_chunk(&self, bit_offset: usize) -> &[u8; CHUNK_SIZE] {
         &self.storage[self.chunk_index(bit_offset)]
     }
 
     #[inline]
-    pub(crate) fn chunk_byte_bitmask(bit_offset: u64) -> u8 {
+    pub(crate) fn chunk_byte_bitmask(bit_offset: usize) -> u8 {
         1 << (bit_offset % 8)
     }
 
     /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
     #[inline]
-    pub(crate) fn chunk_byte_offset(bit_offset: u64) -> usize {
-        (bit_offset / 8) as usize % CHUNK_SIZE
+    pub(crate) fn chunk_byte_offset(bit_offset: usize) -> usize {
+        (bit_offset / 8) % CHUNK_SIZE
     }
 
     /// Convert a bit offset into the index of the chunk it belongs to within self.bitmap.
@@ -161,15 +161,15 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
     ///
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
-    pub(crate) fn chunk_index(&self, bit_offset: u64) -> usize {
-        assert!(bit_offset < self.len() as u64, "Index out of bounds");
+    pub(crate) fn chunk_index(&self, bit_offset: usize) -> usize {
+        assert!(bit_offset < self.len(), "Index out of bounds");
         Self::chunk_num(bit_offset)
     }
 
     /// Convert a bit offset into the number of the chunk it belongs to.
     #[inline]
-    pub(crate) fn chunk_num(bit_offset: u64) -> usize {
-        (bit_offset / Self::CHUNK_SIZE_BITS) as usize
+    pub(crate) fn chunk_num(bit_offset: usize) -> usize {
+        bit_offset / Self::CHUNK_SIZE_BITS
     }
 
     /// Prepares the next chunk of the bitmap to preserve the invariant that there is always room
@@ -229,7 +229,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
 
     /// Get the value of a bit from its chunk.
     #[inline]
-    pub fn get_bit_from_chunk(chunk: &[u8; CHUNK_SIZE], bit_offset: u64) -> bool {
+    pub fn get_bit_from_chunk(chunk: &[u8; CHUNK_SIZE], bit_offset: usize) -> bool {
         let byte_offset = Self::chunk_byte_offset(bit_offset);
         let byte = chunk[byte_offset];
         let mask = Self::chunk_byte_bitmask(bit_offset);
@@ -245,10 +245,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
         if index >= self.len() {
             return None;
         }
-        Some(Self::get_bit_from_chunk(
-            self.get_chunk(index as u64),
-            index as u64,
-        ))
+        Some(Self::get_bit_from_chunk(self.get_chunk(index), index))
     }
 
     /// Sets the bit at `index` to 1.
@@ -258,7 +255,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
     /// Panics if `index` is out of bounds.
     #[inline]
     pub fn set(&mut self, index: usize) {
-        self.set_bit(index as u64, true);
+        self.set_bit(index, true);
     }
 
     /// Sets the bit at `index` to 0.
@@ -268,11 +265,11 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
     /// Panics if `index` is out of bounds.
     #[inline]
     pub fn clear(&mut self, index: usize) {
-        self.set_bit(index as u64, false);
+        self.set_bit(index, false);
     }
 
     /// Set the value of the referenced bit.
-    pub fn set_bit(&mut self, bit_offset: u64, bit: bool) {
+    pub fn set_bit(&mut self, bit_offset: usize, bit: bool) {
         let chunk_index = self.chunk_index(bit_offset);
         let chunk = &mut self.storage[chunk_index];
 
@@ -293,7 +290,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
     /// Panics if `index` is out of bounds.
     #[inline]
     pub fn toggle(&mut self, index: usize) {
-        let bit_offset = index as u64;
+        let bit_offset = index;
         let chunk_index = self.chunk_index(bit_offset);
         let chunk = &mut self.storage[chunk_index];
 
@@ -396,7 +393,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
     /// Calculates the number of chunks needed to store `num_bits`.
     #[inline(always)]
     fn num_chunks(num_bits: usize) -> usize {
-        num_bits.div_ceil(Self::CHUNK_SIZE_BITS as usize)
+        num_bits.div_ceil(Self::CHUNK_SIZE_BITS)
     }
 
     /// Asserts that the index is within bounds.
@@ -483,8 +480,6 @@ impl<const CHUNK_SIZE: usize> PartialEq for BitVec<CHUNK_SIZE> {
 
 impl<const CHUNK_SIZE: usize> Eq for BitVec<CHUNK_SIZE> {}
 
-// ---------- Constructors ----------
-
 impl<const CHUNK_SIZE: usize> Default for BitVec<CHUNK_SIZE> {
     fn default() -> Self {
         Self::new()
@@ -553,15 +548,13 @@ impl<const CHUNK_SIZE: usize> fmt::Debug for BitVec<CHUNK_SIZE> {
 
             f.write_str("...")?;
 
-            for i in (self.next_bit - HALF_DISPLAY as u64)..self.next_bit {
-                write_bit(f, i as usize)?;
+            for i in (self.next_bit - HALF_DISPLAY)..self.next_bit {
+                write_bit(f, i)?;
             }
         }
         f.write_str("]")
     }
 }
-
-// ---------- Operations ----------
 
 impl<const CHUNK_SIZE: usize> Index<usize> for BitVec<CHUNK_SIZE> {
     type Output = bool;
@@ -572,7 +565,7 @@ impl<const CHUNK_SIZE: usize> Index<usize> for BitVec<CHUNK_SIZE> {
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         self.assert_index(index);
-        let value = Self::get_bit_from_chunk(self.get_chunk(index as u64), index as u64);
+        let value = Self::get_bit_from_chunk(self.get_chunk(index), index);
         if value {
             &true
         } else {
@@ -627,28 +620,22 @@ impl<const CHUNK_SIZE: usize> Read for BitVec<CHUNK_SIZE> {
     type Cfg = RangeCfg;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
-        // Parse length with validation
-        let next_bits = u64::read_cfg(buf, &())?;
-        let length_as_usize = usize::try_from(next_bits)
-            .map_err(|_| CodecError::InvalidLength(next_bits as usize))?;
+        // Parse length with range validation
+        let next_bit = usize::read_cfg(buf, range)?;
 
-        // Validate length is within allowed range
-        if !range.contains(&length_as_usize) {
-            return Err(CodecError::InvalidLength(length_as_usize));
-        }
-
-        // Parse blocks
-        let num_chunks = Self::num_chunks(next_bits as usize);
+        // Parse chunks
+        let num_chunks = Self::num_chunks(next_bit);
         let mut storage = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
             let chunk = <[u8; CHUNK_SIZE]>::read(buf)?;
             storage.push_back(chunk);
         }
 
-        Ok(Self {
-            storage,
-            next_bit: next_bits,
-        })
+        if buf.remaining() > 0 {
+            return Err(CodecError::ExtraData(buf.remaining()));
+        }
+
+        Ok(Self { storage, next_bit })
     }
 }
 
@@ -1136,13 +1123,34 @@ mod tests {
     }
 
     #[test]
+    fn test_codec_error_extra_data() {
+        use bytes::BytesMut;
+
+        // Create a valid BitVec and encode it
+        let mut bv = BitVec::new();
+        bv.push(true);
+        bv.push(false);
+        let encoded = bv.encode();
+
+        // Add extra bytes to the encoded data
+        let mut buf_with_extra = BytesMut::from(encoded.as_ref());
+        buf_with_extra.extend_from_slice(&[0xFF, 0xAA]); // Extra garbage data
+
+        let mut cursor = std::io::Cursor::new(buf_with_extra);
+        assert!(matches!(
+            BitVec::decode_cfg(&mut cursor, &(..).into()),
+            Err(CodecError::ExtraData(2)) // Should detect 2 extra bytes
+        ));
+    }
+
+    #[test]
     fn test_codec_error_insufficient_data() {
         use bytes::BytesMut;
 
         // Test case 1: Buffer with length but no chunk data
         let mut buf1 = BytesMut::new();
-        5u64.write(&mut buf1); // Write length as 5 bits
-                               // Don't write any chunk data
+        5usize.write(&mut buf1); // Write length as 5 bits
+                                 // Don't write any chunk data
 
         let mut cursor1 = std::io::Cursor::new(buf1);
         assert!(matches!(
@@ -1152,7 +1160,7 @@ mod tests {
 
         // Test case 2: Buffer with length and partial chunk data
         let mut buf2 = BytesMut::new();
-        9u64.write(&mut buf2); // Write length as 9 bits (needs 2 chunks)
+        9usize.write(&mut buf2); // Write length as 9 bits (needs 2 chunks)
         let partial_chunk = [1u8; 1]; // Only 1 byte instead of full chunk
         partial_chunk.write(&mut buf2);
 

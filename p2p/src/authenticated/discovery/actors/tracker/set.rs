@@ -35,7 +35,7 @@ impl<P: PublicKey> Set<P> {
     /// Marks the given peer as known or unknown.
     pub fn update(&mut self, peer: &P, known: bool) -> bool {
         if let Some(idx) = self.order.get(peer) {
-            self.knowledge.set_bit(*idx as u64, known);
+            self.knowledge.set_bit(*idx, known);
             return true;
         }
         false
