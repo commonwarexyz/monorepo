@@ -375,6 +375,10 @@ mod tests {
             let target_db_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_db_ops.clone()).await;
             target_db.commit().await.unwrap();
+            target_db
+                .prune(target_db.inactivity_floor_loc)
+                .await
+                .unwrap();
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc;
             let target_log_size = target_db.log.size().await.unwrap();
@@ -734,8 +738,11 @@ mod tests {
             target_db.commit().await.unwrap();
             sync_db.commit().await.unwrap();
 
-            target_db.sync().await.unwrap();
-            sync_db.sync().await.unwrap();
+            target_db
+                .prune(target_db.inactivity_floor_loc)
+                .await
+                .unwrap();
+            sync_db.prune(sync_db.inactivity_floor_loc).await.unwrap();
 
             // Close sync_db
             sync_db.close().await.unwrap();
@@ -1523,6 +1530,10 @@ mod tests {
             let ops = create_test_ops(NUM_OPS);
             apply_ops(&mut source_db, ops.clone()).await;
             source_db.commit().await.unwrap();
+            source_db
+                .prune(source_db.inactivity_floor_loc)
+                .await
+                .unwrap();
 
             let lower_bound_ops = source_db.inactivity_floor_loc;
             let upper_bound_ops = source_db.op_count() - 1;
@@ -1720,8 +1731,13 @@ mod tests {
             let original_ops = create_test_ops(NUM_OPS);
             apply_ops(&mut target_db, original_ops.clone()).await;
             target_db.commit().await.unwrap();
+            target_db
+                .prune(target_db.inactivity_floor_loc)
+                .await
+                .unwrap();
             apply_ops(&mut sync_db, original_ops.clone()).await;
             sync_db.commit().await.unwrap();
+            sync_db.prune(sync_db.inactivity_floor_loc).await.unwrap();
             let sync_db_original_size = sync_db.op_count();
 
             // Get pinned nodes before closing the database
@@ -1821,6 +1837,15 @@ mod tests {
             let target_db_log_size = db.log.size().await.unwrap();
             let target_db_mmr_size = db.mmr.size();
 
+            let pinned_nodes = join_all(
+                Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(db.inactivity_floor_loc))
+                    .map(|pos| db.mmr.get_node(pos)),
+            )
+            .await;
+            let pinned_nodes = pinned_nodes
+                .iter()
+                .map(|node| node.as_ref().unwrap().unwrap())
+                .collect::<Vec<_>>();
             let AnyTest { mmr, log, .. } = db;
 
             // When we re-open the database, the MMR is closed and the log is opened.
@@ -1832,7 +1857,7 @@ mod tests {
                     context.clone(),
                     db_config,
                     log,
-                    None,
+                    Some(pinned_nodes),
                     sync_lower_bound,
                     sync_upper_bound,
                     1024,

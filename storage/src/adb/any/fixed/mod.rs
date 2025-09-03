@@ -765,10 +765,10 @@ pub(super) mod test {
         Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
-            mmr_items_per_blob: NZU64!(1024),
+            mmr_items_per_blob: NZU64!(13), // intentionally small and janky size
             mmr_write_buffer: NZUsize!(64),
             log_journal_partition: format!("log_journal_{seed}"),
-            log_items_per_blob: NZU64!(1024),
+            log_items_per_blob: NZU64!(11), // intentionally small and janky size
             log_write_buffer: NZUsize!(64),
             translator: TwoCap,
             thread_pool: None,
