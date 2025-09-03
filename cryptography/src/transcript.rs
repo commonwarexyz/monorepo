@@ -1,8 +1,9 @@
-//! This module exists to provide the [Transcript] abstraction.
+//! This module provides a [Transcript] abstraction.
 //!
 //! This is useful for hashing data, committing to it, and extracting secure
-//! randomness from it. The API evades common footguns with doing these things
+//! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
+
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, Write};
@@ -12,7 +13,7 @@ use rand_core::{
 };
 use zeroize::ZeroizeOnDrop;
 
-/// Exists to provide an implementation of [CryptoRngCore].
+/// Provides an implementation of [CryptoRngCore].
 ///
 /// We intentionally don't expose this struct, to make the impl returned by
 /// [Transcript::noise] completely opaque.
@@ -77,7 +78,7 @@ impl RngCore for Rng {
 
 impl CryptoRng for Rng {}
 
-/// This makes different [Transcript] initializations different.
+/// Ensures different [Transcript] initializations are unique.
 #[repr(u8)]
 enum StartTag {
     New = 0,
@@ -86,7 +87,7 @@ enum StartTag {
     Noise = 3,
 }
 
-/// This struct provides a convenient abstraction over hashing data and deriving randomness.
+/// Provides a convenient abstraction over hashing data and deriving randomness.
 ///
 /// It automatically takes care of details like:
 /// - correctly segmenting packets of data,
