@@ -45,7 +45,8 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Converts a hexadecimal string to bytes.
 pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
+    // Even length and only [0-9a-fA-F]
+    if !hex.len().is_multiple_of(2) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
 
