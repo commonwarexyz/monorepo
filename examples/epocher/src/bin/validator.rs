@@ -8,7 +8,9 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt as _, Signer as _,
 };
-use commonware_epocher::{application::Application, orchestrator, ACTIVE_VALIDATORS, THRESHOLD};
+use commonware_epocher::{
+    application::Application, orchestrator, poller, ACTIVE_VALIDATORS, THRESHOLD,
+};
 use commonware_p2p::authenticated::discovery;
 use commonware_resolver::p2p::mocks as resolver_mocks;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
@@ -39,6 +41,10 @@ fn main() {
                 .value_parser(value_parser!(String)),
         )
         .get_matches();
+    let indexers: Vec<String> = matches
+        .get_many::<String>("indexer")
+        .map(|vals| vals.cloned().collect())
+        .unwrap_or_default();
 
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
@@ -91,6 +97,7 @@ fn main() {
         let (polynomial, mut shares) =
             ops::generate_shares::<_, MinSig>(&mut rng, None, ACTIVE_VALIDATORS, THRESHOLD);
         shares.sort_by(|a, b| a.index.cmp(&b.index));
+        let identity = *poly::public::<MinSig>(&polynomial);
 
         // Register physical channels for consensus, broadcast, and backfill
         let channel_p = network.register(0, Quota::per_second(NZU32!(10)), 256);
@@ -122,7 +129,7 @@ fn main() {
         let namespace = b"EPOCHER".to_vec();
         let marshal_cfg = marshal::Config {
             public_key: signer.public_key(),
-            identity: *poly::public::<MinSig>(&polynomial),
+            identity,
             coordinator: coordinator.clone(),
             partition_prefix: format!("marshal-{}", signer.public_key()),
             mailbox_size: 1024,
@@ -162,15 +169,21 @@ fn main() {
             validators,
             muxer_size: 1024,
             mailbox_size: 1024,
-            indexers: matches
-                .get_many::<String>("indexer")
-                .map(|vals| vals.cloned().collect())
-                .unwrap_or_default(),
+            indexers: indexers.clone(),
         };
         let (orchestrator_actor, orchestrator) =
             orchestrator::Orchestrator::new(context.with_label("orchestrator"), orchestrator_cfg);
 
+        // Start the indexer poller (if indexers configured)
+        let poller_actor = poller::Poller::new(
+            context.with_label("poller"),
+            identity,
+            indexers,
+            orchestrator.clone(),
+        );
+
         // Start the actors
+        poller_actor.start();
         app_actor.start(orchestrator.clone());
         marshal_actor.start(application, broadcast_mailbox, channel_backfill);
 

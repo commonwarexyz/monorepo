@@ -37,6 +37,9 @@ pub struct Application<R: Rng + Spawner> {
     mailbox: mpsc::Receiver<Message<Sha256Digest>>,
     marshal: marshal::Mailbox<MinSig, Block>,
     finalized: Arc<Mutex<BTreeMap<u64, Block>>>,
+
+    /// Responders for block heights.
+    responders: BTreeMap<u64, Vec<oneshot::Sender<Sha256Digest>>>,
 }
 
 impl<R: Rng + Spawner> Application<R> {
@@ -52,6 +55,7 @@ impl<R: Rng + Spawner> Application<R> {
                 mailbox,
                 marshal,
                 finalized: Arc::new(Mutex::new(BTreeMap::new())),
+                responders: BTreeMap::new(),
             },
             Mailbox::new(sender),
         )
@@ -75,7 +79,8 @@ impl<R: Rng + Spawner> Application<R> {
                     let height = epoch::get_last_height(epoch - 1);
                     let finalized = self.finalized.lock().unwrap();
                     let Some(block) = finalized.get(&height) else {
-                        // No block exists, drop the response.
+                        // No block exists, put the response in the responders map for later.
+                        self.responders.entry(height).or_default().push(response);
                         continue;
                     };
                     let _ = response.send(block.commitment());
@@ -118,6 +123,13 @@ impl<R: Rng + Spawner> Application<R> {
                     let Some(epoch) = epoch::is_last_block_in_epoch(height) else {
                         continue;
                     };
+
+                    // Respond to any responders for this block height.
+                    if let Some(responders) = self.responders.remove(&height) {
+                        for responder in responders {
+                            let _ = responder.send(block.commitment());
+                        }
+                    }
 
                     let seed = if epoch == 0 {
                         GENESIS_BLOCK.commitment()
