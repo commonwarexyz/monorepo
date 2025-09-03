@@ -7,7 +7,7 @@
 use crate::{
     adb::any::fixed::sync::init_journal_at_size,
     journal::{
-        fixed::{self, Config as JConfig, Journal},
+        fixed::{Config as JConfig, Journal},
         Error as JError,
     },
     metadata::{Config as MConfig, Metadata},
@@ -355,7 +355,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             buffer_pool: cfg.config.buffer_pool.clone(),
         };
         let mut journal =
-            fixed::Journal::<E, H::Digest>::init(context.clone(), journal_config.clone()).await?;
+            Journal::<E, H::Digest>::init(context.clone(), journal_config.clone()).await?;
         let journal_size = journal.size().await?;
         let journal = if journal_size <= cfg.lower_bound {
             debug!(
@@ -402,9 +402,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let journal_size = journal.size().await?;
         assert!(journal_size <= cfg.upper_bound + 1);
         assert!(journal_size >= cfg.lower_bound);
-
-        let journal_size = journal.size().await?;
-        assert!(journal_size <= cfg.upper_bound + 1);
 
         // Write the pruning boundary.
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
