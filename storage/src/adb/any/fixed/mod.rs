@@ -138,6 +138,11 @@ pub struct Any<
     /// The location of the oldest operation in the log that remains readable.
     pub(crate) oldest_retained_loc: u64,
 
+    /// Stores the persisted oldest_retained_loc.
+    /// The oldest_retained_loc persisted here is updated (i.e. moved forward) before actually
+    /// pruning the log up the the given target. On init, if we find that the oldest_retained_loc
+    /// persisted here is in a blob ahead of the log's oldest retained blob, we rewind this value
+    /// to the log's oldest retained blob.
     pub(crate) metadata: Metadata<E, U64, u64>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
@@ -168,12 +173,10 @@ impl<
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
-
         let mut hasher = Standard::<H>::new();
-        let (mmr, log, metadata) =
-            Self::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
+        let (mmr, log, metadata) = Self::init_components(context.clone(), cfg, &mut hasher).await?;
 
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
         let inactivity_floor_loc = Self::build_snapshot_from_log(
             oldest_retained_loc,
             &log,
@@ -196,10 +199,10 @@ impl<
         Ok(db)
     }
 
-    /// Initialize and return the mmr and log from the given config, correcting any inconsistencies
+    /// Initialize and return the MMR, log and metadata from the given config, correcting any inconsistencies
     /// between them. Any uncommitted operations in the log will be rolled back and the state of the
     /// db will be as of the last committed operation.
-    pub(crate) async fn init_mmr_and_log(
+    pub(crate) async fn init_components(
         context: E,
         cfg: Config<T>,
         hasher: &mut Standard<H>,
@@ -246,6 +249,9 @@ impl<
         )
         .await?;
 
+        // We advance the persisted oldest_retained_loc before actually pruning the log up the the given target.
+        // If we find that the persisted oldest_retained_loc is in a blob ahead of the log's oldest retained blob,
+        // rewind the persisted oldest_retained_loc to the start of the log's oldest retained blob.
         let expected_oldest_blob = metadata_oldest_retained_loc / cfg.log_items_per_blob.get();
         if let Some(actual_oldest_blob) = log.blobs.first_key_value().map(|(k, _)| k) {
             if expected_oldest_blob != *actual_oldest_blob {
@@ -319,18 +325,18 @@ impl<
     /// this method will panic otherwise. The caller is responsible for syncing any changes made to
     /// the bitmap.
     pub(crate) async fn build_snapshot_from_log<const N: usize>(
-        start_leaf_num: u64,
+        oldest_retained_loc: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<u64, Error> {
-        let mut inactivity_floor_loc = start_leaf_num;
+        let mut inactivity_floor_loc = oldest_retained_loc;
         if let Some(ref bitmap) = bitmap {
-            assert_eq!(start_leaf_num, bitmap.bit_count());
+            assert_eq!(oldest_retained_loc, bitmap.bit_count());
         }
 
         let stream = log
-            .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), start_leaf_num)
+            .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), oldest_retained_loc)
             .await?;
         pin_mut!(stream);
         while let Some(result) = stream.next().await {
@@ -716,19 +722,12 @@ impl<
             return Ok(());
         };
 
-        if target_prune_loc <= self.oldest_retained_loc {
-            return Ok(());
-        }
-
-        // Update the metadata with the new oldest_retained_loc.
-        let target_blob = target_prune_loc / self.log.cfg.items_per_blob.get();
-        let target_blob_start = target_blob * self.log.cfg.items_per_blob.get();
-        if target_blob_start == self.oldest_retained_loc {
-            return Ok(());
-        }
-
+        // Advance the persisted oldest_retained_loc before actually pruning the log up the the given target.
+        let target_blob_index = target_prune_loc / self.log.cfg.items_per_blob.get();
+        let target_blob_start = target_blob_index * self.log.cfg.items_per_blob.get();
         write_oldest_retained_loc(&mut self.metadata, target_blob_start);
         self.metadata.sync().await?;
+
         if !self.log.prune(target_prune_loc).await? {
             return Ok(());
         }
@@ -1449,17 +1448,16 @@ pub(super) mod test {
 
             // Initialize the db's mmr/log.
             let cfg = any_db_config("partition");
-
-            let (mmr, log, metadata) = AnyTest::init_mmr_and_log(context.clone(), cfg, &mut hasher)
+            let (mmr, log, metadata) = AnyTest::init_components(context.clone(), cfg, &mut hasher)
                 .await
                 .unwrap();
-            let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
+            let oldest_retained_loc = read_oldest_retained_loc(&metadata);
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot: Index<TwoCap, u64> =
                 Index::init(context.with_label("snapshot"), TwoCap);
             let inactivity_floor_loc = AnyTest::build_snapshot_from_log::<SHA256_SIZE>(
-                start_leaf_num,
+                oldest_retained_loc,
                 &log,
                 &mut snapshot,
                 Some(&mut bitmap),
@@ -1468,7 +1466,6 @@ pub(super) mod test {
             .unwrap();
 
             // Check the recovered state is correct.
-            let oldest_retained_loc = log.oldest_retained_pos().await.unwrap().unwrap_or(0);
             let db = AnyTest {
                 mmr,
                 log,

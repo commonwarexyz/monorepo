@@ -162,7 +162,7 @@ impl<
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
         let (mut mmr, log, metadata) =
-            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
+            Any::<_, _, _, _, T>::init_components(context.clone(), cfg, &mut hasher).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
         let mmr_pruned_pos = mmr.pruned_to_pos();
