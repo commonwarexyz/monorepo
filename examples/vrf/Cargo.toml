@@ -19,6 +19,7 @@ commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+rand_core = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 clap = { workspace = true }

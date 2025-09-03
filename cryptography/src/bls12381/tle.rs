@@ -92,7 +92,7 @@ use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_utils::sequence::FixedBytes;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 
 /// Domain separation tag for hashing the `h3` message to a scalar.
 const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
@@ -249,7 +249,7 @@ fn xor(a: &Block, b: &Block) -> Block {
 ///
 /// # Returns
 /// * `Ciphertext<V>` - The encrypted ciphertext
-pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
+pub fn encrypt<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     public: V::Public,
     target: (Option<&[u8]>, &[u8]),

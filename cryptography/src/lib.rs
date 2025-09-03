@@ -16,12 +16,13 @@ extern crate alloc;
 
 use commonware_codec::{Encode, ReadExt};
 use commonware_utils::Array;
-use rand::{CryptoRng, Rng, RngCore, SeedableRng as _};
+use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
 
 pub mod bls12381;
 pub mod ed25519;
 pub mod sha256;
+use rand_core::CryptoRngCore;
 pub use sha256::{CoreSha256, Sha256};
 pub mod blake3;
 pub use blake3::{Blake3, CoreBlake3};
@@ -73,7 +74,7 @@ pub trait PrivateKeyExt: PrivateKey {
     }
 
     /// Create a fresh [PrivateKey] using the supplied RNG.
-    fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self;
+    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self;
 }
 
 /// Verifies [Signature]s over messages.
@@ -132,7 +133,7 @@ pub trait BatchVerifier<K: PublicKey> {
     /// (`c_1 + d` and `c_2 - d`).
     ///
     /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-    fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool;
+    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool;
 }
 
 /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
@@ -144,7 +145,7 @@ pub trait Digest: Array + Copy {
     ///
     /// This function is typically used for testing and is not recommended
     /// for production use.
-    fn random<R: RngCore + CryptoRng>(rng: &mut R) -> Self;
+    fn random<R: CryptoRngCore>(rng: &mut R) -> Self;
 }
 
 /// An object that can be uniquely represented as a [Digest].
