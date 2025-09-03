@@ -18,7 +18,7 @@ thiserror = { workspace = true }
 rand = { workspace = true, features = ["std_rng"] }
 rand_core = { workspace = true }
 sha2 = { workspace = true }
-blake3 = { workspace = true }
+blake3 = { workspace = true, features = ["zeroize"] }
 rayon = { workspace = true, optional = true }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 ed25519-consensus = { version = "2.1.0", default-features = false }

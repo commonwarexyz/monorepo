@@ -5,11 +5,13 @@ use rand_core::{
     impls::{next_u32_via_fill, next_u64_via_fill},
     CryptoRng, CryptoRngCore, RngCore,
 };
+use zeroize::ZeroizeOnDrop;
 
 /// Exists to provide an implementation of [CryptoRngCore].
 ///
 /// We intentionally don't expose this struct, to make the impl returned by
 /// [Transcript::noise] completely opaque.
+#[derive(ZeroizeOnDrop)]
 struct Rng {
     inner: blake3::OutputReader,
     buf: [u8; BLOCK_LEN],
@@ -85,6 +87,7 @@ enum StartTag {
 /// - correctly segmenting packets of data,
 /// - domain separating different uses of tags and randomness,
 /// - making sure that secret state is zeroized as necessary.
+#[derive(ZeroizeOnDrop)]
 pub struct Transcript {
     hasher: blake3::Hasher,
     pending: u64,
@@ -146,7 +149,7 @@ impl Transcript {
     /// ```
     /// # use commonware_cryptography::transcript::Transcript;
     /// let s1 = Transcript::new(b"test").commit(b"A".as_slice()).summarize();
-    /// let s2 = Transcript::resume(s1).summarize();
+    /// let s2 = Transcript::resume(s1.clone()).summarize();
     /// assert_ne!(s1, s2);
     /// ```
     pub fn resume(summary: Summary) -> Self {
@@ -248,7 +251,7 @@ impl Transcript {
 /// This is the primary way to compare two transcripts for equality.
 /// You can think of this as a hash over the transcript, providing a commitment
 /// to the data it recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, ZeroizeOnDrop)]
 pub struct Summary {
     hash: blake3::Hash,
 }
