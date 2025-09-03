@@ -5,27 +5,30 @@ module replica {
 
     // Total number of replicas.
     const N: int
-    // Maximum number of faulty replicas.
+    // Maximum number of byzantine(faulty) replicas.
     const F: int
     // Identities of the correct replicas.
     const CORRECT: Set[ReplicaId]
-    // Identities of the faulty replicas.
-    const FAULTY: Set[ReplicaId]
+    // Identities of the byzantine replicas.
+    const BYZANTINE: Set[ReplicaId]
     // The set of all views.
     const VIEWS: Set[ViewNumber]
     // the set of all blocks
-    const VALID_BLOCKS: Set[BlockHash]
+    const VALID_BLOCKS: Set[Block]
     // All replicas.
-    pure val Replicas = CORRECT.union(FAULTY)
+    pure val Replicas = CORRECT.union(BYZANTINE)
+    // The keys of the replicas, normally, one unique key per replica.
+    // For modeling byzantine behaviour via twin replicas use the same keys.
+    const REPLICA_KEYS: ReplicaId -> ReplicaKey
     
     // Quorums:
-    pure val Q = N - F;
-    pure val L = 2*F + 1;
+    pure val L = N - F;
+    pure val M = 2*F + 1;
 
     // Produce replica's signature
-    pure def sig_of(id: str): str = id
+    pure def sig_of(id: ReplicaId): ReplicaKey = REPLICA_KEYS.get(id)
 
-    const INVALID_BLOCKS: Set[BlockHash]
+    const INVALID_BLOCKS: Set[Block]
     pure val AllBlocks = VALID_BLOCKS.union(INVALID_BLOCKS)
 
     // The states of the correct replicas
@@ -33,11 +36,11 @@ module replica {
     // the leader function from the view to the replicas identities
     var leader: ViewNumber -> ReplicaId
 
-    // proposals sent by the replicas, correct and faulty
+    // proposals sent by the replicas, correct and byzantine
     var sent_proposal: Set[Proposal]
-    // notarize and nullify votes sent by the replicas, correct and faulty
+    // notarize and nullify votes sent by the replicas, correct and byzantine
     var sent_vote: Set[Vote]
-    // `notarization` and `nullification` messages sent by the replicas, correct and faulty
+    // `notarization` and `nullification` messages sent by the replicas, correct and byzantine
     var sent_certificate: Set[Certificate]
 
     // notarize and nullify votes received by the correct replicas
@@ -48,7 +51,7 @@ module replica {
     // history of received proposals
     var ghost_proposal: ReplicaId -> Set[Proposal]
     // sequences of blocks committed by every correct replica
-    var ghost_committed_blocks: ReplicaId -> List[BlockHash]
+    var ghost_committed_blocks: ReplicaId -> List[Block]
 
     // Filter votes by view and kind.
     pure def select_votes(view: ViewNumber, kind: Kind, votes: Set[Vote]): Set[Vote] = {
@@ -64,30 +67,48 @@ module replica {
         votes.exists(v=> v.view == view and v.kind == NotarizeKind and v.sig == id)
     }
 
-    // Get the block hashes from the certificates that were notarized.
-    pure def notarized_blocks(certificates: Set[Certificate]): Set[BlockHash] = {
-        certificates.filter(v => v.kind == NotarizationKind).map(v => v.block_hash)
-    }
-
     // Does a set of certificates have a notarization certificate for a view?
     pure def is_view_notarized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
-        certificates.exists(v => v.kind == NotarizationKind and v.view == view)
+        certificates.exists(v => v.kind == NotarizationKind and v.view == view),
+        certificates.exists(v => v.kind == FinalizationKind and v.view == view)
+    }
+
+    // Does a set of certificates have a notarization certificate for a view?
+    pure def is_view_notarized_votes(view: ViewNumber, votes: Set[Vote], block: Block): bool = or {
+        view == GENESIS_VIEW,
+        select_votes(view, NotarizeKind, votes)
+            .filter(v => v.block == block)
+            .map(v => v.sig)
+            .size() >= M
+    }
+
+    pure def is_view_finalized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
+        view == GENESIS_VIEW,
+        certificates.exists(v => v.kind == FinalizationKind and v.view == view)
     }
 
     // Does a set of votes have a quorum of votes for a view?
-    pure def is_view_finalized(view: ViewNumber, votes: Set[Vote], block_hash: BlockHash): bool = or {
+    pure def is_view_finalized_votes(view: ViewNumber, votes: Set[Vote], block: Block): bool = or {
         view == GENESIS_VIEW,
         select_votes(view, NotarizeKind, votes)
-            .filter(v => v.block_hash == block_hash)
+            .filter(v => v.block == block)
             .map(v => v.sig)
-            .size() >= Q
+            .size() >= L
     }
 
     // Does a set of certificates contain nullification certificates for this view?
     pure def is_view_nullified(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
         certificates.exists(v => v.kind == NullificationKind and v.view == view)
+    }
+
+    pure def is_view_nullified_votes(view: ViewNumber, votes: Set[Vote]): bool = or {
+        view == GENESIS_VIEW,
+        select_votes(view, NullifyKind, votes)
+            .filter(v => v.block == DUMMY_BLOCK)
+            .map(v => v.sig)
+            .size() >= M
     }
 
     // Does a set of certificates contain nullifications certificates for all views in the interval (v1, v2)?
@@ -107,108 +128,96 @@ module replica {
         val similar_votes: Set[Vote] = votes.filter(v => and {
             v.view == view,
             v.kind == NullifyKind,
-            v.block_hash == DUMMY_BLOCK_HASH
+            v.block == DUMMY_BLOCK
         })
         val votes_count = similar_votes.size()
 
-        if (votes_count < L) {
+        if (votes_count < M)
             None
-        } else {
+        else
             Some({
                 view: view,
-                block_hash: DUMMY_BLOCK_HASH,
+                block: DUMMY_BLOCK,
                 signatures: similar_votes.map(v => v.sig),
                 ghost_sender: id,
                 kind: NullificationKind
             })
-        }
     }
 
     def create_notarization(id: ReplicaId,
-            view: ViewNumber, block_hash: BlockHash, votes: Set[Vote]): Option[Certificate] = {
+            view: ViewNumber, block: Block, votes: Set[Vote]): Option[Certificate] = {
         val similar_votes: Set[Vote] = votes.filter(v => and {
             v.view == view,
             v.kind == NotarizeKind,
-            v.block_hash == block_hash
+            v.block == block
         })
 
         val votes_count = similar_votes.size()
-        if (votes_count < L) {
+        if (votes_count < M)
             None
-        } else {
+        else
             Some({
                 view: view,
-                block_hash: block_hash,
+                block: block,
                 signatures: similar_votes.map(v => v.sig),
                 ghost_sender: id,
-                kind: NotarizationKind
+                kind: if (votes_count >= L) FinalizationKind else NotarizationKind
             })
-        }
     }
 
     // Check whether a block cannot be notarized in a view.
-    def is_block_in_view_cannot_be_notarized(b: BlockHash, view: ViewNumber, votes: Set[Vote]): bool = {
-        val vs1 = votes.filter(v => v.kind == NotarizeKind and v.view == view and v.block_hash != b).map(v => v.sig)
+    def is_block_in_view_cannot_be_notarized(b: Block, view: ViewNumber, votes: Set[Vote]): bool = {
+        val vs1 = votes.filter(v => v.kind == NotarizeKind and v.view == view and v.block != b).map(v => v.sig)
         val vs2 = votes.filter(v => v.kind == NullifyKind and v.view == view).map(v => v.sig)
-        vs1.union(vs2).size() >= L
+        vs1.union(vs2).size() >= M
     }
 
     // Is there a contradiction for the notarized block in the set of votes?
     def is_contradicted(self: ReplicaState, view: ViewNumber, votes: Set[Vote]): bool = {
         val c = self.notarized.get(view)
-        if (c != EMPTY_BLOCK) {
+        if (c != EMPTY_BLOCK)
             is_block_in_view_cannot_be_notarized(c, view, votes)
-        } else {
+        else
             false
-        }
-    }
-
-    // Replica did not vote for dummy block (in other words, the replica did not complain or did not timeout)
-    def replica_did_not_send_nullify(id: ReplicaId, view: ViewNumber): bool = {
-        not({ view: view, block_hash: DUMMY_BLOCK_HASH, kind: NullifyKind, sig: id }.in(sent_vote))
-    }
-
-    // Has the replica sent a nullify vote for the dummy block?
-    def has_replica_sent_nullify(id: ReplicaId, view: ViewNumber): bool = {
-        { view: view, kind: NullifyKind, block_hash: DUMMY_BLOCK_HASH, sig: id }.in(sent_vote)
     }
 
     // Enter a new view, unless it is older than the current view.
-    pure def enter_new_view(self: ReplicaState, cert_view: ViewNumber, notarized: bool): ReplicaState = {
-        val new_view = cert_view + 1
-        if (new_view <= self.view or not(VIEWS.contains(new_view))) {
+    pure def enter_new_view(self: ReplicaState, cert: Certificate): ReplicaState = {
+        val new_view = cert.view + 1
+        if (not(VIEWS.contains(new_view)))
             self // no change
-        } else {
+        else
             {
                 ...self,
-                propose_sent: false,
-                nullified: false,
-                // TODO: diff: in the spec r.timer = 2Δ;
-                timer_cancelled: false,
-                view: new_view,
+                propose_sent: if (self.view < new_view) false else self.propose_sent,
+                nullified: if (self.view < new_view) false else self.nullified,
+                timer_cancelled: if (self.view < new_view) false else self.timer_cancelled,
+                view: 
+                    if (self.view < new_view) new_view else self.view,
+                last_finalized: 
+                    if (self.last_finalized < cert.view and cert.kind == FinalizationKind) cert.view else self.last_finalized,
                 ghost_last_seen_notarization:
-                    if (notarized) cert_view else self.ghost_last_seen_notarization
+                    if (self.ghost_last_seen_notarization < cert.view and cert.kind != NullificationKind) cert.view else self.ghost_last_seen_notarization
             }
-        }
     }
 
     // A predicate `is_select_parent(id, pb, pv)` iff `(pb, pv) = select_parent(r, r.view)`.
-    def is_select_parent(id: ReplicaId, parent_block: BlockHash, parent_view: ViewNumber): bool = {
+    def is_select_parent(id: ReplicaId, parent_block: Block, parent_view: ViewNumber): bool = {
         val v = replica_state.get(id).view
         val certs = store_certificate.get(id)
         // note that `valid_parent` is different from the code below
         and {
             // all views in the interval (parent_view, v) are nullified
             VIEWS.forall(i => (parent_view < i and i < v) implies and {
-                not(i.is_view_notarized(certs)),
-                i.is_view_nullified(certs),
+                not(is_view_notarized(i, certs)),
+                is_view_nullified(i, certs),
             }),
             // the parent block is notarized in the parent view
             or {
                 certs.exists(c => and {
-                    c.kind == NotarizationKind,
+                    c.kind == NotarizationKind or c.kind == FinalizationKind,
                     c.view == parent_view,
-                    c.block_hash == parent_block,
+                    c.block == parent_block,
                 }),
                 parent_view < 0 and parent_block == GENESIS_BLOCK,
             }
@@ -238,36 +247,36 @@ module replica {
         sent_certificate' = Set(),
         store_vote'   = CORRECT.mapBy(_ => Set()),
         store_certificate'   = CORRECT.mapBy(_ => Set()),
-        ghost_committed_blocks' = CORRECT.mapBy(_ => List()),
+        ghost_committed_blocks' = CORRECT.mapBy(id => List()),
         ghost_proposal' = CORRECT.mapBy(id => Set()),
         leader'       = l
     }
 
-    // A step by a correct or faulty replica.
+    // A step by a correct or byzantine replica.
     action step = {
         any {
             {
-                nondet id = oneOf(CORRECT)
-                replica_step(id)
+                correct_replica_step
             },
             all {
                 nondet id = oneOf(CORRECT)
                 // Non-deterministically choose the next block, use it only for the case of None below.
                 nondet new_block = oneOf(VALID_BLOCKS)
                 // Non-deterministically choose the parent block and parent view (checked in proposer_step)
-                nondet parent_block = oneOf(AllBlocks.union(Set(hash(GENESIS_BLOCK))))
+                nondet parent_block = oneOf(AllBlocks.union(Set(GENESIS_BLOCK)))
                 nondet parent_view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
                 proposer_step(id, new_block, parent_block, parent_view),
             },
             all {
-                faulty_step,
+                byzantine_replica_step,
                 _unchanged_replica_state,
             }
         }
     }
 
     // A step by a correct replica, except for the proposer step.
-    action replica_step(id: ReplicaId): bool = all {
+    action correct_replica_step(): bool = all {
+        nondet id = oneOf(CORRECT)
         // Non‑deterministically pick one enabled internal action
         any {
             {
@@ -281,8 +290,8 @@ module replica {
             {
                 nondet votes = oneOf(powerset(sent_vote))
                 nondet view = VIEWS.oneOf()
-                nondet block_hash = AllBlocks.oneOf()
-                on_vote_notarize(id, view, block_hash, votes)
+                nondet block = AllBlocks.oneOf()
+                on_vote_notarize(id, view, block, votes)
             },
             {
                 nondet votes = oneOf(powerset(sent_vote))
@@ -302,8 +311,8 @@ module replica {
     }
 
     // 8.1. A proposer step by the view leader.
-    action proposer_step(id: ReplicaId, new_block: BlockHash,
-                         parent_block: BlockHash, parent_view: ViewNumber): bool = all {
+    action proposer_step(id: ReplicaId, new_block: Block,
+                         parent_block: Block, parent_view: ViewNumber): bool = all {
         val self = replica_state.get(id)
 
         all {
@@ -328,10 +337,10 @@ module replica {
                     propose_sent: true,
                     // "Treat propose(r, c, v, (c', v')) as r's notarize(c, v)"
                     notarized: self.notarized.put(self.view, new_block),
-                    ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(hash(new_block)))
+                    ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(new_block))
                 }),
                 // "Treat propose(r, c, v, (c', v')) as r's notarize(c, v)"
-                sent_vote' = sent_vote.union(Set(notarize(self.view, id, hash(new_block)))),
+                sent_vote' = sent_vote.union(Set(notarize(self.view, id, new_block))),
                 ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
                 // unchanged
                 sent_certificate' = sent_certificate,
@@ -351,7 +360,7 @@ module replica {
     action on_proposal(id: ReplicaId, proposal: Proposal): bool = all {
         val self = replica_state.get(id)
         val certificates = store_certificate.get(id)
-        val notarize_vote = notarize(proposal.view, id, hash(proposal.block))
+        val notarize_vote = notarize(proposal.view, id, proposal.block)
         all {
             not(self.has_notarized()),
             not(self.nullified),
@@ -377,7 +386,7 @@ module replica {
             replica_state' = replica_state.set(id, {
                 ...self,
                 notarized: self.notarized.put(self.view, proposal.block),
-                ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(hash(proposal.block)))
+                ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(proposal.block))
             }),
 
             // unchanged
@@ -397,9 +406,10 @@ module replica {
     // 8.6 Nullify by Contradiction
     action on_nullify_by_contradiction(id: ReplicaId, view: ViewNumber): bool = all {
         val self = replica_state.get(id)
-        val certificates = store_certificate.get(id)
+
         all {
             self.view == view,
+            self.has_notarized(),
             not(self.nullified),
             is_contradicted(self, view, store_vote.get(id)),
 
@@ -407,7 +417,7 @@ module replica {
             replica_state' = replica_state.set(id, {
                 ...self,
                 nullified: true,
-                ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(DUMMY_BLOCK_HASH))
+                ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(DUMMY_BLOCK))
             }),
 
             store_vote' = store_vote,
@@ -420,70 +430,48 @@ module replica {
 
         }
     }
-
+    
     // 8.4. Notarization & Finalization
-    action on_vote_notarize(id: ReplicaId, view: ViewNumber,
-                            block_hash: BlockHash, votes: Set[Vote]): bool = all {
+    action on_vote_notarize(id: ReplicaId, view: ViewNumber, block: Block, votes: Set[Vote]): bool = all {
         val self = replica_state.get(id)
         val store = store_vote.get(id)
-
         all {
             votes != Set(),
             votes.forall(v => and {
-                v.view == view, v.kind == NotarizeKind, v.block_hash == block_hash,
+                // Note, `view` is not the current view of the replica,
+                // it is `view` from the input needed to be able pass the concrete view parameter into underlying functions, e.g., `is_view_finalized`.
+                v.view == view, v.kind == NotarizeKind, v.block == block,
             }),
             val new_store = store_vote.get(id).union(votes)
 
             all {
                 store_vote' = store_vote.set(id, new_store),
-                // try to create a notarization certificate
-                val maybe_cert = create_notarization(id, view, block_hash, new_store)
-                val new_self = match maybe_cert {
-                    | Some(cert) => enter_new_view(self, cert.view, true)
-                    | None => self
-                }
-                val was_finalized = self.last_finalized >= view
-                val now_finalized = is_view_finalized(view, new_store, block_hash)
+
                 val certificates = store_certificate.get(id)
-                all {
-                    val is_cert_stored = or {
-                        not(is_view_notarized(view, certificates)),
-                        not(was_finalized) and now_finalized,
+
+                val was_notarized = is_view_notarized(view, certificates) or is_view_notarized_votes(view, store, block)
+                val now_notarized = is_view_notarized_votes(view, new_store, block)
+
+                val was_finalized = is_view_finalized(view, certificates) or is_view_finalized_votes(view, store, block)
+                val now_finalized = is_view_finalized_votes(view, new_store, block)
+                
+                val is_new_cert = or {
+                    not(was_notarized) and now_notarized,
+                    not(was_finalized) and now_finalized,
+                }
+                
+                match create_notarization(id, view, block, new_store) {
+                    | Some(cert) =>  {
+                        _process_certificate(id, cert, is_new_cert)
                     }
-                    match maybe_cert {
-                        | Some(cert) => all {
-                            if (is_cert_stored) all {
-                                store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
-                                sent_certificate' = sent_certificate.union(Set(cert)),
-                            } else all {
-                                store_certificate' = store_certificate,
-                                sent_certificate' = sent_certificate,
-                            }
-                        }
-
-                        | None => all {
-                            store_certificate' = store_certificate,
-                            sent_certificate' = sent_certificate,
-                        }
-                    },
-
-                    if (not(was_finalized) and now_finalized) {
-                        all {
-                            ghost_committed_blocks' =
-                                ghost_committed_blocks.setBy(id, old => old.append(block_hash)),
-                            replica_state' = replica_state.set(id, {
-                                ...new_self,
-                                last_finalized: view,
-                            }),
-                        }
-                    } else {
-                        all {
-                            ghost_committed_blocks' = ghost_committed_blocks,
-                            replica_state' = replica_state.set(id, new_self),
-                        }
+                    | None => all {
+                        store_certificate' = store_certificate,
+                        sent_certificate' = sent_certificate,
+                        replica_state' = replica_state,
+                        ghost_committed_blocks' = ghost_committed_blocks,
+                        sent_vote'=sent_vote
                     }
                 },
-                sent_vote' = sent_vote,
                 sent_proposal' = sent_proposal,
                 leader' = leader,
                 ghost_proposal' = ghost_proposal
@@ -503,27 +491,25 @@ module replica {
 
             all {
                 store_vote' = store_vote.set(id, new_store),
-                val is_cert_stored = not(is_view_nullified(view, certificates))
+
+                val was_nullified = is_view_nullified(view, certificates)
+                val now_nullified = is_view_nullified_votes(view, new_store)
+                val is_new_cert = or {
+                    not(was_nullified) and now_nullified,
+                }
+                
                 match create_nullification(id, view, new_store) {
-                    | Some(cert) => all {
-                        if (is_cert_stored) all {
-                            store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
-                            sent_certificate' = sent_certificate.union(Set(cert)),
-                        } else all {
-                            store_certificate' = store_certificate,
-                            sent_certificate' = sent_certificate,
-                        },
-                        val new_self = enter_new_view(self, cert.view, false)
-                        replica_state' = replica_state.set(id, new_self)
+                    | Some(cert) =>  {
+                        _process_certificate(id, cert, is_new_cert)
                     }
                     | None => all {
                         store_certificate' = store_certificate,
                         sent_certificate' = sent_certificate,
-                        replica_state' = replica_state
+                        replica_state' = replica_state,
+                        ghost_committed_blocks' = ghost_committed_blocks,
+                        sent_vote'=sent_vote
                     }
                 },
-                ghost_committed_blocks' = ghost_committed_blocks,
-                sent_vote' = sent_vote,
                 sent_proposal' = sent_proposal,
                 leader' = leader,
                 ghost_proposal' = ghost_proposal
@@ -539,48 +525,68 @@ module replica {
         val certificates = store_certificate.get(id)
 
         all {
-            // verify view
-            cert.view >= self.view, // not in spec
-            // verify certificate: Certificate of ≥ L notarize(c, v) or nullify(v) messages
-            cert.signatures.size() >= L,
-            // Store the certificate if we do not have already had it.
-            //not(cert.in(store_certificate.get(id))),
-            _process_certificate(id, certificates, cert),
+            not(cert.in(store_certificate.get(id))),
+
+            or {
+                cert.kind == NullificationKind and cert.signatures.size() >= M and not(is_view_nullified(cert.view, certificates)),
+                cert.kind == NotarizationKind  and cert.signatures.size() >= M and not(is_view_notarized(cert.view, certificates)),
+                cert.kind == FinalizationKind  and cert.signatures.size() >= L and not(is_view_finalized(cert.view, certificates)),
+            },
+            
+            // is_new_cert set to true, because this is a certificate and at this moment the view is not nullified, notarized, or finalized
+            _process_certificate(id, cert, true),
 
             // unchanged
-            sent_proposal'  = sent_proposal,
-            store_vote'    = store_vote,
+            sent_proposal' = sent_proposal,
+            store_vote' = store_vote,
             leader' = leader,
             ghost_proposal' = ghost_proposal
         }
     }
 
-    action _process_certificate(id: ReplicaId, certificates: Set[Certificate], cert: Certificate): bool = all {
+    action _process_certificate(id: ReplicaId, cert: Certificate, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
+        val should_send_notarize_vote = and {
+            self.view == cert.view,
+            not(self.has_notarized()),
+            not(self.nullified),
+            cert.kind == NotarizationKind or cert.kind == FinalizationKind,
+            is_new_cert
+        }
+
         all {
-            not(cert.in(store_certificate.get(id))),
+            cert.signatures.size() >= M,
 
-            if (not(
-                (cert.kind == NotarizationKind and is_view_notarized(cert.view, certificates))
-                or
-                (cert.kind == NullificationKind and is_view_nullified(cert.view, certificates))
-            )) {
-                all {
-                    store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
-                    sent_certificate' = sent_certificate.union(Set(cert)),
-                    val new_self = enter_new_view(self, cert.view, cert.kind == NotarizationKind)
-                    replica_state' = replica_state.set(id, new_self)
-                }
-
-            } else {
-                all {
-                    store_certificate' = store_certificate,
-                    sent_certificate' = sent_certificate,
-                    replica_state' = replica_state
-                }
+            if (is_new_cert) all {
+                store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
+                sent_certificate' = sent_certificate.union(Set(cert)),
+            } else all {
+                store_certificate' = store_certificate,
+                sent_certificate' = sent_certificate,
             },
-            ghost_committed_blocks' = ghost_committed_blocks,
-            sent_vote' = sent_vote
+        
+            if (cert.kind == FinalizationKind and cert.view > self.last_finalized and is_new_cert)
+                ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.append(cert.block))
+            else 
+                ghost_committed_blocks' = ghost_committed_blocks
+            ,
+
+            val new_self = enter_new_view(self, cert)
+            
+            if (should_send_notarize_vote) 
+                all {
+                    sent_vote' = sent_vote.union(Set(notarize(cert.view, id, cert.block))),
+                    replica_state' = replica_state.set(id, {
+                        ...new_self,
+                        notarized: self.notarized.put(cert.view, cert.block),
+                        ghost_sent_votes: self.ghost_sent_votes.setBy(cert.view, old => old.append(cert.block))
+                    }),
+                }
+            else 
+                all {
+                    sent_vote' = sent_vote,
+                    replica_state' = replica_state.set(id, new_self),
+                },
         }
     }
 
@@ -603,7 +609,7 @@ module replica {
                 ...self,
                 nullified: true,
                 timer_cancelled: true,
-                ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(DUMMY_BLOCK_HASH))
+                ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(DUMMY_BLOCK))
             }),
 
             // unchanged
@@ -621,19 +627,19 @@ module replica {
     // Byzantine behavior (completely adversarial)
     // -------------------------------------------------
 
-    action faulty_step: bool = all {
-        FAULTY != Set(),
+    action byzantine_replica_step: bool = all {
+        BYZANTINE != Set(),
 
         // Adversary may inject arbitrary well-typed vote messages.
         all {
-            nondet senders = FAULTY.powerset().oneOf()
+            nondet senders = BYZANTINE.powerset().oneOf()
             nondet view = VIEWS.oneOf()
-            nondet block_hash = AllBlocks.union(Set(DUMMY_BLOCK_HASH)).oneOf()
-            nondet sig = oneOf(FAULTY)
+            nondet block = AllBlocks.union(Set(DUMMY_BLOCK)).oneOf()
+            nondet sig = oneOf(BYZANTINE)
             nondet k = oneOf(Set(NotarizeKind, NullifyKind))
             val votes = senders.map(s => {
                 view: view,
-                block_hash: block_hash,
+                block: block,
                 sig: sig,
                 kind: k
             })
@@ -641,24 +647,26 @@ module replica {
         },
         // Adversary may inject arbitrary certificates.
         all {
-            nondet sender = FAULTY.oneOf()
-            nondet senders = FAULTY.powerset().oneOf()
+            nondet sender = BYZANTINE.oneOf()
+            nondet senders = BYZANTINE.powerset().oneOf()
             nondet view = VIEWS.oneOf()
-            nondet block_hash = AllBlocks.oneOf()
-            nondet sig = oneOf(FAULTY)
-            nondet kind = oneOf(Set(NotarizationKind, NullificationKind))
+            nondet block = AllBlocks.oneOf()
+            nondet kind = oneOf(Set(NotarizeKind, NullifyKind))
             val votes = sent_vote.filter(v => and {
                 v.view == view,
-                v.block_hash == block_hash,
+                v.block == block,
                 v.kind == kind
             })
-            nondet agg_sig = votes.map(v => v.sig).union(FAULTY).powerset().oneOf()
+            nondet agg_sig = votes.map(v => v.sig).union(BYZANTINE).powerset().oneOf()
+            val cert_kind = if (kind == NullifyKind) {
+                NullificationKind
+            } else if (votes.size()>= L) FinalizationKind else NotarizationKind
             val cert = {
                 view: view,
-                block_hash: block_hash,
+                block: block,
                 signatures: agg_sig,
                 ghost_sender: sender,
-                kind: kind
+                kind: cert_kind
             }
             sent_certificate' = sent_certificate.union(Set(cert))
         },
@@ -666,7 +674,7 @@ module replica {
         all {
             nondet view_parent = VIEWS.oneOf()
             nondet view = VIEWS.oneOf()
-            nondet sig = oneOf(FAULTY)
+            nondet sig = oneOf(BYZANTINE)
             nondet block = AllBlocks.oneOf()
             nondet block_parent = AllBlocks.oneOf()
             val proposal = {
@@ -696,10 +704,11 @@ module replica {
 
     // Assumptions and thresholds.
     val assumptions_valid = all {
-        CORRECT.size() + FAULTY.size() == N,
+        CORRECT.size() + BYZANTINE.size() == N,
+        CORRECT.intersect(BYZANTINE) == Set(),
         N >= 5*F+1,
-        2*L <= Q + 1, // Liveness guard, prevents equivocation stall.
-        L + Q > N + F, // Every L-quorum and every Q-quorum share at least one honest replica.
+        2*M <= L + 1, // Liveness guard, prevents equivocation stall.
+        M + L > N + F, // Every M-quorum and every L-quorum share at least one honest replica.
     } 
 
     // No two correct replicas disagree on the committed blocks.
@@ -712,8 +721,8 @@ module replica {
         }
     })
 
-    def votes_seq_correct(votes: List[BlockHash]): bool = {
-        (length(votes) == 2 and votes[0]!=DUMMY_BLOCK_HASH and votes[1] == DUMMY_BLOCK_HASH) or
+    def votes_seq_correct(votes: List[Block]): bool = {
+        (length(votes) == 2 and votes[0]!=DUMMY_BLOCK and votes[1] == DUMMY_BLOCK) or
         length(votes) <= 1
     }
 
@@ -734,14 +743,14 @@ module replica {
         val views_with_nullification =
             certs.filter(c => c.kind == NullificationKind).map(c => c.view)
         val views_with_finalization =
-            VIEWS.filter(v => AllBlocks.exists(h => is_view_finalized(v, votes, h)))
+            VIEWS.filter(v => AllBlocks.exists(h => is_view_finalized_votes(v, votes, h)))
         views_with_nullification.intersect(views_with_finalization) == Set()
     })
 
     // No equivocation.
     val no_proposal_equivocation = tuples(sent_proposal, sent_proposal).forall(((m1, m2)) => or {
         not(m1.view == m2.view and m1.sig == m2.sig),
-        FAULTY.contains(m1.sig),
+        BYZANTINE.contains(m1.sig),
         m1.block == m2.block,
     })
 
@@ -756,14 +765,17 @@ module replica {
         val certs = store_certificate.get(id)
         certs.forall(cert => and {
             cert.view >= 0,
-            cert.signatures.size() >= L,
-            cert.kind == NotarizationKind or cert.kind == NullificationKind,
-            (cert.block_hash == DUMMY_BLOCK_HASH) iff (cert.kind == NullificationKind),
-            VALID_BLOCKS.contains(cert.block_hash) or (cert.block_hash == DUMMY_BLOCK_HASH)
+            or {
+                cert.signatures.size() >= M and (cert.kind == NotarizationKind or cert.kind == NullificationKind),
+                cert.signatures.size() >= L and cert.kind == FinalizationKind,
+            },
+            cert.kind == NotarizationKind or cert.kind == NullificationKind or cert.kind == FinalizationKind,
+            (cert.block == DUMMY_BLOCK) iff (cert.kind == NullificationKind),
+            VALID_BLOCKS.contains(cert.block) or (cert.block == DUMMY_BLOCK)
         })
     })
 
-    val notarized_consistence = CORRECT.forall(id => {
+    val notarized_consistency = CORRECT.forall(id => {
         val self = replica_state.get(id)
         VIEWS.forall(v => self.notarized.get(v)!=EMPTY_BLOCK iff has_notarized_view(id, v, sent_vote))
     })
@@ -771,16 +783,16 @@ module replica {
     // Suppose that a block B for some slot v is finalized, then no other block B' for slot v can be finalized.
     val validity = tuples(CORRECT, CORRECT, VIEWS).forall(((id1, id2, v)) => {
         val certs1 = store_certificate.get(id1).filter(c => and {
-            c.signatures.size() >= Q, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= L, c.kind == FinalizationKind, c.view == v
         })
         val certs2 = store_certificate.get(id2).filter(c => and {
-            c.signatures.size() >= Q, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= L, c.kind == FinalizationKind, c.view == v
         })
 
         or {
             certs1 == Set(),
             certs2 == Set(),
-            certs1.map(c => c.block_hash) == certs2.map(c => c.block_hash)
+            certs1.map(c => c.block) == certs2.map(c => c.block)
         }
     })
 
@@ -789,10 +801,10 @@ module replica {
         val self = replica_state.get(id)
         val votes = store_vote.get(id)
         or {
-            AllBlocks.forall(b => not(is_view_finalized(v, votes, b))),
+            AllBlocks.forall(b => not(is_view_finalized_votes(v, votes, b))),
             select_votes(v, NullifyKind, votes)
                 .map(vote => vote.sig)
-                .size() < L
+                .size() < M
         }
     })
 
@@ -801,11 +813,11 @@ module replica {
         val self = replica_state.get(id)
         val votes = store_vote.get(id)
         AllBlocks.forall(b => or {
-            not(is_view_finalized(v, votes, b)),
+            not(is_view_finalized_votes(v, votes, b)),
             select_votes(v, NotarizeKind, votes)
-                .filter(vote => vote.block_hash != b)
+                .filter(vote => vote.block != b)
                 .map(vote => vote.sig)
-                .size() < L
+                .size() < M
         })
     })
 
@@ -822,8 +834,8 @@ module replica {
         validity,
         valid_last_finalized,
         certificates_are_valid_inv,
-        notarized_consistence,
-        safe_finalization
+        notarized_consistency,
+        safe_finalization,
     }
 
     val safe = all_invariants
@@ -831,11 +843,11 @@ module replica {
     // Test invariants.
 
     val correct_nodes_sent_certificates_valid = sent_certificate.filter(cert => cert.ghost_sender.in(CORRECT)).forall(cert => {
-        cert.signatures.size() >= L
+        cert.signatures.size() >= M
     })
     val store_certificates_are_valid = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
-        certs.forall(cert => cert.signatures.size() >= L)
+        certs.forall(cert => cert.signatures.size() >= M)
     })
 
     val certificates_are_valid = and {
@@ -869,12 +881,12 @@ module replica {
 
     // Check this invariant to see an example of having a subquorum of votes.
     val votes_subquorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= L
+        store_vote.get(id).size() <= M
     })
 
     // Check this invariant to see an example of having a quorum of votes.
     val votes_quorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= Q
+        store_vote.get(id).size() <= L
     })
 
     // Check this invariant to see an example of having a certificate.
