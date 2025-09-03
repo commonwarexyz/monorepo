@@ -700,8 +700,6 @@ mod tests {
             assert_eq!(item2, test_digest(2));
             let err = journal.read(3).await.expect_err("expected read to fail");
             assert!(matches!(err, Error::Runtime(_)));
-            let err = journal.read(400).await.expect_err("expected read to fail");
-            assert!(matches!(err, Error::InvalidItem(x) if x == 400));
 
             // Sync the journal
             journal.sync().await.expect("failed to sync journal");

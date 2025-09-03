@@ -704,7 +704,8 @@ impl<
     }
 
     /// Simulate an unclean shutdown by consuming the db without syncing (or only partially syncing)
-    /// the log and/or mmr.
+    /// the log and/or mmr. When _not_ fully syncing the mmr, the `write_limit` parameter dictates
+    /// how many mmr nodes to write during a partial sync (can be 0).
     #[cfg(test)]
     pub async fn simulate_failure(
         mut self,
@@ -716,6 +717,7 @@ impl<
             self.log.sync().await?;
         }
         if sync_mmr {
+            assert_eq!(write_limit, 0);
             self.mmr.sync(&mut self.hasher).await?;
         } else if write_limit > 0 {
             self.mmr
@@ -1101,8 +1103,10 @@ pub(super) mod test {
         });
     }
 
+    /// Test that various types of unclean shutdown while updating a non-empty DB recover to the
+    /// empty DB on re-open.
     #[test_traced("WARN")]
-    fn test_any_fixed_db_recovery() {
+    fn test_any_fixed_non_empty_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1116,12 +1120,15 @@ pub(super) mod test {
                 db.update(k, v).await.unwrap();
             }
             db.commit().await.unwrap();
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
             let root = db.root(&mut hasher);
             let op_count = db.op_count();
+            let inactivity_floor_loc = db.inactivity_floor_loc();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
             async fn apply_more_ops(db: &mut AnyTest) {
@@ -1132,27 +1139,33 @@ pub(super) mod test {
                 }
             }
 
-            // Insert another 1000 keys then simulate failure (sync nothing).
+            // Insert operations without commit, then simulate failure, syncing nothing.
             apply_more_ops(&mut db).await;
-            db.simulate_failure(false, false, 10).await.unwrap();
+            db.simulate_failure(false, false, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
-            // Insert another 1000 keys then simulate failure (sync only the log).
+            // Repeat, though this time sync the log and only 10 elements of the mmr.
             apply_more_ops(&mut db).await;
             db.simulate_failure(true, false, 10).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(&mut hasher), root);
 
-            // Insert another 1000 keys then simulate failure (sync only the mmr).
+            // Repeat, though this time only fully sync the mmr.
             apply_more_ops(&mut db).await;
-            db.simulate_failure(false, false, 10).await.unwrap();
+            db.simulate_failure(false, true, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            apply_more_ops(&mut db).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_eq!(db.root(&mut hasher), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
+            apply_more_ops(&mut db).await;
+            apply_more_ops(&mut db).await;
+            apply_more_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(&mut hasher), root);
@@ -1160,6 +1173,76 @@ pub(super) mod test {
             // Apply the ops one last time but fully commit them this time, then clean up.
             apply_more_ops(&mut db).await;
             db.commit().await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert!(db.op_count() > op_count);
+            assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_ne!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that various types of unclean shutdown while updating an empty DB recover to the empty
+    /// DB on re-open.
+    #[test_traced("WARN")]
+    fn test_any_fixed_empty_db_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize an empty db.
+            let mut hasher = Standard::<Sha256>::new();
+            let db = open_db(context.clone()).await;
+            let root = db.root(&mut hasher);
+
+            // Reopen DB without clean shutdown and make sure the state is the same.
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            async fn apply_ops(db: &mut AnyTest) {
+                for i in 0u64..1000 {
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                    db.update(k, v).await.unwrap();
+                }
+            }
+
+            // Insert operations without commit then simulate failure, syncing nothing except one
+            // element of the mmr.
+            apply_ops(&mut db).await;
+            db.simulate_failure(false, false, 1).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // Repeat, though this time sync the log.
+            apply_ops(&mut db).await;
+            db.simulate_failure(true, false, 0).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // Repeat, though this time sync the mmr.
+            apply_ops(&mut db).await;
+            db.simulate_failure(false, true, 0).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // One last check that re-open without proper shutdown still recovers the correct state.
+            apply_ops(&mut db).await;
+            apply_ops(&mut db).await;
+            apply_ops(&mut db).await;
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // Apply the ops one last time but fully commit them this time, then clean up.
+            apply_ops(&mut db).await;
+            db.commit().await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert!(db.op_count() > 0);
+            assert_ne!(db.root(&mut hasher), root);
+
             db.destroy().await.unwrap();
         });
     }
