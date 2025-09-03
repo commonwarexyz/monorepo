@@ -19,7 +19,8 @@ use governor::Quota;
 use rand::{rngs::StdRng, SeedableRng};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    str::FromStr, time::Duration,
+    str::FromStr,
+    time::Duration,
 };
 
 fn main() {
@@ -40,6 +41,7 @@ fn main() {
                 .value_delimiter(',')
                 .value_parser(value_parser!(String)),
         )
+        .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .get_matches();
     let indexers: Vec<String> = matches
         .get_many::<String>("indexer")
@@ -76,8 +78,14 @@ fn main() {
         }
     }
 
+    // Configure storage directory
+    let storage_directory = matches
+        .get_one::<String>("storage-dir")
+        .expect("Please provide storage directory");
+
     // Start runtime
-    let executor = tokio::Runner::default();
+    let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
+    let executor = tokio::Runner::new(runtime_cfg);
     executor.start(|context| async move {
         // Setup P2P.
         // Tracks at least 3 peer sets since the epoch+2 set is established at end-of-epoch.
@@ -90,6 +98,7 @@ fn main() {
             1024 * 1024,
         );
         p2p_cfg.tracked_peer_sets = 3;
+        p2p_cfg.query_frequency = Duration::from_secs(2);
         let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Create shares.
@@ -181,10 +190,7 @@ fn main() {
             orchestrator: orchestrator.clone(),
             poll_interval: Duration::from_secs(15),
         };
-        let poller_actor = poller::Poller::new(
-            context.with_label("poller"),
-            poller_cfg,
-        );
+        let poller_actor = poller::Poller::new(context.with_label("poller"), poller_cfg);
 
         // Start the actors
         poller_actor.start();

@@ -25,12 +25,12 @@ bash -c '
   # Start indexer
   cargo run -p commonware-epocher --release --bin commonware-epocher-indexer -- --me 1@4001 &
   # Start validators (bootstrapper + joiners) and point to indexer
-  cargo run -p commonware-epocher --release --bin commonware-epocher -- --me 1@3001 --indexer http://127.0.0.1:4001 &
+  cargo run -p commonware-epocher --release --bin commonware-epocher -- --me 1@3001 --indexer http://127.0.0.1:4001 --storage-dir /tmp/commonware-epocher/1 &
   sleep 1
   for i in {2..10}; do
     sleep 1
     port=$((3000 + i))
-    cargo run -p commonware-epocher --release --bin commonware-epocher -- --me ${i}@${port} --bootstrappers 1@127.0.0.1:3001 --indexer http://127.0.0.1:4001 &
+    cargo run -p commonware-epocher --release --bin commonware-epocher -- --me ${i}@${port} --bootstrappers 1@127.0.0.1:3001 --indexer http://127.0.0.1:4001 --storage-dir /tmp/commonware-epocher/${i} &
   done
   wait
 '
@@ -69,6 +69,7 @@ You should see logs indicating finalized blocks (e.g., `finalized-delivered-to-a
 - `--me KEY@PORT`: required. KEY must be an integer in 1..10. Binds to `127.0.0.1:PORT` and derives the node key from `KEY`.
 - `--bootstrappers KEY@HOST:PORT[,KEY@HOST:PORT...]`: optional. One or more known peers to initially connect to (use `1@127.0.0.1:3001` for local runs).
  - `--indexer URL[,URL...]`: optional. One or more indexer base URLs to POST finalized `(Finalization, Block)` tuples to (e.g., `http://127.0.0.1:4001`).
+ - `--storage-dir PATH`: required. Storage directory for persisting state across restarts.
 
 ### Indexer endpoints
 

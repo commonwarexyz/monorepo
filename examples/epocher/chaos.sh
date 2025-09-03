@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Chaos runner for epocher: runs indexer and 10 validators locally,
-# randomly restarting each validator every 0–10 minutes independently.
+# randomly restarting each validator.
 #
 # Requirements: cargo, Rust toolchain installed.
 # Usage: ./chaos.sh
@@ -13,15 +13,21 @@ export RUST_LOG
 ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")"/../.. && pwd)
 cd "$ROOT_DIR"
 
+# Build once so we can run binaries directly (simplifies clean shutdowns)
+cargo build -p commonware-epocher --release >/dev/null
+
 # Ensure we kill all children on exit
 cleanup() {
   trap - EXIT INT TERM
-  pkill -P $$ || true
+  # Terminate the entire process group (script + children + grandchildren)
+  kill -TERM -$$ 2>/dev/null || true
+  sleep 1 || true
+  kill -KILL -$$ 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-BIN_VALIDATOR="-p commonware-epocher --release --bin commonware-epocher"
-BIN_INDEXER="-p commonware-epocher --release --bin commonware-epocher-indexer"
+PATH_VALIDATOR="$ROOT_DIR/target/release/commonware-epocher"
+PATH_INDEXER="$ROOT_DIR/target/release/commonware-epocher-indexer"
 
 INDEXER_PORT=4001
 BOOTSTRAP_KEY=1
@@ -32,14 +38,15 @@ log() { printf '[%(%Y-%m-%dT%H:%M:%S%z)T] %s\n' -1 "$*"; }
 
 # Start indexer
 log "starting indexer on :${INDEXER_PORT}"
-cargo run ${BIN_INDEXER} -- --me 1@${INDEXER_PORT} &
+"${PATH_INDEXER}" --me 1@${INDEXER_PORT} &
 INDEXER_PID=$!
 
 sleep 1
 
 # Start bootstrap validator (key 1)
 log "starting bootstrap validator ${BOOTSTRAP_KEY}@${BOOTSTRAP_PORT}"
-cargo run ${BIN_VALIDATOR} -- --me ${BOOTSTRAP_KEY}@${BOOTSTRAP_PORT} --indexer http://127.0.0.1:${INDEXER_PORT} &
+mkdir -p /tmp/commonware-epocher/${BOOTSTRAP_KEY}
+"${PATH_VALIDATOR}" --me ${BOOTSTRAP_KEY}@${BOOTSTRAP_PORT} --indexer http://127.0.0.1:${INDEXER_PORT} --storage-dir /tmp/commonware-epocher/${BOOTSTRAP_KEY} &
 BOOTSTRAP_PID=$!
 
 sleep 2
@@ -48,9 +55,12 @@ sleep 2
 run_validator() {
   local key=$1
   local port=$2
-  cargo run ${BIN_VALIDATOR} -- --me ${key}@${port} \
+  local storage_dir="/tmp/commonware-epocher/${key}"
+  mkdir -p "${storage_dir}"
+  exec "${PATH_VALIDATOR}" --me ${key}@${port} \
     --bootstrappers ${BOOTSTRAP_ADDR} \
-    --indexer http://127.0.0.1:${INDEXER_PORT}
+    --indexer http://127.0.0.1:${INDEXER_PORT} \
+    --storage-dir "${storage_dir}"
 }
 
 # Chaos loop per validator (keys 2..10)
@@ -58,8 +68,8 @@ chaos_validator() {
   local key=$1
   local port=$2
   while true; do
-    # Random up-time 0..10 minutes
-    local up_sec=$((RANDOM % 600))
+    # Random up-time 0..120 seconds
+    local up_sec=$((RANDOM % 120))
     log "validator ${key}: starting on port ${port} for ~${up_sec}s"
     run_validator ${key} ${port} &
     local pid=$!
@@ -72,13 +82,24 @@ chaos_validator() {
     # Kill process (if still running)
     if kill -0 ${pid} 2>/dev/null; then
       log "validator ${key}: stopping"
-      kill ${pid} 2>/dev/null || true
-      # Give some time to terminate; force kill if needed
-      sleep 2 || true
-      kill -9 ${pid} 2>/dev/null || true
+      kill -TERM ${pid} 2>/dev/null || true
+      # Wait up to ~3s for clean shutdown
+      for _ in 1 2 3 4 5 6; do
+        if kill -0 ${pid} 2>/dev/null; then
+          sleep 0.5 || true
+        else
+          break
+        fi
+      done
+      # Force kill if still alive
+      if kill -0 ${pid} 2>/dev/null; then
+        kill -KILL ${pid} 2>/dev/null || true
+      fi
+      # Reap process to avoid zombies
+      wait ${pid} 2>/dev/null || true
     fi
-    # Random downtime 0..60 seconds
-    local down_sec=$((RANDOM % 60))
+    # Random downtime 0..10 seconds
+    local down_sec=$((RANDOM % 10))
     log "validator ${key}: down for ~${down_sec}s"
     if [[ ${down_sec} -gt 0 ]]; then
       sleep ${down_sec} || true
@@ -96,5 +117,3 @@ done
 
 # Wait forever (children are managed by traps)
 wait
-
-
