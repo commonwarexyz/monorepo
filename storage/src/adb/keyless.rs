@@ -206,10 +206,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             // Locations/mmr are empty, so we must replay the entire log to regenerate them.
             (0, 0)
         };
-        println!(
-            "section and offset of last valid log operation {} {}",
-            section, offset
-        );
+        println!("section and offset of last valid log operation {section} {offset}");
 
         // Next, replay any log operations that are missing from the other structures, keeping track
         // of the very last operation in the log and its size.
