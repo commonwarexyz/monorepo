@@ -22,7 +22,7 @@
 //! ```
 
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
@@ -32,6 +32,7 @@ use core::{
     iter::{Extend, FromIterator},
     ops::{BitAnd, BitOr, BitXor, Index},
 };
+#[cfg(feature = "std")]
 use std::collections::VecDeque;
 
 /// A growable bit vector with configurable chunk size.
