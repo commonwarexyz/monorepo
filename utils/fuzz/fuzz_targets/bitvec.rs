@@ -44,7 +44,6 @@ enum FuzzInput {
     BitOrOp(Vec<bool>, Vec<bool>),
     BitXorOp(Vec<bool>, Vec<bool>),
     Codec(Vec<bool>),
-    CodecWithTrailingBits(usize, Vec<u8>),
     IteratorOps(Vec<bool>),
 }
 
