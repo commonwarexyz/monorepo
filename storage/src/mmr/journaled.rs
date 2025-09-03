@@ -394,6 +394,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound)
                 .await?;
         }
+        metadata.sync().await?;
 
         Ok(Self {
             mem_mmr,
