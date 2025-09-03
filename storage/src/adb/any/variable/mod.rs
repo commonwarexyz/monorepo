@@ -274,7 +274,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 offset, "operation was missing from MMR/location map"
                             );
                             self.mmr.add(&mut self.hasher, &op.encode()).await?;
-                            self.locations.append(offset.into()).await?;
+                            self.locations.append(offset).await?;
                             mmr_leaves += 1;
                         }
 

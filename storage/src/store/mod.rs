@@ -729,7 +729,9 @@ where
         self.locations
             .prune(self.oldest_retained_loc)
             .await
-            .map_err(Error::Journal)
+            .map_err(Error::Journal)?;
+
+        Ok(())
     }
 }
 

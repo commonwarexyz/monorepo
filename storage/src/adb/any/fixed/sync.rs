@@ -104,23 +104,26 @@ where
                 mmr.sync(&mut hasher).await?;
             }
         }
+        mmr.sync(&mut hasher).await?;
 
         // Build the snapshot from the log.
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        let inactivity_floor_loc = any::fixed::Any::<E, K, V, H, T>::build_snapshot_from_log::<
-            0, /* UNUSED_N */
-        >(lower_bound, &log, &mut snapshot, None)
+        any::fixed::Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
+            lower_bound,
+            &log,
+            &mut snapshot,
+            None,
+        )
         .await?;
 
         let mut db = any::fixed::Any {
             mmr,
             log,
+            inactivity_floor_loc: lower_bound,
             snapshot,
-            inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher: hasher::Standard::<H>::new(),
-            pruning_delay: db_config.pruning_delay,
         };
         db.sync().await?;
         Ok(db)
@@ -309,7 +312,7 @@ mod tests {
             any::fixed::{
                 test::{
                     any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
-                    AnyTest, PAGE_CACHE_SIZE, PAGE_SIZE,
+                    AnyTest,
                 },
                 Any,
             },
@@ -344,6 +347,10 @@ mod tests {
         sync::Arc,
     };
     use test_case::test_case;
+
+    // Janky sizes to test boundary conditions.
+    const PAGE_SIZE: usize = 99;
+    const PAGE_CACHE_SIZE: usize = 3;
 
     fn test_hasher() -> Standard<Sha256> {
         Standard::<Sha256>::new()
@@ -469,9 +476,8 @@ mod tests {
 
             // Capture the database state before closing
             let final_synced_op_count = got_db.op_count();
-            let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
             let final_synced_log_size = got_db.log.size().await.unwrap();
-            let final_synced_oldest_retained_loc = got_db.oldest_retained_loc();
+            let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
             let final_synced_pruned_to_pos = got_db.mmr.pruned_to_pos();
             let final_synced_root = got_db.root(&mut hasher);
 
@@ -489,8 +495,8 @@ mod tests {
             );
             assert_eq!(reopened_db.log.size().await.unwrap(), final_synced_log_size);
             assert_eq!(
-                reopened_db.oldest_retained_loc(),
-                final_synced_oldest_retained_loc,
+                reopened_db.inactivity_floor_loc,
+                final_synced_inactivity_floor,
             );
             assert_eq!(reopened_db.mmr.pruned_to_pos(), final_synced_pruned_to_pos);
             assert_eq!(reopened_db.root(&mut hasher), final_synced_root);
@@ -600,7 +606,7 @@ mod tests {
 
             // Verify the synced database has the correct range of operations
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
-            assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(
                 synced_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(lower_bound_ops)
@@ -678,7 +684,7 @@ mod tests {
                 sync_db.inactivity_floor_loc,
                 target_db.read().await.inactivity_floor_loc
             );
-            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
+            assert_eq!(sync_db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
                 target_db.read().await.log.size().await.unwrap()
@@ -777,7 +783,7 @@ mod tests {
             // Verify database state
             assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
             assert_eq!(sync_db.op_count(), target_db.op_count());
-            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
+            assert_eq!(sync_db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
                 target_db.log.size().await.unwrap()
@@ -991,7 +997,7 @@ mod tests {
             assert_eq!(synced_db.root(&mut hasher), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound + 1);
             assert_eq!(synced_db.inactivity_floor_loc, final_lower_bound);
-            assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
+            assert_eq!(synced_db.inactivity_floor_loc, final_lower_bound);
 
             synced_db.destroy().await.unwrap();
 
@@ -1237,7 +1243,7 @@ mod tests {
                     target_db.inactivity_floor_loc
                 );
                 assert_eq!(
-                    synced_db.oldest_retained_loc().unwrap(),
+                    synced_db.inactivity_floor_loc,
                     target_db.inactivity_floor_loc
                 );
                 assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
@@ -1347,10 +1353,7 @@ mod tests {
                 synced_db.inactivity_floor_loc,
                 target_db.inactivity_floor_loc
             );
-            assert_eq!(
-                synced_db.oldest_retained_loc().unwrap(),
-                initial_lower_bound
-            );
+            assert_eq!(synced_db.inactivity_floor_loc, initial_lower_bound);
             assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
 
             // Verify the expected operations are present in the synced database.
@@ -1415,7 +1418,6 @@ mod tests {
             let expected_root = synced_db.root(&mut hasher);
             let expected_op_count = synced_db.op_count();
             let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc;
-            let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
             let expected_pruned_to_pos = synced_db.mmr.pruned_to_pos();
 
             // Close the database
@@ -1432,8 +1434,8 @@ mod tests {
                 expected_inactivity_floor_loc
             );
             assert_eq!(
-                reopened_db.oldest_retained_loc(),
-                expected_oldest_retained_loc
+                reopened_db.inactivity_floor_loc,
+                expected_inactivity_floor_loc
             );
             assert_eq!(reopened_db.mmr.pruned_to_pos(), expected_pruned_to_pos);
 
@@ -1596,7 +1598,6 @@ mod tests {
             // Verify database state
             assert_eq!(db.op_count(), upper_bound_ops + 1);
             assert_eq!(db.inactivity_floor_loc, lower_bound_ops);
-            assert_eq!(db.oldest_retained_loc(), Some(lower_bound_ops));
             assert_eq!(db.mmr.size(), source_db.mmr.size());
             assert_eq!(db.mmr.pruned_to_pos(), leaf_num_to_pos(lower_bound_ops));
             assert_eq!(
@@ -1699,7 +1700,6 @@ mod tests {
                 assert_eq!(db.mmr.size(), leaf_num_to_pos(expected_op_count));
                 assert_eq!(db.op_count(), expected_op_count);
                 assert_eq!(db.inactivity_floor_loc, lower_bound);
-                assert_eq!(db.oldest_retained_loc(), Some(lower_bound));
                 assert_eq!(db.mmr.pruned_to_pos(), leaf_num_to_pos(lower_bound));
 
                 // Verify state matches the source operations
@@ -1795,7 +1795,7 @@ mod tests {
             // Verify database state
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
-            assert_eq!(sync_db.oldest_retained_loc(), Some(sync_lower_bound));
+            assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
             assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
             assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
             assert_eq!(
@@ -1872,7 +1872,7 @@ mod tests {
             // Verify database state
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
-            assert_eq!(sync_db.oldest_retained_loc(), Some(sync_lower_bound));
+            assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
             assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
             assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
             assert_eq!(
