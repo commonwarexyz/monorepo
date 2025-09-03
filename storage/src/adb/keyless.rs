@@ -206,6 +206,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             // Locations/mmr are empty, so we must replay the entire log to regenerate them.
             (0, 0)
         };
+        println!(
+            "section and offset of last valid log operation {} {}",
+            section, offset
+        );
 
         // Next, replay any log operations that are missing from the other structures, keeping track
         // of the very last operation in the log and its size.
@@ -282,38 +286,28 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             op = log.get(section, offset).await?.expect("no operation found");
         }
 
+        let rewind_point = rewind_point.unwrap_or((0, 0));
+
         // If any operations follow the last commit, rewind them.
-        if let Some(last_commit_loc) = last_commit_loc {
-            if last_commit_loc != size - 1 {
-                // There's at least one append operation to rewind.
-                warn!(
-                    old_size = size,
-                    new_size = last_commit_loc + 1,
-                    "rewinding to last commit point"
-                );
-                locations.rewind(last_commit_loc + 1).await?;
-                locations.sync().await?;
-                mmr.pop((size - last_commit_loc - 1) as usize).await?;
-                size = last_commit_loc + 1;
-                // Rewind the operations log last to ensure the locations journal always references
-                // valid data in the event of failures.
-                let rewind_point = rewind_point.expect("no rewind point found");
-                let section = rewind_point.0 / cfg.log_items_per_section.get();
-                log.rewind_to_offset(section, rewind_point.1).await?;
-                log.sync(section).await?;
-            }
-        } else if size > 0 {
-            warn!(old_size = size, "no commit point found, rewinding to start");
-            locations.rewind(0).await?;
+        if rewind_point.0 != size {
+            warn!(
+                old_size = size,
+                new_size = rewind_point.0,
+                offset = rewind_point.1,
+                "rewinding log to last commit"
+            );
+            locations.rewind(rewind_point.0).await?;
             locations.sync().await?;
-            mmr.pop(size as usize).await?;
-            size = 0;
-            log.rewind(0, 0).await?;
-            log.sync(0).await?;
+            mmr.pop((size - rewind_point.0) as usize).await?;
+            size = rewind_point.0;
+            let section = rewind_point.0 / cfg.log_items_per_section.get();
+            log.rewind_to_offset(section, rewind_point.1).await?;
+            log.sync(section).await?;
         }
 
         // Final alignment check.
-        assert_eq!(locations.size().await?, mmr.leaves());
+        assert_eq!(size, mmr.leaves());
+        assert_eq!(size, locations.size().await?);
 
         Ok(Self {
             mmr,
