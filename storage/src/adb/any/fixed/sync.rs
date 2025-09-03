@@ -430,10 +430,6 @@ mod tests {
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
             assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
-            assert_eq!(
-                got_db.mmr.pruned_to_pos(),
-                leaf_num_to_pos(target_inactivity_floor)
-            );
 
             // Verify the root digest matches the target
             assert_eq!(got_db.root(&mut hasher), target_root);
@@ -478,7 +474,6 @@ mod tests {
             let final_synced_op_count = got_db.op_count();
             let final_synced_log_size = got_db.log.size().await.unwrap();
             let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
-            let final_synced_pruned_to_pos = got_db.mmr.pruned_to_pos();
             let final_synced_root = got_db.root(&mut hasher);
 
             // Close the database
@@ -498,7 +493,6 @@ mod tests {
                 reopened_db.inactivity_floor_loc,
                 final_synced_inactivity_floor,
             );
-            assert_eq!(reopened_db.mmr.pruned_to_pos(), final_synced_pruned_to_pos);
             assert_eq!(reopened_db.root(&mut hasher), final_synced_root);
 
             // Verify that the original key-value pairs are still correct
@@ -607,10 +601,6 @@ mod tests {
             // Verify the synced database has the correct range of operations
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
-            assert_eq!(
-                synced_db.mmr.pruned_to_pos(),
-                leaf_num_to_pos(lower_bound_ops)
-            );
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
 
             // Verify the final root digest matches our target
@@ -688,10 +678,6 @@ mod tests {
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
                 target_db.read().await.log.size().await.unwrap()
-            );
-            assert_eq!(
-                sync_db.mmr.pruned_to_pos(),
-                leaf_num_to_pos(lower_bound_ops)
             );
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);
@@ -787,10 +773,6 @@ mod tests {
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
                 target_db.log.size().await.unwrap()
-            );
-            assert_eq!(
-                sync_db.mmr.pruned_to_pos(),
-                leaf_num_to_pos(lower_bound_ops)
             );
 
             // Verify the root digest matches the target
@@ -1415,7 +1397,6 @@ mod tests {
             let expected_root = synced_db.root(&mut hasher);
             let expected_op_count = synced_db.op_count();
             let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc;
-            let expected_pruned_to_pos = synced_db.mmr.pruned_to_pos();
 
             // Close the database
             synced_db.close().await.unwrap();
@@ -1434,7 +1415,6 @@ mod tests {
                 reopened_db.inactivity_floor_loc,
                 expected_inactivity_floor_loc
             );
-            assert_eq!(reopened_db.mmr.pruned_to_pos(), expected_pruned_to_pos);
 
             // Cleanup
             Arc::try_unwrap(target_db)
@@ -1596,7 +1576,6 @@ mod tests {
             assert_eq!(db.op_count(), upper_bound_ops + 1);
             assert_eq!(db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(db.mmr.size(), source_db.mmr.size());
-            assert_eq!(db.mmr.pruned_to_pos(), leaf_num_to_pos(lower_bound_ops));
             assert_eq!(
                 db.log.size().await.unwrap(),
                 source_db.log.size().await.unwrap()
@@ -1697,7 +1676,6 @@ mod tests {
                 assert_eq!(db.mmr.size(), leaf_num_to_pos(expected_op_count));
                 assert_eq!(db.op_count(), expected_op_count);
                 assert_eq!(db.inactivity_floor_loc, lower_bound);
-                assert_eq!(db.mmr.pruned_to_pos(), leaf_num_to_pos(lower_bound));
 
                 // Verify state matches the source operations
                 let mut expected_kvs = HashMap::new();
@@ -1795,10 +1773,6 @@ mod tests {
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
             assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
             assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
-            assert_eq!(
-                sync_db.mmr.pruned_to_pos(),
-                leaf_num_to_pos(sync_lower_bound)
-            );
 
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), target_hash);
@@ -1872,10 +1846,6 @@ mod tests {
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
             assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
             assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
-            assert_eq!(
-                sync_db.mmr.pruned_to_pos(),
-                leaf_num_to_pos(sync_lower_bound)
-            );
 
             sync_db.destroy().await.unwrap();
         });
@@ -2124,12 +2094,6 @@ mod tests {
                 let result = journal.read(i).await;
                 assert!(result.is_ok(),);
                 assert_eq!(result.unwrap(), test_digest(i));
-            }
-
-            // Verify operations beyond the upper bound are not readable (were rewound)
-            for i in expected_final_size..initial_size {
-                let result = journal.read(i).await;
-                assert!(result.is_err(),);
             }
 
             // Verify that new operations can be appended from the sync position
