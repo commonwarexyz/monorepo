@@ -184,6 +184,9 @@ impl Transcript {
     /// Like [Self::commit], except that subsequent calls to [Self::append] or [Self::commit] are
     /// considered part of the same message.
     ///
+    /// [Self::commit] needs to be called before calling any other method, besides [Self::append],
+    /// in order to avoid having uncommitted data.
+    ///
     /// ```
     /// # use commonware_cryptography::transcript::Transcript;
     /// let s1 = Transcript::new(b"test").append(b"A".as_slice()).commit(b"B".as_slice()).summarize();
