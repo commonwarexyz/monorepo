@@ -255,6 +255,14 @@ mod tests {
         // Test case 4: invalid hexadecimal character
         let h = "01g3";
         assert!(from_hex(h).is_none());
+
+        // Test case 5: invalid `+` in string
+        let h = "+123";
+        assert!(from_hex(h).is_none());
+
+        // Test case 6: not a hex string
+        let h = "aabbccddklmn";
+        assert!(from_hex(h).is_none());
     }
 
     #[test]
