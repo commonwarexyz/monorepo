@@ -14,7 +14,6 @@ use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::Instant;
-use tracing::info;
 
 const NUM_ELEMENTS: u64 = 1_000;
 const NUM_OPERATIONS: u64 = 10_000;
@@ -98,7 +97,6 @@ fn bench_fixed_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "benchmarking fixed::Any generate",);
             c.bench_function(
                 &format!(
                     "{}/elements={} operations={}",
@@ -111,7 +109,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                         let ctx = context::get::<Context>();
                         let start = Instant::now();
                         for _ in 0..iters {
-                            let db = gen_random_any(ctx.clone(), elements, operations).await;
+                            let mut db = gen_random_any(ctx.clone(), elements, operations).await;
+                            db.sync().await.unwrap();
                             db.destroy().await.unwrap();
                         }
                         start.elapsed()
