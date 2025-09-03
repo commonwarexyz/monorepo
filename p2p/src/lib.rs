@@ -28,7 +28,7 @@ pub type Message<P> = (P, Bytes);
 pub type Channel = u32;
 
 /// Enum indicating the set of recipients to send a message to.
-#[derive(Clone)]
+#[derive(Clone,Debug)]
 pub enum Recipients<P: PublicKey> {
     All,
     Some(Vec<P>),
