@@ -1,6 +1,6 @@
 use crate::{orchestrator::EpochUpdate, GENESIS_BLOCK, NAMESPACE};
 use commonware_codec::extensions::DecodeRangeExt;
-use commonware_consensus::{Reporter, threshold_simplex::types::Finalization};
+use commonware_consensus::{threshold_simplex::types::Finalization, Reporter};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     sha256::Digest as Sha256Digest,
@@ -12,7 +12,7 @@ use std::time::Duration;
 use tracing::{debug, info, trace, warn};
 
 pub struct Config<O: Reporter<Activity = EpochUpdate>> {
-	pub identity: <MinSig as Variant>::Public,
+    pub identity: <MinSig as Variant>::Public,
     pub indexers: Vec<String>,
     pub poll_interval: Duration,
     pub orchestrator: O,
@@ -39,10 +39,7 @@ where
     E: Clock + Spawner + Metrics + Rng,
     O: Reporter<Activity = EpochUpdate> + Clone,
 {
-    pub fn new(
-        context: E,
-		cfg: Config<O>,
-    ) -> Self {
+    pub fn new(context: E, cfg: Config<O>) -> Self {
         Self {
             context,
             identity: cfg.identity,
