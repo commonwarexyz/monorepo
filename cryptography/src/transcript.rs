@@ -1,3 +1,8 @@
+//! This module exists to provide the [Transcript] abstraction.
+//!
+//! This is useful for hashing data, committing to it, and extracting secure
+//! randomness from it. The API evades common footguns with doing these things
+//! in an ad hoc way.
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, Write};
@@ -128,7 +133,7 @@ impl Transcript {
 impl Transcript {
     /// Create a new transcript.
     ///
-    /// The namespace serves to disamiguate two transcripts, so that even if they record
+    /// The namespace serves to disambiguate two transcripts, so that even if they record
     /// the same information, the results will be different:
     /// ```
     /// # use commonware_cryptography::transcript::Transcript;
