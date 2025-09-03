@@ -103,7 +103,7 @@ impl Read for BloomFilter {
         if !hashers_cfg.contains(&(hashers as usize)) {
             return Err(CodecError::Invalid("BloomFilter", "invalid hashers"));
         }
-        let bits = BitVec::read_cfg(buf, &bits_cfg)?;
+        let bits = BitVec::read_cfg(buf, bits_cfg)?;
         Ok(Self { hashers, bits })
     }
 }

@@ -135,14 +135,14 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::GetUnchecked(bools, index) => unsafe {
+            FuzzInput::GetUnchecked(bools, index) => {
                 let v = BitVec::from(&bools);
                 // Caller must ensure `index` is less than the length of the BitVec.
                 if index >= v.len() {
                     return;
                 }
                 v.get(index);
-            },
+            }
 
             FuzzInput::Set(bools, index) => {
                 let mut v = BitVec::from(&bools);
@@ -192,7 +192,6 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::And(bools1, bools2) => {
-                /* TODO fix
                 if bools1.len() != bools2.len() {
                     return;
                 }
@@ -202,11 +201,15 @@ fn fuzz(input: Vec<FuzzInput>) {
                 v1.and(&v2);
 
                 assert_eq!(v1.len(), old_len);
-                */
+
+                // Verify the AND operation worked correctly
+                for i in 0..v1.len() {
+                    let expected = bools1[i] && bools2[i];
+                    assert_eq!(v1.get(i), Some(expected));
+                }
             }
 
             FuzzInput::Or(bools1, bools2) => {
-                /* TODO fix
                 if bools1.len() != bools2.len() {
                     return;
                 }
@@ -216,11 +219,15 @@ fn fuzz(input: Vec<FuzzInput>) {
                 v1.or(&v2);
 
                 assert_eq!(v1.len(), old_len);
-                */
+
+                // Verify the OR operation worked correctly
+                for i in 0..v1.len() {
+                    let expected = bools1[i] || bools2[i];
+                    assert_eq!(v1.get(i), Some(expected));
+                }
             }
 
             FuzzInput::Xor(bools1, bools2) => {
-                /* TODO fix
                 if bools1.len() != bools2.len() {
                     return;
                 }
@@ -230,11 +237,15 @@ fn fuzz(input: Vec<FuzzInput>) {
                 v1.xor(&v2);
 
                 assert_eq!(v1.len(), old_len);
-                */
+
+                // Verify the XOR operation worked correctly
+                for i in 0..v1.len() {
+                    let expected = bools1[i] ^ bools2[i];
+                    assert_eq!(v1.get(i), Some(expected));
+                }
             }
 
             FuzzInput::Invert(bools) => {
-                /* TODO fix
                 let mut v = BitVec::from(&bools);
                 let old_ones = v.count_ones();
                 let old_zeros = v.count_zeros();
@@ -242,7 +253,6 @@ fn fuzz(input: Vec<FuzzInput>) {
 
                 assert_eq!(v.count_ones(), old_zeros);
                 assert_eq!(v.count_zeros(), old_ones);
-                */
             }
 
             FuzzInput::Default => {
@@ -299,17 +309,14 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Index(bools, index) => {
-                /* TODO fix
                 let v = BitVec::from(&bools);
                 if index < v.len() {
                     let indexed_value = v[index];
                     assert_eq!(Some(indexed_value), v.get(index));
                 }
-                */
             }
 
             FuzzInput::BitAndOp(bools1, bools2) => {
-                /* TODO fix
                 if bools1.len() != bools2.len() {
                     return;
                 }
@@ -322,11 +329,9 @@ fn fuzz(input: Vec<FuzzInput>) {
                     let expected = bools1[i] && bools2[i];
                     assert_eq!(result.get(i), Some(expected));
                 }
-                */
             }
 
             FuzzInput::BitOrOp(bools1, bools2) => {
-                /* TODO fix
                 if bools1.len() != bools2.len() {
                     return;
                 }
@@ -339,11 +344,9 @@ fn fuzz(input: Vec<FuzzInput>) {
                     let expected = bools1[i] || bools2[i];
                     assert_eq!(result.get(i), Some(expected));
                 }
-                */
             }
 
             FuzzInput::BitXorOp(bools1, bools2) => {
-                /* TODO fix
                 if bools1.len() != bools2.len() {
                     return;
                 }
@@ -356,7 +359,6 @@ fn fuzz(input: Vec<FuzzInput>) {
                     let expected = bools1[i] ^ bools2[i];
                     assert_eq!(result.get(i), Some(expected));
                 }
-                */
             }
 
             FuzzInput::Codec(bools) => {
