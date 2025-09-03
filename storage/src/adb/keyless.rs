@@ -118,6 +118,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        // TO_FIX: This implementation does not handle pruning.
         let mut hasher = Standard::<H>::new();
 
         let mut mmr = Mmr::init(
@@ -284,6 +285,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // The location of the first append operation to follow the last known commit, and the
         // offset it wraps.
         let mut rewind_point = None;
+        let mut offset = offset;
         loop {
             match op {
                 Operation::Commit(_) => {
@@ -298,7 +300,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 break;
             }
             op_index -= 1;
-            let offset = locations.read(op_index).await?;
+            offset = locations.read(op_index).await?;
             let section = op_index / cfg.log_items_per_section.get();
             op = log.get(section, offset).await?.expect("no operation found");
         }
@@ -600,19 +602,18 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub(super) async fn simulate_failure(
         mut self,
         sync_log: bool,
-        sync_mmr: bool,
         sync_locations: bool,
+        sync_mmr: bool,
     ) -> Result<(), Error> {
         if sync_log {
             let section = self.current_section();
             self.log.sync(section).await?;
         }
-
-        if sync_mmr {
-            self.mmr.sync(&mut self.hasher).await?;
-        }
         if sync_locations {
             self.locations.sync().await?;
+        }
+        if sync_mmr {
+            self.mmr.sync(&mut self.hasher).await?;
         }
 
         Ok(())
@@ -856,6 +857,185 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2 * ELEMENTS + 2);
             assert_eq!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that various types of unclean shutdown while updating a non-empty DB recover to the
+    /// empty DB on re-open.
+    #[test_traced("WARN")]
+    fn test_keyless_db_non_empty_db_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            // Append many values then commit.
+            const ELEMENTS: u64 = 200;
+            for i in 0u64..ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
+                db.append(v).await.unwrap();
+            }
+            db.commit(None).await.unwrap();
+            db.prune(10).await.unwrap();
+            let root = db.root(&mut hasher);
+            let op_count = db.op_count();
+
+            // Reopen DB without clean shutdown and make sure the state is the same.
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            async fn apply_more_ops(db: &mut Db) {
+                for i in 0..ELEMENTS {
+                    let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
+                    db.append(v).await.unwrap();
+                }
+            }
+
+            // Insert operations without commit, then simulate various failures.
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(false, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(true, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(false, true, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(false, false, true).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(true, true, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(true, false, true).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_more_ops(&mut db).await;
+            db.simulate_failure(false, true, true).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // One last check that re-open without proper shutdown still recovers the correct state.
+            apply_more_ops(&mut db).await;
+            apply_more_ops(&mut db).await;
+            apply_more_ops(&mut db).await;
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // Apply the ops one last time but fully commit them this time, then clean up.
+            apply_more_ops(&mut db).await;
+            db.commit(None).await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert!(db.op_count() > op_count);
+            assert_ne!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that various types of unclean shutdown while updating an empty DB recover to the empty
+    /// DB on re-open.
+    #[test_traced("WARN")]
+    fn test_keyless_db_empty_db_recovery() {
+        const ELEMENTS: u64 = 1000;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let db = open_db(context.clone()).await;
+            let root = db.root(&mut hasher);
+
+            // Reopen DB without clean shutdown and make sure the state is the same.
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            async fn apply_ops(db: &mut Db) {
+                for i in 0..ELEMENTS {
+                    let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
+                    db.append(v).await.unwrap();
+                }
+            }
+
+            // Simulate various failure types after inserting operations without a commit.
+            apply_ops(&mut db).await;
+            db.simulate_failure(false, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_ops(&mut db).await;
+            db.simulate_failure(true, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_ops(&mut db).await;
+            db.simulate_failure(false, true, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_ops(&mut db).await;
+            db.simulate_failure(false, false, true).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_ops(&mut db).await;
+            db.simulate_failure(true, true, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_ops(&mut db).await;
+            db.simulate_failure(true, false, true).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            apply_ops(&mut db).await;
+            db.simulate_failure(false, true, true).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // One last check that re-open without proper shutdown still recovers the correct state.
+            apply_ops(&mut db).await;
+            apply_ops(&mut db).await;
+            apply_ops(&mut db).await;
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), root);
+
+            // Apply the ops one last time but fully commit them this time, then clean up.
+            apply_ops(&mut db).await;
+            db.commit(None).await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert!(db.op_count() > 0);
+            assert_ne!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();
         });
