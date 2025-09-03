@@ -1,6 +1,6 @@
 use crate::{orchestrator::EpochUpdate, GENESIS_BLOCK, NAMESPACE};
 use commonware_codec::extensions::DecodeRangeExt;
-use commonware_consensus::threshold_simplex::types::Finalization;
+use commonware_consensus::{Reporter, threshold_simplex::types::Finalization};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     sha256::Digest as Sha256Digest,
@@ -11,13 +11,20 @@ use rand::{seq::SliceRandom, Rng};
 use std::time::Duration;
 use tracing::{debug, info, trace, warn};
 
+pub struct Config<O: Reporter<Activity = EpochUpdate>> {
+	pub identity: <MinSig as Variant>::Public,
+    pub indexers: Vec<String>,
+    pub poll_interval: Duration,
+    pub orchestrator: O,
+}
+
 /// Poller actor: periodically polls configured indexers for the latest
 /// finalizations, validates them against the network identity, and reports
 /// next-epoch transitions to the orchestrator.
 pub struct Poller<E, O>
 where
     E: Clock + Spawner + Metrics + Rng,
-    O: commonware_consensus::Reporter<Activity = EpochUpdate>,
+    O: Reporter<Activity = EpochUpdate>,
 {
     context: E,
     identity: <MinSig as Variant>::Public,
@@ -30,21 +37,19 @@ where
 impl<E, O> Poller<E, O>
 where
     E: Clock + Spawner + Metrics + Rng,
-    O: commonware_consensus::Reporter<Activity = EpochUpdate> + Clone,
+    O: Reporter<Activity = EpochUpdate> + Clone,
 {
     pub fn new(
         context: E,
-        identity: <MinSig as Variant>::Public,
-        indexers: Vec<String>,
-        orchestrator: O,
+		cfg: Config<O>,
     ) -> Self {
         Self {
             context,
-            identity,
-            indexers,
+            identity: cfg.identity,
+            indexers: cfg.indexers,
             client: reqwest::Client::new(),
-            orchestrator,
-            poll_interval: Duration::from_secs(2),
+            orchestrator: cfg.orchestrator,
+            poll_interval: cfg.poll_interval,
         }
     }
 
