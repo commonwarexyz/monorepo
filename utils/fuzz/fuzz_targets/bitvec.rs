@@ -282,7 +282,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                         let arr: [bool; 65] = bools[..65].try_into().unwrap();
                         let v: BitVec = (&arr).into();
                         assert_eq!(v.len(), 65);
-                        }
+                    }
                 }
             }
 
