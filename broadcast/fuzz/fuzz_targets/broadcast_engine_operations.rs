@@ -190,7 +190,7 @@ fn fuzz(input: FuzzInput) {
                 codec_config: RangeCfg::from(..),
             };
 
-            let engine_context = context.with_label(&format!("peer_{}", i));
+            let engine_context = context.with_label(&format!("peer_{i}"));
             let (engine, mailbox) =
                 Engine::<_, PublicKey, FuzzMessage>::new(engine_context, config);
             mailboxes.insert(public_key.clone(), mailbox);
@@ -229,7 +229,7 @@ fn fuzz(input: FuzzInput) {
 
                     if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
                         let resolved_recipients = resolve_recipients(&recipients, &peers);
-                        let _ = mailbox.broadcast(resolved_recipients, message).await;
+                        drop(mailbox.broadcast(resolved_recipients, message).await);
                     }
                 }
                 BroadcastAction::Subscribe {
@@ -248,9 +248,11 @@ fn fuzz(input: FuzzInput) {
                             let clamped_sender_idx = sender_idx % peers.len();
                             peers[clamped_sender_idx].clone()
                         });
-                        let _ = mailbox
-                            .subscribe(sender_key, commitment_digest, digest_hash)
-                            .await;
+                        drop(
+                            mailbox
+                                .subscribe(sender_key, commitment_digest, digest_hash)
+                                .await,
+                        );
                     }
                 }
                 BroadcastAction::Get {
@@ -269,9 +271,10 @@ fn fuzz(input: FuzzInput) {
                             let clamped_sender_idx = sender_idx % peers.len();
                             peers[clamped_sender_idx].clone()
                         });
-                        let _ = mailbox
+                        let dummy2 = mailbox
                             .get(sender_key, commitment_digest, digest_hash)
                             .await;
+                        drop(dummy2);
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {
