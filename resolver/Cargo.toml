@@ -29,6 +29,12 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+commonware-resolver = { path = ".", features = ["mocks"] }
+
+# Tell cargo-udeps to ignore the use of commonware-resolver in [dev-dependencies],
+# which we use to enable the mocks feature in tests
+[package.metadata.cargo-udeps.ignore]
+development = ["commonware-resolver"]
 
 [lib]
 bench = false
