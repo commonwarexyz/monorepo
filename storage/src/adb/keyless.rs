@@ -523,7 +523,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub async fn proof(
         &self,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
         self.historical_proof(self.size, start_loc, max_ops).await
     }
@@ -533,10 +533,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
         let start_pos = leaf_num_to_pos(start_loc);
-        let end_index = std::cmp::min(size - 1, start_loc + max_ops - 1);
+        let end_index = std::cmp::min(size - 1, start_loc + max_ops.get() - 1);
         let end_pos = leaf_num_to_pos(end_index);
         let mmr_size = leaf_num_to_pos(size);
 
@@ -1061,7 +1061,7 @@ mod test {
             ];
 
             for (start_loc, max_ops) in test_cases {
-                let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
+                let (proof, ops) = db.proof(start_loc, NZU64!(max_ops)).await.unwrap();
 
                 // Verify the proof
                 assert!(
@@ -1195,7 +1195,7 @@ mod test {
                     continue;
                 }
 
-                let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
+                let (proof, ops) = db.proof(start_loc, NZU64!(max_ops)).await.unwrap();
 
                 // Verify the proof still works
                 assert!(
@@ -1221,7 +1221,7 @@ mod test {
             assert!(new_oldest <= AGGRESSIVE_PRUNE);
 
             // Can still generate proofs for the remaining data
-            let (proof, ops) = db.proof(new_oldest, 20).await.unwrap();
+            let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
             assert!(
                 verify_proof(&mut hasher, &proof, new_oldest, &ops, &root),
                 "Proof should still verify after aggressive pruning"
@@ -1235,7 +1235,7 @@ mod test {
 
             // Should still be able to prove the remaining operations
             if final_oldest < db.op_count() {
-                let (final_proof, final_ops) = db.proof(final_oldest, 10).await.unwrap();
+                let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
                 assert!(
                     verify_proof(&mut hasher, &final_proof, final_oldest, &final_ops, &root),
                     "Should be able to prove remaining operations after extensive pruning"

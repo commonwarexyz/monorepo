@@ -109,7 +109,7 @@ where
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(size, start_loc, NZU64!(max_ops))
+        self.historical_proof(size, start_loc, max_ops)
     }
 
     fn name() -> &'static str {
