@@ -30,7 +30,6 @@ pub fn create_config() -> fixed::Config<Translator> {
         translator: Translator::default(),
         thread_pool: None,
         buffer_pool: buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-        pruning_delay: 1024,
     }
 }
 
@@ -110,7 +109,7 @@ where
         start_loc: u64,
         max_ops: u64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(size, start_loc, max_ops)
+        self.historical_proof(size, start_loc, NZU64!(max_ops))
     }
 
     fn name() -> &'static str {

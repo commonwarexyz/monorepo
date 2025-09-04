@@ -18,10 +18,11 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, error, warn};
 
 /// Engine that will disperse messages and collect responses.
-pub struct Engine<E, B, Rq, Rs, P, M, H>
+pub struct Engine<E, P, S, B, Rq, Rs, M, H>
 where
     E: Clock + Spawner,
     P: PublicKey,
+    S: Sender<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
     Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
@@ -39,7 +40,7 @@ where
     // Message passing
     monitor: M,
     handler: H,
-    mailbox: mpsc::Receiver<Message<P, Rq>>,
+    mailbox: mpsc::Receiver<Message<S, Rq>>,
 
     // State
     tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
@@ -50,10 +51,11 @@ where
     responses: Counter,
 }
 
-impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
+impl<E, P, S, B, Rq, Rs, M, H> Engine<E, P, S, B, Rq, Rs, M, H>
 where
     E: Clock + Spawner + Metrics,
     P: PublicKey,
+    S: Sender<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
     Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
@@ -63,10 +65,10 @@ where
     /// Creates a new engine with the given configuration.
     ///
     /// Returns a tuple of the engine and the mailbox for sending messages.
-    pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
+    pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<S, Rq>) {
         // Create mailbox
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
-        let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
+        let mailbox: Mailbox<S, Rq> = Mailbox::new(tx);
 
         // Create metrics
         let outstanding = Gauge::default();
@@ -105,16 +107,28 @@ where
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        requests: (
+            impl Sender<PublicKey = P, Error = S::Error>,
+            impl Receiver<PublicKey = P>,
+        ),
+        responses: (
+            impl Sender<PublicKey = P, Error = S::Error>,
+            impl Receiver<PublicKey = P>,
+        ),
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(requests, responses))
     }
 
     async fn run(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        requests: (
+            impl Sender<PublicKey = P, Error = S::Error>,
+            impl Receiver<PublicKey = P>,
+        ),
+        responses: (
+            impl Sender<PublicKey = P, Error = S::Error>,
+            impl Receiver<PublicKey = P>,
+        ),
     ) {
         // Wrap channels
         let (mut req_tx, mut req_rx) = wrap(self.request_codec, requests.0, requests.1);
@@ -131,27 +145,25 @@ where
                             Message::Send { request, recipients, responder } => {
                                 // Track commitment (if not already tracked)
                                 let commitment = request.commitment();
-                                let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                                let (requests, _) = self.tracked.entry(commitment).or_insert_with(|| {
                                     self.outstanding.inc();
                                     (HashSet::new(), HashSet::new())
                                 });
 
                                 // Send the request to recipients
-                                match req_tx.send(
+                                let result = req_tx.send(
                                     recipients,
                                     request,
                                     self.priority_request
-                                ).await {
-                                    Ok(recipients) => {
-                                        for peer in &recipients {
-                                            entry.0.insert(peer.clone());
-                                        }
-                                        let _ = responder.send(recipients);
-                                    }
-                                    Err(err) => {
-                                        error!(?err, ?commitment, "failed to send message");
-                                    }
+                                ).await;
+
+                                // Update tracked recipients
+                                if let Ok(recipients) = &result {
+                                    requests.extend(recipients.iter().cloned());
                                 }
+
+                                // Return the result directly
+                                let _ = responder.send(result);
                             },
                             Message::Cancel { commitment } => {
                                 if self.tracked.remove(&commitment).is_none() {
@@ -229,21 +241,21 @@ where
 
                     // Handle the response
                     let commitment = msg.commitment();
-                    let Some(responses) = self.tracked.get_mut(&commitment) else {
+                    let Some((req, res)) = self.tracked.get_mut(&commitment) else {
                         debug!(?commitment, ?peer, "response for unknown commitment");
                         continue;
                     };
-                    if !responses.0.contains(&peer) {
+                    if !req.contains(&peer) {
                         debug!(?commitment, ?peer, "never sent request");
                         continue;
                     }
-                    if !responses.1.insert(peer.clone()) {
+                    if !res.insert(peer.clone()) {
                         debug!(?commitment, ?peer, "duplicate response");
                         continue;
                     }
 
                     // Send the response to the monitor
-                    self.monitor.collected(peer, msg, responses.1.len()).await;
+                    self.monitor.collected(peer, msg, res.len()).await;
                 },
             }
         }
