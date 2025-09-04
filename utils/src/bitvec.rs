@@ -1,126 +1,236 @@
-//! Bit-vector implementation
+//! Growable bit vector with configurable chunk size.
 //!
-//! The bit-vector is a compact representation of a sequence of bits, using [u8] "blocks" for a
-//! more-efficient memory layout than doing a [`Vec<bool>`]. Thus, if the length of the bit-vector
-//! is not a multiple of 8, the last block will contain some bits that are not part of the vector.
-//! An invariant of the implementation is that any bits in the last block that are not part of the
-//! vector are set to 0.
+//! Uses `VecDeque<[u8; CHUNK_SIZE]>` for storage. Trailing bits in the last chunk
+//! may have undefined values but are masked during equality comparisons.
 //!
-//! The implementation is focused on being compact when encoding small bit vectors, so [u8] is
-//! used over more performant types like [usize] or [u64]. Such types would result in more
-//! complex encoding and decoding logic.
+//! ## Invariants
+//!
+//! - `storage` always contains at least one chunk (never empty)
+//! - `next_bit` represents the total number of valid bits (logical length)
+//! - Only bits `0..next_bit` are considered valid; trailing bits are ignored
+//! - `CHUNK_SIZE` must be > 0 (enforced by const generics)
+//!
+//! ```
+//! use commonware_utils::BitVec;
+//!
+//! let mut bv = BitVec::<1>::new();
+//! bv.append(true);
+//! bv.append(false);
+//! assert_eq!(bv.len(), 2);
+//! assert_eq!(bv.get(0), Some(true));
+//! assert_eq!(bv.get(1), Some(false));
+//! ```
 
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use core::{
     fmt::{self, Formatter, Write as _},
+    iter::{Extend, FromIterator},
     ops::{BitAnd, BitOr, BitXor, Index},
 };
+#[cfg(feature = "std")]
+use std::collections::VecDeque;
 
-/// Type alias for the underlying block type.
-type Block = u8;
-
-/// Number of bits in a [Block].
-const BITS_PER_BLOCK: usize = Block::BITS as usize;
-
-/// Empty block of bits (all bits set to 0).
-const EMPTY_BLOCK: Block = 0;
-
-/// Full block of bits (all bits set to 1).
-const FULL_BLOCK: Block = Block::MAX;
-
-/// Represents a vector of bits.
+/// A growable bit vector with configurable chunk size.
 ///
-/// Stores bits using [u8] blocks for efficient storage.
-#[derive(Clone, PartialEq, Eq)]
-pub struct BitVec {
+/// Stores bits in chunks of `CHUNK_SIZE` bytes each. The bit vector can grow by adding
+/// more chunks as needed. Bits are indexed from 0 and stored in little-endian bit order
+/// within each byte.
+#[derive(Clone)]
+pub struct BitVec<const CHUNK_SIZE: usize> {
     /// The underlying storage for the bits.
-    storage: Vec<Block>,
-    /// The total number of bits
-    num_bits: usize,
+    ///
+    /// Invariant: The last chunk in the bitmap always has room for at least one more bit. This
+    /// implies there is always at least one chunk in the bitmap, it's just empty if no bits have
+    /// been added yet.
+    storage: VecDeque<[u8; CHUNK_SIZE]>,
+
+    /// The total number of bits currently stored in this bit vector.
+    /// This determines the logical length of the bit vector.
+    next_bit: usize,
 }
 
-impl BitVec {
-    /// Creates a new, empty `BitVec`.
-    #[inline]
+impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
+    pub const CHUNK_SIZE_BITS: usize = CHUNK_SIZE * 8;
+    const EMPTY_CHUNK: [u8; CHUNK_SIZE] = [0u8; CHUNK_SIZE];
+    const FULL_CHUNK: [u8; CHUNK_SIZE] = [u8::MAX; CHUNK_SIZE];
+
+    /// Creates a new empty bit vector.
     pub fn new() -> Self {
-        BitVec {
-            storage: Vec::new(),
-            num_bits: 0,
+        let storage = VecDeque::from([Self::EMPTY_CHUNK]);
+        Self {
+            storage,
+            next_bit: 0,
         }
     }
 
-    /// Creates a new `BitVec` with the specified capacity in bits.
+    /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
     #[inline]
-    pub fn with_capacity(size: usize) -> Self {
-        BitVec {
-            storage: Vec::with_capacity(Self::num_blocks(size)),
-            num_bits: 0,
-        }
+    pub fn bit_count(&self) -> u64 {
+        self.next_bit as u64
     }
 
-    /// Creates a new `BitVec` with `size` bits, all initialized to zero.
+    /// Return the last chunk of the bitmap as a slice.
     #[inline]
-    pub fn zeroes(size: usize) -> Self {
-        BitVec {
-            storage: vec![EMPTY_BLOCK; Self::num_blocks(size)],
-            num_bits: size,
-        }
+    pub fn last_chunk(&self) -> &[u8] {
+        self.storage.back().unwrap()
     }
 
-    /// Creates a new `BitVec` with `size` bits, all initialized to one.
+    /// Return the last chunk of the bitmap as a mutable slice.
     #[inline]
-    pub fn ones(size: usize) -> Self {
-        let mut result = Self {
-            storage: vec![FULL_BLOCK; Self::num_blocks(size)],
-            num_bits: size,
+    fn last_chunk_mut(&mut self) -> &mut [u8] {
+        self.storage.back_mut().unwrap()
+    }
+
+    /// Returns the bitmap chunk containing the specified bit.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bit doesn't exist or has been pruned.
+    #[inline]
+    pub fn get_chunk(&self, bit_offset: usize) -> &[u8; CHUNK_SIZE] {
+        &self.storage[self.chunk_index(bit_offset)]
+    }
+
+    /// Creates a new bit vector with capacity for at least `capacity` bits.
+    ///
+    /// The bit vector will be empty but will have allocated space for the specified
+    /// number of bits without needing to reallocate.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let num_chunks = if capacity == 0 {
+            1
+        } else {
+            Self::num_chunks(capacity)
         };
-        result.clear_trailing_bits();
-        result
+        let mut storage = VecDeque::with_capacity(num_chunks);
+        storage.push_back(Self::EMPTY_CHUNK);
+        Self {
+            storage,
+            next_bit: 0,
+        }
     }
 
-    /// Creates a new `BitVec` from a slice of booleans.
-    #[inline]
-    pub fn from_bools(bools: &[bool]) -> Self {
-        let mut bv = Self::with_capacity(bools.len());
-        for &b in bools {
-            bv.push(b);
+    /// Creates a new bit vector with `size` bits, all set to false (0).
+    pub fn zeroes(size: usize) -> Self {
+        if size == 0 {
+            return Self::new();
         }
-        bv
+
+        let num_chunks = Self::num_chunks(size);
+        let mut storage = VecDeque::with_capacity(num_chunks);
+        for _ in 0..num_chunks {
+            storage.push_back(Self::EMPTY_CHUNK);
+        }
+        Self {
+            storage,
+            next_bit: size,
+        }
+    }
+
+    /// Creates a new bit vector with `size` bits, all set to true (1).
+    pub fn ones(size: usize) -> Self {
+        if size == 0 {
+            return Self::new();
+        }
+
+        let num_chunks = Self::num_chunks(size);
+        let mut storage = VecDeque::with_capacity(num_chunks);
+        for _ in 0..num_chunks {
+            storage.push_back(Self::FULL_CHUNK);
+        }
+        Self {
+            storage,
+            next_bit: size,
+        }
     }
 
     /// Returns the number of bits in the vector.
     #[inline]
     pub fn len(&self) -> usize {
-        self.num_bits
+        self.next_bit
     }
 
     /// Returns true if the vector contains no bits.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.num_bits == 0
+        self.next_bit == 0
+    }
+
+    /// Gets the value of the bit at `index` (true if 1, false if 0).
+    ///
+    /// Returns `None` if the index is out of bounds.
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<bool> {
+        if index >= self.len() {
+            return None;
+        }
+        Some(Self::get_bit_from_chunk(self.get_chunk(index), index))
+    }
+
+    /// Get the value of a bit from its chunk.
+    #[inline]
+    pub fn get_bit_from_chunk(chunk: &[u8; CHUNK_SIZE], bit_offset: usize) -> bool {
+        let byte_offset = Self::byte_offset_into_chunk(bit_offset);
+        let byte = chunk[byte_offset];
+        let mask = Self::chunk_byte_bitmask(bit_offset);
+
+        (byte & mask) != 0
     }
 
     /// Appends a bit to the end of the vector.
     #[inline]
-    pub fn push(&mut self, value: bool) {
-        // Increment the number of bits and get the index for the new bit
-        let index = self.num_bits;
-        self.num_bits += 1;
-
-        // Ensure the storage has enough blocks to hold the new bit
-        if Self::block_index(index) >= self.storage.len() {
-            self.storage.push(EMPTY_BLOCK);
+    pub fn append(&mut self, bit: bool) {
+        let chunk_byte = Self::byte_offset_into_chunk(self.next_bit);
+        if bit {
+            self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bitmask(self.next_bit);
+        } else {
+            self.last_chunk_mut()[chunk_byte] &= !Self::chunk_byte_bitmask(self.next_bit);
         }
+        self.next_bit += 1;
 
-        // Set the bit
-        if value {
-            self.set_bit_unchecked(index);
+        // If we've filled the current chunk, prepare the next one
+        if self.next_bit % Self::CHUNK_SIZE_BITS == 0 {
+            self.prepare_next_chunk();
         }
+    }
+
+    /// A bitmask with one bit set: where bit_offset falls within the byte containing it.
+    #[inline]
+    pub(crate) fn chunk_byte_bitmask(bit_offset: usize) -> u8 {
+        1 << (bit_offset % 8)
+    }
+
+    /// Returns the index within the chunk containing the bit of the byte containing the bit.
+    #[inline]
+    pub(crate) fn byte_offset_into_chunk(bit_offset: usize) -> usize {
+        (bit_offset / 8) % CHUNK_SIZE
+    }
+
+    /// Convert a bit offset into the index of the chunk it belongs to within self.bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bit doesn't exist or has been pruned.
+    #[inline]
+    pub(crate) fn chunk_index(&self, bit_offset: usize) -> usize {
+        assert!(bit_offset < self.len(), "Index out of bounds");
+        Self::chunk_num(bit_offset)
+    }
+
+    /// Convert a bit offset into the number of the chunk it belongs to.
+    #[inline]
+    pub(crate) fn chunk_num(bit_offset: usize) -> usize {
+        bit_offset / Self::CHUNK_SIZE_BITS
+    }
+
+    /// Prepares the next chunk of the bitmap to preserve the invariant that there is always room
+    /// for one more bit.
+    pub(crate) fn prepare_next_chunk(&mut self) {
+        self.storage.push_back(Self::EMPTY_CHUNK);
     }
 
     /// Removes the last bit from the vector and returns it.
@@ -132,41 +242,20 @@ impl BitVec {
             return None;
         }
 
-        // Decrement the number of bits and get the value of the last bit
-        self.num_bits -= 1;
-        let index = self.num_bits;
-        let value = self.get_bit_unchecked(index);
+        // Get the value of the last bit before decrementing
+        let bit_offset = self.next_bit - 1;
+        let value = Self::get_bit_from_chunk(self.get_chunk(bit_offset), bit_offset);
 
-        // If that was the last bit in the block, drop the block;
-        // otherwise, if the bit was 1, we need to clear it
-        if Self::bit_offset(index) == 0 {
-            self.storage.pop().expect("Storage should not be empty");
-        } else if value {
-            self.clear_bit_unchecked(index);
+        // Decrement the number of bits
+        self.next_bit -= 1;
+
+        // If we just emptied the last chunk and there's more than one chunk, remove it
+        let remaining_bits_in_chunk = self.next_bit % Self::CHUNK_SIZE_BITS;
+        if remaining_bits_in_chunk == 0 && self.storage.len() > 1 {
+            self.storage.pop_back();
         }
 
         Some(value)
-    }
-
-    /// Gets the value of the bit at `index` (true if 1, false if 0).
-    ///
-    /// Returns `None` if the index is out of bounds.
-    #[inline]
-    pub fn get(&self, index: usize) -> Option<bool> {
-        if index >= self.num_bits {
-            return None;
-        }
-        Some(self.get_bit_unchecked(index))
-    }
-
-    /// Gets the value of the bit at the specified index without bounds checking.
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure `index` is less than the length of the BitVec.
-    #[inline]
-    pub unsafe fn get_unchecked(&self, index: usize) -> bool {
-        self.get_bit_unchecked(index)
     }
 
     /// Sets the bit at `index` to 1.
@@ -176,8 +265,7 @@ impl BitVec {
     /// Panics if `index` is out of bounds.
     #[inline]
     pub fn set(&mut self, index: usize) {
-        self.assert_index(index);
-        self.set_bit_unchecked(index);
+        self.set_bit(index, true);
     }
 
     /// Sets the bit at `index` to 0.
@@ -187,8 +275,22 @@ impl BitVec {
     /// Panics if `index` is out of bounds.
     #[inline]
     pub fn clear(&mut self, index: usize) {
-        self.assert_index(index);
-        self.clear_bit_unchecked(index);
+        self.set_bit(index, false);
+    }
+
+    /// Set the value of the referenced bit.
+    pub fn set_bit(&mut self, bit_offset: usize, bit: bool) {
+        let chunk_index = self.chunk_index(bit_offset);
+        let chunk = &mut self.storage[chunk_index];
+
+        let byte_offset = Self::byte_offset_into_chunk(bit_offset);
+        let mask = Self::chunk_byte_bitmask(bit_offset);
+
+        if bit {
+            chunk[byte_offset] |= mask;
+        } else {
+            chunk[byte_offset] &= !mask;
+        }
     }
 
     /// Flips the bit at `index`.
@@ -198,57 +300,63 @@ impl BitVec {
     /// Panics if `index` is out of bounds.
     #[inline]
     pub fn toggle(&mut self, index: usize) {
-        self.assert_index(index);
-        self.toggle_bit_unchecked(index);
-    }
+        let bit_offset = index;
+        let chunk_index = self.chunk_index(bit_offset);
+        let chunk = &mut self.storage[chunk_index];
 
-    /// Sets the bit at `index` to the specified `value`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `index` is out of bounds.
-    #[inline]
-    pub fn set_to(&mut self, index: usize, value: bool) {
-        self.assert_index(index);
-        if value {
-            self.set_bit_unchecked(index);
-        } else {
-            self.clear_bit_unchecked(index);
-        }
+        let byte_offset = Self::byte_offset_into_chunk(bit_offset);
+        let mask = Self::chunk_byte_bitmask(bit_offset);
+
+        chunk[byte_offset] ^= mask;
     }
 
     /// Sets all bits to 0.
     #[inline]
     pub fn clear_all(&mut self) {
-        for block in &mut self.storage {
-            *block = EMPTY_BLOCK;
+        for chunk in &mut self.storage {
+            *chunk = Self::EMPTY_CHUNK;
         }
     }
 
     /// Sets all bits to 1.
-    #[inline]
     pub fn set_all(&mut self) {
-        for block in &mut self.storage {
-            *block = FULL_BLOCK;
+        for chunk in &mut self.storage {
+            *chunk = Self::FULL_CHUNK;
         }
-        self.clear_trailing_bits();
     }
 
     /// Returns the number of bits set to 1.
     #[inline]
     pub fn count_ones(&self) -> usize {
-        self.storage
-            .iter()
-            .map(|block| block.count_ones() as usize)
-            .sum()
+        let mut count = 0;
+
+        // Count ones in all complete chunks
+        let complete_chunks = Self::chunk_num(self.next_bit);
+        for chunk_idx in 0..complete_chunks {
+            count += self.storage[chunk_idx]
+                .iter()
+                .map(|b| b.count_ones() as usize)
+                .sum::<usize>();
+        }
+
+        // Count ones in the partial last chunk (if any)
+        let remaining_bits = self.next_bit % Self::CHUNK_SIZE_BITS;
+        if remaining_bits > 0 && complete_chunks < self.storage.len() {
+            let last_chunk = &self.storage[complete_chunks];
+            for bit_offset in 0..remaining_bits {
+                if Self::get_bit_from_chunk(last_chunk, bit_offset) {
+                    count += 1;
+                }
+            }
+        }
+
+        count
     }
 
     /// Returns the number of bits set to 0.
     #[inline]
     pub fn count_zeros(&self) -> usize {
-        self.num_bits
-            .checked_sub(self.count_ones())
-            .expect("Overflow in count_zeros")
+        self.len() - self.count_ones()
     }
 
     /// Performs a bitwise AND with another BitVec.
@@ -256,9 +364,8 @@ impl BitVec {
     /// # Panics
     ///
     /// Panics if the lengths don't match.
-    pub fn and(&mut self, other: &BitVec) {
+    pub fn and(&mut self, other: &BitVec<CHUNK_SIZE>) {
         self.binary_op(other, |a, b| a & b);
-        self.clear_trailing_bits();
     }
 
     /// Performs a bitwise OR with another BitVec.
@@ -266,9 +373,8 @@ impl BitVec {
     /// # Panics
     ///
     /// Panics if the lengths don't match.
-    pub fn or(&mut self, other: &BitVec) {
+    pub fn or(&mut self, other: &BitVec<CHUNK_SIZE>) {
         self.binary_op(other, |a, b| a | b);
-        self.clear_trailing_bits();
     }
 
     /// Performs a bitwise XOR with another BitVec.
@@ -276,169 +382,154 @@ impl BitVec {
     /// # Panics
     ///
     /// Panics if the lengths don't match.
-    pub fn xor(&mut self, other: &BitVec) {
+    pub fn xor(&mut self, other: &BitVec<CHUNK_SIZE>) {
         self.binary_op(other, |a, b| a ^ b);
-        self.clear_trailing_bits();
     }
 
     /// Flips all bits (1s become 0s and vice versa).
     pub fn invert(&mut self) {
-        for block in &mut self.storage {
-            *block = !*block;
+        for chunk in &mut self.storage {
+            for byte in chunk {
+                *byte = !*byte;
+            }
         }
-        self.clear_trailing_bits();
     }
 
     /// Creates an iterator over the bits.
-    pub fn iter(&self) -> BitIterator<'_> {
+    pub fn iter(&self) -> BitIterator<'_, CHUNK_SIZE> {
         BitIterator { vec: self, pos: 0 }
     }
 
-    // ---------- Helper Functions ----------
-
-    /// Calculates the block index for a given bit index.
+    /// Calculates the number of chunks needed to store `num_bits`.
     #[inline(always)]
-    fn block_index(index: usize) -> usize {
-        index / BITS_PER_BLOCK
-    }
-
-    /// Calculates the bit offset within a block.
-    #[inline(always)]
-    fn bit_offset(index: usize) -> usize {
-        index % BITS_PER_BLOCK
-    }
-
-    /// Calculates the number of blocks needed to store `num_bits`.
-    #[inline(always)]
-    fn num_blocks(num_bits: usize) -> usize {
-        num_bits.div_ceil(BITS_PER_BLOCK)
-    }
-
-    /// Creates a mask with the first `num_bits` bits set to 1.
-    #[inline(always)]
-    fn mask_over_first_n_bits(num_bits: usize) -> Block {
-        match num_bits {
-            BITS_PER_BLOCK => FULL_BLOCK,
-            n if n < BITS_PER_BLOCK => FULL_BLOCK.unbounded_shr((BITS_PER_BLOCK - n) as u32),
-            _ => panic!("num_bits exceeds block size: {num_bits}"),
-        }
-    }
-
-    #[inline(always)]
-    fn get_bit_unchecked(&self, index: usize) -> bool {
-        let block_index = Self::block_index(index);
-        let bit_index = Self::bit_offset(index);
-        (self.storage[block_index] & (1 << bit_index)) != 0
-    }
-
-    #[inline(always)]
-    fn set_bit_unchecked(&mut self, index: usize) {
-        let block_index = Self::block_index(index);
-        let bit_index = Self::bit_offset(index);
-        self.storage[block_index] |= 1 << bit_index;
-    }
-
-    #[inline(always)]
-    fn clear_bit_unchecked(&mut self, index: usize) {
-        let block_index = Self::block_index(index);
-        let bit_index = Self::bit_offset(index);
-        self.storage[block_index] &= !(1 << bit_index);
-    }
-
-    #[inline(always)]
-    fn toggle_bit_unchecked(&mut self, index: usize) {
-        let block_index = Self::block_index(index);
-        let bit_index = Self::bit_offset(index);
-        self.storage[block_index] ^= 1 << bit_index;
+    fn num_chunks(num_bits: usize) -> usize {
+        num_bits.div_ceil(Self::CHUNK_SIZE_BITS)
     }
 
     /// Asserts that the index is within bounds.
     #[inline(always)]
     fn assert_index(&self, index: usize) {
-        assert!(index < self.num_bits, "Index out of bounds");
+        assert!(index < self.len(), "Index out of bounds");
     }
 
     /// Asserts that the lengths of two BitVecs match.
     #[inline(always)]
-    fn assert_eq_len(&self, other: &BitVec) {
-        assert_eq!(self.num_bits, other.num_bits, "BitVec lengths don't match");
+    fn assert_eq_len(&self, other: &BitVec<CHUNK_SIZE>) {
+        assert_eq!(self.len(), other.len(), "BitVec lengths don't match");
     }
 
     /// Helper for binary operations (AND, OR, XOR)
     #[inline]
-    fn binary_op<F: Fn(Block, Block) -> Block>(&mut self, other: &BitVec, op: F) {
+    fn binary_op<F: Fn(u8, u8) -> u8>(&mut self, other: &BitVec<CHUNK_SIZE>, op: F) {
         self.assert_eq_len(other);
-        for (a, b) in self.storage.iter_mut().zip(other.storage.iter()) {
-            *a = op(*a, *b);
+        for (chunk_a, chunk_b) in self.storage.iter_mut().zip(other.storage.iter()) {
+            for (byte_a, byte_b) in chunk_a.iter_mut().zip(chunk_b.iter()) {
+                *byte_a = op(*byte_a, *byte_b);
+            }
         }
-    }
-
-    /// Clears any bits in storage beyond the last valid bit. Returns true if any bits were cleared.
-    #[inline]
-    fn clear_trailing_bits(&mut self) -> bool {
-        let bit_offset = Self::bit_offset(self.num_bits);
-        if bit_offset == 0 {
-            // No extra bits to clear
-            return false;
-        }
-
-        // Clear the bits in the last block
-        let block = self
-            .storage
-            .last_mut()
-            .expect("Storage should not be empty");
-        let old_block = *block;
-        let mask = Self::mask_over_first_n_bits(bit_offset);
-        *block &= mask;
-
-        // Check if the last block was modified
-        *block != old_block
     }
 }
 
-// ---------- Constructors ----------
+impl<const CHUNK_SIZE: usize> PartialEq for BitVec<CHUNK_SIZE> {
+    fn eq(&self, other: &Self) -> bool {
+        // First check if lengths are equal
+        if self.next_bit != other.next_bit {
+            return false;
+        }
 
-impl Default for BitVec {
+        // If both are empty, they're equal
+        if self.next_bit == 0 {
+            return true;
+        }
+
+        // Compare complete chunks
+        let complete_chunks = Self::chunk_num(self.next_bit);
+        for i in 0..complete_chunks {
+            if self.storage[i] != other.storage[i] {
+                return false;
+            }
+        }
+
+        // Compare the partial last chunk (if any) with proper masking
+        let remaining_bits = self.next_bit % Self::CHUNK_SIZE_BITS;
+        if remaining_bits > 0 {
+            let last_chunk_idx = complete_chunks;
+            if last_chunk_idx < self.storage.len() && last_chunk_idx < other.storage.len() {
+                let self_chunk = &self.storage[last_chunk_idx];
+                let other_chunk = &other.storage[last_chunk_idx];
+
+                // Compare each byte in the last chunk, masking the unused bits
+                let complete_bytes = remaining_bits / 8;
+                let remaining_bits_in_byte = remaining_bits % 8;
+
+                // Compare complete bytes
+                for byte_idx in 0..complete_bytes {
+                    if self_chunk[byte_idx] != other_chunk[byte_idx] {
+                        return false;
+                    }
+                }
+
+                // Compare the partial last byte (if any)
+                if remaining_bits_in_byte > 0 {
+                    let byte_idx = complete_bytes;
+                    if byte_idx < CHUNK_SIZE {
+                        let mask = (1u8 << remaining_bits_in_byte) - 1;
+                        let self_masked = self_chunk[byte_idx] & mask;
+                        let other_masked = other_chunk[byte_idx] & mask;
+                        if self_masked != other_masked {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        true
+    }
+}
+
+impl<const CHUNK_SIZE: usize> Eq for BitVec<CHUNK_SIZE> {}
+
+impl<const CHUNK_SIZE: usize> Default for BitVec<CHUNK_SIZE> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl From<Vec<bool>> for BitVec {
-    fn from(v: Vec<bool>) -> Self {
-        Self::from_bools(&v)
+impl<const CHUNK_SIZE: usize, T: AsRef<[bool]>> From<T> for BitVec<CHUNK_SIZE> {
+    fn from(t: T) -> Self {
+        let bools = t.as_ref();
+        let mut bv = Self::with_capacity(bools.len());
+        for &b in bools {
+            bv.append(b);
+        }
+        bv
     }
 }
 
-impl From<&[bool]> for BitVec {
-    fn from(s: &[bool]) -> Self {
-        Self::from_bools(s)
-    }
-}
-
-impl<const N: usize> From<[bool; N]> for BitVec {
-    fn from(arr: [bool; N]) -> Self {
-        Self::from_bools(&arr)
-    }
-}
-
-impl<const N: usize> From<&[bool; N]> for BitVec {
-    fn from(arr: &[bool; N]) -> Self {
-        Self::from_bools(arr)
-    }
-}
-
-// ---------- Converters ----------
-
-impl From<BitVec> for Vec<bool> {
-    fn from(bv: BitVec) -> Self {
+impl<const CHUNK_SIZE: usize> From<BitVec<CHUNK_SIZE>> for Vec<bool> {
+    fn from(bv: BitVec<CHUNK_SIZE>) -> Self {
         bv.iter().collect()
     }
 }
 
-// ---------- Debug ----------
+impl<const CHUNK_SIZE: usize> Extend<bool> for BitVec<CHUNK_SIZE> {
+    fn extend<I: IntoIterator<Item = bool>>(&mut self, iter: I) {
+        for bit in iter {
+            self.append(bit);
+        }
+    }
+}
 
-impl fmt::Debug for BitVec {
+impl<const CHUNK_SIZE: usize> FromIterator<bool> for BitVec<CHUNK_SIZE> {
+    fn from_iter<I: IntoIterator<Item = bool>>(iter: I) -> Self {
+        let mut bv = Self::new();
+        bv.extend(iter);
+        bv
+    }
+}
+
+impl<const CHUNK_SIZE: usize> fmt::Debug for BitVec<CHUNK_SIZE> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         // For very large BitVecs, only show a preview
         const MAX_DISPLAY: usize = 64;
@@ -446,7 +537,7 @@ impl fmt::Debug for BitVec {
 
         // Closure for writing a bit
         let write_bit = |formatter: &mut Formatter<'_>, index: usize| -> core::fmt::Result {
-            formatter.write_char(if self.get_bit_unchecked(index) {
+            formatter.write_char(if self.get(index).unwrap_or_default() {
                 '1'
             } else {
                 '0'
@@ -454,9 +545,9 @@ impl fmt::Debug for BitVec {
         };
 
         f.write_str("BitVec[")?;
-        if self.num_bits <= MAX_DISPLAY {
+        if self.next_bit <= MAX_DISPLAY {
             // Show all bits
-            for i in 0..self.num_bits {
+            for i in 0..self.next_bit {
                 write_bit(f, i)?;
             }
         } else {
@@ -467,7 +558,7 @@ impl fmt::Debug for BitVec {
 
             f.write_str("...")?;
 
-            for i in (self.num_bits - HALF_DISPLAY)..self.num_bits {
+            for i in (self.next_bit - HALF_DISPLAY)..self.next_bit {
                 write_bit(f, i)?;
             }
         }
@@ -475,9 +566,7 @@ impl fmt::Debug for BitVec {
     }
 }
 
-// ---------- Operations ----------
-
-impl Index<usize> for BitVec {
+impl<const CHUNK_SIZE: usize> Index<usize> for BitVec<CHUNK_SIZE> {
     type Output = bool;
 
     /// Allows accessing bits using the `[]` operator.
@@ -486,7 +575,7 @@ impl Index<usize> for BitVec {
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         self.assert_index(index);
-        let value = self.get_bit_unchecked(index);
+        let value = Self::get_bit_from_chunk(self.get_chunk(index), index);
         if value {
             &true
         } else {
@@ -495,8 +584,8 @@ impl Index<usize> for BitVec {
     }
 }
 
-impl BitAnd for &BitVec {
-    type Output = BitVec;
+impl<const CHUNK_SIZE: usize> BitAnd for &BitVec<CHUNK_SIZE> {
+    type Output = BitVec<CHUNK_SIZE>;
 
     fn bitand(self, rhs: Self) -> Self::Output {
         self.assert_eq_len(rhs);
@@ -506,8 +595,8 @@ impl BitAnd for &BitVec {
     }
 }
 
-impl BitOr for &BitVec {
-    type Output = BitVec;
+impl<const CHUNK_SIZE: usize> BitOr for &BitVec<CHUNK_SIZE> {
+    type Output = BitVec<CHUNK_SIZE>;
 
     fn bitor(self, rhs: Self) -> Self::Output {
         self.assert_eq_len(rhs);
@@ -517,8 +606,8 @@ impl BitOr for &BitVec {
     }
 }
 
-impl BitXor for &BitVec {
-    type Output = BitVec;
+impl<const CHUNK_SIZE: usize> BitXor for &BitVec<CHUNK_SIZE> {
+    type Output = BitVec<CHUNK_SIZE>;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
         self.assert_eq_len(rhs);
@@ -528,63 +617,55 @@ impl BitXor for &BitVec {
     }
 }
 
-// ---------- Codec ----------
-
-impl Write for BitVec {
+impl<const CHUNK_SIZE: usize> Write for BitVec<CHUNK_SIZE> {
     fn write(&self, buf: &mut impl BufMut) {
-        // Prefix with the number of bits, which is generally larger than the length of the storage
-        self.num_bits.write(buf);
-
-        // Write full blocks
-        for &block in &self.storage {
-            block.write(buf);
+        self.next_bit.write(buf);
+        for &chunk in &self.storage {
+            chunk.write(buf);
         }
     }
 }
 
-impl Read for BitVec {
+impl<const CHUNK_SIZE: usize> Read for BitVec<CHUNK_SIZE> {
     type Cfg = RangeCfg;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
-        // Parse length
-        let num_bits = usize::read_cfg(buf, range)?;
+        // Parse length with range validation
+        let next_bit = usize::read_cfg(buf, range)?;
 
-        // Parse blocks
-        let num_blocks = num_bits.div_ceil(BITS_PER_BLOCK);
-        let mut storage = Vec::with_capacity(num_blocks);
-        for _ in 0..num_blocks {
-            let block = Block::read(buf)?;
-            storage.push(block);
+        // Parse chunks
+        let num_chunks = Self::num_chunks(next_bit);
+        let mut storage = VecDeque::with_capacity(num_chunks);
+        for _ in 0..num_chunks {
+            let chunk = <[u8; CHUNK_SIZE]>::read(buf)?;
+            storage.push_back(chunk);
         }
 
-        // Ensure there were no trailing bits
-        let mut result = BitVec { storage, num_bits };
-        if result.clear_trailing_bits() {
-            return Err(CodecError::Invalid("BitVec", "trailing bits"));
+        // Ensure invariant: always room for at least one more bit
+        if next_bit % Self::CHUNK_SIZE_BITS == 0 && next_bit > 0 {
+            storage.push_back(Self::EMPTY_CHUNK);
         }
 
-        Ok(result)
+        Ok(Self { storage, next_bit })
     }
 }
 
-impl EncodeSize for BitVec {
+impl<const CHUNK_SIZE: usize> EncodeSize for BitVec<CHUNK_SIZE> {
     fn encode_size(&self) -> usize {
-        self.num_bits.encode_size() + (Block::SIZE * self.storage.len())
+        self.next_bit.encode_size() + (<[u8; CHUNK_SIZE]>::SIZE * self.storage.len())
     }
 }
-
-// ---------- Iterator ----------
 
 /// Iterator over bits in a BitVec
-pub struct BitIterator<'a> {
+pub struct BitIterator<'a, const CHUNK_SIZE: usize> {
     /// Reference to the BitVec being iterated over
-    vec: &'a BitVec,
+    vec: &'a BitVec<CHUNK_SIZE>,
 
     /// Current position in the BitVec (0-indexed)
     pos: usize,
 }
 
-impl Iterator for BitIterator<'_> {
+impl<const CHUNK_SIZE: usize> Iterator for BitIterator<'_, CHUNK_SIZE> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -592,9 +673,9 @@ impl Iterator for BitIterator<'_> {
             return None;
         }
 
-        let bit = self.vec.get_bit_unchecked(self.pos);
+        let bit = self.vec.get(self.pos);
         self.pos += 1;
-        Some(bit)
+        bit
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -603,15 +684,13 @@ impl Iterator for BitIterator<'_> {
     }
 }
 
-impl ExactSizeIterator for BitIterator<'_> {}
-
-// ---------- Tests ----------
+impl<const CHUNK_SIZE: usize> ExactSizeIterator for BitIterator<'_, CHUNK_SIZE> {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use bytes::BytesMut;
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, Encode, Error as CodecError, Write};
+
+    type BitVec = super::BitVec<1>;
 
     #[test]
     fn test_constructors() {
@@ -619,15 +698,30 @@ mod tests {
         let bv = BitVec::new();
         assert_eq!(bv.len(), 0);
         assert!(bv.is_empty());
-        assert_eq!(bv.storage.len(), 0);
+        assert_eq!(bv.storage.len(), 1); // Always has at least one chunk
 
         // Test with_capacity()
+        let bv = BitVec::with_capacity(0);
+        assert_eq!(bv.len(), 0);
+        assert!(bv.is_empty());
+
         let bv = BitVec::with_capacity(100);
         assert_eq!(bv.len(), 0);
         assert!(bv.is_empty());
-        assert!(bv.storage.capacity() >= BitVec::num_blocks(100));
+        assert!(bv.storage.capacity() >= BitVec::num_chunks(100));
 
         // Test zeroes()
+        let bv = BitVec::zeroes(0);
+        assert_eq!(bv.len(), 0);
+        assert!(bv.is_empty());
+
+        let bv = BitVec::zeroes(5);
+        assert_eq!(bv.len(), 5);
+        assert!(!bv.is_empty());
+        for i in 0..5 {
+            assert_eq!(bv.get(i), Some(false));
+        }
+
         let bv = BitVec::zeroes(100);
         assert_eq!(bv.len(), 100);
         assert!(!bv.is_empty());
@@ -637,6 +731,17 @@ mod tests {
         }
 
         // Test ones()
+        let bv = BitVec::ones(0);
+        assert_eq!(bv.len(), 0);
+        assert!(bv.is_empty());
+
+        let bv = BitVec::ones(5);
+        assert_eq!(bv.len(), 5);
+        assert!(!bv.is_empty());
+        for i in 0..5 {
+            assert_eq!(bv.get(i), Some(true));
+        }
+
         let bv = BitVec::ones(100);
         assert_eq!(bv.len(), 100);
         assert!(!bv.is_empty());
@@ -645,13 +750,12 @@ mod tests {
             assert!(bv.get(i).unwrap());
         }
 
-        // Test from_bools()
+        // Test From trait implementations
         let bools = [true, false, true, false, true];
-        let bv = BitVec::from_bools(&bools);
+        let bv = BitVec::from(&bools);
         assert_eq!(bv.len(), 5);
         assert_eq!(bv.count_ones(), 3);
 
-        // Test From trait implementations
         let vec_bool = vec![true, false, true];
         let bv: BitVec = vec_bool.into();
         assert_eq!(bv.len(), 3);
@@ -715,19 +819,19 @@ mod tests {
         bv.toggle(0);
         assert!(bv.get(0).unwrap());
 
-        // Test set_to
-        bv.set_to(10, true);
-        bv.set_to(11, false);
+        // Test set_bit
+        bv.set_bit(10, true);
+        bv.set_bit(11, false);
 
         assert_eq!(bv.get(10), Some(true));
         assert_eq!(bv.get(11), Some(false));
 
         // Test push and pop
-        bv.push(true);
+        bv.append(true);
         assert_eq!(bv.len(), 101);
         assert!(bv.get(100).unwrap());
 
-        bv.push(false);
+        bv.append(false);
         assert_eq!(bv.len(), 102);
         assert!(!bv.get(101).unwrap());
 
@@ -743,7 +847,23 @@ mod tests {
 
     #[test]
     fn test_conversions() {
-        // Test conversion from/to Vec<bool>
+        // Test From<Vec<bool>>
+        let bools = vec![true, false, true, false];
+        let bv: BitVec = bools.clone().into();
+        assert_eq!(bv.len(), 4);
+        for (i, &expected) in bools.iter().enumerate() {
+            assert_eq!(bv.get(i), Some(expected));
+        }
+
+        // Test From<&[bool]>
+        let bools = [false, true, false, true, true];
+        let bv: BitVec = (&bools).into();
+        assert_eq!(bv.len(), 5);
+        for (i, &expected) in bools.iter().enumerate() {
+            assert_eq!(bv.get(i), Some(expected));
+        }
+
+        // Test Into<Vec<bool>>
         let original = vec![true, false, true];
         let bv: BitVec = original.clone().into();
         assert_eq!(bv.len(), 3);
@@ -756,57 +876,39 @@ mod tests {
 
     #[test]
     fn test_bitwise_operations() {
-        // Create test bitvecs
-        let a = BitVec::from_bools(&[true, false, true, false, true]);
-        let b = BitVec::from_bools(&[true, true, false, false, true]);
+        // Test with simple case
+        let a = BitVec::from(&[true, false, true, false, true]);
+        let b = BitVec::from(&[true, true, false, false, true]);
 
         // Test AND
         let mut result = a.clone();
         result.and(&b);
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[true, false, false, false, true])
-        );
+        assert_eq!(result, BitVec::from(&[true, false, false, false, true]));
 
         // Test OR
         let mut result = a.clone();
         result.or(&b);
-        assert_eq!(result, BitVec::from_bools(&[true, true, true, false, true]));
+        assert_eq!(result, BitVec::from(&[true, true, true, false, true]));
 
         // Test XOR
         let mut result = a.clone();
         result.xor(&b);
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[false, true, true, false, false])
-        );
+        assert_eq!(result, BitVec::from(&[false, true, true, false, false]));
 
         // Test INVERT
         let mut result = a.clone();
         result.invert();
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[false, true, false, true, false])
-        );
+        assert_eq!(result, BitVec::from(&[false, true, false, true, false]));
 
         // Test operator overloads
-        let a_ref = &a;
-        let b_ref = &b;
+        let result = &a & &b;
+        assert_eq!(result, BitVec::from(&[true, false, false, false, true]));
 
-        let result = a_ref & b_ref;
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[true, false, false, false, true])
-        );
+        let result = &a | &b;
+        assert_eq!(result, BitVec::from(&[true, true, true, false, true]));
 
-        let result = a_ref | b_ref;
-        assert_eq!(result, BitVec::from_bools(&[true, true, true, false, true]));
-
-        let result = a_ref ^ b_ref;
-        assert_eq!(
-            result,
-            BitVec::from_bools(&[false, true, true, false, false])
-        );
+        let result = &a ^ &b;
+        assert_eq!(result, BitVec::from(&[false, true, true, false, false]));
 
         // Test multi-block bitwise operations
         let mut bv_long1 = BitVec::zeroes(70);
@@ -822,6 +924,51 @@ mod tests {
         let mut expected_and = BitVec::zeroes(70);
         expected_and.set(65);
         assert_eq!(bv_long_and, expected_and);
+
+        // Test with different sizes
+        for size in [1, 7, 8, 9, 15, 16, 17] {
+            let mut a = BitVec::zeroes(size);
+            let mut b = BitVec::zeroes(size);
+
+            // Set some bits in a pattern
+            for i in (0..size).step_by(2) {
+                a.set(i);
+            }
+            for i in (1..size).step_by(3) {
+                b.set(i);
+            }
+
+            // Test AND
+            let mut result = a.clone();
+            result.and(&b);
+            for i in 0..size {
+                let expected = a.get(i).unwrap() && b.get(i).unwrap();
+                assert_eq!(result.get(i), Some(expected));
+            }
+
+            // Test OR
+            let mut result = a.clone();
+            result.or(&b);
+            for i in 0..size {
+                let expected = a.get(i).unwrap() || b.get(i).unwrap();
+                assert_eq!(result.get(i), Some(expected));
+            }
+
+            // Test XOR
+            let mut result = a.clone();
+            result.xor(&b);
+            for i in 0..size {
+                let expected = a.get(i).unwrap() ^ b.get(i).unwrap();
+                assert_eq!(result.get(i), Some(expected));
+            }
+
+            // Test trait operators
+            let result = &a & &b;
+            for i in 0..size {
+                let expected = a.get(i).unwrap() && b.get(i).unwrap();
+                assert_eq!(result.get(i), Some(expected));
+            }
+        }
     }
 
     #[test]
@@ -859,9 +1006,9 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Index out of bounds")]
-    fn test_set_to_out_of_bounds() {
+    fn test_set_bit_out_of_bounds() {
         let mut bv = BitVec::zeroes(10);
-        bv.set_to(10, true);
+        bv.set_bit(10, true);
     }
 
     #[test]
@@ -873,15 +1020,24 @@ mod tests {
 
     #[test]
     fn test_count_operations() {
+        // Test empty
+        let bv = BitVec::new();
+        assert_eq!(bv.count_ones(), 0);
+        assert_eq!(bv.count_zeros(), 0);
+
+        // Test single bit
+        let bv = BitVec::from(&[true]);
+        assert_eq!(bv.count_ones(), 1);
+        assert_eq!(bv.count_zeros(), 0);
+
+        let bv = BitVec::from(&[false]);
+        assert_eq!(bv.count_ones(), 0);
+        assert_eq!(bv.count_zeros(), 1);
+
         // Small BitVec
-        let bv = BitVec::from_bools(&[true, false, true, true, false, true]);
+        let bv = BitVec::from(&[true, false, true, true, false, true]);
         assert_eq!(bv.count_ones(), 4);
         assert_eq!(bv.count_zeros(), 2);
-
-        // Empty BitVec
-        let empty = BitVec::new();
-        assert_eq!(empty.count_ones(), 0);
-        assert_eq!(empty.count_zeros(), 0);
 
         // Large BitVecs
         let zeroes = BitVec::zeroes(100);
@@ -892,7 +1048,7 @@ mod tests {
         assert_eq!(ones.count_ones(), 100);
         assert_eq!(ones.count_zeros(), 0);
 
-        // Test across block boundary
+        // Test across chunk boundaries
         let mut bv_multi = BitVec::zeroes(70);
         bv_multi.set(0);
         bv_multi.set(63); // Last bit in first block
@@ -900,12 +1056,22 @@ mod tests {
         bv_multi.set(69);
         assert_eq!(bv_multi.count_ones(), 4);
         assert_eq!(bv_multi.count_zeros(), 66);
+
+        // Test across multiple chunks with different chunk size
+        let mut bv = super::BitVec::<1>::new();
+        for i in 0..17 {
+            // Spans multiple chunks
+            bv.append(i % 2 == 0);
+        }
+        let expected_ones = (0..17).filter(|&i| i % 2 == 0).count();
+        assert_eq!(bv.count_ones(), expected_ones);
+        assert_eq!(bv.count_zeros(), 17 - expected_ones);
     }
 
     #[test]
     fn test_clear_set_all_invert() {
         // Test on small BitVec
-        let mut bv = BitVec::from_bools(&[true, false, true, false, true]); // 5 bits
+        let mut bv = BitVec::from(&[true, false, true, false, true]); // 5 bits
 
         // Set all
         bv.set_all();
@@ -914,14 +1080,11 @@ mod tests {
         for i in 0..5 {
             assert_eq!(bv.get(i), Some(true));
         }
-        // Check trailing bits in the block were cleared
-        assert_eq!(bv.storage[0], (1 << 5) - 1);
 
         // Clear all
         bv.clear_all();
         assert_eq!(bv.len(), 5);
         assert_eq!(bv.count_ones(), 0);
-        assert_eq!(bv.storage[0], 0);
 
         // Set some bits and test invert
         bv.set(1);
@@ -945,27 +1108,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mask_over_first_n_bits() {
-        // Test with various sizes
-        for i in 0..=BITS_PER_BLOCK {
-            let mask = BitVec::mask_over_first_n_bits(i);
-            let ones = mask.trailing_ones() as usize;
-            let zeroes = mask.leading_zeros() as usize;
-            assert_eq!(ones, i);
-            assert_eq!(ones.checked_add(zeroes).unwrap(), BITS_PER_BLOCK);
-            assert_eq!(
-                mask,
-                ((1 as Block)
-                    .checked_shl(i as u32)
-                    .unwrap_or(0)
-                    .wrapping_sub(1))
-            );
-        }
-    }
-
-    #[test]
     fn test_codec_roundtrip() {
-        let original = BitVec::from_bools(&[true, false, true, false, true]);
+        let original = BitVec::from(&[true, false, true, false, true]);
         let mut buf = original.encode();
         let decoded = BitVec::decode_cfg(&mut buf, &(..).into()).unwrap();
         assert_eq!(original, decoded);
@@ -973,7 +1117,7 @@ mod tests {
 
     #[test]
     fn test_codec_error_invalid_length() {
-        let original = BitVec::from_bools(&[true, false, true, false, true]);
+        let original = BitVec::from(&[true, false, true, false, true]);
         let buf = original.encode();
 
         let mut buf_clone1 = buf.clone();
@@ -990,13 +1134,238 @@ mod tests {
     }
 
     #[test]
-    fn test_codec_error_trailing_bits() {
-        let mut buf = BytesMut::new();
-        1usize.write(&mut buf); // write the bit length as 1
-        (2 as Block).write(&mut buf); // set two bits
+    fn test_codec_error_extra_data() {
+        use bytes::BytesMut;
+
+        // Create a valid BitVec and encode it
+        let mut bv = BitVec::new();
+        bv.append(true);
+        bv.append(false);
+        let encoded = bv.encode();
+
+        // Add extra bytes to the encoded data
+        let mut buf_with_extra = BytesMut::from(encoded.as_ref());
+        buf_with_extra.extend_from_slice(&[0xFF, 0xAA]); // Extra garbage data
+
+        let mut cursor = std::io::Cursor::new(buf_with_extra);
         assert!(matches!(
-            BitVec::decode_cfg(&mut buf, &(..).into()),
-            Err(CodecError::Invalid("BitVec", "trailing bits"))
+            BitVec::decode_cfg(&mut cursor, &(..).into()),
+            Err(CodecError::ExtraData(2)) // Should detect 2 extra bytes
         ));
+    }
+
+    #[test]
+    fn test_codec_error_insufficient_data() {
+        use bytes::BytesMut;
+
+        // Test case 1: Buffer with length but no chunk data
+        let mut buf1 = BytesMut::new();
+        5usize.write(&mut buf1); // Write length as 5 bits
+                                 // Don't write any chunk data
+
+        let mut cursor1 = std::io::Cursor::new(buf1);
+        assert!(matches!(
+            BitVec::decode_cfg(&mut cursor1, &(..).into()),
+            Err(CodecError::EndOfBuffer)
+        ));
+
+        // Test case 2: Buffer with length and partial chunk data
+        let mut buf2 = BytesMut::new();
+        9usize.write(&mut buf2); // Write length as 9 bits (needs 2 chunks)
+        let partial_chunk = [1u8; 1]; // Only 1 byte instead of full chunk
+        partial_chunk.write(&mut buf2);
+
+        let mut cursor2 = std::io::Cursor::new(buf2);
+        assert!(matches!(
+            BitVec::decode_cfg(&mut cursor2, &(..).into()),
+            Err(CodecError::EndOfBuffer)
+        ));
+
+        // Test case 3: Empty buffer
+        let buf3 = BytesMut::new();
+        let mut cursor3 = std::io::Cursor::new(buf3);
+        assert!(matches!(
+            BitVec::decode_cfg(&mut cursor3, &(..).into()),
+            Err(CodecError::EndOfBuffer)
+        ));
+    }
+
+    #[test]
+    fn test_push_pop_across_chunks() {
+        let mut bv = BitVec::new();
+
+        // Test push
+        bv.append(true);
+        assert_eq!(bv.len(), 1);
+        assert_eq!(bv.get(0), Some(true));
+
+        bv.append(false);
+        assert_eq!(bv.len(), 2);
+        assert_eq!(bv.get(1), Some(false));
+
+        // Push across chunk boundary
+        for i in 2..20 {
+            bv.append(i % 2 == 0);
+        }
+        assert_eq!(bv.len(), 20);
+
+        // Verify all values
+        for i in 0..20 {
+            let expected = if i == 0 {
+                true
+            } else if i == 1 {
+                false
+            } else {
+                i % 2 == 0
+            };
+            assert_eq!(bv.get(i), Some(expected));
+        }
+
+        // Test pop
+        for expected_len in (0..20).rev() {
+            let popped = bv.pop();
+            assert!(popped.is_some());
+            assert_eq!(bv.len(), expected_len);
+        }
+
+        // Pop from empty
+        assert_eq!(bv.pop(), None);
+        assert_eq!(bv.len(), 0);
+        assert!(bv.is_empty());
+    }
+
+    #[test]
+    fn test_bit_manipulation_at_boundaries() {
+        let mut bv = BitVec::zeroes(16);
+
+        // Test set/clear/toggle at various positions
+        let test_positions = [0, 1, 7, 8, 15]; // Include byte and chunk boundaries
+
+        for &pos in &test_positions {
+            // Test set
+            bv.set(pos);
+            assert_eq!(bv.get(pos), Some(true));
+
+            // Test clear
+            bv.clear(pos);
+            assert_eq!(bv.get(pos), Some(false));
+
+            // Test toggle
+            bv.toggle(pos); // false -> true
+            assert_eq!(bv.get(pos), Some(true));
+            bv.toggle(pos); // true -> false
+            assert_eq!(bv.get(pos), Some(false));
+        }
+
+        // Test set_bit method
+        bv.set_bit(5, true);
+        assert_eq!(bv.get(5), Some(true));
+        bv.set_bit(5, false);
+        assert_eq!(bv.get(5), Some(false));
+    }
+
+    #[test]
+    fn test_equality_with_trailing_bits() {
+        // Create two BitVecs with same logical content but potentially different trailing bits
+        let mut bv1 = BitVec::ones(5);
+        let mut bv2 = BitVec::zeroes(5);
+
+        // Make them logically identical
+        for i in 0..5 {
+            bv2.set(i);
+        }
+
+        // They should be equal despite potentially different trailing bits
+        assert_eq!(bv1, bv2);
+
+        // Test with different patterns
+        bv1.clear_all();
+        bv2.clear_all();
+        bv1.set(1);
+        bv1.set(3);
+        bv2.set(1);
+        bv2.set(3);
+        assert_eq!(bv1, bv2);
+
+        // Test inequality
+        bv2.set(2);
+        assert_ne!(bv1, bv2);
+    }
+
+    #[test]
+    fn test_iterator_and_size_hint() {
+        // Test empty iterator
+        let bv = BitVec::new();
+        let mut iter = bv.iter();
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+
+        // Test iterator with various patterns
+        let bv = BitVec::from(&[true, false, true, false, true]);
+        let iter = bv.iter();
+        assert_eq!(iter.len(), 5);
+
+        let collected: Vec<bool> = iter.collect();
+        assert_eq!(collected, vec![true, false, true, false, true]);
+
+        // Test size_hint
+        let mut iter = bv.iter();
+        assert_eq!(iter.size_hint(), (5, Some(5)));
+        iter.next();
+        assert_eq!(iter.size_hint(), (4, Some(4)));
+    }
+
+    #[test]
+    fn test_index_operator() {
+        let bv = BitVec::from(&[true, false, true]);
+        assert!(bv[0]);
+        assert!(!bv[1]);
+        assert!(bv[2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Index out of bounds")]
+    fn test_index_oob_panic() {
+        let bv = BitVec::from(&[true, false]);
+        let _ = bv[2];
+    }
+
+    #[test]
+    fn test_different_chunk_sizes() {
+        // Test with chunk size 1 (single byte chunks)
+        let mut bv = super::BitVec::<1>::new();
+        for i in 0..20 {
+            bv.append(i % 2 == 0);
+        }
+        assert_eq!(bv.len(), 20);
+        assert_eq!(bv.storage.len(), 3); // 20 bits = 3 chunks of 8 bits each
+
+        // Test with larger chunk size
+        let mut bv = super::BitVec::<4>::new();
+        for i in 0..40 {
+            bv.append(i % 3 == 0);
+        }
+        assert_eq!(bv.len(), 40);
+        assert_eq!(bv.storage.len(), 2); // 40 bits = 2 chunks of 32 bits each
+
+        // Test boundary conditions
+        let mut bv = super::BitVec::<1>::new();
+
+        // Fill 7 bits (not quite full)
+        for _ in 0..7 {
+            bv.append(true);
+        }
+        assert_eq!(bv.len(), 7);
+        assert_eq!(bv.storage.len(), 1); // Still using the initial chunk
+
+        // Add one more to exactly fill the chunk
+        bv.append(false);
+        assert_eq!(bv.len(), 8);
+        assert_eq!(bv.storage.len(), 2); // prepare_next_chunk() was called
+
+        // Add one more to use the new chunk
+        bv.append(true);
+        assert_eq!(bv.len(), 9);
+        assert_eq!(bv.storage.len(), 2); // Still using the second chunk
     }
 }

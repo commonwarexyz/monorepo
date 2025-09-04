@@ -19,10 +19,12 @@ const FREEZER_PREFIX: u8 = 0;
 /// Prefix for [Ordinal] records.
 const ORDINAL_PREFIX: u8 = 1;
 
+const CHUNK_SIZE: usize = 1;
+
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
 enum Record {
     Freezer(Checkpoint),
-    Ordinal(Option<BitVec>),
+    Ordinal(Option<BitVec<CHUNK_SIZE>>),
 }
 
 impl Record {
@@ -35,7 +37,7 @@ impl Record {
     }
 
     /// Get the [Ordinal] [BitVec] from the [Record].
-    fn ordinal(&self) -> &Option<BitVec> {
+    fn ordinal(&self) -> &Option<BitVec<CHUNK_SIZE>> {
         match self {
             Self::Ordinal(indices) => indices,
             _ => panic!("incorrect record"),
@@ -64,7 +66,7 @@ impl Read for Record {
         let tag = u8::read(buf)?;
         match tag {
             0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),
-            1 => Ok(Self::Ordinal(Option::<BitVec>::read_cfg(
+            1 => Ok(Self::Ordinal(Option::<BitVec<CHUNK_SIZE>>::read_cfg(
                 buf,
                 &(0..=usize::MAX).into(),
             )?)),

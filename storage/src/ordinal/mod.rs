@@ -137,13 +137,15 @@ mod tests {
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, BitVec, NZUsize, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
     const DEFAULT_WRITE_BUFFER: usize = 4096;
     const DEFAULT_REPLAY_BUFFER: usize = 1024 * 1024;
+
+    type BitVec = commonware_utils::BitVec<1>;
 
     #[test_traced]
     fn test_put_get() {

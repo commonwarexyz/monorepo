@@ -16,6 +16,8 @@ use std::{
 };
 use tracing::{debug, warn};
 
+const CHUNK_SIZE: usize = 1;
+
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
 struct Record<V: CodecFixed<Cfg = ()>> {
@@ -98,7 +100,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     pub async fn init_with_bits(
         context: E,
         config: Config,
-        bits: Option<BTreeMap<u64, &Option<BitVec>>>,
+        bits: Option<BTreeMap<u64, &Option<BitVec<CHUNK_SIZE>>>>,
     ) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();

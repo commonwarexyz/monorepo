@@ -22,6 +22,8 @@ const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
 const DATA_PREFIX: u8 = 2;
 
+const CHUNK_SIZE: usize = 1;
+
 /// Configuration when deserializing messages.
 ///
 /// This is used to limit the size of the messages received from peers.
@@ -115,7 +117,7 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: UtilsBitVec,
+    pub bits: UtilsBitVec<CHUNK_SIZE>,
 }
 
 impl EncodeSize for BitVec {
