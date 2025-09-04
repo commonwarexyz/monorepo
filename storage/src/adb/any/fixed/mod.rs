@@ -541,12 +541,11 @@ impl<
         Ok((proof, ops))
     }
 
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule.
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule.
     ///
-    /// While commit ensures durability of the committed operations, it does not guarantee a clean
-    /// shutdown. Failures after commit may involve some amount of recovery. To ensure clean
-    /// shutdown, call `sync` (or `close`, which invokes sync).
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
