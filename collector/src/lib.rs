@@ -12,7 +12,7 @@
 
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
-use commonware_p2p::Recipients;
+use commonware_p2p::{Recipients, Sender};
 use futures::channel::oneshot;
 use std::future::Future;
 
@@ -20,8 +20,8 @@ pub mod p2p;
 
 /// An [Originator] sends requests out to a set of [Handler]s and collects replies.
 pub trait Originator: Clone + Send + 'static {
-    /// The [PublicKey] of a recipient.
-    type PublicKey: PublicKey;
+    /// The [Sender] used to send requests.
+    type Sender: Sender;
 
     /// The type of request to send.
     type Request: Committable + Digestible + Codec;
@@ -30,9 +30,11 @@ pub trait Originator: Clone + Send + 'static {
     /// tried to send to.
     fn send(
         &mut self,
-        recipients: Recipients<Self::PublicKey>,
+        recipients: Recipients<<Self::Sender as Sender>::PublicKey>,
         request: Self::Request,
-    ) -> impl Future<Output = Vec<Self::PublicKey>> + Send;
+    ) -> impl Future<
+        Output = Result<Vec<<Self::Sender as Sender>::PublicKey>, <Self::Sender as Sender>::Error>,
+    > + Send;
 
     /// Cancel a request by `commitment`, ignoring any future responses.
     ///
