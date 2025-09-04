@@ -11,7 +11,7 @@
 //! complex encoding and decoding logic.
 
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{collections::VecDeque, vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
@@ -20,6 +20,8 @@ use core::{
     fmt::{self, Formatter, Write as _},
     ops::{BitAnd, BitOr, BitXor, Index},
 };
+#[cfg(feature = "std")]
+use std::collections::VecDeque;
 
 /// Type alias for the underlying block type.
 type Block = u8;
@@ -581,6 +583,212 @@ impl Iterator for BitIterator<'_> {
 }
 
 impl ExactSizeIterator for BitIterator<'_> {}
+
+/// A bitmap that stores data in chunks of N bytes.
+#[derive(Clone, Debug)]
+pub struct Bitvec2<const N: usize> {
+    /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
+    /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
+    /// higher order bits in the bit ordering.
+    ///
+    /// Invariant: The last chunk in the bitmap always has room for at least one more bit. This
+    /// implies there is always at least one chunk in the bitmap, it's just empty if no bits have
+    /// been added yet.
+    bitmap: VecDeque<[u8; N]>,
+
+    /// The position within the last chunk of the bitmap where the next bit is to be appended.
+    ///
+    /// Invariant: This value is always in the range [0, N * 8).
+    next_bit: u64,
+}
+
+impl<const N: usize> Bitvec2<N> {
+    /// The size of a chunk in bytes.
+    pub const CHUNK_SIZE: usize = N;
+
+    /// The size of a chunk in bits.
+    pub const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
+
+    /// Create a new empty bitmap.
+    pub fn new() -> Self {
+        let bitmap = VecDeque::from([[0u8; N]]);
+        Self {
+            bitmap,
+            next_bit: 0,
+        }
+    }
+
+    /// Return the number of bits currently stored in the bitmap.
+    #[inline]
+    pub fn bit_count(&self) -> u64 {
+        self.bitmap.len() as u64 * Self::CHUNK_SIZE_BITS - Self::CHUNK_SIZE_BITS + self.next_bit
+    }
+
+    /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
+    /// last chunk is empty).
+    #[inline]
+    pub fn last_chunk(&self) -> (&[u8; N], u64) {
+        (self.bitmap.back().unwrap(), self.next_bit)
+    }
+
+    /// Return the last chunk of the bitmap as a mutable slice.
+    #[inline]
+    fn last_chunk_mut(&mut self) -> &mut [u8] {
+        self.bitmap.back_mut().unwrap()
+    }
+
+    /// Returns the bitmap chunk containing the specified bit.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bit doesn't exist.
+    #[inline]
+    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
+        &self.bitmap[self.chunk_index(bit_offset)]
+    }
+
+    /// Get the value of a bit.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bit doesn't exist.
+    #[inline]
+    pub fn get_bit(&self, bit_offset: u64) -> bool {
+        Self::get_bit_from_chunk(self.get_chunk(bit_offset), bit_offset)
+    }
+
+    /// Get the value of a bit from its chunk.
+    #[inline]
+    pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
+        let byte_offset = Self::chunk_byte_offset(bit_offset);
+        let byte = chunk[byte_offset];
+        let mask = Self::chunk_byte_bitmask(bit_offset);
+
+        (byte & mask) != 0
+    }
+
+    /// Add a single bit to the bitmap.
+    pub fn append(&mut self, bit: bool) {
+        if bit {
+            let chunk_byte = (self.next_bit / 8) as usize;
+            self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bitmask(self.next_bit);
+        }
+        self.next_bit += 1;
+        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
+
+        if self.next_bit == Self::CHUNK_SIZE_BITS {
+            self.prepare_next_chunk();
+        }
+    }
+
+    /// Efficiently add a byte's worth of bits to the bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Assumes self.next_bit is currently byte aligned, and panics otherwise.
+    pub fn append_byte_unchecked(&mut self, byte: u8) {
+        assert!(
+            self.next_bit.is_multiple_of(8),
+            "cannot add byte when not byte aligned"
+        );
+
+        let chunk_byte = (self.next_bit / 8) as usize;
+        self.last_chunk_mut()[chunk_byte] = byte;
+        self.next_bit += 8;
+        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
+
+        if self.next_bit == Self::CHUNK_SIZE_BITS {
+            self.prepare_next_chunk();
+        }
+    }
+
+    /// Efficiently add a chunk of bits to the bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Assumes we are at a chunk boundary (that is, `self.next_bit` is 0) and panics otherwise.
+    pub fn append_chunk_unchecked(&mut self, chunk: &[u8; N]) {
+        assert!(
+            self.next_bit == 0,
+            "cannot add chunk when not chunk aligned"
+        );
+
+        self.last_chunk_mut().copy_from_slice(chunk.as_ref());
+        self.prepare_next_chunk();
+    }
+
+    /// Set the value of the referenced bit.
+    pub fn set_bit(&mut self, bit_offset: u64, bit: bool) {
+        let chunk_index = self.chunk_index(bit_offset);
+        let chunk = &mut self.bitmap[chunk_index];
+
+        let byte_offset = Self::chunk_byte_offset(bit_offset);
+        let mask = Self::chunk_byte_bitmask(bit_offset);
+
+        if bit {
+            chunk[byte_offset] |= mask;
+        } else {
+            chunk[byte_offset] &= !mask;
+        }
+    }
+
+    /// Prepares the next chunk of the bitmap to preserve the invariant that there is always room
+    /// for one more bit.
+    pub(crate) fn prepare_next_chunk(&mut self) {
+        self.next_bit = 0;
+        self.bitmap.push_back([0u8; N]);
+    }
+
+    /// Convert a bit offset into a bitmask for the byte containing that bit.
+    #[inline]
+    pub(crate) fn chunk_byte_bitmask(bit_offset: u64) -> u8 {
+        1 << (bit_offset % 8)
+    }
+
+    /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
+    #[inline]
+    pub(crate) fn chunk_byte_offset(bit_offset: u64) -> usize {
+        (bit_offset / 8) as usize % Self::CHUNK_SIZE
+    }
+
+    /// Convert a bit offset into the index of the chunk it belongs to within self.bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bit doesn't exist.
+    #[inline]
+    pub(crate) fn chunk_index(&self, bit_offset: u64) -> usize {
+        assert!(bit_offset < self.bit_count(), "out of bounds: {bit_offset}");
+        Self::chunk_num(bit_offset)
+    }
+
+    /// Convert a bit offset into the number of the chunk it belongs to.
+    #[inline]
+    pub(crate) fn chunk_num(bit_offset: u64) -> usize {
+        (bit_offset / Self::CHUNK_SIZE_BITS) as usize
+    }
+
+    /// Get the number of chunks in the bitmap
+    pub fn len(&self) -> usize {
+        self.bitmap.len()
+    }
+
+    /// Returns true if the bitmap is empty.
+    pub fn is_empty(&self) -> bool {
+        self.bitmap.is_empty()
+    }
+
+    /// Get a reference to a chunk by its index in the current bitmap
+    pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
+        &self.bitmap[index]
+    }
+}
+
+impl<const N: usize> Default for Bitvec2<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ---------- Tests ----------
 
