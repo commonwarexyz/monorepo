@@ -22,6 +22,16 @@ use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashMap, time::Duration};
 
+const MAX_LEN: usize = 1_000_000;
+const MAX_OPERATIONS: usize = 256;
+
+#[derive(Debug, Arbitrary)]
+enum RecipientsType {
+    All,
+    One,
+    Some,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Arbitrary)]
 struct FuzzRequest {
     id: u64,
@@ -41,7 +51,7 @@ impl Read for FuzzRequest {
     fn read_cfg(buf: &mut impl Buf, _cfg: &()) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let len = u32::read(buf)? as usize;
-        if len > 1_000_000 {
+        if len > MAX_LEN {
             return Err(CodecError::InvalidVarint(0));
         }
         let mut data = vec![0u8; len];
@@ -92,7 +102,7 @@ impl Read for FuzzResponse {
     fn read_cfg(buf: &mut impl Buf, _cfg: &()) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let len = u32::read(buf)? as usize;
-        if len > 1_000_000 {
+        if len > MAX_LEN {
             return Err(CodecError::InvalidVarint(0));
         }
         let mut result = vec![0u8; len];
@@ -258,7 +268,7 @@ enum CollectorOperation {
     SendRequest {
         peer_idx: u8,
         request: FuzzRequest,
-        recipients_type: u8,
+        recipients_type: RecipientsType,
     },
     CancelRequest {
         request_id: u64,
@@ -306,14 +316,14 @@ fn fuzz(input: FuzzInput) {
         let mut handlers: HashMap<usize, FuzzHandler> = HashMap::new();
         let mut monitors: HashMap<usize, FuzzMonitor> = HashMap::new();
 
-        for i in 0..5 {
+        for i in 2..5 {
             let seed = rng.gen();
             peers.push(PrivateKey::from_seed(seed));
             handlers.insert(i, FuzzHandler::new(rng.gen(), StdRng::seed_from_u64(seed)));
             monitors.insert(i, FuzzMonitor::new());
         }
 
-        for op in input.operations.into_iter().take(100) {
+        for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
                 CollectorOperation::SendRequest {
                     peer_idx,
@@ -322,13 +332,13 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let idx = (peer_idx as usize) % peers.len().max(1);
                     if let Some(mailbox) = mailboxes.get_mut(&idx) {
-                        let recipients = match recipients_type % 3 {
-                            0 => Recipients::All,
-                            1 if peers.len() > 1 => {
+                        let recipients = match recipients_type {
+                            RecipientsType::All => Recipients::All,
+                            RecipientsType::One => {
                                 let target_idx = rng.gen_range(0..peers.len());
                                 Recipients::One(peers[target_idx].public_key())
                             }
-                            _ => {
+                            RecipientsType::Some => {
                                 let mut selected = vec![];
                                 for (i, peer) in peers.iter().enumerate() {
                                     if i != idx && rng.gen_bool(0.5) {
