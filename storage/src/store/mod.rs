@@ -604,7 +604,7 @@ where
         let (offset, _) = self.log.append(section, op).await?;
 
         // Append the offset of the new operation to locations.
-        self.locations.append(offset.into()).await?;
+        self.locations.append(offset).await?;
 
         // Update the uncommitted operations count and increment the log size
         self.uncommitted_ops += 1;
