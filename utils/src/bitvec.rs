@@ -119,7 +119,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
     /// Returns the number of bits in the vector.
     #[inline]
     pub fn len(&self) -> usize {
-        self.next_bit as usize
+        self.next_bit
     }
 
     /// Returns true if the vector contains no bits.
@@ -453,7 +453,7 @@ impl<const CHUNK_SIZE: usize> PartialEq for BitVec<CHUNK_SIZE> {
                 let remaining_bits_in_byte = remaining_bits % 8;
 
                 // Compare complete bytes
-                for byte_idx in 0..complete_bytes as usize {
+                for byte_idx in 0..complete_bytes {
                     if self_chunk[byte_idx] != other_chunk[byte_idx] {
                         return false;
                     }
@@ -461,7 +461,7 @@ impl<const CHUNK_SIZE: usize> PartialEq for BitVec<CHUNK_SIZE> {
 
                 // Compare the partial last byte (if any)
                 if remaining_bits_in_byte > 0 {
-                    let byte_idx = complete_bytes as usize;
+                    let byte_idx = complete_bytes;
                     if byte_idx < CHUNK_SIZE {
                         let mask = (1u8 << remaining_bits_in_byte) - 1;
                         let self_masked = self_chunk[byte_idx] & mask;
@@ -535,10 +535,10 @@ impl<const CHUNK_SIZE: usize> fmt::Debug for BitVec<CHUNK_SIZE> {
         };
 
         f.write_str("BitVec[")?;
-        if self.next_bit as usize <= MAX_DISPLAY {
+        if self.next_bit <= MAX_DISPLAY {
             // Show all bits
             for i in 0..self.next_bit {
-                write_bit(f, i as usize)?;
+                write_bit(f, i)?;
             }
         } else {
             // Show first and last bits with ellipsis
