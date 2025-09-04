@@ -384,8 +384,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Returns an ordered stream of all items in the journal starting with the item at the given
-    /// `start_section` and `offset`. Each item is returned as a tuple of (section, offset, size,
-    /// item).
+    /// `start_section` and `offset` into that section. Each item is returned as a tuple of
+    /// (section, offset, size, item).
     ///
     /// # Repair
     ///
