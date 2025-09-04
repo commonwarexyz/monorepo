@@ -323,6 +323,8 @@ fn fuzz(input: FuzzInput) {
             monitors.insert(i, FuzzMonitor::new());
         }
 
+        assert!(!peers.is_empty(), "no peers");
+
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
                 CollectorOperation::SendRequest {
@@ -330,7 +332,7 @@ fn fuzz(input: FuzzInput) {
                     request,
                     recipients_type,
                 } => {
-                    let idx = (peer_idx as usize) % peers.len().max(1);
+                    let idx = (peer_idx as usize) % peers.len();
                     if let Some(mailbox) = mailboxes.get_mut(&idx) {
                         let recipients = match recipients_type {
                             RecipientsType::All => Recipients::All,
@@ -370,8 +372,8 @@ fn fuzz(input: FuzzInput) {
                     request,
                     should_respond,
                 } => {
-                    let handler_idx = (peer_idx as usize) % handlers.len().max(1);
-                    let origin_idx = (origin_idx as usize) % peers.len().max(1);
+                    let handler_idx = (peer_idx as usize) % peers.len();
+                    let origin_idx = (origin_idx as usize) % peers.len();
 
                     if let Some(handler) = handlers.get_mut(&handler_idx) {
                         let (tx, rx) = oneshot::channel();
@@ -392,12 +394,12 @@ fn fuzz(input: FuzzInput) {
                     response,
                     count,
                 } => {
-                    let monitor_idx = (peer_idx as usize) % monitors.len().max(1);
-                    let handler_idx = rng.gen_range(0..peers.len());
+                    let monitor_idx = (peer_idx as usize) % peers.len();
+                    let handler_idx = (peer_idx as usize) % peers.len();
 
                     if let Some(monitor) = monitors.get_mut(&monitor_idx) {
                         monitor
-                            .collected(peers[handler_idx].public_key(), response, count.min(1000))
+                            .collected(peers[handler_idx].public_key(), response, count)
                             .await;
                     }
                 }
@@ -408,7 +410,7 @@ fn fuzz(input: FuzzInput) {
                     priority_request,
                     priority_response,
                 } => {
-                    let idx = (peer_idx as usize) % peers.len().max(1);
+                    let idx = (peer_idx as usize) % peers.len();
 
                     let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
                         FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
@@ -419,7 +421,7 @@ fn fuzz(input: FuzzInput) {
                         blocker: FuzzBlocker,
                         monitor,
                         handler,
-                        mailbox_size: (mailbox_size as usize).clamp(1, 10000),
+                        mailbox_size: (mailbox_size as usize),
                         priority_request,
                         request_codec: (),
                         priority_response,
@@ -442,10 +444,7 @@ fn fuzz(input: FuzzInput) {
                     );
                 }
             }
-
-            context
-                .sleep(Duration::from_millis(rng.gen_range(0..10)))
-                .await;
+            context.sleep(Duration::from_millis(100)).await;
         }
     });
 }
