@@ -750,4 +750,48 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_send_returns_error_on_message_too_large() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            // Configure network with very small max message size to force an error
+            let (network, mut oracle) = commonware_p2p::simulated::Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config { max_size: 4 },
+            );
+            network.start();
+
+            // Create peers (only need to register channels for the originator)
+            let scheme1 = PrivateKey::from_seed(0);
+            let scheme2 = PrivateKey::from_seed(1);
+            let pk1 = scheme1.public_key();
+            let pk2 = scheme2.public_key();
+
+            // Register request/response channels for originator (peer 1)
+            let (req_tx1, req_rx1) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (res_tx1, res_rx1) = oracle.register(pk1.clone(), 1).await.unwrap();
+
+            // Spawn engine for originator
+            let (mon, _mon_out) = MockMonitor::new();
+            let mut mailbox1 = setup_and_spawn_engine(
+                &context,
+                oracle.control(pk1.clone()),
+                scheme1,
+                ((req_tx1, req_rx1), (res_tx1, res_rx1)),
+                mon,
+                MockHandler::dummy(),
+            )
+            .await;
+
+            // Attempt to send a request; expect an error to be propagated
+            let request = Request { id: 1, data: 1 };
+            let result = mailbox1.send(Recipients::One(pk2.clone()), request).await;
+
+            assert!(matches!(
+                result.unwrap_err(),
+                commonware_p2p::simulated::Error::MessageTooLarge(_)
+            ));
+        });
+    }
 }
