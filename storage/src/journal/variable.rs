@@ -793,7 +793,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
 
         // Update oldest allowed
-        self.oldest_allowed = Some(min);
+        if pruned {
+            self.oldest_allowed = Some(min);
+        }
         Ok(pruned)
     }
 
