@@ -100,7 +100,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             FuzzInput::Push(bools, value) => {
                 let mut v = BitVec::from(&bools);
                 let old_len = v.len();
-                v.push(value);
+                v.append(value);
                 assert_eq!(v.len(), old_len + 1);
                 assert_eq!(v.get(old_len), Some(value));
             }

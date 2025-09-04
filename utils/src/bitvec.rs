@@ -14,8 +14,8 @@
 //! use commonware_utils::BitVec;
 //!
 //! let mut bv = BitVec::<1>::new();
-//! bv.push(true);
-//! bv.push(false);
+//! bv.append(true);
+//! bv.append(false);
 //! assert_eq!(bv.len(), 2);
 //! assert_eq!(bv.get(0), Some(true));
 //! assert_eq!(bv.get(1), Some(false));
@@ -66,6 +66,34 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
             storage,
             next_bit: 0,
         }
+    }
+
+    /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
+    #[inline]
+    pub fn bit_count(&self) -> u64 {
+        self.next_bit as u64
+    }
+
+    /// Return the last chunk of the bitmap as a slice.
+    #[inline]
+    pub fn last_chunk(&self) -> &[u8] {
+        self.storage.back().unwrap()
+    }
+
+    /// Return the last chunk of the bitmap as a mutable slice.
+    #[inline]
+    fn last_chunk_mut(&mut self) -> &mut [u8] {
+        self.storage.back_mut().unwrap()
+    }
+
+    /// Returns the bitmap chunk containing the specified bit.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bit doesn't exist or has been pruned.
+    #[inline]
+    pub fn get_chunk(&self, bit_offset: usize) -> &[u8; CHUNK_SIZE] {
+        &self.storage[self.chunk_index(bit_offset)]
     }
 
     /// Creates a new bit vector with capacity for at least `capacity` bits.
@@ -132,30 +160,53 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
         self.next_bit == 0
     }
 
-    /// Return the last chunk of the bitmap as a mutable slice.
+    /// Gets the value of the bit at `index` (true if 1, false if 0).
+    ///
+    /// Returns `None` if the index is out of bounds.
     #[inline]
-    fn last_chunk_mut(&mut self) -> &mut [u8] {
-        self.storage.back_mut().unwrap()
+    pub fn get(&self, index: usize) -> Option<bool> {
+        if index >= self.len() {
+            return None;
+        }
+        Some(Self::get_bit_from_chunk(self.get_chunk(index), index))
     }
 
-    /// Returns the bitmap chunk containing the specified bit.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the bit doesn't exist or has been pruned.
+    /// Get the value of a bit from its chunk.
     #[inline]
-    pub fn get_chunk(&self, bit_offset: usize) -> &[u8; CHUNK_SIZE] {
-        &self.storage[self.chunk_index(bit_offset)]
+    pub fn get_bit_from_chunk(chunk: &[u8; CHUNK_SIZE], bit_offset: usize) -> bool {
+        let byte_offset = Self::byte_offset_into_chunk(bit_offset);
+        let byte = chunk[byte_offset];
+        let mask = Self::chunk_byte_bitmask(bit_offset);
+
+        (byte & mask) != 0
     }
 
+    /// Appends a bit to the end of the vector.
+    #[inline]
+    pub fn append(&mut self, bit: bool) {
+        let chunk_byte = Self::byte_offset_into_chunk(self.next_bit);
+        if bit {
+            self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bitmask(self.next_bit);
+        } else {
+            self.last_chunk_mut()[chunk_byte] &= !Self::chunk_byte_bitmask(self.next_bit);
+        }
+        self.next_bit += 1;
+
+        // If we've filled the current chunk, prepare the next one
+        if self.next_bit % Self::CHUNK_SIZE_BITS == 0 {
+            self.prepare_next_chunk();
+        }
+    }
+
+    /// A bitmask with one bit set: where bit_offset falls within the byte containing it.
     #[inline]
     pub(crate) fn chunk_byte_bitmask(bit_offset: usize) -> u8 {
         1 << (bit_offset % 8)
     }
 
-    /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
+    /// Returns the index within the chunk containing the bit of the byte containing the bit.
     #[inline]
-    pub(crate) fn chunk_byte_offset(bit_offset: usize) -> usize {
+    pub(crate) fn byte_offset_into_chunk(bit_offset: usize) -> usize {
         (bit_offset / 8) % CHUNK_SIZE
     }
 
@@ -182,21 +233,6 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
         self.storage.push_back(Self::EMPTY_CHUNK);
     }
 
-    /// Appends a bit to the end of the vector.
-    #[inline]
-    pub fn push(&mut self, bit: bool) {
-        if bit {
-            let chunk_byte = Self::chunk_byte_offset(self.next_bit);
-            self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bitmask(self.next_bit);
-        }
-        self.next_bit += 1;
-
-        // If we've filled the current chunk, prepare the next one
-        if self.next_bit % Self::CHUNK_SIZE_BITS == 0 {
-            self.prepare_next_chunk();
-        }
-    }
-
     /// Removes the last bit from the vector and returns it.
     ///
     /// Returns `None` if the vector is empty.
@@ -210,15 +246,6 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
         let bit_offset = self.next_bit - 1;
         let value = Self::get_bit_from_chunk(self.get_chunk(bit_offset), bit_offset);
 
-        // Clear the bit we're about to pop (maintain invariant that unused bits are 0)
-        if value {
-            let chunk_index = self.chunk_index(bit_offset);
-            let chunk = &mut self.storage[chunk_index];
-            let byte_offset = Self::chunk_byte_offset(bit_offset);
-            let mask = Self::chunk_byte_bitmask(bit_offset);
-            chunk[byte_offset] &= !mask;
-        }
-
         // Decrement the number of bits
         self.next_bit -= 1;
 
@@ -229,27 +256,6 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
         }
 
         Some(value)
-    }
-
-    /// Get the value of a bit from its chunk.
-    #[inline]
-    pub fn get_bit_from_chunk(chunk: &[u8; CHUNK_SIZE], bit_offset: usize) -> bool {
-        let byte_offset = Self::chunk_byte_offset(bit_offset);
-        let byte = chunk[byte_offset];
-        let mask = Self::chunk_byte_bitmask(bit_offset);
-
-        (byte & mask) != 0
-    }
-
-    /// Gets the value of the bit at `index` (true if 1, false if 0).
-    ///
-    /// Returns `None` if the index is out of bounds.
-    #[inline]
-    pub fn get(&self, index: usize) -> Option<bool> {
-        if index >= self.len() {
-            return None;
-        }
-        Some(Self::get_bit_from_chunk(self.get_chunk(index), index))
     }
 
     /// Sets the bit at `index` to 1.
@@ -277,7 +283,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
         let chunk_index = self.chunk_index(bit_offset);
         let chunk = &mut self.storage[chunk_index];
 
-        let byte_offset = Self::chunk_byte_offset(bit_offset);
+        let byte_offset = Self::byte_offset_into_chunk(bit_offset);
         let mask = Self::chunk_byte_bitmask(bit_offset);
 
         if bit {
@@ -298,7 +304,7 @@ impl<const CHUNK_SIZE: usize> BitVec<CHUNK_SIZE> {
         let chunk_index = self.chunk_index(bit_offset);
         let chunk = &mut self.storage[chunk_index];
 
-        let byte_offset = Self::chunk_byte_offset(bit_offset);
+        let byte_offset = Self::byte_offset_into_chunk(bit_offset);
         let mask = Self::chunk_byte_bitmask(bit_offset);
 
         chunk[byte_offset] ^= mask;
@@ -495,7 +501,7 @@ impl<const CHUNK_SIZE: usize, T: AsRef<[bool]>> From<T> for BitVec<CHUNK_SIZE> {
         let bools = t.as_ref();
         let mut bv = Self::with_capacity(bools.len());
         for &b in bools {
-            bv.push(b);
+            bv.append(b);
         }
         bv
     }
@@ -510,7 +516,7 @@ impl<const CHUNK_SIZE: usize> From<BitVec<CHUNK_SIZE>> for Vec<bool> {
 impl<const CHUNK_SIZE: usize> Extend<bool> for BitVec<CHUNK_SIZE> {
     fn extend<I: IntoIterator<Item = bool>>(&mut self, iter: I) {
         for bit in iter {
-            self.push(bit);
+            self.append(bit);
         }
     }
 }
@@ -821,11 +827,11 @@ mod tests {
         assert_eq!(bv.get(11), Some(false));
 
         // Test push and pop
-        bv.push(true);
+        bv.append(true);
         assert_eq!(bv.len(), 101);
         assert!(bv.get(100).unwrap());
 
-        bv.push(false);
+        bv.append(false);
         assert_eq!(bv.len(), 102);
         assert!(!bv.get(101).unwrap());
 
@@ -1055,7 +1061,7 @@ mod tests {
         let mut bv = super::BitVec::<1>::new();
         for i in 0..17 {
             // Spans multiple chunks
-            bv.push(i % 2 == 0);
+            bv.append(i % 2 == 0);
         }
         let expected_ones = (0..17).filter(|&i| i % 2 == 0).count();
         assert_eq!(bv.count_ones(), expected_ones);
@@ -1133,8 +1139,8 @@ mod tests {
 
         // Create a valid BitVec and encode it
         let mut bv = BitVec::new();
-        bv.push(true);
-        bv.push(false);
+        bv.append(true);
+        bv.append(false);
         let encoded = bv.encode();
 
         // Add extra bytes to the encoded data
@@ -1189,17 +1195,17 @@ mod tests {
         let mut bv = BitVec::new();
 
         // Test push
-        bv.push(true);
+        bv.append(true);
         assert_eq!(bv.len(), 1);
         assert_eq!(bv.get(0), Some(true));
 
-        bv.push(false);
+        bv.append(false);
         assert_eq!(bv.len(), 2);
         assert_eq!(bv.get(1), Some(false));
 
         // Push across chunk boundary
         for i in 2..20 {
-            bv.push(i % 2 == 0);
+            bv.append(i % 2 == 0);
         }
         assert_eq!(bv.len(), 20);
 
@@ -1329,7 +1335,7 @@ mod tests {
         // Test with chunk size 1 (single byte chunks)
         let mut bv = super::BitVec::<1>::new();
         for i in 0..20 {
-            bv.push(i % 2 == 0);
+            bv.append(i % 2 == 0);
         }
         assert_eq!(bv.len(), 20);
         assert_eq!(bv.storage.len(), 3); // 20 bits = 3 chunks of 8 bits each
@@ -1337,7 +1343,7 @@ mod tests {
         // Test with larger chunk size
         let mut bv = super::BitVec::<4>::new();
         for i in 0..40 {
-            bv.push(i % 3 == 0);
+            bv.append(i % 3 == 0);
         }
         assert_eq!(bv.len(), 40);
         assert_eq!(bv.storage.len(), 2); // 40 bits = 2 chunks of 32 bits each
@@ -1347,18 +1353,18 @@ mod tests {
 
         // Fill 7 bits (not quite full)
         for _ in 0..7 {
-            bv.push(true);
+            bv.append(true);
         }
         assert_eq!(bv.len(), 7);
         assert_eq!(bv.storage.len(), 1); // Still using the initial chunk
 
         // Add one more to exactly fill the chunk
-        bv.push(false);
+        bv.append(false);
         assert_eq!(bv.len(), 8);
         assert_eq!(bv.storage.len(), 2); // prepare_next_chunk() was called
 
         // Add one more to use the new chunk
-        bv.push(true);
+        bv.append(true);
         assert_eq!(bv.len(), 9);
         assert_eq!(bv.storage.len(), 2); // Still using the second chunk
     }
