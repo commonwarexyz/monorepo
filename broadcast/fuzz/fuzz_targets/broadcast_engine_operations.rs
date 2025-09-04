@@ -242,8 +242,6 @@ fn fuzz(input: FuzzInput) {
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
-                        let commitment_digest = Sha256::hash(&commitment);
-                        let digest_hash = digest.as_ref().map(|d| Sha256::hash(d));
                         let sender_key = sender.map(|sender_idx| {
                             let clamped_sender_idx = sender_idx % peers.len();
                             peers[clamped_sender_idx].clone()
@@ -265,8 +263,6 @@ fn fuzz(input: FuzzInput) {
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
-                        let commitment_digest = Sha256::hash(&commitment);
-                        let digest_hash = digest.as_ref().map(|d| Sha256::hash(d));
                         let sender_key = sender.map(|sender_idx| {
                             let clamped_sender_idx = sender_idx % peers.len();
                             peers[clamped_sender_idx].clone()
