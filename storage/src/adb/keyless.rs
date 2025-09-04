@@ -195,6 +195,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations.sync().await?;
             mmr.pop(walked_back as usize).await?;
         }
+        assert_eq!(mmr.leaves(), locations.size().await?);
 
         // At this point, the tip of the locations journal & mmr, if they exist, correspond
         // to a valid log location represented by `section_offset`.
@@ -229,8 +230,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             (op.0, op.1)
         };
 
-        // Next, replay any log operations that are missing from the other
-        // structures, returning the operation at the log's tip.
+        // Next, replay any log operations that are missing from the other structures, returning the
+        // operation at the log's tip.
         let last_log_op = {
             let stream = log.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
             pin_mut!(stream);
@@ -374,7 +375,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         // Prune the log first since it's always the source of truth.
         let section = loc / self.log_items_per_section;
-        self.log.prune(section).await?;
+        if !self.log.prune(section).await? {
+            return Ok(());
+        }
 
         // Prune locations and the MMR to the corresponding positions.
         let prune_loc = section * self.log_items_per_section;
