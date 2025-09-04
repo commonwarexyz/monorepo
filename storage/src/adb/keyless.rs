@@ -285,7 +285,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 }
                 if op_index == oldest_retained_loc {
                     if op_index != 0 {
-                        panic!("no commit operation found");
+                        panic!(
+                            "no commit operation found, oldest_retained_loc: {}",
+                            oldest_retained_loc
+                        );
                     }
                     break;
                 }
@@ -365,11 +368,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     ///
     /// # Panics
     ///
-    /// Panics if `loc` is greater than the current size of the database, or if `loc` precedes the
-    /// last commit point.
+    /// Panics if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
-        assert!(loc <= self.size);
-        assert!(loc >= self.last_commit_loc.unwrap_or(0));
+        assert!(loc <= self.last_commit_loc.unwrap_or(0));
 
         // Prune the log first since it's always the source of truth.
         let section = loc / self.log_items_per_section;
@@ -422,8 +423,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         Ok(loc)
     }
 
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable.
-    /// Caller can associate an arbitrary `metadata` value with the commit.
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Caller can associate an arbitrary `metadata` value with the commit.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<u64, Error> {
         let loc = self.size;
         let section = self.current_section();
@@ -462,7 +466,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         Ok(loc)
     }
 
-    /// Sync the db to disk ensuring the current state is fully persisted.
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
         let section = self.current_section();
         try_join!(
@@ -1132,6 +1138,8 @@ mod test {
             }
             db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
+
+            println!("last commit loc: {}", db.last_commit_loc.unwrap());
 
             // Prune the first 30 operations
             const PRUNE_LOC: u64 = 30;

@@ -318,8 +318,12 @@ where
         self.apply_op(Operation::Delete(key)).await.map(|_| ())
     }
 
-    /// Commits all uncommitted operations to the store, making them persistent and recoverable.
-    /// Caller can associate an arbitrary `metadata` value with the commit.
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Caller can
+    /// associate an arbitrary `metadata` value with the commit.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
             .await?;
@@ -336,7 +340,9 @@ where
         self.log_size / self.log_items_per_section
     }
 
-    /// Sync the db to disk ensuring the current state is fully persisted.
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
         let current_section = self.log_size / self.log_items_per_section;
         try_join!(self.log.sync(current_section), self.locations.sync())?;

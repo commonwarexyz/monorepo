@@ -607,10 +607,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok((proof, ops))
     }
 
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
-    /// is provided. Caller can associate an arbitrary `metadata` value with the commit.
+    /// Commit any pending operations to the database, ensuring their durability
+    /// upon return from this function. Also raises the inactivity floor
+    /// according to the schedule. Caller can associate an arbitrary `metadata`
+    /// value with the commit.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require
+    /// reprocessing to recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
@@ -648,8 +651,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(Some((last_commit, metadata)))
     }
 
-    /// Sync the db to disk ensuring the current state is fully persisted. Batch operations will be
-    /// parallelized if a thread pool is provided.
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
         let section = self.current_section();
         try_join!(
