@@ -564,8 +564,9 @@ impl<
         Ok(())
     }
 
-    /// Sync the db to disk, ensuring current state is fully persisted, and startup after any
-    /// failures will be fast and free from any recovery phase.
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
