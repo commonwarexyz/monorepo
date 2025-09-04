@@ -29,7 +29,7 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::NZUsize;
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// The size of the read buffer to use for replaying the operations log during recovery.
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
@@ -384,8 +384,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             return Ok(());
         }
 
-        // Prune locations and the MMR to the corresponding positions.
         let prune_loc = section * self.log_items_per_section;
+        debug!(size = self.size, loc = prune_loc, "pruned log");
+
+        // Prune locations and the MMR to the corresponding positions.
         try_join!(
             self.mmr
                 .prune_to_pos(&mut self.hasher, leaf_num_to_pos(prune_loc))
@@ -470,6 +472,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // Run the 2 futures in parallel.
         try_join!(log_loc_fut, mmr_fut)?;
         self.size += 1;
+
+        debug!(size = self.size, "committed db");
 
         Ok(loc)
     }
