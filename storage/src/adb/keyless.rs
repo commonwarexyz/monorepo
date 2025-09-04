@@ -331,7 +331,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Get the value at location `loc` in the database. Returns None if the location is valid but
     /// does not correspond to an append.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `loc` is greater than or equal to the number of operations.
     pub async fn get(&self, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.size);
         let offset = self.locations.read(loc).await?;
 
         let section = loc / self.log_items_per_section;
