@@ -107,16 +107,28 @@ where
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        requests: (S, impl Receiver<PublicKey = P>),
-        responses: (S, impl Receiver<PublicKey = P>),
+        requests: (
+            impl Sender<PublicKey = P, Error = S::Error>,
+            impl Receiver<PublicKey = P>,
+        ),
+        responses: (
+            impl Sender<PublicKey = P, Error = S::Error>,
+            impl Receiver<PublicKey = P>,
+        ),
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(requests, responses))
     }
 
     async fn run(
         mut self,
-        requests: (S, impl Receiver<PublicKey = P>),
-        responses: (S, impl Receiver<PublicKey = P>),
+        requests: (
+            impl Sender<PublicKey = P, Error = S::Error>,
+            impl Receiver<PublicKey = P>,
+        ),
+        responses: (
+            impl Sender<PublicKey = P, Error = S::Error>,
+            impl Receiver<PublicKey = P>,
+        ),
     ) {
         // Wrap channels
         let (mut req_tx, mut req_rx) = wrap(self.request_codec, requests.0, requests.1);
