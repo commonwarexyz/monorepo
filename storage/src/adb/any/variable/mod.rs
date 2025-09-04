@@ -369,6 +369,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
     /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `loc` is greater than or equal to the number of operations in the log.
     pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
         assert!(loc < self.op_count());
         if loc < self.oldest_retained_loc {
@@ -426,7 +430,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the value of the operation with location `loc` in the db if it matches `key`. The
     /// location is assumed valid.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `loc` is greater than or equal to the number of operations in the log.
     pub async fn get_from_loc(&self, key: &K, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.op_count());
+
         match self.locations.read(loc).await {
             Ok(offset) => {
                 return self.get_from_offset(key, loc, offset).await;
@@ -579,12 +589,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Analogous to proof, but with respect to the state of the MMR when it had `size` elements.
+    ///
+    /// # Panics
+    ///
+    /// - Panics if `start_loc` greater than or equal to `size`.
+    /// - Panics if `size` is greater than the number of operations.
     pub async fn historical_proof(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        assert!(size <= self.op_count());
+        assert!(start_loc < size);
+
         let start_pos = leaf_num_to_pos(start_loc);
         let end_index = std::cmp::min(size - 1, start_loc + max_ops - 1);
         let end_pos = leaf_num_to_pos(end_index);
