@@ -5,7 +5,8 @@ set -euo pipefail
 # randomly restarting each validator.
 #
 # Requirements: cargo, Rust toolchain installed.
-# Usage: ./chaos.sh
+# Usage: ./chaos.sh [prefix]
+# If prefix is not provided, a random 8-character alphanumeric string is used.
 
 RUST_LOG=${RUST_LOG:-info}
 export RUST_LOG
@@ -36,18 +37,33 @@ BOOTSTRAP_ADDR="1@127.0.0.1:${BOOTSTRAP_PORT}"
 
 log() { printf '[%(%Y-%m-%dT%H:%M:%S%z)T] %s\n' -1 "$*"; }
 
+# Optional storage prefix handling
+PREFIX="${1:-}"
+if [[ -z "${PREFIX}" ]]; then
+  generate_prefix() {
+    local s=""
+    while [[ ${#s} -lt 8 ]]; do
+      s="${s}$(dd if=/dev/urandom bs=64 count=1 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9')"
+    done
+    printf '%s' "${s:0:8}"
+  }
+  PREFIX="$(generate_prefix)"
+fi
+STORAGE_BASE="/tmp/commonware-epocher/${PREFIX}"
+
+# Announce chosen prefix
+log "using storage at: ${STORAGE_BASE}"
+
 # Start indexer
 log "starting indexer on :${INDEXER_PORT}"
-"${PATH_INDEXER}" --me 1@${INDEXER_PORT} &
-INDEXER_PID=$!
+"${PATH_INDEXER}" --me 1@${INDEXER_PORT} --storage-dir "${STORAGE_BASE}/indexer" &
 
 sleep 1
 
 # Start bootstrap validator (key 1)
 log "starting bootstrap validator ${BOOTSTRAP_KEY}@${BOOTSTRAP_PORT}"
-mkdir -p /tmp/commonware-epocher/${BOOTSTRAP_KEY}
-"${PATH_VALIDATOR}" --me ${BOOTSTRAP_KEY}@${BOOTSTRAP_PORT} --indexer http://127.0.0.1:${INDEXER_PORT} --storage-dir /tmp/commonware-epocher/${BOOTSTRAP_KEY} &
-BOOTSTRAP_PID=$!
+mkdir -p "${STORAGE_BASE}/${BOOTSTRAP_KEY}"
+"${PATH_VALIDATOR}" --me ${BOOTSTRAP_KEY}@${BOOTSTRAP_PORT} --indexer http://127.0.0.1:${INDEXER_PORT} --storage-dir "${STORAGE_BASE}/${BOOTSTRAP_KEY}" &
 
 sleep 2
 
@@ -55,7 +71,7 @@ sleep 2
 run_validator() {
   local key=$1
   local port=$2
-  local storage_dir="/tmp/commonware-epocher/${key}"
+  local storage_dir="${STORAGE_BASE}/${key}"
   mkdir -p "${storage_dir}"
   exec "${PATH_VALIDATOR}" --me ${key}@${port} \
     --bootstrappers ${BOOTSTRAP_ADDR} \

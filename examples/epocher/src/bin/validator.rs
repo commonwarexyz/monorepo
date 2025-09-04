@@ -179,6 +179,7 @@ fn main() {
             muxer_size: 1024,
             mailbox_size: 1024,
             indexers: indexers.clone(),
+            partition_prefix: format!("epocher-orchestrator-{}", signer.public_key()),
         };
         let (orchestrator_actor, orchestrator) =
             orchestrator::Orchestrator::new(context.with_label("orchestrator"), orchestrator_cfg);

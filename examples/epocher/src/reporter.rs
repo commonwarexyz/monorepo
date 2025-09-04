@@ -1,10 +1,10 @@
-use crate::types::block::Block;
+use crate::types::{block::Block, epoch};
 use commonware_codec::Encode;
-use commonware_consensus::{marshal, threshold_simplex::types::Activity, Reporter};
+use commonware_consensus::{marshal, threshold_simplex::types::Activity, Block as _, Reporter};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, sha256::Digest as Sha256Digest,
 };
-use tracing::error;
+use tracing::{debug, error, info};
 
 /// Reporter implementation for forwarding finalizations to multiple indexers.
 #[derive(Clone)]
@@ -32,13 +32,32 @@ impl Reporter for Forwarder {
             return;
         };
 
-        let commitment = finalization.proposal.payload;
-
         // Best-effort: try to get the block locally from marshal; skip if unavailable
-        let rx = self.marshal.get(commitment).await;
+        let rx = self.marshal.get(finalization.proposal.payload).await;
         let Ok(Some(block)) = rx.await else {
+            error!(
+                "forwarder: failed to get block: {}",
+                finalization.proposal.payload
+            );
             return;
         };
+
+        // Skip if block height is not the last height in the epoch
+        let height = block.height();
+        let epoch = finalization.proposal.round.epoch();
+        if height != epoch::get_last_height(epoch) {
+            debug!(
+                "forwarder: skipping finalization: height: {}, epoch: {}",
+                height, epoch
+            );
+            return;
+        }
+
+        // TODO: remove?
+        info!(
+            "forwarder: reporting finalization: height: {}, epoch: {}",
+            height, epoch
+        );
 
         // Encode (finalization, block) and POST to indexer
         let bytes = (finalization, block).encode().freeze();
@@ -52,8 +71,13 @@ impl Reporter for Forwarder {
                 .send()
                 .await
             {
-                error!("failed to post finalization to indexer {}: {}", base, e);
-            };
+                error!(
+                    "forwarder:failed to post finalization to indexer {}: {}",
+                    base, e
+                );
+            } else {
+                info!("forwarder: posted finalization to indexer {}", base);
+            }
         }
     }
 }

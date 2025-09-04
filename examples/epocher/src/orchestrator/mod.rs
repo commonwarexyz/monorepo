@@ -38,4 +38,7 @@ pub struct Config<
 
     // Optional indexer base URLs (e.g., http://127.0.0.1:4001)
     pub indexers: Vec<String>,
+
+    // Partition prefix used for orchestrator metadata persistence
+    pub partition_prefix: String,
 }

@@ -20,12 +20,15 @@ use commonware_p2p::{
     Receiver, Sender,
 };
 use commonware_runtime::{buffer::PoolRef, Clock, Handle, Metrics, Spawner, Storage};
-use commonware_utils::{NZUsize, NZU32};
+use commonware_storage::metadata::{self, Metadata};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{rngs::StdRng, seq::SliceRandom, CryptoRng, Rng, SeedableRng};
 use std::time::Duration;
 use tracing::info;
+
+const METADATA_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 
 type D = sha256::Digest;
 
@@ -50,10 +53,14 @@ pub struct Orchestrator<
     validators: Vec<C::PublicKey>,
     muxer_size: usize,
     indexers: Vec<String>,
+    partition_prefix: String,
 
     // State
     epoch: Epoch,
     consensus_engine: Option<Handle<()>>,
+
+    // Metadata store for persisting latest epoch/seed
+    metadata: Option<Metadata<E, FixedBytes<1>, (Epoch, sha256::Digest)>>,
 }
 
 impl<
@@ -79,9 +86,12 @@ impl<
                 validators: cfg.validators,
                 muxer_size: cfg.muxer_size,
                 indexers: cfg.indexers,
+                partition_prefix: cfg.partition_prefix,
 
                 epoch: 0,
                 consensus_engine: None,
+
+                metadata: None,
             },
             Mailbox::new(tx),
         )
@@ -143,12 +153,36 @@ impl<
         );
         mux.start();
 
-        // Enter initial epoch using genesis seed (genesis block hash).
-        let genesis_seed = GENESIS_BLOCK.commitment();
+        // Initialize metadata store
+        let metadata = Metadata::init(
+            self.context.with_label("metadata"),
+            metadata::Config {
+                partition: format!("{}-metadata", self.partition_prefix),
+                codec_config: ((), ()),
+            },
+        )
+        .await
+        .expect("failed to initialize orchestrator metadata");
+        self.metadata = Some(metadata);
+
         // Register all possible validators (ensures all validators receive consensus messages)
         self.oracle.register(0, self.validators.clone()).await;
-        self.enter_epoch(0, genesis_seed, &mut p_mux, &mut rc_mux, &mut rs_mux)
-            .await;
+
+        // Enter initial epoch using recovered metadata if present; otherwise use genesis seed.
+        // Recover last epoch/seed from metadata
+        let (initial_epoch, initial_seed) = self
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get(&METADATA_KEY).cloned())
+            .unwrap_or((0, GENESIS_BLOCK.commitment()));
+        self.enter_epoch(
+            initial_epoch,
+            initial_seed,
+            &mut p_mux,
+            &mut rc_mux,
+            &mut rs_mux,
+        )
+        .await;
 
         // Keep waiting for epoch updates.
         while let Some(message) = self.mailbox.next().await {
@@ -185,12 +219,19 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         >,
     ) {
+        // Persist latest epoch and seed via metadata
+        let _ = self
+            .metadata
+            .as_mut()
+            .unwrap()
+            .put_sync(METADATA_KEY, (epoch, seed))
+            .await;
+        self.epoch = epoch;
+
         // Stop previous engine.
         if let Some(engine) = self.consensus_engine.take() {
             engine.abort();
         }
-
-        self.epoch = epoch;
 
         // Select 4 participants deterministically using the provided seed
         let mut shuffled = self.validators.clone();
