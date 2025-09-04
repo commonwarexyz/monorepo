@@ -43,6 +43,10 @@ use std::collections::VecDeque;
 #[derive(Clone)]
 pub struct BitVec<const CHUNK_SIZE: usize> {
     /// The underlying storage for the bits.
+    ///
+    /// Invariant: The last chunk in the bitmap always has room for at least one more bit. This
+    /// implies there is always at least one chunk in the bitmap, it's just empty if no bits have
+    /// been added yet.
     storage: VecDeque<[u8; CHUNK_SIZE]>,
 
     /// The total number of bits currently stored in this bit vector.
@@ -631,8 +635,9 @@ impl<const CHUNK_SIZE: usize> Read for BitVec<CHUNK_SIZE> {
             storage.push_back(chunk);
         }
 
-        if buf.remaining() > 0 {
-            return Err(CodecError::ExtraData(buf.remaining()));
+        // Ensure invariant: always room for at least one more bit
+        if next_bit % Self::CHUNK_SIZE_BITS == 0 && next_bit > 0 {
+            storage.push_back(Self::EMPTY_CHUNK);
         }
 
         Ok(Self { storage, next_bit })
