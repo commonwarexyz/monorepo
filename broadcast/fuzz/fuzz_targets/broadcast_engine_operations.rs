@@ -83,14 +83,14 @@ enum BroadcastAction {
     Subscribe {
         peer_index: usize,
         sender: Option<usize>,
-        commitment: Vec<u8>,
-        digest: Option<Vec<u8>>,
+        commitment: [u8; 32],
+        digest: Option<[u8; 32]>,
     },
     Get {
         peer_index: usize,
         sender: Option<usize>,
-        commitment: Vec<u8>,
-        digest: Option<Vec<u8>>,
+        commitment: [u8; 32],
+        digest: Option<[u8; 32]>,
     },
     Sleep {
         duration_ms: u64,
@@ -248,7 +248,7 @@ fn fuzz(input: FuzzInput) {
                         });
                         drop(
                             mailbox
-                                .subscribe(sender_key, commitment_digest, digest_hash)
+                                .subscribe(sender_key, commitment.into(), digest.map(|d| d.into()))
                                 .await,
                         );
                     }
@@ -268,7 +268,7 @@ fn fuzz(input: FuzzInput) {
                             peers[clamped_sender_idx].clone()
                         });
                         let dummy2 = mailbox
-                            .get(sender_key, commitment_digest, digest_hash)
+                            .get(sender_key, commitment.into(), digest.map(|d| d.into()))
                             .await;
                         drop(dummy2);
                     }
