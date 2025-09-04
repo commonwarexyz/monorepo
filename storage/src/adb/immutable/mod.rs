@@ -287,24 +287,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         locations: &mut fixed::Journal<E, u32>,
         snapshot: &mut Index<T, u64>,
     ) -> Result<(u64, u64), Error> {
-        // Align the mmr with the location map. Any elements we remove here that are still in the
-        // log will be re-added later.
-        let mut mmr_leaves = leaf_pos_to_num(mmr.size()).unwrap();
-        let locations_size = locations.size().await?;
-        if locations_size > mmr_leaves {
-            warn!(
-                mmr_leaves,
-                locations_size, "rewinding misaligned locations map"
-            );
-            locations.rewind(mmr_leaves).await?;
-            locations.sync().await?;
-        }
-        if mmr_leaves > locations_size {
-            warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
-            mmr.pop((mmr_leaves - locations_size) as usize).await?;
-            mmr.sync(hasher).await?;
-            mmr_leaves = locations_size;
-        }
+        // Align the mmr with the location map.
+        let mut mmr_leaves = super::align_mmr_and_locations(mmr, locations).await?;
 
         // The number of operations in the log.
         let mut log_size = 0;
@@ -425,8 +409,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Prunes the db of up to all operations that have location less than `loc`. The actual number
     /// pruned may be fewer than requested due to blob boundaries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
-        assert!(loc <= self.log_size);
+        assert!(loc <= self.last_commit.unwrap_or(0));
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
