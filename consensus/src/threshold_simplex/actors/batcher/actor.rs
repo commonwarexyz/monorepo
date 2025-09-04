@@ -105,7 +105,7 @@ impl<
     async fn add(&mut self, sender: C, message: Voter<V, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.supervisor.is_participant(self.view, &sender) else {
-            warn!(?sender, "blocking peer");
+            warn!(?sender, "blocking peer since not a participant");
             self.blocker.block(sender).await;
             return false;
         };
@@ -120,7 +120,7 @@ impl<
 
                 // Verify sender is signer
                 if index != notarize.signer() {
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for invalid signer");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -133,7 +133,7 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer");
+                            warn!(?sender, "blocking peer for conflicting notarize");
                             self.blocker.block(sender).await;
                         }
                         false
@@ -156,7 +156,12 @@ impl<
 
                 // Verify sender is signer
                 if index != nullify.signer() {
-                    warn!(?sender, "blocking peer");
+                    warn!(
+                        ?sender,
+                        ?index,
+                        signer = nullify.signer(),
+                        "blocking peer for invalid signer"
+                    );
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -167,7 +172,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for nullify-finalize conflict");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -199,7 +204,7 @@ impl<
 
                 // Verify sender is signer
                 if index != finalize.signer() {
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for invalid signer");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -210,7 +215,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for nullify-finalize conflict");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -223,7 +228,7 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer");
+                            warn!(?sender, "blocking peer for conflicting finalize");
                             self.blocker.block(sender).await;
                         }
                         false
@@ -239,7 +244,7 @@ impl<
                 }
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
-                warn!(?sender, "blocking peer");
+                warn!(?sender, "blocking peer for invalid message type");
                 self.blocker.block(sender).await;
                 false
             }
@@ -605,7 +610,7 @@ impl<
                 let participants = self.supervisor.participants(view).unwrap();
                 for invalid in failed {
                     let signer = participants[invalid as usize].clone();
-                    warn!(?signer, "blocking peer");
+                    warn!(?signer, "blocking peer for invalid signature");
                     self.blocker.block(signer).await;
                 }
             }
