@@ -1202,6 +1202,7 @@ dependencies = [
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
+ "commonware-storage",
  "commonware-utils",
  "futures",
  "governor",

@@ -20,6 +20,7 @@ commonware-p2p = { workspace = true }
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
+commonware-storage = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
 rand = { workspace = true }

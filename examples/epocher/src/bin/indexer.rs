@@ -22,25 +22,35 @@ use commonware_epocher::{
     types::{block::Block, epoch},
     NAMESPACE, THRESHOLD, TOTAL_VALIDATORS,
 };
-use commonware_runtime::Runner;
+use commonware_runtime::{
+    buffer::PoolRef,
+    tokio::{Config as TokioConfig, Context as TokioContext, Runner as TokioRunner},
+    Runner,
+};
+use commonware_storage::archive::{immutable, Archive as _, Identifier};
+use commonware_utils::{NZUsize, NZU64};
 use rand::SeedableRng;
 use std::{
-    collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
+use tracing::{error, info, warn};
+
+type Finalizations =
+    immutable::Archive<TokioContext, Sha256Digest, Finalization<MinSig, Sha256Digest>>;
 
 #[derive(Clone)]
 struct AppState {
     identity: <MinSig as commonware_cryptography::bls12381::primitives::variant::Variant>::Public,
-    store: Arc<Mutex<BTreeMap<u64, Finalization<MinSig, Sha256Digest>>>>,
+    finalizations: Arc<Mutex<Finalizations>>,
 }
 
 fn main() {
     let matches = Command::new("epocher-indexer")
         .about("indexer for epoch finalizations")
         .arg(Arg::new("me").long("me").required(true))
+        .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .get_matches();
 
     tracing_subscriber::fmt()
@@ -54,23 +64,56 @@ fn main() {
     let _signer = ed25519::PrivateKey::from_seed(key);
     let port = parts[1].parse::<u16>().expect("port not well-formed");
 
+    // Configure storage directory
+    let storage_directory = matches
+        .get_one::<String>("storage-dir")
+        .expect("Please provide storage directory");
+
     // Start runtime
-    let executor = commonware_runtime::tokio::Runner::default();
-    executor.start(|_context| async move {
+    let runtime_cfg = TokioConfig::new().with_storage_directory(storage_directory);
+    let executor = TokioRunner::new(runtime_cfg);
+    executor.start(|context| async move {
         // Compute network identity used to verify threshold signatures
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let (polynomial, _shares) =
             ops::generate_shares::<_, MinSig>(&mut rng, None, TOTAL_VALIDATORS, THRESHOLD);
         let identity = *poly::public::<MinSig>(&polynomial);
 
-        // Shared storage: map epoch -> best known finalization (highest view)
-        let store: Arc<Mutex<BTreeMap<u64, Finalization<MinSig, Sha256Digest>>>> =
-            Arc::new(Mutex::new(BTreeMap::new()));
+        // Initialize immutable archive for finalizations
+        let prefix = {
+            // Use a unique partition prefix based on the provided identity/port
+            let me = matches
+                .get_one::<String>("me")
+                .expect("provide --me")
+                .clone();
+            format!("epocher-indexer-{}", me.replace('@', "-"))
+        };
+        let finalizations = immutable::Archive::init(
+            <TokioContext as commonware_runtime::Metrics>::with_label(&context, "finalizations"),
+            immutable::Config {
+                metadata_partition: format!("{}-finalizations-metadata", prefix),
+                freezer_table_partition: format!("{}-finalizations-freezer-table", prefix),
+                freezer_table_initial_size: 65_536,
+                freezer_table_resize_frequency: 4,
+                freezer_table_resize_chunk_size: 16_384,
+                freezer_journal_partition: format!("{}-finalizations-freezer-journal", prefix),
+                freezer_journal_target_size: 8 * 1024 * 1024, // 8MB
+                freezer_journal_compression: Some(3),
+                freezer_journal_buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(1_000)),
+                ordinal_partition: format!("{}-finalizations-ordinal", prefix),
+                items_per_section: NZU64!(1024),
+                codec_config: (),
+                replay_buffer: NZUsize!(1_024 * 1_024),
+                write_buffer: NZUsize!(1_024 * 1_024),
+            },
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
 
         // Build HTTP server with axum
         let state = AppState {
             identity,
-            store: store.clone(),
+            finalizations: Arc::new(Mutex::new(finalizations)),
         };
         let app = Router::new()
             .route("/upload", post(upload))
@@ -91,53 +134,92 @@ async fn upload(State(state): State<AppState>, body: AxumBytes) -> StatusCode {
     let Ok((finalization, block)) =
         <(Finalization<MinSig, Sha256Digest>, Block)>::decode(body.as_ref())
     else {
+        error!("indexer: failed to decode finalization");
         return StatusCode::BAD_REQUEST;
     };
 
     // Verify the block is at the end of the epoch
-    let (epoch, view) = finalization.proposal.round.into();
+    let epoch = finalization.proposal.round.epoch();
     if block.height() != epoch::get_last_height(epoch) {
+        error!(
+            "indexer: block height mismatch: height: {}, epoch: {}",
+            block.height(),
+            epoch
+        );
         return StatusCode::BAD_REQUEST;
     }
 
     // Verify the block commitment matches the finalization
     if block.commitment() != finalization.proposal.payload {
+        error!("indexer: block commitment mismatch");
         return StatusCode::BAD_REQUEST;
     }
 
     // Verify threshold signatures against network identity
     if !finalization.verify(NAMESPACE, &state.identity) {
+        error!("indexer: finalization failed verification");
         return StatusCode::BAD_REQUEST;
     }
 
-    // Upsert if earlier view in same epoch
-    let mut guard = state.store.lock().unwrap();
-    if guard
-        .get(&epoch)
-        .is_some_and(|existing| view >= existing.proposal.round.view())
-    {
-        return StatusCode::OK;
-    };
+    // Early return if key already exists
+    let mut finals = state.finalizations.lock().await;
 
-    // Upsert since this is an earlier view
-    guard.insert(epoch, finalization);
+    // Persist finalization to immutable archive, indexed by epoch and keyed by block commitment
+    if finals
+        .put_sync(epoch, block.commitment(), finalization.clone())
+        .await
+        .is_err()
+    {
+        error!("indexer: failed to put finalization: {}", epoch);
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+
+    warn!("indexer: persisted finalization: {}", epoch);
     StatusCode::OK
 }
 
 async fn latest(State(state): State<AppState>) -> impl IntoResponse {
-    // Collect up-to the two most-recent finalizations by epoch
-    let finals = {
-        let guard = state.store.lock().unwrap();
-        let mut finals = guard
-            .iter()
-            .rev()
-            .take(2)
-            .map(|(_, f)| f.clone())
-            .collect::<Vec<_>>();
-        finals.sort_by_key(|f| f.proposal.round.epoch());
-        finals
-    };
+    // Find the latest finalized epoch present by scanning gaps from 0 upward
+    // We probe with increasing cursors to find the last continuous segment.
+    // For simplicity, probe in steps until no next range is found.
+    let mut cursor = 0u64;
+    let mut tip = None;
+    {
+        let finals = state.finalizations.lock().await;
+        loop {
+            let (end, next) = finals.next_gap(cursor);
+            if let Some(end) = end {
+                tip = Some(end);
+            }
+            if let Some(next) = next {
+                cursor = next;
+            } else {
+                break;
+            }
+        }
+    }
 
-    let bytes = finals.encode().freeze();
+    // Collect up to two most recent finalizations by epoch
+    let mut finals_vec = Vec::new();
+    if let Some(end) = tip {
+        // Read end
+        let finals = state.finalizations.lock().await;
+        if let Ok(Some(f)) = finals.get(Identifier::Index(end)).await {
+            finals_vec.push(f);
+        }
+        // Read end-1 if present
+        if end > 0 {
+            if let Ok(Some(f)) = finals.get(Identifier::Index(end - 1)).await {
+                finals_vec.push(f);
+                finals_vec.sort_by_key(|f| f.proposal.round.epoch());
+            } else {
+                error!("indexer: failed to read end-1: {}", end - 1);
+                finals_vec.clear();
+            }
+        }
+    }
+
+    // Encode and return the latest finalizations
+    let bytes = finals_vec.encode().freeze();
     ([(header::CONTENT_TYPE, "application/octet-stream")], bytes)
 }
