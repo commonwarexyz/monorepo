@@ -47,8 +47,8 @@ pub enum Error {
     KeyNotFound,
 }
 
-/// Utility to align the sizes of an MMR and location journal pair, used by keyless & variable adb
-/// recovery. Returns the aligned size.
+/// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &
+/// variable adb recovery. Returns the aligned size.
 async fn align_mmr_and_locations<E: Storage + Clock + Metrics, H: Hasher>(
     mmr: &mut crate::mmr::journaled::Mmr<E, H>,
     locations: &mut crate::journal::fixed::Journal<E, u32>,

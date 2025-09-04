@@ -1,13 +1,13 @@
-//! The [Keyless] adb allows for append-only storage of arbitrary variable-length data that can later be retrieved by
-//! its location.
+//! The [Keyless] adb allows for append-only storage of arbitrary variable-length data that can
+//! later be retrieved by its location.
 //!
-//! The implementation consists of an `mmr` over the operations applied to the database, an operations `log` storing
-//! these operations, and a `locations` journal storing the offset of its respective operation in its section of the
-//! operations log.
+//! The implementation consists of an `mmr` over the operations applied to the database, an
+//! operations `log` storing these operations, and a `locations` journal storing the offset of its
+//! respective operation in its section of the operations log.
 //!
-//! The operations log is the "source of truth", and the database is updated such that the locations & mmr should never
-//! end up ahead of it even in the event of failures. If the locations & mmr end up behind, recovery will replay log
-//! items to bring back them in sync.
+//! The state of the operations log up until the last commit point is the "source of truth". In the
+//! event of unclean shutdown, the mmr and locations structures will be brought back into alignment
+//! with the log on startup.
 
 use crate::{
     adb::Error,

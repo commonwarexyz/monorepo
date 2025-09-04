@@ -350,7 +350,8 @@ where
         Ok(())
     }
 
-    /// Prune historical operations that are behind the inactivity floor.
+    /// Prune historical operations that are behind the inactivity floor. This does not affect the
+    /// state root.
     ///
     /// # Panics
     ///
@@ -750,36 +751,6 @@ where
             .await
             .map(|_| ())
     }
-
-    /// Prune historical operations that are behind the inactivity floor. This does not affect the
-    /// current snapshot.
-    pub async fn prune_inactive(&mut self) -> Result<(), Error> {
-        if self.log_size == 0 {
-            return Ok(());
-        }
-
-        // Calculate the target pruning position: inactivity_floor_loc.
-        let target_prune_loc = self.inactivity_floor_loc;
-        let ops_to_prune = target_prune_loc.saturating_sub(self.oldest_retained_loc);
-        if ops_to_prune == 0 {
-            return Ok(());
-        }
-        debug!(ops_to_prune, target_prune_loc, "pruning inactive ops");
-
-        // Prune the log up to the section containing the requested pruning location. We always
-        // prune the log first, and then prune the locations structure based on the log's
-        // actual pruning boundary. This procedure ensures all log operations always have
-        // corresponding location entries, even in the event of failures, with no need for
-        // special recovery.
-        let section = target_prune_loc / self.log_items_per_section;
-        self.log.prune(section).await?;
-        self.oldest_retained_loc = section * self.log_items_per_section;
-
-        // Prune the locations map up to the oldest retained item in the log after pruning.
-        self.locations.prune(self.oldest_retained_loc).await?;
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -822,7 +793,7 @@ mod test {
             let mut db = create_test_store(context.clone()).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc, 0);
-            assert!(matches!(db.prune_inactive().await, Ok(())));
+            assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = Digest::random(&mut context);
@@ -835,7 +806,7 @@ mod test {
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1);
-            assert!(matches!(db.prune_inactive().await, Ok(())));
+            assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             let mut db = create_test_store(context.clone()).await;
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
@@ -977,7 +948,7 @@ mod test {
 
             // Re-open the store, prune it, then ensure it replays the log correctly.
             let mut store = create_test_store(ctx.with_label("store")).await;
-            store.prune_inactive().await.unwrap();
+            store.prune(store.inactivity_floor_loc()).await.unwrap();
 
             let iter = store.snapshot.get(&k);
             assert_eq!(iter.count(), 1);

@@ -807,11 +807,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(())
     }
 
+    /// Returns the number of the oldest section in the journal.
     pub fn oldest_section(&self) -> Option<u64> {
         self.oldest_allowed
     }
 
-    /// Remove any underlying blobs created by the journal.
+    /// Removes any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             let size = blob.size().await;
