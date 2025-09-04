@@ -312,7 +312,7 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         let mut peers: Vec<PrivateKey> = Vec::new();
-        let mut mailboxes: HashMap<usize, Mailbox<PublicKey, FuzzRequest>> = HashMap::new();
+        let mut mailboxes: HashMap<usize, Mailbox<MockSender, FuzzRequest>> = HashMap::new();
         let mut handlers: HashMap<usize, FuzzHandler> = HashMap::new();
         let mut monitors: HashMap<usize, FuzzMonitor> = HashMap::new();
 
@@ -428,7 +428,7 @@ fn fuzz(input: FuzzInput) {
                         response_codec: (),
                     };
 
-                    let (engine, mailbox) = Engine::new(context.clone(), config);
+                    let (engine, mailbox): (Engine<_, _, MockSender, _, _, _, _, _>, _) = Engine::new(context.clone(), config);
                     mailboxes.insert(idx, mailbox);
 
                     let (_tx, _rx) = mpsc::unbounded();
