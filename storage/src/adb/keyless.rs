@@ -118,7 +118,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // TO_FIX: This implementation does not handle pruning.
         let mut hasher = Standard::<H>::new();
 
         let mut mmr = Mmr::init(
@@ -285,6 +284,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                     }
                 }
                 if op_index == oldest_retained_loc {
+                    if op_index != 0 {
+                        panic!("no commit operation found");
+                    }
                     break;
                 }
                 op_index -= 1;
@@ -363,9 +365,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     ///
     /// # Panics
     ///
-    /// Panics if `loc` is greater than the current size of the database.
+    /// Panics if `loc` is greater than the current size of the database, or if `loc` precedes the
+    /// last commit point.
     pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
         assert!(loc <= self.size);
+        assert!(loc >= self.last_commit_loc.unwrap_or(0));
 
         // Prune the log first since it's always the source of truth.
         let section = loc / self.log_items_per_section;
