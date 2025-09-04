@@ -20,7 +20,7 @@ const NUM_OPERATIONS: u64 = 10_000;
 const COMMIT_FREQUENCY: u32 = 25;
 const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
 const ITEMS_PER_BLOB: u64 = 50_000;
-const PARTITION_SUFFIX: &str = "any_bench_partition";
+const PARTITION_SUFFIX: &str = "any_fixed_bench_partition";
 
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: usize = 16384;
