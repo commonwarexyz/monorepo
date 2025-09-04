@@ -17,7 +17,7 @@ use crate::{
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{sequence::U32, Array, NZUsize};
+use commonware_utils::{Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
@@ -100,7 +100,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
-    locations: fixed::Journal<E, U32>,
+    locations: fixed::Journal<E, u32>,
 
     /// The location of the oldest retained operation, or 0 if no operations have been added.
     oldest_retained_loc: u64,
@@ -284,7 +284,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         log_items_per_section: NonZeroU64,
         mmr: &mut Mmr<E, H>,
         log: &mut variable::Journal<E, Variable<K, V>>,
-        locations: &mut fixed::Journal<E, U32>,
+        locations: &mut fixed::Journal<E, u32>,
         snapshot: &mut Index<T, u64>,
     ) -> Result<(u64, u64), Error> {
         // Align the mmr with the location map. Any elements we remove here that are still in the
@@ -349,7 +349,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 offset, "operation was missing from MMR/location map"
                             );
                             mmr.add(hasher, &op.encode()).await?;
-                            locations.append(offset.into()).await?;
+                            locations.append(offset).await?;
                             mmr_leaves += 1;
                         }
                         match op {
@@ -466,7 +466,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::OperationPruned(loc));
         }
 
-        let offset = self.locations.read(loc).await?.into();
+        let offset = self.locations.read(loc).await?;
         let section = loc / self.log_items_per_section;
         let op = self.log.get(section, offset).await?.expect("invalid loc");
 
@@ -483,7 +483,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         match self.locations.read(loc).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc, offset.into()).await;
+                return self.get_from_offset(key, loc, offset).await;
             }
             Err(e) => Err(Error::Journal(e)),
         }
@@ -547,7 +547,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let section = self.current_section();
         let (offset, _) = self.log.append(section, op).await?;
         self.log_size += 1;
-        self.locations.append(offset.into()).await?;
+        self.locations.append(offset).await?;
 
         if section != self.current_section() {
             self.log.sync(section).await?;
@@ -598,7 +598,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         for loc in start_loc..=end_loc {
             let section = loc / self.log_items_per_section;
-            let offset = self.locations.read(loc).await?.into();
+            let offset = self.locations.read(loc).await?;
             let Some(op) = self.log.get(section, offset).await? else {
                 panic!("no log item at location {loc}");
             };
@@ -624,7 +624,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Ok(None);
         };
         let section = last_commit / self.log_items_per_section;
-        let offset = self.locations.read(last_commit).await?.into();
+        let offset = self.locations.read(last_commit).await?;
         let Some(Variable::Commit(metadata)) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };

@@ -216,13 +216,14 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        adb::any::fixed::test::{PAGE_CACHE_SIZE, PAGE_SIZE},
-        journal::variable::ITEM_ALIGNMENT,
-    };
+    use crate::journal::variable::ITEM_ALIGNMENT;
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
+
+    // Use some jank sizes to exercise boundary conditions.
+    const PAGE_SIZE: usize = 101;
+    const PAGE_CACHE_SIZE: usize = 2;
 
     /// Test `init_journal` when there is no existing data on disk.
     #[test_traced]
