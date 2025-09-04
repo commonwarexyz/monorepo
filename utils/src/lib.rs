@@ -273,6 +273,9 @@ mod tests {
         // Test case 5: invalid `+` in string
         let h = "+123";
         assert!(from_hex(h).is_none());
+
+        // Test case 6: empty string
+        assert_eq!(from_hex(""), Some(vec![]));
     }
 
     #[test]
