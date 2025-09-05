@@ -15,6 +15,7 @@ commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-storage = { workspace = true }
 bytes = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
 reed-solomon-simd = "3.0.1"
 
@@ -23,9 +24,15 @@ bench = false
 
 [dev-dependencies]
 criterion = { workspace = true }
+rstest = { workspace = true }
 rand = { workspace = true }
 
 [[bench]]
 name = "reed_solomon"
 harness = false
 path = "src/reed_solomon/benches/bench.rs"
+
+[[bench]]
+name = "zoda"
+harness = false
+path = "src/zoda/benches/bench.rs"
