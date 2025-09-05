@@ -72,7 +72,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
     // indexes to their locations in the journal.
     keys: Index<T, u64>,
-    indices: BTreeMap<u64, Location>,
+    indices: BTreeMap<u64, Vec<(K, Location)>>,
     intervals: RMap,
 
     items_tracked: Gauge,
@@ -120,7 +120,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 let (_, offset, len, data) = result?;
 
                 // Store index
-                indices.insert(data.index, Location { offset, len });
+                indices.insert(
+                    data.index,
+                    vec![(data.key.clone(), Location { offset, len })],
+                );
 
                 // Store index in keys
                 keys.insert(&data.key, data.index);
@@ -176,7 +179,30 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         })
     }
 
-    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
+    async fn get_all_values_index(&self, index: u64) -> Result<Vec<V>, Error> {
+        // Update metrics
+        self.gets.inc();
+
+        match self.indices.get(&index) {
+            Some(entries) => {
+                let mut results = Vec::with_capacity(entries.len());
+                for (_, loc) in entries {
+                    let section = self.section(index);
+                    let record = self
+                        .journal
+                        .get_exact(section, loc.offset, loc.len)
+                        .await?
+                        .ok_or(Error::RecordCorrupted)?;
+                    results.push(record.value);
+                }
+                Ok(results)
+            }
+            None => Ok(vec![]),
+        }
+    }
+
+    /// Get the first item at a given index
+    async fn get_first_value_at_index(&self, index: u64) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
 
@@ -190,13 +216,13 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         let section = self.section(index);
         let record = self
             .journal
-            .get_exact(section, location.offset, location.len)
+            .get_exact(section, location[0].1.offset, location[0].1.len)
             .await?
             .ok_or(Error::RecordCorrupted)?;
         Ok(Some(record.value))
     }
 
-    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
+    async fn get_first_key(&self, key: &K) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
 
@@ -214,7 +240,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             let section = self.section(*index);
             let record = self
                 .journal
-                .get_exact(section, location.offset, location.len)
+                .get_exact(section, location[0].1.offset, location[0].1.len)
                 .await?
                 .ok_or(Error::RecordCorrupted)?;
 
@@ -223,6 +249,42 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 return Ok(Some(record.value));
             }
             self.unnecessary_reads.inc();
+        }
+
+        Ok(None)
+    }
+
+    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
+        // Update metrics
+        self.gets.inc();
+
+        // Fetch index
+        let iter = self.keys.get(key);
+        let min_allowed = self.oldest_allowed.unwrap_or(0);
+        for index in iter {
+            // Continue if index is no longer allowed due to pruning.
+            if *index < min_allowed {
+                continue;
+            }
+
+            // Fetch item from disk
+            let entries = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
+            for (stored_key, location) in entries {
+                if stored_key.as_ref() == key.as_ref() {
+                    let section = self.section(*index);
+                    let record = self
+                        .journal
+                        .get_exact(section, location.offset, location.len)
+                        .await?
+                        .ok_or(Error::RecordCorrupted)?;
+
+                    // Get key from item
+                    if record.key.as_ref() == key.as_ref() {
+                        return Ok(Some(record.value));
+                    }
+                    self.unnecessary_reads.inc();
+                }
+            }
         }
 
         Ok(None)
@@ -301,20 +363,28 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         }
 
         // Check for existing index
-        if self.indices.contains_key(&index) {
-            return Ok(());
+        if let Some(entries) = self.indices.get_mut(&index) {
+            if entries.iter().any(|(existing_key, _)| existing_key == &key) {
+                return Ok(()); // Already stored
+            }
         }
 
         // Store item in journal
         let record = Record::new(index, key.clone(), data);
         let section = self.section(index);
         let (offset, len) = self.journal.append(section, record).await?;
+        let location = Location { offset, len };
 
         // Store index
-        self.indices.insert(index, Location { offset, len });
+        self.indices
+            .entry(index)
+            .or_insert_with(Vec::new)
+            .push((key.clone(), location));
 
-        // Store interval
-        self.intervals.insert(index);
+        // Store interval (only if this is the first item at this index)
+        if self.indices.get(&index).unwrap().len() == 1 {
+            self.intervals.insert(index);
+        }
 
         // Insert and prune any useless keys
         self.keys
@@ -330,7 +400,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
         match identifier {
-            Identifier::Index(index) => self.get_index(index).await,
+            Identifier::Index(index) => self.get_first_value_at_index(index).await,
             Identifier::Key(key) => self.get_key(key).await,
         }
     }
