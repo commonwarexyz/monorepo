@@ -1,5 +1,5 @@
 use crate::{
-    buffer::{tip::Buffer, PoolRef},
+    buffer::{tip::Buffer, Immutable, PoolRef},
     Blob, Error, RwLock,
 };
 use commonware_utils::{NZUsize, StableBuf};
@@ -39,6 +39,24 @@ impl<B: Blob> Append<B> {
         buffer_size: NonZeroUsize,
         pool_ref: PoolRef,
     ) -> Result<Self, Error> {
+        let pool_id = pool_ref.next_id().await;
+        Self::new_in_pool(blob, size, buffer_size, pool_id, pool_ref, None).await
+    }
+
+    /// Create a new [Append] with a specific pool ID.
+    ///
+    /// This is used internally when converting from [Immutable] to reuse the same pool ID.
+    /// The `trailing` buffer allows passing already-loaded trailing bytes to avoid re-reading
+    /// from disk. This method will panic if `trailing` doesn't contain the entire trailing
+    /// bytes (consistent with `size` and pool page size).
+    pub(super) async fn new_in_pool(
+        blob: B,
+        size: u64,
+        buffer_size: NonZeroUsize,
+        id: u64,
+        pool_ref: PoolRef,
+        trailing: Option<Vec<u8>>,
+    ) -> Result<Self, Error> {
         // Set a floor on the write buffer size to make sure we always write at least 1 page of new
         // data with each flush. We multiply page_size by two here since we could be storing up to
         // page_size-1 bytes of already written data in the append buffer to maintain page
@@ -50,16 +68,25 @@ impl<B: Blob> Append<B> {
         // ensure its offset into the blob is always page aligned.
         let leftover_size = size % pool_ref.page_size as u64;
         let page_aligned_size = size - leftover_size;
-        let mut buffer = Buffer::new(page_aligned_size, NZUsize!(buffer_size));
+
+        let mut buf = trailing.unwrap_or_else(|| Vec::with_capacity(buffer_size));
+
         if leftover_size != 0 {
-            let page_buf = vec![0; leftover_size as usize];
-            let buf = blob.read_at(page_buf, page_aligned_size).await?;
-            assert!(!buffer.append(buf.as_ref()));
+            // If we have trailing bytes, verify they match expected size.
+            if !buf.is_empty() {
+                assert_eq!(buf.len(), leftover_size as usize);
+            } else {
+                // Otherwise, read trailing bytes from disk.
+                buf.resize(leftover_size as usize, 0);
+                buf = blob.read_at(buf, page_aligned_size).await?.into();
+            }
         }
+
+        let buffer = Buffer::from_vec(buf, page_aligned_size, NZUsize!(buffer_size));
 
         Ok(Self {
             blob,
-            id: pool_ref.next_id().await,
+            id,
             pool_ref,
             buffer: Arc::new(RwLock::new((buffer, size))),
         })
@@ -132,6 +159,30 @@ impl<B: Blob> Append<B> {
         *blob_size += new_data_len;
 
         Ok(())
+    }
+
+    /// Convert this [Append] wrapper to an [Immutable] wrapper.
+    ///
+    /// The caller *must* sync the [Append] before calling this conversion,
+    /// otherwise any unflushed data in the write buffer will be lost.
+    pub async fn into_immutable(self) -> Immutable<B> {
+        // After sync the append buffer contains only the trailing bytes.
+        // Take ownership of the append buffer if possible to avoid cloning.
+        let (blob_size, trailing) = match Arc::try_unwrap(self.buffer) {
+            Ok(buffer) => {
+                let (mut buffer, blob_size) = buffer.into_inner();
+                let trailing_size = blob_size.saturating_sub(buffer.offset) as usize;
+                buffer.data.truncate(trailing_size);
+                (blob_size, buffer.data)
+            }
+            Err(buffer) => {
+                let (buffer, blob_size) = &*buffer.read().await;
+                let trailing_size = blob_size.saturating_sub(buffer.offset) as usize;
+                (*blob_size, buffer.data[..trailing_size].to_vec())
+            }
+        };
+
+        Immutable::new_in_pool(self.blob, blob_size, self.id, self.pool_ref, trailing)
     }
 
     /// Clones and returns the underlying blob.
