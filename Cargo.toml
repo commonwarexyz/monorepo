@@ -25,6 +25,7 @@ members = [
     # Fuzz builds
     "codec/fuzz",
     "coding/fuzz",
+    "collector/fuzz",
     "cryptography/fuzz",
     "runtime/fuzz",
     "stream/fuzz",
