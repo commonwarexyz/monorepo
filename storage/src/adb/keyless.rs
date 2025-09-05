@@ -630,6 +630,25 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         Ok(())
     }
+
+    #[cfg(test)]
+    /// Simulate pruning failure by consuming the db and abandoning pruning operation mid-flight.
+    pub(super) async fn simulate_prune_failure(mut self, loc: u64) -> Result<(), Error> {
+        assert!(loc <= self.last_commit_loc.unwrap_or(0));
+        // Perform the same steps as pruning except "crash" right after the log is pruned.
+        try_join!(
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.locations.sync().map_err(Error::Journal),
+        )?;
+        let section = loc / self.log_items_per_section;
+        assert!(
+            self.log.prune(section).await?,
+            "nothing was pruned, so could not simulate failure"
+        );
+
+        // "fail" before mmr/locations are pruned.
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -967,7 +986,16 @@ mod test {
 
             recover_from_failure(context.clone(), root, &mut hasher, op_count).await;
 
-            // Repeat recover_from_failure tests after pruning to the last commit.
+            // Simulate a failure during pruning and ensure we recover.
+            let db = open_db(context.clone()).await;
+            let last_commit_loc = db.last_commit_loc().unwrap();
+            db.simulate_prune_failure(last_commit_loc).await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.root(&mut hasher), root);
+            db.close().await.unwrap();
+
+            // Repeat recover_from_failure tests after successfully pruning to the last commit.
             let mut db = open_db(context.clone()).await;
             db.prune(db.last_commit_loc().unwrap()).await.unwrap();
             assert_eq!(db.op_count(), op_count);
