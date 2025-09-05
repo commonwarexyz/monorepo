@@ -758,7 +758,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Ok(());
         }
 
-        // Sync the mmr/locations so they never end up behind the log.
+        // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
+        // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
+        // the operations between the MMR tip and the log pruning boundary.
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1554): We currently sync locations
+        // as well, but this could be avoided by extending recovery.
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.locations.sync().map_err(Error::Journal),

@@ -645,7 +645,9 @@ impl<
             return Ok(());
         };
 
-        // Sync the mmr so it never ends up behind the log.
+        // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
+        // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
+        // the operations between the MMR tip and the log pruning boundary.
         self.mmr.sync(&mut self.hasher).await?;
 
         if !self.log.prune(target_prune_loc).await? {

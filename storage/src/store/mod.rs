@@ -364,6 +364,8 @@ where
         }
 
         // Sync locations so it never ends up behind the log.
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1554): Extend recovery to avoid
+        // this sync.
         self.locations.sync().await?;
 
         // Prune the log up to the section containing the requested pruning location. We always
