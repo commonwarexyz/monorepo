@@ -1,0 +1,131 @@
+use commonware_cryptography::{Hasher, Sha256};
+use commonware_runtime::{
+    benchmarks::{context, tokio},
+    buffer::PoolRef,
+    create_pool,
+    tokio::{Config, Context},
+    ThreadPool,
+};
+use commonware_storage::{
+    adb::any::variable::{Any, Config as AConfig},
+    translator::EightCap,
+};
+use commonware_utils::{NZUsize, NZU64};
+use criterion::{criterion_group, Criterion};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Instant,
+};
+
+const NUM_ELEMENTS: u64 = 1_000;
+const NUM_OPERATIONS: u64 = 10_000;
+const COMMIT_FREQUENCY: u32 = 25;
+const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
+const PARTITION_SUFFIX: &str = "any_variable_bench_partition";
+
+/// Use a "prod sized" page size to test the performance of the journal.
+const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
+
+/// The number of pages to cache in the buffer pool.
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
+
+/// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
+/// configured to provide 8 cores.
+const THREADS: usize = 8;
+
+fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg, ())> {
+    AConfig::<EightCap, (commonware_codec::RangeCfg, ())> {
+        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_items_per_blob: ITEMS_PER_BLOB,
+        mmr_write_buffer: NZUsize!(1024),
+        log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_codec_config: ((0..=10000).into(), ()),
+        log_items_per_section: ITEMS_PER_BLOB,
+        log_write_buffer: NZUsize!(1024),
+        log_compression: None,
+        locations_journal_partition: format!("locations_journal_{PARTITION_SUFFIX}"),
+        locations_items_per_blob: ITEMS_PER_BLOB,
+        translator: EightCap,
+        thread_pool: Some(pool),
+        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+    }
+}
+
+/// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
+/// elements by inserting them in order, each with a new random value. Then, it performs
+/// `num_operations` over these elements, each selected uniformly at random for each operation. The
+/// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
+/// after every `COMMIT_FREQUENCY` operations.
+async fn gen_random_any(ctx: Context, num_elements: u64, num_operations: u64) -> AnyDb {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let any_cfg = any_cfg(pool);
+    let mut db = Any::<_, _, Vec<u8>, Sha256, EightCap>::init(ctx, any_cfg)
+        .await
+        .unwrap();
+
+    // Insert a random value for every possible element into the db.
+    let mut rng = StdRng::seed_from_u64(42);
+    for i in 0u64..num_elements {
+        let k = Sha256::hash(&i.to_be_bytes());
+        let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
+        db.update(k, v).await.unwrap();
+    }
+
+    // Randomly update / delete them + randomly commit.
+    for _ in 0u64..num_operations {
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        if rng.next_u32() % DELETE_FREQUENCY == 0 {
+            db.delete(rand_key).await.unwrap();
+            continue;
+        }
+        let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
+        db.update(rand_key, v).await.unwrap();
+        if rng.next_u32() % COMMIT_FREQUENCY == 0 {
+            db.commit(None).await.unwrap();
+        }
+    }
+    db.commit(None).await.unwrap();
+
+    db
+}
+
+type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
+
+/// Benchmark the generation of a large randomly generated any db.
+fn bench_variable_generate(c: &mut Criterion) {
+    tracing_subscriber::fmt().try_init().ok();
+    let cfg = Config::default();
+    let runner = tokio::Runner::new(cfg.clone());
+    for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
+        for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
+            c.bench_function(
+                &format!(
+                    "{}/elements={} operations={}",
+                    module_path!(),
+                    elements,
+                    operations,
+                ),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        let start = Instant::now();
+                        for _ in 0..iters {
+                            let db = gen_random_any(ctx.clone(), elements, operations).await;
+                            db.destroy().await.unwrap();
+                        }
+                        start.elapsed()
+                    });
+                },
+            );
+        }
+    }
+}
+
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = bench_variable_generate
+}

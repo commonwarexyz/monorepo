@@ -23,7 +23,7 @@ use crate::{
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{sequence::U32, Array, NZUsize};
+use commonware_utils::{Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::{
     collections::HashMap,
@@ -114,7 +114,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
-    locations: FJournal<E, U32>,
+    locations: FJournal<E, u32>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -225,6 +225,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 locations_size, "rewinding misaligned locations map"
             );
             self.locations.rewind(mmr_leaves).await?;
+            self.locations.sync().await?;
         } else if mmr_leaves > locations_size {
             warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
             self.mmr.pop((mmr_leaves - locations_size) as usize).await?;
@@ -273,7 +274,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 offset, "operation was missing from MMR/location map"
                             );
                             self.mmr.add(&mut self.hasher, &op.encode()).await?;
-                            self.locations.append(offset.into()).await?;
+                            self.locations.append(offset).await?;
                             mmr_leaves += 1;
                         }
 
@@ -347,6 +348,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Pop any MMR elements that are ahead of the last log commit point.
         if mmr_leaves > self.log_size {
             self.locations.rewind(self.log_size).await?;
+            self.locations.sync().await?;
 
             let op_count = mmr_leaves - self.log_size;
             warn!(op_count, "popping uncommitted MMR operations");
@@ -382,7 +384,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::OperationPruned(loc));
         }
 
-        let offset = self.locations.read(loc).await?.into();
+        let offset = self.locations.read(loc).await?;
         let section = loc / self.log_items_per_section;
         let op = self.log.get(section, offset).await?.expect("invalid loc");
 
@@ -436,7 +438,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get_from_loc(&self, key: &K, loc: u64) -> Result<Option<V>, Error> {
         match self.locations.read(loc).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc, offset.into()).await;
+                return self.get_from_offset(key, loc, offset).await;
             }
             Err(e) => Err(Error::Journal(e)),
         }
@@ -447,10 +449,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         match self.locations.read(loc).await {
             Ok(offset) => {
                 let section = loc / self.log_items_per_section;
-                self.log
-                    .get(section, offset.into())
-                    .await
-                    .map_err(Error::Journal)
+                self.log.get(section, offset).await.map_err(Error::Journal)
             }
             Err(e) => Err(Error::Journal(e)),
         }
@@ -546,7 +545,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let section = self.current_section();
         let (offset, _) = self.log.append(section, op).await?;
         self.log_size += 1;
-        self.locations.append(offset.into()).await?;
+        self.locations.append(offset).await?;
 
         if section != self.current_section() {
             self.log.sync(section).await?;
@@ -593,7 +592,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut ops = Vec::with_capacity((end_index - start_loc + 1) as usize);
         for loc in start_loc..=end_index {
             let section = loc / self.log_items_per_section;
-            let offset = self.locations.read(loc).await?.into();
+            let offset = self.locations.read(loc).await?;
             let Some(op) = self.log.get(section, offset).await? else {
                 panic!("no log item at location {loc}");
             };
@@ -633,7 +632,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
         last_commit -= 1;
         let section = last_commit / self.log_items_per_section;
-        let offset = self.locations.read(last_commit).await?.into();
+        let offset = self.locations.read(last_commit).await?;
         let Some(Operation::CommitFloor(metadata, _)) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };

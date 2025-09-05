@@ -18,7 +18,7 @@ use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
 use alloc::{borrow::Cow, collections::BTreeMap, vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_utils::union_unique;
-use rand::RngCore;
+use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
 #[cfg(feature = "std")]
@@ -32,7 +32,7 @@ pub fn compute_public<V: Variant>(private: &Scalar) -> V::Public {
 }
 
 /// Returns a new keypair derived from the provided randomness.
-pub fn keypair<R: RngCore, V: Variant>(rng: &mut R) -> (group::Private, V::Public) {
+pub fn keypair<R: CryptoRngCore, V: Variant>(rng: &mut R) -> (group::Private, V::Public) {
     let private = group::Private::from_rand(rng);
     let public = compute_public::<V>(&private);
     (private, public)

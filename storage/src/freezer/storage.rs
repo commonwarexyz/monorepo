@@ -578,6 +578,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
                 // Rewind the journal to the committed section and offset
                 journal.rewind(checkpoint.section, checkpoint.size).await?;
+                journal.sync(checkpoint.section).await?;
 
                 // Resize table if needed
                 let expected_table_len = Self::table_offset(checkpoint.table_size);

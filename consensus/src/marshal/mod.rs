@@ -283,8 +283,8 @@ mod tests {
     #[test_traced("WARN")]
     fn test_finalize_good_links() {
         let link = Link {
-            latency: 100.0,
-            jitter: 1.0,
+            latency: Duration::from_millis(100),
+            jitter: Duration::from_millis(1),
             success_rate: 1.0,
         };
         for seed in 0..5 {
@@ -299,8 +299,8 @@ mod tests {
     #[test_traced("WARN")]
     fn test_finalize_bad_links() {
         let link = Link {
-            latency: 200.0,
-            jitter: 50.0,
+            latency: Duration::from_millis(200),
+            jitter: Duration::from_millis(50),
             success_rate: 0.7,
         };
         for seed in 0..5 {
@@ -367,9 +367,7 @@ mod tests {
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
                 // the block before continuing.
-                context
-                    .sleep(Duration::from_millis(link.latency as u64))
-                    .await;
+                context.sleep(link.latency).await;
 
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
@@ -439,8 +437,8 @@ mod tests {
             let mut actor = actors[0].clone();
 
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             setup_network_links(&mut oracle, &peers, link).await;
@@ -493,8 +491,8 @@ mod tests {
             let mut actor = actors[0].clone();
 
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             setup_network_links(&mut oracle, &peers, link).await;
@@ -561,8 +559,8 @@ mod tests {
             let mut actor = actors[0].clone();
 
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             setup_network_links(&mut oracle, &peers, link).await;
@@ -623,8 +621,8 @@ mod tests {
             let mut actor = actors[0].clone();
 
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             setup_network_links(&mut oracle, &peers, link).await;
