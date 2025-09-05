@@ -140,7 +140,7 @@ mod tests {
         ),
         monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,
-    ) -> Mailbox<PublicKey, Request> {
+    ) -> Mailbox<Sender<PublicKey>, Request> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("engine_{public_key}")),
@@ -208,7 +208,8 @@ mod tests {
             let request = Request { id: 1, data: 1 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
+                .await
+                .unwrap();
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify peer 2 received the request
@@ -275,7 +276,8 @@ mod tests {
             let commitment = request.commitment();
             let recipients = mailbox
                 .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
+                .await
+                .unwrap();
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Cancel immediately
@@ -356,7 +358,10 @@ mod tests {
 
             // Broadcast request
             let request = Request { id: 3, data: 3 };
-            let recipients = mailbox1.send(Recipients::All, request.clone()).await;
+            let recipients = mailbox1
+                .send(Recipients::All, request.clone())
+                .await
+                .unwrap();
             assert_eq!(recipients.len(), 2);
             assert!(recipients.contains(&peers[1]));
             assert!(recipients.contains(&peers[2]));
@@ -434,7 +439,8 @@ mod tests {
             for _ in 0..3 {
                 let recipients = mailbox1
                     .send(Recipients::One(peers[1].clone()), request.clone())
-                    .await;
+                    .await
+                    .unwrap();
                 assert_eq!(recipients, vec![peers[1].clone()]);
             }
 
@@ -507,10 +513,12 @@ mod tests {
             let request2 = Request { id: 20, data: 20 };
             mailbox1
                 .send(Recipients::One(peers[1].clone()), request1)
-                .await;
+                .await
+                .unwrap();
             mailbox1
                 .send(Recipients::One(peers[1].clone()), request2)
-                .await;
+                .await
+                .unwrap();
 
             // Collect both responses
             let mut response10_received = false;
@@ -585,7 +593,8 @@ mod tests {
             let request = Request { id: 100, data: 100 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
+                .await
+                .unwrap();
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify handler received request but didn't respond
@@ -632,8 +641,11 @@ mod tests {
 
             // Send request with empty recipients list
             let request = Request { id: 1, data: 1 };
-            let recipients = mailbox.send(Recipients::All, request.clone()).await;
-            assert_eq!(recipients, Vec::<PublicKey>::new());
+            let recipients = mailbox
+                .send(Recipients::All, request.clone())
+                .await
+                .unwrap();
+            assert!(recipients.is_empty());
 
             // Verify no responses collected
             select! {
@@ -701,7 +713,8 @@ mod tests {
             let request_to_peer2 = Request { id: 42, data: 42 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request_to_peer2.clone())
-                .await;
+                .await
+                .unwrap();
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Send a response from peer 3 to peer 1
@@ -735,6 +748,50 @@ mod tests {
                     // Expected: no more events
                 }
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_send_returns_error_on_message_too_large() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            // Configure network with very small max message size to force an error
+            let (network, mut oracle) = commonware_p2p::simulated::Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config { max_size: 4 },
+            );
+            network.start();
+
+            // Create peers (only need to register channels for the originator)
+            let scheme1 = PrivateKey::from_seed(0);
+            let scheme2 = PrivateKey::from_seed(1);
+            let pk1 = scheme1.public_key();
+            let pk2 = scheme2.public_key();
+
+            // Register request/response channels for originator (peer 1)
+            let (req_tx1, req_rx1) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (res_tx1, res_rx1) = oracle.register(pk1.clone(), 1).await.unwrap();
+
+            // Spawn engine for originator
+            let (mon, _mon_out) = MockMonitor::new();
+            let mut mailbox1 = setup_and_spawn_engine(
+                &context,
+                oracle.control(pk1.clone()),
+                scheme1,
+                ((req_tx1, req_rx1), (res_tx1, res_rx1)),
+                mon,
+                MockHandler::dummy(),
+            )
+            .await;
+
+            // Attempt to send a request; expect an error to be propagated
+            let request = Request { id: 1, data: 1 };
+            let result = mailbox1.send(Recipients::One(pk2.clone()), request).await;
+
+            assert!(matches!(
+                result.unwrap_err(),
+                commonware_p2p::simulated::Error::MessageTooLarge(_)
+            ));
         });
     }
 }
