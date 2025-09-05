@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout default branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
@@ -57,7 +57,7 @@ jobs:
             file_suffix: ""
             benchmark_name: "commonware-coding"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install nightly Rust toolchain
         run: rustup toolchain install nightly
       - name: Run setup
