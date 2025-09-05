@@ -118,8 +118,8 @@ fn fuzz_fill_and_format(byte_val: u8) {
     assert!(slice.iter().all(|&b| b == byte_val));
 
     // Test Debug and Display formatting
-    let debug_str = format!("{:?}", digest);
-    let display_str = format!("{}", digest);
+    let debug_str = format!("{digest:?}");
+    let display_str = format!("{digest}");
     assert_eq!(debug_str, display_str);
     assert_eq!(debug_str.len(), 64); // 32 bytes * 2 hex chars each
 }
