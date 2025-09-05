@@ -213,7 +213,7 @@ impl EncodeSize for GetFinalization {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_consensus::threshold_simplex::types::Proposal;
+    use commonware_consensus::{threshold_simplex::types::Proposal, types::Round};
     use commonware_cryptography::{
         bls12381::primitives::{
             group::{self, Element},
@@ -246,7 +246,7 @@ mod tests {
         seed_signature.mul(&scalar);
         Finalization {
             proposal: Proposal {
-                view: 12345,
+                round: Round::new(333, 12345),
                 parent: 54321,
                 payload: new_digest(),
             },
