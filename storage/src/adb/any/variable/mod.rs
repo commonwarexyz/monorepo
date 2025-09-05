@@ -553,10 +553,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Run the log update future in parallel with adding the operation to the MMR.
         try_join!(
+            log_fut,
             self.mmr
                 .add_batched(&mut self.hasher, &encoded_op)
                 .map_err(Error::Mmr),
-            log_fut
         )?;
         self.uncommitted_ops += 1;
         self.log_size += 1;
