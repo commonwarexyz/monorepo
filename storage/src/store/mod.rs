@@ -363,6 +363,9 @@ where
             return Ok(());
         }
 
+        // Sync locations so it never ends up behind the log.
+        self.locations.sync().await?;
+
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the locations structure based on the log's actual
         // pruning boundary. This procedure ensures all log operations always have corresponding

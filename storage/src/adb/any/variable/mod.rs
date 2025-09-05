@@ -758,6 +758,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Ok(());
         }
 
+        // Sync the mmr/locations so they never end up behind the log.
+        try_join!(
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.locations.sync().map_err(Error::Journal),
+        )?;
+
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
         // actual pruning boundary. This procedure ensures all log operations always have

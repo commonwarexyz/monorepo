@@ -203,7 +203,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let (section, offset) = if let Some((s, o)) = section_offset {
             (s, o)
         } else {
-            // since locations & mmr are empty, find the very first log operation as our starting point.
+            // Since locations & mmr are empty, find the very first log operation as our starting
+            // point.
             let op = {
                 let stream = log.replay(0, 0, REPLAY_BUFFER_SIZE).await?;
                 pin_mut!(stream);
@@ -382,6 +383,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Panics if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
         assert!(loc <= self.last_commit_loc.unwrap_or(0));
+
+        // Sync the mmr/locations so they never end up behind the log.
+        try_join!(
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.locations.sync().map_err(Error::Journal),
+        )?;
 
         // Prune the log first since it's always the source of truth.
         let section = loc / self.log_items_per_section;

@@ -645,6 +645,9 @@ impl<
             return Ok(());
         };
 
+        // Sync the mmr so it never ends up behind the log.
+        self.mmr.sync(&mut self.hasher).await?;
+
         if !self.log.prune(target_prune_loc).await? {
             return Ok(());
         }
