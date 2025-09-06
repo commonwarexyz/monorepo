@@ -10,6 +10,7 @@
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 
+use crate::{journal::fixed::Journal, mmr::journaled};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use thiserror::Error;
@@ -26,8 +27,6 @@ pub use verify::{
     digests_required_for_proof, extract_pinned_nodes, verify_multi_proof, verify_proof,
     verify_proof_and_extract_digests,
 };
-
-use crate::{journal::fixed::Journal, mmr::journaled};
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
