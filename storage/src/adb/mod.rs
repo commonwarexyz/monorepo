@@ -27,6 +27,8 @@ pub use verify::{
     verify_proof_and_extract_digests,
 };
 
+use crate::{journal::fixed::Journal, mmr::journaled};
+
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -50,8 +52,8 @@ pub enum Error {
 /// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &
 /// variable adb recovery. Returns the aligned size.
 async fn align_mmr_and_locations<E: Storage + Clock + Metrics, H: Hasher>(
-    mmr: &mut crate::mmr::journaled::Mmr<E, H>,
-    locations: &mut crate::journal::fixed::Journal<E, u32>,
+    mmr: &mut journaled::Mmr<E, H>,
+    locations: &mut Journal<E, u32>,
 ) -> Result<u64, Error> {
     let aligned_size = {
         let locations_size = locations.size().await?;

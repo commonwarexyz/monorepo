@@ -5,7 +5,7 @@
 //! db instead._
 
 use crate::{
-    adb::Error,
+    adb::{align_mmr_and_locations, Error},
     index::Index,
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
@@ -217,8 +217,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
         // Align the mmr with the location map. Any elements we remove here that are still in the
         // log will be re-added later.
-        let mut mmr_leaves =
-            super::super::align_mmr_and_locations(&mut self.mmr, &mut self.locations).await?;
+        let mut mmr_leaves = align_mmr_and_locations(&mut self.mmr, &mut self.locations).await?;
 
         // The location and blob-offset of the first operation to follow the last known commit point.
         let mut after_last_commit = None;
