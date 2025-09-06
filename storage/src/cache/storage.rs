@@ -99,7 +99,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         let mut intervals = RMap::new();
         {
             debug!("initializing cache");
-            let stream = journal.replay(cfg.replay_buffer).await?;
+            let stream = journal.replay(0, 0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record

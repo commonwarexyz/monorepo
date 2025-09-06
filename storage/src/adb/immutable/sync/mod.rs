@@ -35,7 +35,7 @@ where
     let mut size = lower_bound;
     let mut current_section: Option<u64> = None;
     let mut index_in_section: u64 = 0;
-    let stream = journal.replay(NZUsize!(1024)).await?;
+    let stream = journal.replay(0, 0, NZUsize!(1024)).await?;
     pin_mut!(stream);
     while let Some(item) = stream.next().await {
         match item {

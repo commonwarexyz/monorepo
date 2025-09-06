@@ -1718,7 +1718,7 @@ impl<
         let start = self.context.current();
         {
             let stream = journal
-                .replay(self.replay_buffer)
+                .replay(0, 0, self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

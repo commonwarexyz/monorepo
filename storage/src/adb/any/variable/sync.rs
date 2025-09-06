@@ -254,7 +254,7 @@ mod tests {
 
             // Verify the journal is ready for sync items
             assert!(journal.blobs.is_empty()); // No sections created yet
-            assert_eq!(journal.oldest_allowed, None); // No pruning applied
+            assert_eq!(journal.oldest_section(), None); // No pruning applied
 
             // Verify that items can be appended starting from the sync position
             let lower_section = lower_bound / items_per_section; // 10/5 = 2
@@ -324,7 +324,7 @@ mod tests {
             // Verify pruning: sections before lower_section are pruned
             let lower_section = lower_bound / items_per_section; // 8/5 = 1
             assert_eq!(lower_section, 1);
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify section 0 is pruned (< lower_section), section 1+ are retained (>= lower_section)
             assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
@@ -438,7 +438,7 @@ mod tests {
 
             // Verify pruning to lower bound
             let lower_section = lower_bound / items_per_section; // 5/5 = 1
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify section 0 is pruned, sections 1-3 are retained
             assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
@@ -526,7 +526,7 @@ mod tests {
 
             // Verify pruning to lower bound and rewinding beyond upper bound
             let lower_section = lower_bound / items_per_section; // 8/5 = 1
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify section 0 is pruned (< lower_section)
             assert!(!journal.blobs.contains_key(&0));
@@ -615,7 +615,7 @@ mod tests {
 
             // Verify fresh journal (all old data destroyed)
             assert!(journal.blobs.is_empty());
-            assert_eq!(journal.oldest_allowed, None);
+            assert_eq!(journal.oldest_section(), None);
 
             // Verify old sections don't exist
             assert!(!journal.blobs.contains_key(&0));
@@ -669,7 +669,7 @@ mod tests {
 
             // Verify correct section range
             let lower_section = lower_bound / items_per_section; // 2
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify sections 2, 3, 4 exist, others don't
             assert!(!journal.blobs.contains_key(&0));
@@ -742,7 +742,7 @@ mod tests {
 
             // Both operations are in section 1, so section 0 should be pruned, section 1+ retained
             let target_section = lower_bound / items_per_section; // 6/5 = 1
-            assert_eq!(journal.oldest_allowed, Some(target_section));
+            assert_eq!(journal.oldest_section(), Some(target_section));
 
             // Verify pruning and retention
             assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned

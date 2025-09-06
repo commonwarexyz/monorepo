@@ -15,7 +15,7 @@ use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const NUM_ELEMENTS: u64 = 1_000;
@@ -88,6 +88,8 @@ async fn gen_random_any(ctx: Context, num_elements: u64, num_operations: u64) ->
         }
     }
     db.commit(None).await.unwrap();
+    db.sync().await.unwrap();
+    db.prune(db.inactivity_floor_loc()).await.unwrap();
 
     db
 }
@@ -111,12 +113,17 @@ fn bench_variable_generate(c: &mut Criterion) {
                 |b| {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<Context>();
-                        let start = Instant::now();
+                        let mut total_elapsed = Duration::ZERO;
                         for _ in 0..iters {
-                            let db = gen_random_any(ctx.clone(), elements, operations).await;
-                            db.destroy().await.unwrap();
+                            let start = Instant::now();
+                            let mut db = gen_random_any(ctx.clone(), elements, operations).await;
+                            db.sync().await.unwrap();
+                            total_elapsed += start.elapsed();
+
+                            db.destroy().await.unwrap(); // don't time destroy
                         }
-                        start.elapsed()
+
+                        total_elapsed
                     });
                 },
             );

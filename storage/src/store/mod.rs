@@ -256,6 +256,7 @@ where
             log_size: 0,
             uncommitted_ops: 0,
         };
+
         db.build_snapshot_from_log().await
     }
 
@@ -317,15 +318,79 @@ where
         self.apply_op(Operation::Delete(key)).await.map(|_| ())
     }
 
-    /// Commits all uncommitted operations to the store, making them persistent and recoverable.
-    /// Caller can associate an arbitrary `metadata` value with the commit.
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Caller can
+    /// associate an arbitrary `metadata` value with the commit.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
 
-        self.sync().await?;
-        self.prune_inactive().await
+        let section = self.current_section();
+        self.log.sync(section).await?;
+        debug!(log_size = self.log_size, "commit complete");
+
+        Ok(())
+    }
+
+    fn current_section(&self) -> u64 {
+        self.log_size / self.log_items_per_section
+    }
+
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        let current_section = self.log_size / self.log_items_per_section;
+        try_join!(self.log.sync(current_section), self.locations.sync())?;
+
+        Ok(())
+    }
+
+    /// Prune historical operations that are behind the inactivity floor. This does not affect the
+    /// state root.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
+        // Calculate the target pruning position: inactivity_floor_loc.
+        assert!(target_prune_loc <= self.inactivity_floor_loc);
+        if target_prune_loc <= self.oldest_retained_loc {
+            return Ok(());
+        }
+
+        // Sync locations so it never ends up behind the log.
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1554): Extend recovery to avoid
+        // this sync.
+        self.locations.sync().await?;
+
+        // Prune the log up to the section containing the requested pruning location. We always
+        // prune the log first, and then prune the locations structure based on the log's actual
+        // pruning boundary. This procedure ensures all log operations always have corresponding
+        // location entries, even in the event of failures, with no need for special recovery.
+        let section_with_target = target_prune_loc / self.log_items_per_section;
+        if !self.log.prune(section_with_target).await? {
+            return Ok(());
+        }
+        self.oldest_retained_loc = section_with_target * self.log_items_per_section;
+        debug!(
+            log_size = self.log_size,
+            oldest_retained_loc = self.oldest_retained_loc,
+            target_prune_loc,
+            "pruned inactive ops"
+        );
+
+        // Prune the locations map up to the oldest retained item in the log after pruning.
+        self.locations
+            .prune(self.oldest_retained_loc)
+            .await
+            .map_err(Error::Journal)?;
+
+        Ok(())
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
@@ -371,9 +436,8 @@ where
             self.locations.sync().await?;
         }
         if sync_log {
-            self.log
-                .sync(self.log_size / self.log_items_per_section)
-                .await?;
+            let section = self.current_section();
+            self.log.sync(section).await?;
         }
 
         Ok(())
@@ -396,17 +460,10 @@ where
         self.log_size
     }
 
-    /// Syncs the active section of the log to persistent storage.
-    ///
-    /// This method ensures that all buffered data is written to disk, but unlike [Store::commit],
-    /// does not create a commit point.
-    ///
-    /// Use this method when you want to ensure data durability without creating a formal
-    /// transaction boundary.
-    async fn sync(&mut self) -> Result<(), Error> {
-        let current_section = self.log_size / self.log_items_per_section;
-        try_join!(self.log.sync(current_section), self.locations.sync())?;
-        Ok(())
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive.
+    pub fn inactivity_floor_loc(&self) -> u64 {
+        self.inactivity_floor_loc
     }
 
     /// Builds the database's snapshot from the log of operations. Any operations that sit above
@@ -423,7 +480,10 @@ where
         let mut uncommitted_ops = HashMap::new();
         let mut oldest_retained_loc_found = false;
         {
-            let stream = self.log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
+            let stream = self
+                .log
+                .replay(0, 0, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
+                .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -545,24 +605,20 @@ where
     /// Append the operation to the log. The `commit` method must be called to make any applied operation
     /// persistent & recoverable.
     async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u32, Error> {
-        let current_section = self.log_size / self.log_items_per_section;
+        // Append the operation to the current section of the operations log.
+        let section = self.current_section();
+        let (offset, _) = self.log.append(section, op).await?;
 
-        // Append the operation to the entry log, and the offset to the locations log.
-        //
-        // The section number can be derived from the location by dividing the location
-        // by the number of items to store in each section, hence why we only store a
-        // map of location -> offset within the section.
-        let (offset, _) = self.log.append(current_section, op).await?;
+        // Append the offset of the new operation to locations.
         self.locations.append(offset).await?;
 
+        // Update the uncommitted operations count and increment the log size
         self.uncommitted_ops += 1;
         self.log_size += 1;
 
-        let new_section = self.log_size / self.log_items_per_section;
-
-        // Sync the previous section if we transitioned to a new section
-        if new_section != current_section {
-            self.log.sync(current_section).await?;
+        // Maintain the invariant that all completely full sections are synced & immutable.
+        if self.current_section() != section {
+            self.log.sync(section).await?;
         }
 
         Ok(offset)
@@ -700,39 +756,6 @@ where
             .await
             .map(|_| ())
     }
-
-    /// Prune historical operations that are behind the inactivity floor. This does not affect the
-    /// current snapshot.
-    async fn prune_inactive(&mut self) -> Result<(), Error> {
-        if self.log_size == 0 {
-            return Ok(());
-        }
-
-        // Calculate the target pruning position: inactivity_floor_loc.
-        let target_prune_loc = self.inactivity_floor_loc;
-        let ops_to_prune = target_prune_loc.saturating_sub(self.oldest_retained_loc);
-        if ops_to_prune == 0 {
-            return Ok(());
-        }
-        debug!(ops_to_prune, target_prune_loc, "pruning inactive ops");
-
-        // Prune the log up to the section containing the requested pruning location. We always
-        // prune the log first, and then prune the locations structure based on the log's
-        // actual pruning boundary. This procedure ensures all log operations always have
-        // corresponding location entries, even in the event of failures, with no need for
-        // special recovery.
-        let section = target_prune_loc / self.log_items_per_section;
-        self.log.prune(section).await?;
-        self.oldest_retained_loc = section * self.log_items_per_section;
-
-        // Prune the locations map up to the oldest retained item in the log after pruning.
-        self.locations
-            .prune(self.oldest_retained_loc)
-            .await
-            .map_err(Error::Journal)?;
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -775,7 +798,7 @@ mod test {
             let mut db = create_test_store(context.clone()).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc, 0);
-            assert!(matches!(db.prune_inactive().await, Ok(())));
+            assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = Digest::random(&mut context);
@@ -788,7 +811,7 @@ mod test {
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1);
-            assert!(matches!(db.prune_inactive().await, Ok(())));
+            assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             let mut db = create_test_store(context.clone()).await;
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
@@ -928,8 +951,9 @@ mod test {
             store.commit(None).await.unwrap();
             store.close().await.unwrap();
 
-            // Re-open the store to ensure it replays the log correctly.
-            let store = create_test_store(ctx.with_label("store")).await;
+            // Re-open the store, prune it, then ensure it replays the log correctly.
+            let mut store = create_test_store(ctx.with_label("store")).await;
+            store.prune(store.inactivity_floor_loc()).await.unwrap();
 
             let iter = store.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
@@ -939,6 +963,7 @@ mod test {
             assert_eq!(store.log_size, UPDATES + 3);
             // Only the highest `Update` operation is active, plus the commit operation above it.
             assert_eq!(store.inactivity_floor_loc, UPDATES + 1);
+
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
             // is the first in the last retained blob.
             assert_eq!(store.oldest_retained_loc, UPDATES - UPDATES % 7);
@@ -1166,6 +1191,8 @@ mod test {
 
             assert_eq!(db.op_count(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.oldest_retained_loc, 1480 - 1480 % 7);
             assert_eq!(db.snapshot.items(), 857);
 

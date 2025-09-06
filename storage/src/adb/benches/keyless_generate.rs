@@ -12,7 +12,7 @@ use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const NUM_OPERATIONS: u64 = 10_000;
@@ -68,6 +68,7 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
         }
     }
     db.commit(None).await.unwrap();
+    db.sync().await.unwrap();
 
     db
 }
@@ -85,12 +86,17 @@ fn bench_keyless_generate(c: &mut Criterion) {
             |b| {
                 b.to_async(&runner).iter_custom(|iters| async move {
                     let ctx = context::get::<Context>();
-                    let start = Instant::now();
+                    let mut total_elapsed = Duration::ZERO;
                     for _ in 0..iters {
-                        let db = gen_random_keyless(ctx.clone(), operations).await;
-                        db.destroy().await.unwrap();
+                        let start = Instant::now();
+                        let mut db = gen_random_keyless(ctx.clone(), operations).await;
+                        db.sync().await.unwrap();
+                        total_elapsed += start.elapsed();
+
+                        db.destroy().await.unwrap(); // don't time destroy
                     }
-                    start.elapsed()
+
+                    total_elapsed
                 });
             },
         );
