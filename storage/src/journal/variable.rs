@@ -159,8 +159,6 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     pub(crate) context: E,
     pub(crate) cfg: Config<V::Cfg>,
 
-    pub(crate) oldest_allowed: Option<u64>,
-
     pub(crate) blobs: BTreeMap<u64, Append<E::Blob>>,
 
     pub(crate) tracked: Gauge,
@@ -209,9 +207,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(Self {
             context,
             cfg,
-
-            oldest_allowed: blobs.first_key_value().map(|(section, _)| *section),
-
             blobs,
             tracked,
             synced,
@@ -223,7 +218,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Ensures that a pruned section is not accessed.
     fn prune_guard(&self, section: u64, inclusive: bool) -> Result<(), Error> {
-        if let Some(oldest_allowed) = self.oldest_allowed {
+        if let Some(oldest_allowed) = self.blobs.first_key_value().map(|(section, _)| *section) {
             if section < oldest_allowed || (inclusive && section <= oldest_allowed) {
                 return Err(Error::AlreadyPrunedToSection(oldest_allowed));
             }
@@ -777,25 +772,22 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 break;
             }
 
-            // Remove blob
+            // Remove blob from journal
             let blob = self.blobs.remove(&section).unwrap();
             let size = blob.size().await;
             drop(blob);
 
             // Remove blob from storage
-            pruned = true;
             self.context
                 .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await?;
+            pruned = true;
+
             debug!(blob = section, size, "pruned blob");
             self.tracked.dec();
             self.pruned.inc();
         }
 
-        // Update oldest allowed
-        if pruned {
-            self.oldest_allowed = Some(min);
-        }
         Ok(pruned)
     }
 
@@ -811,7 +803,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Returns the number of the oldest section in the journal.
     pub fn oldest_section(&self) -> Option<u64> {
-        self.oldest_allowed
+        self.blobs.first_key_value().map(|(section, _)| *section)
     }
 
     /// Removes any underlying blobs created by the journal.
