@@ -217,9 +217,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Ensures that a pruned section is not accessed.
-    fn prune_guard(&self, section: u64, inclusive: bool) -> Result<(), Error> {
+    fn prune_guard(&self, section: u64) -> Result<(), Error> {
         if let Some(oldest_allowed) = self.oldest_section() {
-            if section < oldest_allowed || (inclusive && section <= oldest_allowed) {
+            if section < oldest_allowed {
                 return Err(Error::AlreadyPrunedToSection(oldest_allowed));
             }
         }
@@ -537,7 +537,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// `append` to prevent this.
     pub async fn append(&mut self, section: u64, item: V) -> Result<(u32, u32), Error> {
         // Check last pruned
-        self.prune_guard(section, false)?;
+        self.prune_guard(section)?;
 
         // Create item
         let encoded = item.encode();
@@ -605,7 +605,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
     pub async fn get(&self, section: u64, offset: u32) -> Result<Option<V>, Error> {
-        self.prune_guard(section, false)?;
+        self.prune_guard(section)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
@@ -629,7 +629,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         offset: u32,
         size: u32,
     ) -> Result<Option<V>, Error> {
-        self.prune_guard(section, false)?;
+        self.prune_guard(section)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
@@ -651,7 +651,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// Returns 0 if the section does not exist.
     pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.prune_guard(section, false)?;
+        self.prune_guard(section)?;
         match self.blobs.get(&section) {
             Some(blob) => Ok(blob.size().await),
             None => Ok(0),
@@ -679,7 +679,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section, false)?;
+        self.prune_guard(section)?;
 
         // Remove any sections beyond the given section
         let trailing: Vec<u64> = self
@@ -731,7 +731,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// This operation is not guaranteed to survive restarts until sync is called.
     pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section, false)?;
+        self.prune_guard(section)?;
 
         // Get the blob at the given section
         let blob = match self.blobs.get_mut(&section) {
@@ -753,7 +753,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
-        self.prune_guard(section, false)?;
+        self.prune_guard(section)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(()),
