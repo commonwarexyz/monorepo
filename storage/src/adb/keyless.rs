@@ -124,7 +124,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     ) -> Result<(u64, Option<(u64, u32)>), Error> {
         let mut has_offset_size = aligned_size;
         let mut section_offset = None;
-        
+
         while has_offset_size > 0 {
             let loc = has_offset_size - 1;
             let offset = locations.read(loc).await?;
@@ -149,7 +149,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             );
             has_offset_size -= 1;
         }
-        
+
         Ok((has_offset_size, section_offset))
     }
 
@@ -163,18 +163,18 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let stream = log.replay(0, 0, REPLAY_BUFFER_SIZE).await?;
         pin_mut!(stream);
         let op = stream.next().await;
-        
+
         let Some(op) = op else {
             warn!("no starting log operation found, returning empty db");
             return Ok(None);
         };
-        
+
         let op = op?;
         mmr.add_batched(hasher, &op.3.encode()).await?;
         mmr.sync(hasher).await?;
         locations.append(op.1).await?;
         locations.sync().await?;
-        
+
         Ok(Some((op.0, op.1)))
     }
 
@@ -192,7 +192,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let op = stream.next().await;
         let op = op.expect("operation known to exist");
         let mut op = op?.3;
-        
+
         while let Some(result) = stream.next().await {
             let (section, offset, _, next_op) = result?;
             let encoded_op = next_op.encode();
@@ -204,12 +204,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             mmr.add_batched(hasher, &encoded_op).await?;
             locations.append(offset).await?;
         }
-        
+
         if mmr.is_dirty() {
             mmr.sync(hasher).await?;
             locations.sync().await?;
         }
-        
+
         Ok(op)
     }
 
@@ -230,7 +230,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             .oldest_retained_pos()
             .await?
             .expect("location should be nonempty");
-        
+
         loop {
             match op {
                 Operation::Commit(_) => {
@@ -245,10 +245,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             }
             if op_index == oldest_retained_loc {
                 if op_index != 0 {
-                    panic!(
-                        "no commit operation found, oldest_retained_loc: {}",
-                        oldest_retained_loc
-                    );
+                    panic!("no commit operation found, oldest_retained_loc: {oldest_retained_loc}");
                 }
                 break;
             }
@@ -257,7 +254,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             let section = op_index / log_items_per_section;
             op = log.get(section, offset).await?.expect("no operation found");
         }
-        
+
         Ok(rewind_point.expect("rewind point should exist"))
     }
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
