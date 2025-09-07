@@ -233,15 +233,17 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         Ok(Some((offset, last_op)))
     }
 
-    /// Find the last commit point for recovery.
-    async fn find_last_commit_point(
-        locations: &FJournal<E, u32>,
-        log: &VJournal<E, Operation<V>>,
+    /// Find the last commit point and rewind to it if necessary.
+    /// Returns the final size after rewinding.
+    async fn find_last_commit_and_rewind(
+        locations: &mut FJournal<E, u32>,
+        log: &mut VJournal<E, Operation<V>>,
+        mmr: &mut Mmr<E, H>,
         last_log_op: Operation<V>,
         op_count: u64,
         initial_offset: u32,
         log_items_per_section: u64,
-    ) -> Result<(u64, u32), Error> {
+    ) -> Result<u64, Error> {
         let mut rewind_point = None;
         let mut op_index = op_count - 1;
         let mut op = last_log_op;
@@ -275,7 +277,21 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             op = log.get(section, offset).await?.expect("no operation found");
         }
 
-        Ok(rewind_point.expect("rewind point should exist"))
+        let rewind_point = rewind_point.expect("rewind point should exist");
+        let size = rewind_point.0;
+        let ops_to_rewind = (op_count - size) as usize;
+        
+        if ops_to_rewind > 0 {
+            warn!(ops_to_rewind, size, "rewinding log to last commit");
+            locations.rewind(size).await?;
+            locations.sync().await?;
+            mmr.pop(ops_to_rewind).await?;
+            let section = size / log_items_per_section;
+            log.rewind_to_offset(section, rewind_point.1).await?;
+            log.sync(section).await?;
+        }
+        
+        Ok(size)
     }
 
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
@@ -369,31 +385,18 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             }
         };
 
-        // Find the last commit point and return the location/offset of the first operation to
-        // follow it, or the tip of the log (+ offset 0) if none exists.
+        // Find the last commit point and rewind if necessary
         let op_count = mmr.leaves();
-        let rewind_point = Self::find_last_commit_point(
-            &locations,
-            &log,
+        let size = Self::find_last_commit_and_rewind(
+            &mut locations,
+            &mut log,
+            &mut mmr,
             last_log_op,
             op_count,
             offset,
             cfg.log_items_per_section.get(),
         )
         .await?;
-
-        // If any operations follow the last commit, rewind them.
-        let size = rewind_point.0;
-        let ops_to_rewind = (mmr.leaves() - size) as usize;
-        if ops_to_rewind > 0 {
-            warn!(ops_to_rewind, size, "rewinding log to last commit");
-            locations.rewind(size).await?;
-            locations.sync().await?;
-            mmr.pop(ops_to_rewind).await?;
-            let section = size / cfg.log_items_per_section.get();
-            log.rewind_to_offset(section, rewind_point.1).await?;
-            log.sync(section).await?;
-        }
         // Final alignment check.
         assert_eq!(size, mmr.leaves());
         assert_eq!(size, locations.size().await?);
