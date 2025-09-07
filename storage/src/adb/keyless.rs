@@ -325,7 +325,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         // Find the section+offset of the most recent log operation that has a valid location offset
         // in locations.
-        let (has_offset_size, section_offset) = Self::find_last_valid_log_operation(
+        let (valid_size, section_offset) = Self::find_last_valid_log_operation(
             &locations,
             &log,
             aligned_size,
@@ -334,15 +334,15 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         .await?;
 
         // Trim any locations/mmr elements that do not have corresponding operations in log.
-        if aligned_size != has_offset_size {
+        if aligned_size != valid_size {
             warn!(
                 size = aligned_size,
-                new_size = has_offset_size,
+                new_size = valid_size,
                 "trimming locations & mmr elements ahead of log"
             );
-            locations.rewind(has_offset_size).await?;
+            locations.rewind(valid_size).await?;
             locations.sync().await?;
-            mmr.pop((aligned_size - has_offset_size) as usize).await?;
+            mmr.pop((aligned_size - valid_size) as usize).await?;
         }
         assert_eq!(mmr.leaves(), locations.size().await?);
 
