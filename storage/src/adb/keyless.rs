@@ -389,8 +389,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             cfg.log_items_per_section.get(),
         )
         .await?;
-
-        // Final alignment check.
         assert_eq!(size, mmr.leaves());
         assert_eq!(size, locations.size().await?);
 
