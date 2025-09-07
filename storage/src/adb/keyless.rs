@@ -163,17 +163,16 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         hasher: &mut Standard<H>,
         section_offset: Option<(u64, u32)>,
     ) -> Result<Option<(u32, Operation<V>)>, Error> {
+        // Initialize stream from section_offset
         let (section, offset, expect_first) = match section_offset {
             Some((s, o)) => (s, o, true),
             None => (0, 0, false),
         };
-
         let stream = log.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
         pin_mut!(stream);
 
-        let first_op = stream.next().await;
-
         // Handle empty log case
+        let first_op = stream.next().await;
         if !expect_first {
             let Some(first_op) = first_op else {
                 warn!("no starting log operation found, returning empty db");
@@ -212,7 +211,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // Handle case where we expect the first operation to exist
         let first_op = first_op.expect("operation known to exist")?;
         let mut last_op = first_op.3;
-
         while let Some(result) = stream.next().await {
             let (section, offset, _, next_op) = result?;
             let encoded_op = next_op.encode();
@@ -225,6 +223,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations.append(offset).await?;
         }
 
+        // If items have been added, sync the auxiliary data structures
         if mmr.is_dirty() {
             mmr.sync(hasher).await?;
             locations.sync().await?;
