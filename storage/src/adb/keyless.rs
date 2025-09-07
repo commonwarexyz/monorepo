@@ -280,7 +280,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let rewind_point = rewind_point.expect("rewind point should exist");
         let size = rewind_point.0;
         let ops_to_rewind = (op_count - size) as usize;
-        
+
         if ops_to_rewind > 0 {
             warn!(ops_to_rewind, size, "rewinding log to last commit");
             locations.rewind(size).await?;
@@ -290,7 +290,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             log.rewind_to_offset(section, rewind_point.1).await?;
             log.sync(section).await?;
         }
-        
+
         Ok(size)
     }
 
@@ -397,6 +397,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             cfg.log_items_per_section.get(),
         )
         .await?;
+
         // Final alignment check.
         assert_eq!(size, mmr.leaves());
         assert_eq!(size, locations.size().await?);
