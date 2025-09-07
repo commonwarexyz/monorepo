@@ -153,50 +153,66 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         Ok((has_offset_size, section_offset))
     }
 
-    /// Handle the case where MMR and locations are empty.
-    async fn handle_empty_structures(
-        mmr: &mut Mmr<E, H>,
-        locations: &mut FJournal<E, u32>,
-        log: &VJournal<E, Operation<V>>,
-        hasher: &mut Standard<H>,
-    ) -> Result<Option<(u64, u32)>, Error> {
-        let stream = log.replay(0, 0, REPLAY_BUFFER_SIZE).await?;
-        pin_mut!(stream);
-        let op = stream.next().await;
-
-        let Some(op) = op else {
-            warn!("no starting log operation found, returning empty db");
-            return Ok(None);
-        };
-
-        let op = op?;
-        mmr.add_batched(hasher, &op.3.encode()).await?;
-        mmr.sync(hasher).await?;
-        locations.append(op.1).await?;
-        locations.sync().await?;
-
-        Ok(Some((op.0, op.1)))
-    }
-
-    /// Replay missing log operations to sync MMR and locations.
-    async fn replay_missing_operations(
+    /// Replay log operations from a given position and sync MMR and locations.
+    /// Returns None if the log is empty (for initial replay), otherwise returns
+    /// the section/offset of the first operation and the last operation processed.
+    async fn replay_and_sync_operations(
         mmr: &mut Mmr<E, H>,
         locations: &mut FJournal<E, u32>,
         log: &VJournal<E, Operation<V>>,
         hasher: &mut Standard<H>,
         section: u64,
         offset: u32,
-    ) -> Result<Operation<V>, Error> {
+        expect_first: bool,
+    ) -> Result<Option<((u64, u32), Operation<V>)>, Error> {
         let stream = log.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
         pin_mut!(stream);
-        let op = stream.next().await;
-        let op = op.expect("operation known to exist");
-        let mut op = op?.3;
-
+        
+        let first_op = stream.next().await;
+        
+        // Handle empty log case
+        if !expect_first {
+            let Some(first_op) = first_op else {
+                warn!("no starting log operation found, returning empty db");
+                return Ok(None);
+            };
+            let first_op = first_op?;
+            let first_position = (first_op.0, first_op.1);
+            let encoded_op = first_op.3.encode();
+            
+            // Add first operation to mmr and locations
+            mmr.add_batched(hasher, &encoded_op).await?;
+            locations.append(first_op.1).await?;
+            
+            // Process remaining operations
+            let mut last_op = first_op.3;
+            while let Some(result) = stream.next().await {
+                let (section, offset, _, next_op) = result?;
+                let encoded_op = next_op.encode();
+                last_op = next_op;
+                warn!(
+                    location = mmr.leaves(),
+                    section, offset, "adding missing operation to MMR/location map"
+                );
+                mmr.add_batched(hasher, &encoded_op).await?;
+                locations.append(offset).await?;
+            }
+            
+            // Sync if needed
+            mmr.sync(hasher).await?;
+            locations.sync().await?;
+            
+            return Ok(Some((first_position, last_op)));
+        }
+        
+        // Handle case where we expect the first operation to exist
+        let first_op = first_op.expect("operation known to exist")?;
+        let mut last_op = first_op.3;
+        
         while let Some(result) = stream.next().await {
             let (section, offset, _, next_op) = result?;
             let encoded_op = next_op.encode();
-            op = next_op;
+            last_op = next_op;
             warn!(
                 location = mmr.leaves(),
                 section, offset, "adding missing operation to MMR/location map"
@@ -204,13 +220,13 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             mmr.add_batched(hasher, &encoded_op).await?;
             locations.append(offset).await?;
         }
-
+        
         if mmr.is_dirty() {
             mmr.sync(hasher).await?;
             locations.sync().await?;
         }
-
-        Ok(op)
+        
+        Ok(Some(((section, offset), last_op)))
     }
 
     /// Find the last commit point for recovery.
@@ -330,13 +346,36 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // location represented by `section_offset`. We use this as the starting point to replay the
         // log in order to add back any missing items. If they don't exist, we use the very first
         // log operation as our starting point.
-        let (section, offset) = match section_offset {
-            Some((s, o)) => (s, o),
+        let (last_log_op, offset) = match section_offset {
+            Some((section, offset)) => {
+                // Replay from existing position
+                let result = Self::replay_and_sync_operations(
+                    &mut mmr,
+                    &mut locations,
+                    &log,
+                    &mut hasher,
+                    section,
+                    offset,
+                    true, // expect_first = true
+                )
+                .await?;
+                let ((_, _), last_op) = result.expect("operation should exist");
+                (last_op, offset)
+            }
             None => {
-                match Self::handle_empty_structures(&mut mmr, &mut locations, &log, &mut hasher)
-                    .await?
+                // Replay from beginning (empty structures case)
+                match Self::replay_and_sync_operations(
+                    &mut mmr,
+                    &mut locations,
+                    &log,
+                    &mut hasher,
+                    0,
+                    0,
+                    false, // expect_first = false
+                )
+                .await?
                 {
-                    Some((section, offset)) => (section, offset),
+                    Some(((_, offset), last_op)) => (last_op, offset),
                     None => {
                         return Ok(Self {
                             mmr,
@@ -351,18 +390,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 }
             }
         };
-
-        // Replay any log operations that are missing from the other structures, returning the
-        // operation at the log's tip.
-        let last_log_op = Self::replay_missing_operations(
-            &mut mmr,
-            &mut locations,
-            &log,
-            &mut hasher,
-            section,
-            offset,
-        )
-        .await?;
 
         // Find the last commit point and return the location/offset of the first operation to
         // follow it, or the tip of the log (+ offset 0) if none exists.
