@@ -112,8 +112,9 @@ fn bench_fixed_generate(c: &mut Criterion) {
                             let start = Instant::now();
                             let mut db = gen_random_any(ctx.clone(), elements, operations).await;
                             db.sync().await.unwrap();
-                            db.destroy().await.unwrap(); // don't time destroy
                             total_elapsed += start.elapsed();
+
+                            db.destroy().await.unwrap(); // don't time destroy
                         }
                         total_elapsed
                     });
