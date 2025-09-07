@@ -46,7 +46,7 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Originator for Mailbox<P
                 responder: tx,
             })
             .await;
-        rx.await.unwrap()
+        rx.await.unwrap_or_default()
     }
 
     async fn cancel(&mut self, commitment: R::Commitment) {

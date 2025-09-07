@@ -143,9 +143,7 @@ where
                                     self.priority_request
                                 ).await {
                                     Ok(recipients) => {
-                                        for peer in &recipients {
-                                            entry.0.insert(peer.clone());
-                                        }
+                                        entry.0.extend(recipients.iter().cloned());
                                         let _ = responder.send(recipients);
                                     }
                                     Err(err) => {
