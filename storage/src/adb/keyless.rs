@@ -210,10 +210,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Find the last commit point and rewind to it if necessary.
     /// Returns the final size after rewinding.
-    #[allow(clippy::too_many_arguments)]
     async fn rewind_to_last_commit(
         mmr: &mut Mmr<E, H>,
-        hasher: &mut Standard<H>,
         locations: &mut FJournal<E, u32>,
         log: &mut VJournal<E, Operation<V>>,
         last_log_op: Operation<V>,
@@ -263,8 +261,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         warn!(ops_to_rewind, rewind_size, "rewinding log to last commit");
         locations.rewind(rewind_size).await?;
         locations.sync().await?;
-        mmr.pop(ops_to_rewind).await?;
-        mmr.sync(hasher).await?;
+        mmr.pop(ops_to_rewind).await?; // sync is handled by pop
         let section = rewind_size / log_items_per_section;
         log.rewind_to_offset(section, rewind_offset).await?;
         log.sync(section).await?;
@@ -361,7 +358,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let op_count = mmr.leaves();
         let size = Self::rewind_to_last_commit(
             &mut mmr,
-            &mut hasher,
             &mut locations,
             &mut log,
             last_op,
