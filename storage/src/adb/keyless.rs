@@ -151,9 +151,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// the offset and the last operation processed.
     async fn replay_operations(
         mmr: &mut Mmr<E, H>,
+        hasher: &mut Standard<H>,
         locations: &mut FJournal<E, u32>,
         log: &VJournal<E, Operation<V>>,
-        hasher: &mut Standard<H>,
         section_offset: Option<(u64, u32)>,
     ) -> Result<Option<(u32, Operation<V>)>, Error> {
         // Initialize stream from section_offset
@@ -210,10 +210,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Find the last commit point and rewind to it if necessary.
     /// Returns the final size after rewinding.
+    #[allow(clippy::too_many_arguments)]
     async fn rewind_to_last_commit(
+        mmr: &mut Mmr<E, H>,
+        hasher: &mut Standard<H>,
         locations: &mut FJournal<E, u32>,
         log: &mut VJournal<E, Operation<V>>,
-        mmr: &mut Mmr<E, H>,
         last_log_op: Operation<V>,
         op_count: u64,
         last_offset: u32,
@@ -262,6 +264,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         locations.rewind(rewind_size).await?;
         locations.sync().await?;
         mmr.pop(ops_to_rewind).await?;
+        mmr.sync(hasher).await?;
         let section = rewind_size / log_items_per_section;
         log.rewind_to_offset(section, rewind_offset).await?;
         log.sync(section).await?;
@@ -339,7 +342,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // log in order to add back any missing items. If they don't exist, we use the very first
         // log operation as our starting point.
         let replay_result =
-            Self::replay_operations(&mut mmr, &mut locations, &log, &mut hasher, section_offset)
+            Self::replay_operations(&mut mmr, &mut hasher, &mut locations, &log, section_offset)
                 .await?;
         let Some((last_offset, last_op)) = replay_result else {
             // Empty database
@@ -357,9 +360,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // Find the last commit point and rewind to it (if necessary).
         let op_count = mmr.leaves();
         let size = Self::rewind_to_last_commit(
+            &mut mmr,
+            &mut hasher,
             &mut locations,
             &mut log,
-            &mut mmr,
             last_op,
             op_count,
             last_offset,
