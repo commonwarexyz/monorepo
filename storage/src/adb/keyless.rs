@@ -168,7 +168,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let first_op = stream.next().await;
         if !expect_first {
             let Some(first_op) = first_op else {
-                warn!("no starting log operation found, returning empty db");
+                debug!("no starting log operation found, returning empty db");
                 return Ok(None);
             };
             let first_op = first_op?;
