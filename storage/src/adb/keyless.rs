@@ -136,17 +136,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 }
                 Ok(None) => (),
                 Err(e) => {
-                    warn!(
-                        loc = loc,
-                        err = e.to_string(),
-                        "error finding operation in log"
-                    );
+                    warn!(loc, err=?e, "log operation missing");
                 }
             };
-            warn!(
-                loc = loc,
-                offset, section, "locations is ahead of log, walking back"
-            );
+            warn!(loc, offset, section, "walking back locations");
             valid_size -= 1;
         }
 
