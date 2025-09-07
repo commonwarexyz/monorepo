@@ -358,20 +358,17 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let replay_result =
             Self::replay_operations(&mut mmr, &mut locations, &log, &mut hasher, section_offset)
                 .await?;
-        let (last_log_op, offset) = match replay_result {
-            Some((offset, last_op)) => (last_op, offset),
-            None => {
-                // Empty database
-                return Ok(Self {
-                    mmr,
-                    log,
-                    size: 0,
-                    locations,
-                    log_items_per_section,
-                    hasher,
-                    last_commit_loc: None,
-                });
-            }
+        let Some((offset, last_log_op)) = replay_result else {
+            // Empty database
+            return Ok(Self {
+                mmr,
+                log,
+                size: 0,
+                locations,
+                log_items_per_section,
+                hasher,
+                last_commit_loc: None,
+            });
         };
 
         // Find the last commit point and rewind to it (if necessary).
