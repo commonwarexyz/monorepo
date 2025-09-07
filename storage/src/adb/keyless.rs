@@ -206,10 +206,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // Handle case where we expect the first operation to exist
         let first_op = first_op.expect("operation known to exist")?;
         let mut last_op = first_op.3;
+        let mut last_offset = offset;
         while let Some(result) = stream.next().await {
             let (section, offset, _, next_op) = result?;
             let encoded_op = next_op.encode();
             last_op = next_op;
+            last_offset = offset;
             warn!(
                 location = mmr.leaves(),
                 section, offset, "adding missing operation to MMR/location map"
@@ -224,7 +226,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations.sync().await?;
         }
 
-        Ok(Some((offset, last_op)))
+        Ok(Some((last_offset, last_op)))
     }
 
     /// Find the last commit point and rewind to it if necessary.
@@ -235,13 +237,13 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         mmr: &mut Mmr<E, H>,
         last_log_op: Operation<V>,
         op_count: u64,
-        initial_offset: u32,
+        last_offset: u32,
         log_items_per_section: u64,
     ) -> Result<u64, Error> {
         let mut first_uncommitted: Option<(u64, u32)> = None;
         let mut op_index = op_count - 1;
         let mut op = last_log_op;
-        let mut offset = initial_offset;
+        let mut offset = last_offset;
         let oldest_retained_loc = locations
             .oldest_retained_pos()
             .await?
