@@ -243,7 +243,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         initial_offset: u32,
         log_items_per_section: u64,
     ) -> Result<u64, Error> {
-        let mut rewind_point = None;
+        let mut first_uncommitted: Option<(u64, u32)> = None;
         let mut op_index = op_count - 1;
         let mut op = last_log_op;
         let mut offset = initial_offset;
@@ -255,13 +255,13 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         loop {
             match op {
                 Operation::Commit(_) => {
-                    if rewind_point.is_none() {
-                        rewind_point = Some((op_index + 1, 0));
-                    }
                     break;
                 }
                 Operation::Append(_) => {
-                    rewind_point = Some((op_index, offset));
+                    // Track the earliest uncommitted append (index, offset) encountered while
+                    // walking backwards. If none is found before we hit a Commit, there is
+                    // nothing to rewind.
+                    first_uncommitted = Some((op_index, offset));
                 }
             }
             if op_index == oldest_retained_loc {
@@ -276,21 +276,23 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             op = log.get(section, offset).await?.expect("no operation found");
         }
 
-        let rewind_point = rewind_point.expect("rewind point should exist");
-        let size = rewind_point.0;
-        let ops_to_rewind = (op_count - size) as usize;
+        // If we saw any appends after the last Commit, rewind to just before
+        // the earliest such append. Otherwise, there is nothing to rewind and
+        // size remains at the current op_count.
+        let (rewind_size, rewind_offset) = match first_uncommitted {
+            Some(rewind_point) => rewind_point,
+            None => return Ok(op_index + 1),
+        };
+        let ops_to_rewind = (op_count - rewind_size) as usize;
+        warn!(ops_to_rewind, rewind_size, "rewinding log to last commit");
+        locations.rewind(rewind_size).await?;
+        locations.sync().await?;
+        mmr.pop(ops_to_rewind).await?;
+        let section = rewind_size / log_items_per_section;
+        log.rewind_to_offset(section, rewind_offset).await?;
+        log.sync(section).await?;
 
-        if ops_to_rewind > 0 {
-            warn!(ops_to_rewind, size, "rewinding log to last commit");
-            locations.rewind(size).await?;
-            locations.sync().await?;
-            mmr.pop(ops_to_rewind).await?;
-            let section = size / log_items_per_section;
-            log.rewind_to_offset(section, rewind_point.1).await?;
-            log.sync(section).await?;
-        }
-
-        Ok(size)
+        Ok(rewind_size)
     }
 
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
