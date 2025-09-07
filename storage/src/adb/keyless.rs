@@ -155,21 +155,24 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Replay log operations from a given position and sync MMR and locations.
     /// Returns None if the log is empty (for initial replay), otherwise returns
-    /// the section/offset of the first operation and the last operation processed.
+    /// the offset and the last operation processed.
     async fn replay_and_sync_operations(
         mmr: &mut Mmr<E, H>,
         locations: &mut FJournal<E, u32>,
         log: &VJournal<E, Operation<V>>,
         hasher: &mut Standard<H>,
-        section: u64,
-        offset: u32,
-        expect_first: bool,
-    ) -> Result<Option<((u64, u32), Operation<V>)>, Error> {
+        section_offset: Option<(u64, u32)>,
+    ) -> Result<Option<(u32, Operation<V>)>, Error> {
+        let (section, offset, expect_first) = match section_offset {
+            Some((s, o)) => (s, o, true),
+            None => (0, 0, false),
+        };
+
         let stream = log.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
         pin_mut!(stream);
-        
+
         let first_op = stream.next().await;
-        
+
         // Handle empty log case
         if !expect_first {
             let Some(first_op) = first_op else {
@@ -177,19 +180,20 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 return Ok(None);
             };
             let first_op = first_op?;
-            let first_position = (first_op.0, first_op.1);
             let encoded_op = first_op.3.encode();
-            
+
             // Add first operation to mmr and locations
             mmr.add_batched(hasher, &encoded_op).await?;
             locations.append(first_op.1).await?;
-            
+
             // Process remaining operations
             let mut last_op = first_op.3;
+            let mut last_offset = first_op.1;
             while let Some(result) = stream.next().await {
                 let (section, offset, _, next_op) = result?;
                 let encoded_op = next_op.encode();
                 last_op = next_op;
+                last_offset = offset;
                 warn!(
                     location = mmr.leaves(),
                     section, offset, "adding missing operation to MMR/location map"
@@ -197,18 +201,18 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 mmr.add_batched(hasher, &encoded_op).await?;
                 locations.append(offset).await?;
             }
-            
+
             // Sync if needed
             mmr.sync(hasher).await?;
             locations.sync().await?;
-            
-            return Ok(Some((first_position, last_op)));
+
+            return Ok(Some((last_offset, last_op)));
         }
-        
+
         // Handle case where we expect the first operation to exist
         let first_op = first_op.expect("operation known to exist")?;
         let mut last_op = first_op.3;
-        
+
         while let Some(result) = stream.next().await {
             let (section, offset, _, next_op) = result?;
             let encoded_op = next_op.encode();
@@ -220,13 +224,13 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             mmr.add_batched(hasher, &encoded_op).await?;
             locations.append(offset).await?;
         }
-        
+
         if mmr.is_dirty() {
             mmr.sync(hasher).await?;
             locations.sync().await?;
         }
-        
-        Ok(Some(((section, offset), last_op)))
+
+        Ok(Some((offset, last_op)))
     }
 
     /// Find the last commit point for recovery.
@@ -346,48 +350,27 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // location represented by `section_offset`. We use this as the starting point to replay the
         // log in order to add back any missing items. If they don't exist, we use the very first
         // log operation as our starting point.
-        let (last_log_op, offset) = match section_offset {
-            Some((section, offset)) => {
-                // Replay from existing position
-                let result = Self::replay_and_sync_operations(
-                    &mut mmr,
-                    &mut locations,
-                    &log,
-                    &mut hasher,
-                    section,
-                    offset,
-                    true, // expect_first = true
-                )
-                .await?;
-                let ((_, _), last_op) = result.expect("operation should exist");
-                (last_op, offset)
-            }
+        let replay_result = Self::replay_and_sync_operations(
+            &mut mmr,
+            &mut locations,
+            &log,
+            &mut hasher,
+            section_offset,
+        )
+        .await?;
+        let (last_log_op, offset) = match replay_result {
+            Some((offset, last_op)) => (last_op, offset),
             None => {
-                // Replay from beginning (empty structures case)
-                match Self::replay_and_sync_operations(
-                    &mut mmr,
-                    &mut locations,
-                    &log,
-                    &mut hasher,
-                    0,
-                    0,
-                    false, // expect_first = false
-                )
-                .await?
-                {
-                    Some(((_, offset), last_op)) => (last_op, offset),
-                    None => {
-                        return Ok(Self {
-                            mmr,
-                            log,
-                            size: 0,
-                            locations,
-                            log_items_per_section: cfg.log_items_per_section.get(),
-                            hasher,
-                            last_commit_loc: None,
-                        });
-                    }
-                }
+                // Empty database
+                return Ok(Self {
+                    mmr,
+                    log,
+                    size: 0,
+                    locations,
+                    log_items_per_section: cfg.log_items_per_section.get(),
+                    hasher,
+                    last_commit_loc: None,
+                });
             }
         };
 
