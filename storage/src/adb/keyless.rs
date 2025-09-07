@@ -195,8 +195,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             }
 
             // Sync if needed
-            mmr.sync(hasher).await?;
-            locations.sync().await?;
+            if mmr.is_dirty() {
+                mmr.sync(hasher).await?;
+                locations.sync().await?;
+            }
 
             return Ok(Some((last_offset, last_op)));
         }
@@ -216,7 +218,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations.append(offset).await?;
         }
 
-        // If items have been added, sync the auxiliary data structures
+        // Sync if needed
         if mmr.is_dirty() {
             mmr.sync(hasher).await?;
             locations.sync().await?;
