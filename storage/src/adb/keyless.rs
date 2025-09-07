@@ -1394,24 +1394,8 @@ mod test {
             let uncommitted_value = vec![99u8; 20];
             db.append(uncommitted_value.clone()).await.unwrap();
 
-            // Get current state before simulation
-            let section = db.current_section();
-
             // Sync only the log (not MMR or locations)
-            db.log.sync(section).await.unwrap();
-
-            // Process MMR updates first (required before pop)
-            db.mmr.process_updates(&mut hasher);
-
-            // Manually rewind MMR and locations to simulate them being behind
-            db.mmr.pop(1).await.unwrap();
-            db.locations.rewind(committed_size).await.unwrap();
-
-            // Drop db without proper cleanup to simulate crash
-            //
-            // Don't sync MMR/locations - leave them in "behind" state
-            // This simulates a crash after log write but before MMR/locations update
-            drop(db);
+            db.simulate_failure(true, false, false).await.unwrap();
 
             // Reopen database
             let mut db = open_db(context.clone()).await;
@@ -1457,18 +1441,7 @@ mod test {
             }
 
             // Simulate the same partial failure scenario
-            let section = db.current_section();
-            db.log.sync(section).await.unwrap();
-
-            // Process MMR updates first (required before pop)
-            db.mmr.process_updates(&mut hasher);
-
-            // Rewind MMR and locations to before the uncommitted appends
-            db.mmr.pop(5).await.unwrap();
-            db.locations.rewind(new_committed_size).await.unwrap();
-
-            // Drop db without proper cleanup to simulate crash
-            drop(db);
+            db.simulate_failure(true, false, false).await.unwrap();
 
             // Reopen and verify correct recovery
             let db = open_db(context.clone()).await;
