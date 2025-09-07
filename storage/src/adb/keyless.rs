@@ -377,7 +377,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             }
         };
 
-        // Find the last commit point and rewind if necessary
+        // Find the last commit point and rewind to it (if necessary).
         let op_count = mmr.leaves();
         let size = Self::rewind_to_last_commit(
             &mut locations,
