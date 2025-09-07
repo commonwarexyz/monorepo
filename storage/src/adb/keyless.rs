@@ -252,6 +252,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             .await?
             .expect("location should be nonempty");
 
+        // Walk backwards through the log until we find the last commit point.
         loop {
             match op {
                 Operation::Commit(_) => {
@@ -276,13 +277,13 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             op = log.get(section, offset).await?.expect("no operation found");
         }
 
-        // If we saw any appends after the last Commit, rewind to just before
-        // the earliest such append. Otherwise, there is nothing to rewind and
-        // size remains at the current op_count.
+        // If there are no uncommitted operations, exit early.
         let (rewind_size, rewind_offset) = match first_uncommitted {
             Some(rewind_point) => rewind_point,
             None => return Ok(op_index + 1),
         };
+
+        // Rewind the log and MMR to the last commit point.
         let ops_to_rewind = (op_count - rewind_size) as usize;
         warn!(ops_to_rewind, rewind_size, "rewinding log to last commit");
         locations.rewind(rewind_size).await?;
