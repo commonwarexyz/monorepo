@@ -116,7 +116,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
 
 impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Find the last valid log operation that has a corresponding location entry.
-    async fn find_last_valid_log_operation(
+    async fn find_last_operation(
         locations: &FJournal<E, u32>,
         log: &VJournal<E, Operation<V>>,
         aligned_size: u64,
@@ -343,7 +343,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         // Find the section+offset of the most recent log operation that has a valid location offset
         // in locations.
-        let (valid_size, section_offset) = Self::find_last_valid_log_operation(
+        let (valid_size, section_offset) = Self::find_last_operation(
             &locations,
             &log,
             aligned_size,
