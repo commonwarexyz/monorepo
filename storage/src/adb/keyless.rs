@@ -259,9 +259,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 }
             }
             if op_index == oldest_retained_loc {
-                if op_index != 0 {
-                    panic!("no commit operation found, oldest_retained_loc: {oldest_retained_loc}");
-                }
+                assert_eq!(op_index, 0, "no commit operation found");
                 break;
             }
             op_index -= 1;
@@ -271,9 +269,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         }
 
         // If there are no uncommitted operations, exit early.
-        let (rewind_size, rewind_offset) = match first_uncommitted {
-            Some(rewind_point) => rewind_point,
-            None => return Ok(op_index + 1),
+        let Some((rewind_size, rewind_offset)) = first_uncommitted else {
+            return Ok(op_index + 1);
         };
 
         // Rewind the log and MMR to the last commit point.
