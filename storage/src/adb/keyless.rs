@@ -341,7 +341,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let replay_result =
             Self::replay_operations(&mut mmr, &mut locations, &log, &mut hasher, section_offset)
                 .await?;
-        let Some((offset, last_log_op)) = replay_result else {
+        let Some((last_offset, last_op)) = replay_result else {
             // Empty database
             return Ok(Self {
                 mmr,
@@ -360,9 +360,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             &mut locations,
             &mut log,
             &mut mmr,
-            last_log_op,
+            last_op,
             op_count,
-            offset,
+            last_offset,
             log_items_per_section,
         )
         .await?;
