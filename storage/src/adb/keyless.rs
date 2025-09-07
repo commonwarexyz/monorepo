@@ -122,11 +122,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         aligned_size: u64,
         log_items_per_section: u64,
     ) -> Result<(u64, Option<(u64, u32)>), Error> {
-        let mut has_offset_size = aligned_size;
+        let mut valid_size = aligned_size;
         let mut section_offset = None;
 
-        while has_offset_size > 0 {
-            let loc = has_offset_size - 1;
+        while valid_size > 0 {
+            let loc = valid_size - 1;
             let offset = locations.read(loc).await?;
             let section = loc / log_items_per_section;
             match log.get(section, offset).await {
@@ -147,10 +147,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 loc = loc,
                 offset, section, "locations is ahead of log, walking back"
             );
-            has_offset_size -= 1;
+            valid_size -= 1;
         }
 
-        Ok((has_offset_size, section_offset))
+        Ok((valid_size, section_offset))
     }
 
     /// Replay log operations from a given position and sync MMR and locations.
