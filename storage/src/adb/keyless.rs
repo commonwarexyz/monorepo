@@ -333,13 +333,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         // Find the section+offset of the most recent log operation that has a valid location offset
         // in locations.
-        let (valid_size, section_offset) = Self::find_last_operation(
-            &locations,
-            &log,
-            aligned_size,
-            cfg.log_items_per_section.get(),
-        )
-        .await?;
+        let log_items_per_section = cfg.log_items_per_section.get();
+        let (valid_size, section_offset) =
+            Self::find_last_operation(&locations, &log, aligned_size, log_items_per_section)
+                .await?;
 
         // Trim any locations/mmr elements that do not have corresponding operations in log.
         if aligned_size != valid_size {
@@ -370,7 +367,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                     log,
                     size: 0,
                     locations,
-                    log_items_per_section: cfg.log_items_per_section.get(),
+                    log_items_per_section,
                     hasher,
                     last_commit_loc: None,
                 });
@@ -386,7 +383,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             last_log_op,
             op_count,
             offset,
-            cfg.log_items_per_section.get(),
+            log_items_per_section,
         )
         .await?;
         assert_eq!(size, mmr.leaves());
@@ -397,7 +394,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             log,
             size,
             locations,
-            log_items_per_section: cfg.log_items_per_section.get(),
+            log_items_per_section,
             hasher,
             last_commit_loc: size.checked_sub(1),
         })
