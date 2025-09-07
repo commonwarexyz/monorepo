@@ -157,16 +157,21 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         section_offset: Option<(u64, u32)>,
     ) -> Result<Option<(u32, Operation<V>)>, Error> {
         // Initialize stream from section_offset
-        let (section, offset, expect_first) = match section_offset {
+        let (section, offset, skip_first) = match section_offset {
             Some((s, o)) => (s, o, true),
             None => (0, 0, false),
         };
         let stream = log.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
         pin_mut!(stream);
 
-        // Handle empty log case
+        // Get first operation and handle empty log case
         let first_op = stream.next().await;
-        if !expect_first {
+        let (mut last_offset, mut last_op) = if skip_first {
+            // We expect the first operation to exist (already processed)
+            let first_op = first_op.expect("operation known to exist")?;
+            (offset, first_op.3)
+        } else {
+            // Check if log is empty
             let Some(first_op) = first_op else {
                 debug!("no starting log operation found, returning empty db");
                 return Ok(None);
@@ -177,36 +182,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             // Add first operation to mmr and locations
             mmr.add_batched(hasher, &encoded_op).await?;
             locations.append(first_op.1).await?;
+            (first_op.1, first_op.3)
+        };
 
-            // Process remaining operations
-            let mut last_op = first_op.3;
-            let mut last_offset = first_op.1;
-            while let Some(result) = stream.next().await {
-                let (section, offset, _, next_op) = result?;
-                let encoded_op = next_op.encode();
-                last_op = next_op;
-                last_offset = offset;
-                warn!(
-                    location = mmr.leaves(),
-                    section, offset, "adding missing operation to MMR/location map"
-                );
-                mmr.add_batched(hasher, &encoded_op).await?;
-                locations.append(offset).await?;
-            }
-
-            // Sync if needed
-            if mmr.is_dirty() {
-                mmr.sync(hasher).await?;
-                locations.sync().await?;
-            }
-
-            return Ok(Some((last_offset, last_op)));
-        }
-
-        // Handle case where we expect the first operation to exist
-        let first_op = first_op.expect("operation known to exist")?;
-        let mut last_op = first_op.3;
-        let mut last_offset = offset;
+        // Process remaining operations
         while let Some(result) = stream.next().await {
             let (section, offset, _, next_op) = result?;
             let encoded_op = next_op.encode();
