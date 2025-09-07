@@ -348,9 +348,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let offset = self.locations.read(loc).await?;
 
         let section = loc / self.log_items_per_section;
-        let Some(op) = self.log.get(section, offset).await? else {
-            panic!("didn't find operation at location {loc} and offset {offset}");
+        let op = self.log.get(section, offset).await?;
+        let Some(op) = op else {
+            return Ok(None);
         };
+
         match op {
             Operation::Append(v) => Ok(Some(v)),
             Operation::Commit(v) => Ok(v),
