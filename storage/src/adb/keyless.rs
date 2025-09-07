@@ -156,7 +156,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Replay log operations from a given position and sync MMR and locations.
     /// Returns None if the log is empty (for initial replay), otherwise returns
     /// the offset and the last operation processed.
-    async fn replay_and_sync_operations(
+    async fn replay_operations(
         mmr: &mut Mmr<E, H>,
         locations: &mut FJournal<E, u32>,
         log: &VJournal<E, Operation<V>>,
@@ -350,14 +350,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // location represented by `section_offset`. We use this as the starting point to replay the
         // log in order to add back any missing items. If they don't exist, we use the very first
         // log operation as our starting point.
-        let replay_result = Self::replay_and_sync_operations(
-            &mut mmr,
-            &mut locations,
-            &log,
-            &mut hasher,
-            section_offset,
-        )
-        .await?;
+        let replay_result =
+            Self::replay_operations(&mut mmr, &mut locations, &log, &mut hasher, section_offset)
+                .await?;
         let (last_log_op, offset) = match replay_result {
             Some((offset, last_op)) => (last_op, offset),
             None => {
