@@ -161,6 +161,11 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     pub(crate) blobs: BTreeMap<u64, Append<E::Blob>>,
 
+    /// A section number before which all sections have been pruned. This value is not persisted,
+    /// and is initialized to 0 at startup. It's updated only during calls to `prune` during the
+    /// current execution, and therefore provides only a best effort lower-bound on the true value.
+    pub(crate) oldest_retained_section: u64,
+
     pub(crate) tracked: Gauge,
     pub(crate) synced: Counter,
     pub(crate) pruned: Counter,
@@ -208,6 +213,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             context,
             cfg,
             blobs,
+            oldest_retained_section: 0,
             tracked,
             synced,
             pruned,
@@ -216,14 +222,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         })
     }
 
-    /// Ensures that a pruned section is not accessed.
+    /// Ensures that a section pruned during the current execution is not accessed.
     fn prune_guard(&self, section: u64) -> Result<(), Error> {
-        if let Some(oldest_allowed) = self.oldest_section() {
-            if section < oldest_allowed {
-                return Err(Error::AlreadyPrunedToSection(oldest_allowed));
-            }
+        if section < self.oldest_retained_section {
+            Err(Error::AlreadyPrunedToSection(self.oldest_retained_section))
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     /// Reads an item from the blob at the given offset.
