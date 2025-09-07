@@ -189,8 +189,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         while let Some(result) = stream.next().await {
             let (section, offset, _, next_op) = result?;
             let encoded_op = next_op.encode();
-            last_op = next_op;
             last_offset = offset;
+            last_op = next_op;
             warn!(
                 location = mmr.leaves(),
                 section, offset, "adding missing operation to MMR/location map"
@@ -1367,6 +1367,126 @@ mod test {
                     "Should be able to prove remaining operations after extensive pruning"
                 );
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_keyless_db_replay_with_trailing_appends() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create initial database with committed data
+            let mut db = open_db(context.clone()).await;
+
+            // Add some initial operations and commit
+            for i in 0..10 {
+                let v = vec![i as u8; 10];
+                db.append(v).await.unwrap();
+            }
+            db.commit(None).await.unwrap();
+            let committed_root = db.root(&mut hasher);
+            let committed_size = db.op_count();
+
+            // Add exactly one more append (uncommitted)
+            let uncommitted_value = vec![99u8; 20];
+            db.append(uncommitted_value.clone()).await.unwrap();
+
+            // Get current state before simulation
+            let section = db.current_section();
+
+            // Sync only the log (not MMR or locations)
+            db.log.sync(section).await.unwrap();
+
+            // Process MMR updates first (required before pop)
+            db.mmr.process_updates(&mut hasher);
+
+            // Manually rewind MMR and locations to simulate them being behind
+            db.mmr.pop(1).await.unwrap();
+            db.locations.rewind(committed_size).await.unwrap();
+
+            // Drop db without proper cleanup to simulate crash
+            //
+            // Don't sync MMR/locations - leave them in "behind" state
+            // This simulates a crash after log write but before MMR/locations update
+            drop(db);
+
+            // Reopen database
+            let mut db = open_db(context.clone()).await;
+
+            // Verify correct recovery
+            assert_eq!(
+                db.op_count(),
+                committed_size,
+                "Should rewind to last commit"
+            );
+            assert_eq!(
+                db.root(&mut hasher),
+                committed_root,
+                "Root should match last commit"
+            );
+            assert_eq!(
+                db.last_commit_loc(),
+                Some(committed_size - 1),
+                "Last commit location should be correct"
+            );
+
+            // Verify the uncommitted append was properly discarded
+            // We should be able to append new data without issues
+            let new_value = vec![77u8; 15];
+            let loc = db.append(new_value.clone()).await.unwrap();
+            assert_eq!(
+                loc, committed_size,
+                "New append should get the expected location"
+            );
+
+            // Verify we can read the new value
+            assert_eq!(db.get(loc).await.unwrap(), Some(new_value));
+
+            // Test with multiple trailing appends to ensure robustness
+            db.commit(None).await.unwrap();
+            let new_committed_root = db.root(&mut hasher);
+            let new_committed_size = db.op_count();
+
+            // Add multiple uncommitted appends
+            for i in 0..5 {
+                let v = vec![(200 + i) as u8; 10];
+                db.append(v).await.unwrap();
+            }
+
+            // Simulate the same partial failure scenario
+            let section = db.current_section();
+            db.log.sync(section).await.unwrap();
+
+            // Process MMR updates first (required before pop)
+            db.mmr.process_updates(&mut hasher);
+
+            // Rewind MMR and locations to before the uncommitted appends
+            db.mmr.pop(5).await.unwrap();
+            db.locations.rewind(new_committed_size).await.unwrap();
+
+            // Drop db without proper cleanup to simulate crash
+            drop(db);
+
+            // Reopen and verify correct recovery
+            let db = open_db(context.clone()).await;
+            assert_eq!(
+                db.op_count(),
+                new_committed_size,
+                "Should rewind to last commit with multiple trailing appends"
+            );
+            assert_eq!(
+                db.root(&mut hasher),
+                new_committed_root,
+                "Root should match last commit after multiple appends"
+            );
+            assert_eq!(
+                db.last_commit_loc(),
+                Some(new_committed_size - 1),
+                "Last commit location should be correct after multiple appends"
+            );
 
             db.destroy().await.unwrap();
         });
