@@ -900,8 +900,6 @@ impl<const N: usize> BitVec2<N> {
         }
     }
 
-    // ---------- Helper Functions ----------
-
     /// Flips the bit at the specified index without bounds checking.
     #[inline(always)]
     fn toggle_bit_unchecked(&mut self, index: u64) {
@@ -950,8 +948,6 @@ impl<const N: usize> Default for BitVec2<N> {
     }
 }
 
-// ---------- Equality ----------
-
 impl<const N: usize> PartialEq for BitVec2<N> {
     fn eq(&self, other: &Self) -> bool {
         // First check if bit counts match
@@ -988,6 +984,12 @@ impl<T: AsRef<[bool]>, const N: usize> From<T> for BitVec2<N> {
     }
 }
 
+impl<const N: usize> From<BitVec2<N>> for Vec<bool> {
+    fn from(bv: BitVec2<N>) -> Self {
+        bv.iter().collect()
+    }
+}
+
 impl<const N: usize> fmt::Debug for BitVec2<N> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         // For very large Bitvec2s, only show a preview
@@ -999,7 +1001,7 @@ impl<const N: usize> fmt::Debug for BitVec2<N> {
             formatter.write_char(if self.get_bit(index) { '1' } else { '0' })
         };
 
-        f.write_str("Bitvec2[")?;
+        f.write_str("BitVec2[")?;
         let bit_count = self.bit_count();
         if bit_count <= MAX_DISPLAY as u64 {
             // Show all bits
@@ -1019,6 +1021,57 @@ impl<const N: usize> fmt::Debug for BitVec2<N> {
             }
         }
         f.write_str("]")
+    }
+}
+
+impl<const N: usize> Index<usize> for BitVec2<N> {
+    type Output = bool;
+
+    /// Allows accessing bits using the `[]` operator.
+    ///
+    /// Panics if out of bounds.
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        self.assert_index(index as u64);
+        let value = self.get_bit(index as u64);
+        if value {
+            &true
+        } else {
+            &false
+        }
+    }
+}
+
+impl<const N: usize> BitAnd for &BitVec2<N> {
+    type Output = BitVec2<N>;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        self.assert_eq_len(rhs);
+        let mut result = self.clone();
+        result.and(rhs);
+        result
+    }
+}
+
+impl<const N: usize> BitOr for &BitVec2<N> {
+    type Output = BitVec2<N>;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self.assert_eq_len(rhs);
+        let mut result = self.clone();
+        result.or(rhs);
+        result
+    }
+}
+
+impl<const N: usize> BitXor for &BitVec2<N> {
+    type Output = BitVec2<N>;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        self.assert_eq_len(rhs);
+        let mut result = self.clone();
+        result.xor(rhs);
+        result
     }
 }
 
@@ -1132,8 +1185,6 @@ impl<const N: usize> Iterator for Bitvec2Iterator<'_, N> {
 }
 
 impl<const N: usize> ExactSizeIterator for Bitvec2Iterator<'_, N> {}
-
-// ---------- Tests ----------
 
 #[cfg(test)]
 mod tests {
