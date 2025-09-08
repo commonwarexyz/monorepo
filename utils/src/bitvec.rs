@@ -1,14 +1,7 @@
 //! Bit-vector implementation
 //!
-//! The bit-vector is a compact representation of a sequence of bits, using [u8] "blocks" for a
-//! more-efficient memory layout than doing a [`Vec<bool>`]. Thus, if the length of the bit-vector
-//! is not a multiple of 8, the last block will contain some bits that are not part of the vector.
-//! An invariant of the implementation is that any bits in the last block that are not part of the
-//! vector are set to 0.
-//!
-//! The implementation is focused on being compact when encoding small bit vectors, so [u8] is
-//! used over more performant types like [usize] or [u64]. Such types would result in more
-//! complex encoding and decoding logic.
+//! The bit-vector is a compact representation of a sequence of bits, using "chunks" of bytes for a
+//! more-efficient memory layout than doing a [`Vec<bool>`].
 
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec, vec::Vec};
@@ -27,9 +20,8 @@ pub struct BitVec<const N: usize> {
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
     /// higher order bits in the bit ordering.
     ///
-    /// Invariant: The last chunk in the bitmap always has room for at least one more bit. This
-    /// implies there is always at least one chunk in the bitmap, it's just empty if no bits have
-    /// been added yet.
+    /// Invariant: The last chunk in the bitmap always has room for at least one more bit.
+    /// This implies that !bitmap.is_empty() always holds.
     bitmap: VecDeque<[u8; N]>,
 
     /// The position within the last chunk of the bitmap where the next bit is to be appended.
@@ -52,6 +44,20 @@ impl<const N: usize> BitVec<N> {
             bitmap,
             next_bit: 0,
         }
+    }
+
+    // Create a new bitmap with the capacity to hold `size` bits without reallocating.
+    pub fn with_capacity(size: usize) -> Self {
+        let num_chunks = Self::chunks_needed(size);
+        Self {
+            bitmap: VecDeque::with_capacity(num_chunks),
+            next_bit: 0,
+        }
+    }
+
+    // Returns the number of chunks the BitVec will have when it contains `size` bits.
+    fn chunks_needed(size: usize) -> usize {
+        (size / Self::CHUNK_SIZE_BITS as usize) + 1
     }
 
     // TODO optimize this
@@ -546,17 +552,8 @@ impl<const N: usize> Read for BitVec<N> {
             return Err(CodecError::Invalid("BitVec", "next_bit out of bounds"));
         }
 
-        // Calculate number of chunks needed based on bit_count and next_bit
-        let num_chunks = if bit_count == 0 {
-            1 // Always have at least one chunk
-        } else {
-            // The number of chunks is determined by the bit_count formula:
-            // bit_count = (num_chunks - 1) * CHUNK_SIZE_BITS + next_bit
-            // So: num_chunks = (bit_count - next_bit) / CHUNK_SIZE_BITS + 1
-            ((bit_count - next_bit) / Self::CHUNK_SIZE_BITS + 1) as usize
-        };
-
         // Parse chunks
+        let num_chunks = Self::chunks_needed(bit_count as usize);
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
             let mut chunk = [0u8; N];
@@ -1470,5 +1467,33 @@ mod tests {
         for (i, &expected) in pattern.iter().enumerate() {
             assert_eq!(bv16.get_bit(i as u64), expected);
         }
+    }
+
+    #[test]
+    fn test_chunks_needed() {
+        // Test with different chunk sizes
+        assert_eq!(BitVec::<1>::chunks_needed(0), 1);
+        assert_eq!(BitVec::<1>::chunks_needed(1), 1);
+        assert_eq!(BitVec::<1>::chunks_needed(8), 2);
+        assert_eq!(BitVec::<1>::chunks_needed(9), 2);
+        assert_eq!(BitVec::<1>::chunks_needed(16), 3);
+        assert_eq!(BitVec::<1>::chunks_needed(17), 3);
+
+        assert_eq!(BitVec::<3>::chunks_needed(0), 1);
+        assert_eq!(BitVec::<3>::chunks_needed(1), 1);
+        assert_eq!(BitVec::<3>::chunks_needed(23), 1);
+        assert_eq!(BitVec::<3>::chunks_needed(24), 2);
+        assert_eq!(BitVec::<3>::chunks_needed(25), 2);
+        assert_eq!(BitVec::<3>::chunks_needed(48), 3);
+        assert_eq!(BitVec::<3>::chunks_needed(49), 3);
+
+        assert_eq!(BitVec::<4>::chunks_needed(0), 1);
+        assert_eq!(BitVec::<4>::chunks_needed(1), 1);
+        assert_eq!(BitVec::<4>::chunks_needed(31), 1);
+        assert_eq!(BitVec::<4>::chunks_needed(32), 2);
+        assert_eq!(BitVec::<4>::chunks_needed(33), 2);
+        assert_eq!(BitVec::<4>::chunks_needed(63), 2);
+        assert_eq!(BitVec::<4>::chunks_needed(64), 3);
+        assert_eq!(BitVec::<4>::chunks_needed(65), 3);
     }
 }

@@ -58,10 +58,9 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::WithCapacity(cap) => {
-                // TODO uncomment
-                // let bv = BitVec::with_capacity(cap.min(MAX_SIZE));
-                // assert!(bv.is_empty());
-                // assert_eq!(bv.len(), 0);
+                let bv = BitVec::with_capacity(cap.min(MAX_SIZE));
+                assert!(bv.is_empty());
+                assert_eq!(bv.len(), 0);
             }
 
             FuzzInput::Zeroes(size) => {
@@ -136,14 +135,14 @@ fn fuzz(input: Vec<FuzzInput>) {
                 // }
             }
 
-            FuzzInput::GetUnchecked(bools, index) => unsafe {
+            FuzzInput::GetUnchecked(bools, index) => {
                 let v = BitVec::from(&bools);
                 // Caller must ensure `index` is less than the length of the BitVec.
                 if index as u64 >= v.bit_count() {
                     return;
                 }
                 v.get_bit(index as u64);
-            },
+            }
 
             FuzzInput::Set(bools, index) => {
                 let mut v = BitVec::from(&bools);
