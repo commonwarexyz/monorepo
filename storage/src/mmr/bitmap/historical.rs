@@ -6,16 +6,15 @@
 
 use crate::mmr::bitmap::Bitmap;
 use commonware_cryptography::Hasher;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-/// A bitmap wrapper that maintains a cache of recent bitmap states.
-///
-/// Cached states are automatically pruned when the underlying bitmap is pruned.
+/// A [Bitmap] wrapper that maintains a cache of recent states.
+/// Each stored bitmap state is associated with an index which identifies the state.
 pub struct HistoricalBitmap<H: Hasher, const N: usize> {
     /// The current bitmap state
     bitmap: Bitmap<H, N>,
-    /// Cache of bitmap states keyed by index (log size)
-    cached_states: HashMap<u64, Bitmap<H, N>>,
+    /// Index -> Bitmap State at that index
+    cached_states: BTreeMap<u64, Bitmap<H, N>>,
 }
 
 impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
@@ -29,7 +28,7 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
     pub fn new() -> Self {
         Self {
             bitmap: Bitmap::new(),
-            cached_states: HashMap::new(),
+            cached_states: BTreeMap::new(),
         }
     }
 
@@ -53,7 +52,7 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
         self.cached_states.len()
     }
 
-    /// Cache the current bitmap state at the specified index (log size)
+    /// Cache the current bitmap state at the specified index
     pub fn cache_state(&mut self, index: u64) {
         // Copy and cache the current state
         let bitmap_copy = self.bitmap.clone();
@@ -80,16 +79,11 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
         self.bitmap.append_chunk_unchecked(chunk);
     }
 
-    /// Prune the bitmap to the specified bit offset and remove cached states below this offset.
+    /// Prune the bitmap to the specified bit offset and remove cached states with indices below
+    /// this offset.
     pub fn prune_to_bit(&mut self, bit_offset: u64) {
         self.bitmap.prune_to_bit(bit_offset);
         self.cached_states.retain(|&index, _| index >= bit_offset);
-    }
-
-    /// Get a cached bitmap state by index
-    /// Returns None if the index is not in the cache
-    pub fn get_cached_state(&self, index: u64) -> Option<&Bitmap<H, N>> {
-        self.cached_states.get(&index)
     }
 
     /// Get a bitmap state by index
@@ -97,11 +91,9 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
         self.cached_states.get(&index)
     }
 
-    /// Get all available cached indices in sorted order
+    /// Get all available cached indices in ascending order
     pub fn available_indices(&self) -> Vec<u64> {
-        let mut indices: Vec<u64> = self.cached_states.keys().copied().collect();
-        indices.sort_unstable();
-        indices
+        self.cached_states.keys().into_iter().copied().collect()
     }
 
     /// Check if a state is available (either current or cached)
@@ -195,7 +187,7 @@ impl<H: Hasher, const N: usize> From<Bitmap<H, N>> for HistoricalBitmap<H, N> {
     fn from(bitmap: Bitmap<H, N>) -> Self {
         Self {
             bitmap,
-            cached_states: HashMap::new(),
+            cached_states: BTreeMap::new(),
         }
     }
 }
@@ -248,12 +240,27 @@ mod tests {
         let mut hb = TestHistoricalBitmap::new();
 
         hb.cache_state(0);
+        assert!(hb.has_state(0));
+        assert_eq!(hb.cached_count(), 1);
+        assert_eq!(hb.available_indices(), vec![0]);
+
         hb.append(true);
         hb.cache_state(1);
+        assert!(hb.has_state(1));
+        assert_eq!(hb.cached_count(), 2);
+        assert_eq!(hb.available_indices(), vec![0, 1]);
+
         hb.append(false);
         hb.cache_state(2);
-
+        assert!(hb.has_state(2));
         assert_eq!(hb.cached_count(), 3);
+        assert_eq!(hb.available_indices(), vec![0, 1, 2]);
+
+        hb.set_bit(1, true);
+        hb.cache_state(3);
+        assert!(hb.has_state(3));
+        assert_eq!(hb.cached_count(), 4);
+        assert_eq!(hb.available_indices(), vec![0, 1, 2, 3]);
 
         // Verify cached state contents match expected snapshots
         let state_0 = hb.get_state(0).unwrap();
@@ -267,48 +274,167 @@ mod tests {
         assert_eq!(state_2.bit_count(), 2);
         assert!(state_2.get_bit(0));
         assert!(!state_2.get_bit(1));
-    }
 
-    #[test]
-    fn test_available_indices() {
-        // Tests that available_indices() returns all cached indices in sorted order
-        let mut hb = TestHistoricalBitmap::new();
-
-        // Cache states in non-sequential order
-        hb.cache_state(10);
-        hb.cache_state(5);
-        hb.cache_state(15);
-        hb.cache_state(1);
-
-        let indices = hb.available_indices();
-        assert_eq!(indices, vec![1, 5, 10, 15]); // Should be sorted
+        let state_3 = hb.get_state(3).unwrap();
+        assert_eq!(state_3.bit_count(), 2);
+        assert!(state_3.get_bit(0));
+        assert!(state_3.get_bit(1));
     }
 
     #[test]
     fn test_prune_to_bit() {
-        // Tests that prune_to_bit() removes cached states with index < bit_offset
+        // Tests comprehensive prune_to_bit behavior with operations between cached states
+        // and multiple pruning calls
         let mut hb = TestHistoricalBitmap::new();
 
+        // Phase 1: Build up bitmap with operations and cache states
+
+        // Cache initial empty state
+        // Bitmap: (empty)
+        // Cached: [0]
         hb.cache_state(0);
-        hb.cache_state(1);
+        assert_eq!(hb.current_bit_count(), 0);
+        assert_eq!(hb.cached_count(), 1);
+
+        // Add some bits and cache intermediate states
+        hb.append(true); // bit_count = 1
+        hb.append(false); // bit_count = 2
+                          // Bitmap: [1, 0]
+                          // Cached: [0, 2]
         hb.cache_state(2);
-        hb.cache_state(3);
-        hb.cache_state(4);
 
-        hb.prune_to_bit(2);
+        hb.append(true); // bit_count = 3
+        hb.append(true); // bit_count = 4
+        hb.append(false); // bit_count = 5
+                          // Bitmap: [1, 0, 1, 1, 0]
+                          // Cached: [0, 2, 5]
+        hb.cache_state(5);
 
-        // States with index >= 2 should remain
-        assert_eq!(hb.cached_count(), 3);
-        assert!(!hb.has_state(0));
-        assert!(!hb.has_state(1));
+        hb.append(false); // bit_count = 6
+        hb.append(true); // bit_count = 7
+        hb.append(false); // bit_count = 8
+                          // Bitmap: [1, 0, 1, 1, 0, 0, 1, 0]
+                          // Cached: [0, 2, 5, 8]
+        hb.cache_state(8);
+
+        // Use set_bit to modify an earlier bit (simulates an operation becoming inactive)
+        hb.set_bit(1, true); // Change bit 1 from 0 to 1
+                             // Bitmap: [1, 1, 1, 1, 0, 0, 1, 0]
+                             //            ^  (bit 1 changed from 0 to 1)
+
+        // Verify that previously cached states are NOT affected by set_bit
+        let cached_state_2 = hb.get_state(2).unwrap();
+        assert!(!cached_state_2.get_bit(1)); // Should still be false (cached before set_bit)
+
+        // But current bitmap should reflect the change
+        assert!(hb.current().get_bit(1)); // Should now be true (after set_bit)
+
+        hb.append(true); // bit_count = 9
+        hb.append(false); // bit_count = 10
+                          // Bitmap: [1, 1, 1, 1, 0, 0, 1, 0, 1, 0]
+                          // Cached: [0, 2, 5, 8, 10]
+        hb.cache_state(10);
+
+        // Verify initial state
+        assert_eq!(hb.current_bit_count(), 10);
+        assert_eq!(hb.cached_count(), 5); // States at 0, 2, 5, 8, 10
+        assert!(hb.has_state(0));
         assert!(hb.has_state(2));
-        assert!(hb.has_state(3));
-        assert!(hb.has_state(4));
+        assert!(hb.has_state(5));
+        assert!(hb.has_state(8));
+        assert!(hb.has_state(10));
+
+        // Verify cached state contents are correct
+        let state_0 = hb.get_state(0).unwrap();
+        assert_eq!(state_0.bit_count(), 0);
+
+        let state_2 = hb.get_state(2).unwrap();
+        assert_eq!(state_2.bit_count(), 2);
+        assert!(state_2.get_bit(0)); // true
+        assert!(!state_2.get_bit(1)); // false (this was cached before set_bit changed it)
+
+        let state_5 = hb.get_state(5).unwrap();
+        assert_eq!(state_5.bit_count(), 5);
+        assert!(state_5.get_bit(0)); // true
+        assert!(!state_5.get_bit(1)); // false
+        assert!(state_5.get_bit(2)); // true
+        assert!(state_5.get_bit(3)); // true
+        assert!(!state_5.get_bit(4)); // false
+
+        // Phase 2: First pruning - remove states below bit 3
+        // Before: Bitmap: [1, 0, 1, 1, 0, 0, 1, 0, 1, 0]
+        //         Cached: [0, 2, 5, 8, 10]
+        //         Prune:   ^  ^  ^  (remove states < 3)
+        hb.prune_to_bit(3);
+        // After:  Bitmap: [X, X, X, 1, 0, 0, 1, 0, 1, 0] (bits 0-2 pruned)
+        //         Cached: [5, 8, 10] (states 0,2 removed)
+
+        // States with index >= 3 should remain, others should be removed
+        assert_eq!(hb.cached_count(), 3); // States at 5, 8, 10 remain
+        assert!(!hb.has_state(0)); // Removed (0 < 3)
+        assert!(!hb.has_state(2)); // Removed (2 < 3)
+        assert!(hb.has_state(5)); // Kept (5 >= 3)
+        assert!(hb.has_state(8)); // Kept (8 >= 3)
+        assert!(hb.has_state(10)); // Kept (10 >= 3)
+
+        // Phase 3: Add operations with set_bit modifications
+        hb.append(false); // bit_count = 11
+        hb.append(true); // bit_count = 12
+                         // Bitmap: [X, X, X, 1, 1, 1, 1, 0, 1, 0, 0, 1]
+                         // Cached: [5, 8, 10, 12]
+        hb.cache_state(12);
+
+        // Use set_bit to modify existing bits (simulates operations becoming inactive)
+        hb.set_bit(9, true); // Change bit 9 from 0 to 1
+        hb.set_bit(10, true); // Change bit 10 from 0 to 1
+                              // Bitmap: [X, X, X, 1, 1, 1, 1, 0, 1, 1, 1, 1]
+                              //                              ^  ^  (bits 9,10 changed)
+
+        // Verify that set_bit doesn't affect previously cached states
+        let cached_state_10 = hb.get_state(10).unwrap();
+        assert_eq!(cached_state_10.bit_count(), 10);
+        assert!(!cached_state_10.get_bit(9)); // Should still be false (cached before set_bit)
+
+        // But current bitmap should reflect the set_bit change
+        assert!(hb.current().get_bit(9)); // Should now be true (after set_bit)
+
+        // Verify state before pruning
+        assert_eq!(hb.current_bit_count(), 12);
+        assert_eq!(hb.cached_count(), 4); // States at 5, 8, 10, 12
+
+        // Phase 4: Prune to remove some cached states
+        // Before: Bitmap: [X, X, X, 1, 1, 1, 1, 0, 1, 1, 1, 1]
+        //         Cached: [5, 8, 10, 12]
+        //         Prune:   ^  ^  (remove states < 9)
+        hb.prune_to_bit(9);
+        // After:  Bitmap: [X, X, X, X, X, X, X, X, X, 1, 1, 1] (bits 0-8 pruned)
+        //         Cached: [10, 12] (states 5,8 removed)
+
+        assert_eq!(hb.cached_count(), 2);
+        assert!(!hb.has_state(5)); // Removed (5 < 9)
+        assert!(!hb.has_state(8)); // Removed (8 < 9)
+        assert!(hb.has_state(10)); // Kept (10 >= 9)
+        assert!(hb.has_state(12)); // Kept (12 >= 9)
+
+        // Phase 5: Final pruning beyond all cached states
+        // Before: Bitmap: [X, X, X, X, X, X, X, X, X, 1, 1, 1]
+        //         Cached: [10, 12]
+        //         Prune:   ^   ^  (remove states < 15)
+        hb.prune_to_bit(15);
+        // After:  Bitmap: [X, X, X, X, X, X, X, X, X, X, X, X, X, X, X] (all bits pruned)
+        //         Cached: [] (all states removed)
+
+        assert_eq!(hb.cached_count(), 0);
+        assert!(!hb.has_state(10)); // Removed (10 < 15)
+        assert!(!hb.has_state(12)); // Removed (12 < 15)
+
+        // Current bitmap should still be accessible
+        assert_eq!(hb.current_bit_count(), 12);
     }
 
+    // Tests that cached bitmap states preserve their MMR roots correctly
     #[test]
     fn test_cached_states_preserve_mmr_roots() {
-        // Tests that cached bitmap states preserve their MMR roots correctly
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hb = TestHistoricalBitmap::new();

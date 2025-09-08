@@ -345,6 +345,7 @@ impl<
             )
             .await?; // (2)
 
+        // Save the current state of the bitmap for historical range proofs.
         self.status.cache_state(self.any.op_count());
 
         Ok(())
