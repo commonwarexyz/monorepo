@@ -49,7 +49,7 @@ mod tests {
         },
         Config, Engine, Mailbox,
     };
-    use crate::{Handler, Monitor, Originator};
+    use crate::{Error, Handler, Monitor, Originator};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -701,7 +701,53 @@ mod tests {
                 .send(Recipients::One(peers[1].clone()), request.clone())
                 .await
                 .unwrap_err();
-            assert!(matches!(err, crate::Error::SendFailed(_)));
+            assert!(matches!(err, Error::SendFailed(_)));
+        });
+    }
+
+    #[test_traced]
+    fn test_send_fails_with_canceled() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+            let mut schemes = schemes.into_iter();
+            let mut connections = connections.into_iter();
+
+            // Link the peers
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            // Setup peer 1 with a failing sender
+            let scheme = schemes.next().unwrap();
+            let conn = connections.next().unwrap();
+            let (sender1, receiver1) = conn.0; // Request channel
+            let (sender2, receiver2) = conn.1; // Response channel
+
+            let (engine, mut mailbox) = Engine::new(
+                context.with_label(&format!("engine_{}", scheme.public_key())),
+                Config {
+                    blocker: oracle.control(scheme.public_key()),
+                    monitor: MockMonitor::dummy(),
+                    handler: MockHandler::dummy(),
+                    mailbox_size: MAILBOX_SIZE,
+                    priority_request: false,
+                    request_codec: (),
+                    priority_response: false,
+                    response_codec: (),
+                },
+            );
+
+            // Start engine
+            let handle = engine.start((sender1, receiver1), (sender2, receiver2));
+            handle.abort();
+
+            // Send request
+            let request = Request { id: 1, data: 1 };
+            let err = mailbox
+                .send(Recipients::One(peers[1].clone()), request.clone())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Canceled));
         });
     }
 
