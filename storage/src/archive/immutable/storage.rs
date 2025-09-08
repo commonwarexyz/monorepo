@@ -7,7 +7,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{sequence::prefixed_u64::U64, Array, BitVec};
+use commonware_utils::{sequence::prefixed_u64::U64, Array};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::BTreeMap;
@@ -18,6 +18,9 @@ const FREEZER_PREFIX: u8 = 0;
 
 /// Prefix for [Ordinal] records.
 const ORDINAL_PREFIX: u8 = 1;
+
+const CHUNK_SIZE: usize = 1;
+type BitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
 
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
 enum Record {
@@ -247,7 +250,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
 
         // Update active bits
         let done = if let Record::Ordinal(Some(bits)) = record {
-            bits.set((index % self.items_per_section) as usize);
+            bits.set_bit((index % self.items_per_section) as u64, true);
             bits.count_ones() == self.items_per_section as usize
         } else {
             false

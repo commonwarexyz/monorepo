@@ -585,8 +585,8 @@ impl Iterator for BitIterator<'_> {
 impl ExactSizeIterator for BitIterator<'_> {}
 
 /// A bitmap that stores data in chunks of N bytes.
-#[derive(Clone, Debug)]
-pub struct Bitvec2<const N: usize> {
+#[derive(Clone)]
+pub struct BitVec2<const N: usize> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
     /// higher order bits in the bit ordering.
@@ -602,7 +602,7 @@ pub struct Bitvec2<const N: usize> {
     next_bit: u64,
 }
 
-impl<const N: usize> Bitvec2<N> {
+impl<const N: usize> BitVec2<N> {
     /// The size of a chunk in bytes.
     pub const CHUNK_SIZE: usize = N;
 
@@ -616,6 +616,24 @@ impl<const N: usize> Bitvec2<N> {
             bitmap,
             next_bit: 0,
         }
+    }
+
+    // TODO optimize this
+    pub fn zeroes(size: usize) -> Self {
+        let mut bitmap = Self::new();
+        for _ in 0..size {
+            bitmap.append(false);
+        }
+        bitmap
+    }
+
+    // TODO optimize this
+    pub fn ones(size: usize) -> Self {
+        let mut bitmap = Self::new();
+        for _ in 0..size {
+            bitmap.append(true);
+        }
+        bitmap
     }
 
     /// Return the number of bits currently stored in the bitmap.
@@ -768,9 +786,9 @@ impl<const N: usize> Bitvec2<N> {
         (bit_offset / Self::CHUNK_SIZE_BITS) as usize
     }
 
-    /// Get the number of chunks in the bitmap
+    /// Get the number of bits in the bitmap
     pub fn len(&self) -> usize {
-        self.bitmap.len()
+        self.bit_count() as usize
     }
 
     /// Returns true if the bitmap is empty.
@@ -808,7 +826,6 @@ impl<const N: usize> Bitvec2<N> {
         for chunk in &mut self.bitmap {
             chunk.fill(u8::MAX);
         }
-        self.clear_trailing_bits();
     }
 
     /// Returns the number of bits set to 1.
@@ -852,9 +869,8 @@ impl<const N: usize> Bitvec2<N> {
     /// # Panics
     ///
     /// Panics if the lengths don't match.
-    pub fn and(&mut self, other: &Bitvec2<N>) {
+    pub fn and(&mut self, other: &BitVec2<N>) {
         self.binary_op(other, |a, b| a & b);
-        self.clear_trailing_bits();
     }
 
     /// Performs a bitwise OR with another Bitvec2.
@@ -862,9 +878,8 @@ impl<const N: usize> Bitvec2<N> {
     /// # Panics
     ///
     /// Panics if the lengths don't match.
-    pub fn or(&mut self, other: &Bitvec2<N>) {
+    pub fn or(&mut self, other: &BitVec2<N>) {
         self.binary_op(other, |a, b| a | b);
-        self.clear_trailing_bits();
     }
 
     /// Performs a bitwise XOR with another Bitvec2.
@@ -872,9 +887,8 @@ impl<const N: usize> Bitvec2<N> {
     /// # Panics
     ///
     /// Panics if the lengths don't match.
-    pub fn xor(&mut self, other: &Bitvec2<N>) {
+    pub fn xor(&mut self, other: &BitVec2<N>) {
         self.binary_op(other, |a, b| a ^ b);
-        self.clear_trailing_bits();
     }
 
     /// Flips all bits (1s become 0s and vice versa).
@@ -884,7 +898,6 @@ impl<const N: usize> Bitvec2<N> {
                 *byte = !*byte;
             }
         }
-        self.clear_trailing_bits();
     }
 
     // ---------- Helper Functions ----------
@@ -906,7 +919,7 @@ impl<const N: usize> Bitvec2<N> {
 
     /// Asserts that the lengths of two Bitvec2s match.
     #[inline(always)]
-    fn assert_eq_len(&self, other: &Bitvec2<N>) {
+    fn assert_eq_len(&self, other: &BitVec2<N>) {
         assert_eq!(
             self.bit_count(),
             other.bit_count(),
@@ -914,9 +927,14 @@ impl<const N: usize> Bitvec2<N> {
         );
     }
 
+    /// Creates an iterator over the bits.
+    pub fn iter(&self) -> Bitvec2Iterator<'_, N> {
+        Bitvec2Iterator { vec: self, pos: 0 }
+    }
+
     /// Helper for binary operations (AND, OR, XOR)
     #[inline]
-    fn binary_op<F: Fn(u8, u8) -> u8>(&mut self, other: &Bitvec2<N>, op: F) {
+    fn binary_op<F: Fn(u8, u8) -> u8>(&mut self, other: &BitVec2<N>, op: F) {
         self.assert_eq_len(other);
         for (a_chunk, b_chunk) in self.bitmap.iter_mut().zip(other.bitmap.iter()) {
             for (a_byte, b_byte) in a_chunk.iter_mut().zip(b_chunk.iter()) {
@@ -924,48 +942,196 @@ impl<const N: usize> Bitvec2<N> {
             }
         }
     }
-
-    /// Clears any bits in storage beyond the last valid bit. Returns true if any bits were cleared.
-    #[inline]
-    fn clear_trailing_bits(&mut self) -> bool {
-        if self.next_bit == 0 {
-            // No extra bits to clear
-            return false;
-        }
-
-        let last_chunk = self.bitmap.back_mut().unwrap();
-        let mut cleared = false;
-
-        // Clear bits in the last byte that are beyond next_bit
-        let last_byte_index = ((self.next_bit - 1) / 8) as usize;
-        let bits_in_last_byte = self.next_bit % 8;
-
-        if bits_in_last_byte != 0 {
-            let mask = (1u8 << bits_in_last_byte) - 1;
-            let old_byte = last_chunk[last_byte_index];
-            last_chunk[last_byte_index] &= mask;
-            if old_byte != last_chunk[last_byte_index] {
-                cleared = true;
-            }
-        }
-
-        // Clear all bytes after the last byte with valid bits
-        for i in (last_byte_index + 1)..N {
-            if last_chunk[i] != 0 {
-                last_chunk[i] = 0;
-                cleared = true;
-            }
-        }
-
-        cleared
-    }
 }
 
-impl<const N: usize> Default for Bitvec2<N> {
+impl<const N: usize> Default for BitVec2<N> {
     fn default() -> Self {
         Self::new()
     }
 }
+
+// ---------- Equality ----------
+
+impl<const N: usize> PartialEq for BitVec2<N> {
+    fn eq(&self, other: &Self) -> bool {
+        // First check if bit counts match
+        if self.bit_count() != other.bit_count() {
+            return false;
+        }
+
+        // If both are empty, they're equal
+        if self.bit_count() == 0 {
+            return true;
+        }
+
+        // Compare each valid bit
+        for i in 0..self.bit_count() {
+            if self.get_bit(i) != other.get_bit(i) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl<const N: usize> Eq for BitVec2<N> {}
+
+impl<T: AsRef<[bool]>, const N: usize> From<T> for BitVec2<N> {
+    fn from(t: T) -> Self {
+        let bools = t.as_ref();
+        let mut bv = Self::new();
+        for &b in bools {
+            bv.append(b);
+        }
+        bv
+    }
+}
+
+impl<const N: usize> fmt::Debug for BitVec2<N> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        // For very large Bitvec2s, only show a preview
+        const MAX_DISPLAY: usize = 64;
+        const HALF_DISPLAY: usize = MAX_DISPLAY / 2;
+
+        // Closure for writing a bit
+        let write_bit = |formatter: &mut Formatter<'_>, index: u64| -> core::fmt::Result {
+            formatter.write_char(if self.get_bit(index) { '1' } else { '0' })
+        };
+
+        f.write_str("Bitvec2[")?;
+        let bit_count = self.bit_count();
+        if bit_count <= MAX_DISPLAY as u64 {
+            // Show all bits
+            for i in 0..bit_count {
+                write_bit(f, i)?;
+            }
+        } else {
+            // Show first and last bits with ellipsis
+            for i in 0..HALF_DISPLAY as u64 {
+                write_bit(f, i)?;
+            }
+
+            f.write_str("...")?;
+
+            for i in (bit_count - HALF_DISPLAY as u64)..bit_count {
+                write_bit(f, i)?;
+            }
+        }
+        f.write_str("]")
+    }
+}
+
+impl<const N: usize> Write for BitVec2<N> {
+    fn write(&self, buf: &mut impl BufMut) {
+        // Prefix with the number of bits
+        self.bit_count().write(buf);
+
+        // Write the next_bit position
+        self.next_bit.write(buf);
+
+        // Write all chunks
+        for chunk in &self.bitmap {
+            for &byte in chunk {
+                byte.write(buf);
+            }
+        }
+    }
+}
+
+impl<const N: usize> Read for BitVec2<N> {
+    type Cfg = RangeCfg;
+
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
+        // Parse bit count
+        let bit_count = u64::read(buf)?;
+        if !range.contains(&(bit_count as usize)) {
+            return Err(CodecError::InvalidLength(bit_count as usize));
+        }
+
+        // Parse next_bit position
+        let next_bit = u64::read(buf)?;
+
+        // Validate next_bit is within chunk bounds
+        if next_bit >= Self::CHUNK_SIZE_BITS {
+            return Err(CodecError::Invalid("Bitvec2", "next_bit out of bounds"));
+        }
+
+        // Calculate number of chunks needed based on bit_count and next_bit
+        let num_chunks = if bit_count == 0 {
+            1 // Always have at least one chunk
+        } else {
+            // The number of chunks is determined by the bit_count formula:
+            // bit_count = (num_chunks - 1) * CHUNK_SIZE_BITS + next_bit
+            // So: num_chunks = (bit_count - next_bit) / CHUNK_SIZE_BITS + 1
+            ((bit_count - next_bit) / Self::CHUNK_SIZE_BITS + 1) as usize
+        };
+
+        // Parse chunks
+        let mut bitmap = VecDeque::with_capacity(num_chunks);
+        for _ in 0..num_chunks {
+            let mut chunk = [0u8; N];
+            for byte in &mut chunk {
+                *byte = u8::read(buf)?;
+            }
+            bitmap.push_back(chunk);
+        }
+
+        // Validate the bit_count and next_bit are consistent
+        // The formula is: (num_chunks - 1) * CHUNK_SIZE_BITS + next_bit
+        let expected_bit_count = if bitmap.len() == 1 && next_bit == 0 {
+            0 // Empty bitvec
+        } else {
+            (bitmap.len() - 1) as u64 * Self::CHUNK_SIZE_BITS + next_bit
+        };
+
+        if bit_count != expected_bit_count {
+            return Err(CodecError::Invalid(
+                "Bitvec2",
+                "inconsistent bit_count and next_bit",
+            ));
+        }
+
+        Ok(BitVec2 { bitmap, next_bit })
+    }
+}
+
+impl<const N: usize> EncodeSize for BitVec2<N> {
+    fn encode_size(&self) -> usize {
+        // Size of bit_count (u64) + next_bit (u64) + all chunks
+        self.bit_count().encode_size() + self.next_bit.encode_size() + (self.bitmap.len() * N)
+    }
+}
+
+/// Iterator over bits in a Bitvec2
+pub struct Bitvec2Iterator<'a, const N: usize> {
+    /// Reference to the Bitvec2 being iterated over
+    vec: &'a BitVec2<N>,
+
+    /// Current position in the Bitvec2 (0-indexed)
+    pos: u64,
+}
+
+impl<const N: usize> Iterator for Bitvec2Iterator<'_, N> {
+    type Item = bool;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.vec.bit_count() {
+            return None;
+        }
+
+        let bit = self.vec.get_bit(self.pos);
+        self.pos += 1;
+        Some(bit)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = (self.vec.bit_count() - self.pos) as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<const N: usize> ExactSizeIterator for Bitvec2Iterator<'_, N> {}
 
 // ---------- Tests ----------
 
@@ -1350,20 +1516,20 @@ mod tests {
     #[test]
     fn test_bitvec2_constructors() {
         // Test new()
-        let bv: Bitvec2<4> = Bitvec2::new();
+        let bv: BitVec2<4> = BitVec2::new();
         assert_eq!(bv.bit_count(), 0);
         assert!(bv.is_empty());
         assert_eq!(bv.len(), 1); // Always has at least one chunk
 
         // Test default()
-        let bv: Bitvec2<8> = Default::default();
+        let bv: BitVec2<8> = Default::default();
         assert_eq!(bv.bit_count(), 0);
         assert!(bv.is_empty());
     }
 
     #[test]
     fn test_bitvec2_basic_operations() {
-        let mut bv: Bitvec2<4> = Bitvec2::new();
+        let mut bv: BitVec2<4> = BitVec2::new();
 
         // Test initial state
         assert_eq!(bv.bit_count(), 0);
@@ -1396,7 +1562,7 @@ mod tests {
 
     #[test]
     fn test_bitvec2_chunk_operations() {
-        let mut bv: Bitvec2<4> = Bitvec2::new();
+        let mut bv: BitVec2<4> = BitVec2::new();
         let test_chunk = [0xAB, 0xCD, 0xEF, 0x12];
 
         // Test append_chunk_unchecked
@@ -1419,7 +1585,7 @@ mod tests {
 
     #[test]
     fn test_bitvec2_byte_operations() {
-        let mut bv: Bitvec2<4> = Bitvec2::new();
+        let mut bv: BitVec2<4> = BitVec2::new();
 
         // Test append_byte_unchecked
         bv.append_byte_unchecked(0xFF);
@@ -1441,7 +1607,7 @@ mod tests {
 
     #[test]
     fn test_bitvec2_count_operations() {
-        let mut bv: Bitvec2<4> = Bitvec2::new();
+        let mut bv: BitVec2<4> = BitVec2::new();
 
         // Empty bitvec
         assert_eq!(bv.count_ones(), 0);
@@ -1459,7 +1625,7 @@ mod tests {
         assert_eq!(bv.bit_count(), 5);
 
         // Test with full bytes
-        let mut bv2: Bitvec2<4> = Bitvec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
         bv2.append_byte_unchecked(0xFF); // 8 ones
         bv2.append_byte_unchecked(0x00); // 8 zeros
         bv2.append_byte_unchecked(0xAA); // 4 ones, 4 zeros (10101010)
@@ -1471,7 +1637,7 @@ mod tests {
 
     #[test]
     fn test_bitvec2_clear_set_all() {
-        let mut bv: Bitvec2<4> = Bitvec2::new();
+        let mut bv: BitVec2<4> = BitVec2::new();
 
         // Add some bits - fill to byte boundary first
         bv.append(true);
@@ -1503,7 +1669,7 @@ mod tests {
 
     #[test]
     fn test_bitvec2_invert() {
-        let mut bv: Bitvec2<4> = Bitvec2::new();
+        let mut bv: BitVec2<4> = BitVec2::new();
 
         // Test with specific pattern
         bv.append(true);
@@ -1531,8 +1697,8 @@ mod tests {
 
     #[test]
     fn test_bitvec2_bitwise_and() {
-        let mut bv1: Bitvec2<4> = Bitvec2::new();
-        let mut bv2: Bitvec2<4> = Bitvec2::new();
+        let mut bv1: BitVec2<4> = BitVec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
 
         // Create test patterns: 10110 & 11010 = 10010
         let pattern1 = [true, false, true, true, false];
@@ -1556,8 +1722,8 @@ mod tests {
 
     #[test]
     fn test_bitvec2_bitwise_or() {
-        let mut bv1: Bitvec2<4> = Bitvec2::new();
-        let mut bv2: Bitvec2<4> = Bitvec2::new();
+        let mut bv1: BitVec2<4> = BitVec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
 
         // Create test patterns: 10110 | 11010 = 11110
         let pattern1 = [true, false, true, true, false];
@@ -1581,8 +1747,8 @@ mod tests {
 
     #[test]
     fn test_bitvec2_bitwise_xor() {
-        let mut bv1: Bitvec2<4> = Bitvec2::new();
-        let mut bv2: Bitvec2<4> = Bitvec2::new();
+        let mut bv1: BitVec2<4> = BitVec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
 
         // Create test patterns: 10110 ^ 11010 = 01100
         let pattern1 = [true, false, true, true, false];
@@ -1606,8 +1772,8 @@ mod tests {
 
     #[test]
     fn test_bitvec2_multi_chunk_operations() {
-        let mut bv1: Bitvec2<4> = Bitvec2::new();
-        let mut bv2: Bitvec2<4> = Bitvec2::new();
+        let mut bv1: BitVec2<4> = BitVec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
 
         // Fill multiple chunks
         let chunk1 = [0xAA, 0xBB, 0xCC, 0xDD]; // 10101010 10111011 11001100 11011101
@@ -1649,8 +1815,8 @@ mod tests {
 
     #[test]
     fn test_bitvec2_partial_chunk_operations() {
-        let mut bv1: Bitvec2<4> = Bitvec2::new();
-        let mut bv2: Bitvec2<4> = Bitvec2::new();
+        let mut bv1: BitVec2<4> = BitVec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
 
         // Add partial chunks (not aligned to chunk boundaries)
         for i in 0..35 {
@@ -1689,7 +1855,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Index out of bounds")]
     fn test_bitvec2_toggle_out_of_bounds() {
-        let mut bv: Bitvec2<4> = Bitvec2::new();
+        let mut bv: BitVec2<4> = BitVec2::new();
         bv.append(true);
         bv.toggle(1); // Only bit 0 exists
     }
@@ -1697,8 +1863,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "Bitvec2 lengths don't match")]
     fn test_bitvec2_and_length_mismatch() {
-        let mut bv1: Bitvec2<4> = Bitvec2::new();
-        let mut bv2: Bitvec2<4> = Bitvec2::new();
+        let mut bv1: BitVec2<4> = BitVec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
 
         bv1.append(true);
         bv1.append(false);
@@ -1710,8 +1876,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "Bitvec2 lengths don't match")]
     fn test_bitvec2_or_length_mismatch() {
-        let mut bv1: Bitvec2<4> = Bitvec2::new();
-        let mut bv2: Bitvec2<4> = Bitvec2::new();
+        let mut bv1: BitVec2<4> = BitVec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
 
         bv1.append(true);
         bv2.append(true);
@@ -1723,8 +1889,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "Bitvec2 lengths don't match")]
     fn test_bitvec2_xor_length_mismatch() {
-        let mut bv1: Bitvec2<4> = Bitvec2::new();
-        let mut bv2: Bitvec2<4> = Bitvec2::new();
+        let mut bv1: BitVec2<4> = BitVec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
 
         bv1.append(true);
         bv1.append(false);
@@ -1736,41 +1902,79 @@ mod tests {
     }
 
     #[test]
-    fn test_bitvec2_clear_trailing_bits() {
-        let mut bv: Bitvec2<4> = Bitvec2::new();
+    fn test_bitvec2_equality_ignores_trailing_bits() {
+        // Test that equality comparison ignores trailing bits
+        let mut bv1: BitVec2<4> = BitVec2::new();
+        let mut bv2: BitVec2<4> = BitVec2::new();
 
-        // Add some bits that don't fill a complete byte
-        bv.append(true);
-        bv.append(false);
-        bv.append(true);
+        // Add same bits to both
+        bv1.append(true);
+        bv1.append(false);
+        bv1.append(true);
 
-        // Manually set some trailing bits that shouldn't be there
+        bv2.append(true);
+        bv2.append(false);
+        bv2.append(true);
+
+        // They should be equal
+        assert_eq!(bv1, bv2);
+
+        // Now manually corrupt trailing bits in one of them
         {
-            let last_chunk = bv.bitmap.back_mut().unwrap();
-            last_chunk[0] |= 0xF8; // Set bits 3-7
+            let last_chunk = bv1.bitmap.back_mut().unwrap();
+            last_chunk[0] |= 0xF8; // Set bits 3-7 (invalid bits)
         }
 
-        // clear_trailing_bits should clean this up
-        let cleared = bv.clear_trailing_bits();
-        assert!(cleared);
+        // They should still be equal because comparison ignores trailing bits
+        assert_eq!(bv1, bv2);
 
-        // Only the first 3 bits should remain
-        assert_eq!(bv.get_bit(0), true);
-        assert_eq!(bv.get_bit(1), false);
-        assert_eq!(bv.get_bit(2), true);
+        // But if we change a valid bit, they should be different
+        bv1.set_bit(1, true); // Change bit 1 from false to true
+        assert_ne!(bv1, bv2);
+    }
 
-        // The byte should only have the first 3 bits set
-        let expected_byte = 0b00000101; // bits 0 and 2 set
-        let last_chunk = bv.bitmap.back().unwrap();
-        assert_eq!(last_chunk[0], expected_byte);
+    #[test]
+    fn test_bitvec2_equality_edge_cases() {
+        // Test equality with empty bitvecs
+        let bv1: BitVec2<4> = BitVec2::new();
+        let bv2: BitVec2<4> = BitVec2::new();
+        assert_eq!(bv1, bv2);
+
+        // Test equality with different lengths
+        let mut bv3: BitVec2<4> = BitVec2::new();
+        bv3.append(true);
+        assert_ne!(bv1, bv3);
+
+        // Test equality after operations that might leave trailing bits
+        let mut bv4: BitVec2<4> = [true, false, true].as_ref().into();
+        let mut bv5: BitVec2<4> = [true, false, true].as_ref().into();
+
+        // Perform operations that would previously require clearing trailing bits
+        bv4.set_all();
+        bv5.set_all();
+        assert_eq!(bv4, bv5);
+
+        bv4.invert();
+        bv5.invert();
+        assert_eq!(bv4, bv5);
+
+        // Test with bitwise operations
+        let bv6: BitVec2<4> = [true, true, false].as_ref().into();
+
+        let mut bv8 = bv4.clone();
+        let mut bv9 = bv5.clone();
+
+        bv8.and(&bv6);
+        bv9.and(&bv6);
+        assert_eq!(bv8, bv9);
     }
 
     #[test]
     fn test_bitvec2_different_chunk_sizes() {
         // Test with different chunk sizes
-        let mut bv8: Bitvec2<8> = Bitvec2::new();
-        let mut bv16: Bitvec2<16> = Bitvec2::new();
-        let mut bv32: Bitvec2<32> = Bitvec2::new();
+        let mut bv8: BitVec2<8> = BitVec2::new();
+        let mut bv16: BitVec2<16> = BitVec2::new();
+        let mut bv32: BitVec2<32> = BitVec2::new();
 
         // Test chunk operations first (must be chunk-aligned)
         let chunk8 = [0xFF; 8];
@@ -1799,5 +2003,359 @@ mod tests {
         assert_eq!(bv32.bit_count(), 256 + 2);
         assert_eq!(bv32.count_ones(), 128 + 1); // chunk32 is 0x55 pattern + 1 true bit
         assert_eq!(bv32.count_zeros(), 128 + 1);
+    }
+
+    #[test]
+    fn test_bitvec2_iterator() {
+        // Test empty iterator
+        let bv: BitVec2<4> = BitVec2::new();
+        let mut iter = bv.iter();
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+
+        // Test iterator with some bits
+        let pattern = [true, false, true, false, true];
+        let bv: BitVec2<4> = pattern.as_ref().into();
+
+        // Collect all bits via iterator
+        let collected: Vec<bool> = bv.iter().collect();
+        assert_eq!(collected, pattern);
+
+        // Test size_hint
+        let mut iter = bv.iter();
+        assert_eq!(iter.size_hint(), (5, Some(5)));
+
+        // Consume one element and check size_hint again
+        assert_eq!(iter.next(), Some(true));
+        assert_eq!(iter.size_hint(), (4, Some(4)));
+
+        // Test ExactSizeIterator
+        let iter = bv.iter();
+        assert_eq!(iter.len(), 5);
+
+        // Test iterator with larger bitvec
+        let mut large_bv: BitVec2<8> = BitVec2::new();
+        for i in 0..100 {
+            large_bv.append(i % 3 == 0);
+        }
+
+        let collected: Vec<bool> = large_bv.iter().collect();
+        assert_eq!(collected.len(), 100);
+        for (i, &bit) in collected.iter().enumerate() {
+            assert_eq!(bit, i % 3 == 0);
+        }
+    }
+
+    #[test]
+    fn test_bitvec2_iterator_edge_cases() {
+        // Test iterator with single bit
+        let mut bv: BitVec2<4> = BitVec2::new();
+        bv.append(true);
+
+        let collected: Vec<bool> = bv.iter().collect();
+        assert_eq!(collected, vec![true]);
+
+        // Test iterator across chunk boundaries
+        let mut bv: BitVec2<4> = BitVec2::new();
+        // Fill exactly one chunk (32 bits)
+        for i in 0..32 {
+            bv.append(i % 2 == 0);
+        }
+        // Add a few more bits in the next chunk
+        bv.append(true);
+        bv.append(false);
+        bv.append(true);
+
+        let collected: Vec<bool> = bv.iter().collect();
+        assert_eq!(collected.len(), 35);
+
+        // Verify the pattern
+        for i in 0..32 {
+            assert_eq!(collected[i], i % 2 == 0);
+        }
+        assert_eq!(collected[32], true);
+        assert_eq!(collected[33], false);
+        assert_eq!(collected[34], true);
+    }
+
+    #[test]
+    fn test_bitvec2_codec_roundtrip() {
+        use commonware_codec::Encode;
+
+        // Test empty bitvec
+        let original: BitVec2<4> = BitVec2::new();
+        let encoded = original.encode();
+        let decoded = BitVec2::decode_cfg(&mut encoded.as_ref(), &(..).into()).unwrap();
+        assert_eq!(original, decoded);
+
+        // Test small bitvec
+        let pattern = [true, false, true, false, true];
+        let original: BitVec2<4> = pattern.as_ref().into();
+        let encoded = original.encode();
+        let decoded = BitVec2::decode_cfg(&mut encoded.as_ref(), &(..).into()).unwrap();
+        assert_eq!(original, decoded);
+
+        // Verify the decoded bitvec has the same bits
+        for (i, &expected) in pattern.iter().enumerate() {
+            assert_eq!(decoded.get_bit(i as u64), expected);
+        }
+
+        // Test larger bitvec across multiple chunks
+        let mut large_original: BitVec2<8> = BitVec2::new();
+        for i in 0..100 {
+            large_original.append(i % 7 == 0);
+        }
+
+        let encoded = large_original.encode();
+        let decoded = BitVec2::decode_cfg(&mut encoded.as_ref(), &(..).into()).unwrap();
+        assert_eq!(large_original, decoded);
+
+        // Verify all bits match
+        assert_eq!(decoded.bit_count(), 100);
+        for i in 0..100 {
+            assert_eq!(decoded.get_bit(i), i % 7 == 0);
+        }
+    }
+
+    #[test]
+    fn test_bitvec2_codec_different_chunk_sizes() {
+        use commonware_codec::Encode;
+
+        let pattern = [true, false, true, true, false, false, true];
+
+        // Test with different chunk sizes
+        let bv4: BitVec2<4> = pattern.as_ref().into();
+        let bv8: BitVec2<8> = pattern.as_ref().into();
+        let bv16: BitVec2<16> = pattern.as_ref().into();
+
+        // Encode and decode each
+        let encoded4 = bv4.encode();
+        let decoded4 = BitVec2::decode_cfg(&mut encoded4.as_ref(), &(..).into()).unwrap();
+        assert_eq!(bv4, decoded4);
+
+        let encoded8 = bv8.encode();
+        let decoded8 = BitVec2::decode_cfg(&mut encoded8.as_ref(), &(..).into()).unwrap();
+        assert_eq!(bv8, decoded8);
+
+        let encoded16 = bv16.encode();
+        let decoded16 = BitVec2::decode_cfg(&mut encoded16.as_ref(), &(..).into()).unwrap();
+        assert_eq!(bv16, decoded16);
+
+        // All should have the same logical content
+        for (i, &expected) in pattern.iter().enumerate() {
+            assert_eq!(decoded4.get_bit(i as u64), expected);
+            assert_eq!(decoded8.get_bit(i as u64), expected);
+            assert_eq!(decoded16.get_bit(i as u64), expected);
+        }
+    }
+
+    #[test]
+    fn test_bitvec2_codec_edge_cases() {
+        use commonware_codec::Encode;
+
+        // Test bitvec with exactly one chunk filled
+        let mut bv: BitVec2<4> = BitVec2::new();
+        for i in 0..32 {
+            bv.append(i % 2 == 0);
+        }
+
+        let encoded = bv.encode();
+        let decoded = BitVec2::decode_cfg(&mut encoded.as_ref(), &(..).into()).unwrap();
+        assert_eq!(bv, decoded);
+        assert_eq!(decoded.bit_count(), 32);
+
+        // Test bitvec with partial chunk
+        let mut bv2: BitVec2<4> = BitVec2::new();
+        for i in 0..35 {
+            // 32 + 3 bits
+            bv2.append(i % 3 == 0);
+        }
+
+        let encoded2 = bv2.encode();
+        let decoded2 = BitVec2::decode_cfg(&mut encoded2.as_ref(), &(..).into()).unwrap();
+        assert_eq!(bv2, decoded2);
+        assert_eq!(decoded2.bit_count(), 35);
+    }
+
+    #[test]
+    fn test_bitvec2_encode_size() {
+        // Test encode size calculation
+        let bv: BitVec2<4> = BitVec2::new();
+        let encoded = bv.encode();
+        assert_eq!(bv.encode_size(), encoded.len());
+
+        // Test with some data
+        let pattern = [true, false, true, false, true];
+        let bv: BitVec2<4> = pattern.as_ref().into();
+        let encoded = bv.encode();
+        assert_eq!(bv.encode_size(), encoded.len());
+
+        // Test with larger data
+        let mut large_bv: BitVec2<8> = BitVec2::new();
+        for i in 0..100 {
+            large_bv.append(i % 2 == 0);
+        }
+        let encoded = large_bv.encode();
+        assert_eq!(large_bv.encode_size(), encoded.len());
+    }
+
+    #[test]
+    fn test_bitvec2_codec_error_cases() {
+        use bytes::BytesMut;
+
+        // Test invalid next_bit (too large)
+        let mut buf = BytesMut::new();
+        5u64.write(&mut buf); // bit_count
+        100u64.write(&mut buf); // next_bit (invalid for chunk size 4 = 32 bits max)
+
+        let result = BitVec2::<4>::decode_cfg(&mut buf, &(..).into());
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid("Bitvec2", "next_bit out of bounds"))
+        ));
+
+        // Test inconsistent bit_count and next_bit
+        let mut buf = BytesMut::new();
+        10u64.write(&mut buf); // bit_count
+        5u64.write(&mut buf); // next_bit
+                              // This would imply 5 bits in first chunk, but bit_count says 10
+        [0u8; 4].write(&mut buf); // One chunk
+
+        let result = BitVec2::<4>::decode_cfg(&mut buf, &(..).into());
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "Bitvec2",
+                "inconsistent bit_count and next_bit"
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_bitvec2_from_bool_slice() {
+        // Test From trait with different input types
+
+        // Test with Vec<bool>
+        let vec_bool = vec![true, false, true, false, true];
+        let bv: BitVec2<4> = vec_bool.into();
+        assert_eq!(bv.bit_count(), 5);
+        assert_eq!(bv.count_ones(), 3);
+        assert_eq!(bv.count_zeros(), 2);
+        for (i, &expected) in [true, false, true, false, true].iter().enumerate() {
+            assert_eq!(bv.get_bit(i as u64), expected);
+        }
+
+        // Test with array slice
+        let array = [false, true, true, false];
+        let bv: BitVec2<4> = (&array).into();
+        assert_eq!(bv.bit_count(), 4);
+        assert_eq!(bv.count_ones(), 2);
+        assert_eq!(bv.count_zeros(), 2);
+        for (i, &expected) in array.iter().enumerate() {
+            assert_eq!(bv.get_bit(i as u64), expected);
+        }
+
+        // Test with empty slice
+        let empty: Vec<bool> = vec![];
+        let bv: BitVec2<4> = empty.into();
+        assert_eq!(bv.bit_count(), 0);
+        assert!(bv.is_empty());
+
+        // Test with large slice
+        let large: Vec<bool> = (0..100).map(|i| i % 3 == 0).collect();
+        let bv: BitVec2<8> = large.clone().into();
+        assert_eq!(bv.bit_count(), 100);
+        for (i, &expected) in large.iter().enumerate() {
+            assert_eq!(bv.get_bit(i as u64), expected);
+        }
+    }
+
+    #[test]
+    fn test_bitvec2_debug_formatting() {
+        // Test Debug formatting for different sizes
+
+        // Test empty bitvec
+        let bv: BitVec2<4> = BitVec2::new();
+        let debug_str = format!("{:?}", bv);
+        assert_eq!(debug_str, "Bitvec2[]");
+
+        // Test small bitvec (should show all bits)
+        let bv: BitVec2<4> = [true, false, true, false, true].as_ref().into();
+        let debug_str = format!("{:?}", bv);
+        assert_eq!(debug_str, "Bitvec2[10101]");
+
+        // Test bitvec at the display limit (64 bits)
+        let pattern: Vec<bool> = (0..64).map(|i| i % 2 == 0).collect();
+        let bv: BitVec2<8> = pattern.into();
+        let debug_str = format!("{:?}", bv);
+        let expected_pattern = "1010".repeat(16); // 64 bits alternating
+        assert_eq!(debug_str, format!("Bitvec2[{}]", expected_pattern));
+
+        // Test large bitvec (should show ellipsis)
+        let large_pattern: Vec<bool> = (0..100).map(|i| i % 2 == 0).collect();
+        let bv: BitVec2<16> = large_pattern.into();
+        let debug_str = format!("{:?}", bv);
+
+        // Should show first 32 bits + "..." + last 32 bits
+        let first_32 = "10".repeat(16); // First 32 bits: 1010...
+        let last_32 = "10".repeat(16); // Last 32 bits: ...1010
+        let expected = format!("Bitvec2[{}...{}]", first_32, last_32);
+        assert_eq!(debug_str, expected);
+    }
+
+    #[test]
+    fn test_bitvec2_debug_edge_cases() {
+        // Test single bit
+        let bv: BitVec2<4> = [true].as_ref().into();
+        assert_eq!(format!("{:?}", bv), "Bitvec2[1]");
+
+        let bv: BitVec2<4> = [false].as_ref().into();
+        assert_eq!(format!("{:?}", bv), "Bitvec2[0]");
+
+        // Test exactly at boundary (65 bits - should show ellipsis)
+        let pattern: Vec<bool> = (0..65).map(|i| i == 0 || i == 64).collect(); // First and last bits are true
+        let bv: BitVec2<16> = pattern.into();
+        let debug_str = format!("{:?}", bv);
+
+        // Should show first 32 bits (100000...) + "..." + last 32 bits (...000001)
+        let first_32 = "1".to_string() + &"0".repeat(31);
+        let last_32 = "0".repeat(31) + "1";
+        let expected = format!("Bitvec2[{}...{}]", first_32, last_32);
+        assert_eq!(debug_str, expected);
+    }
+
+    #[test]
+    fn test_bitvec2_from_different_chunk_sizes() {
+        // Test From trait works with different chunk sizes
+        let pattern = [true, false, true, true, false, false, true];
+
+        let bv4: BitVec2<4> = pattern.as_ref().into();
+        let bv8: BitVec2<8> = pattern.as_ref().into();
+        let bv16: BitVec2<16> = pattern.as_ref().into();
+
+        // All should have the same content regardless of chunk size
+        // Test each bitvec separately since they have different types
+        for bv in [&bv4] {
+            assert_eq!(bv.bit_count(), 7);
+            assert_eq!(bv.count_ones(), 4);
+            assert_eq!(bv.count_zeros(), 3);
+            for (i, &expected) in pattern.iter().enumerate() {
+                assert_eq!(bv.get_bit(i as u64), expected);
+            }
+        }
+
+        assert_eq!(bv8.bit_count(), 7);
+        assert_eq!(bv8.count_ones(), 4);
+        assert_eq!(bv8.count_zeros(), 3);
+        for (i, &expected) in pattern.iter().enumerate() {
+            assert_eq!(bv8.get_bit(i as u64), expected);
+        }
+
+        assert_eq!(bv16.bit_count(), 7);
+        assert_eq!(bv16.count_ones(), 4);
+        assert_eq!(bv16.count_zeros(), 3);
+        for (i, &expected) in pattern.iter().enumerate() {
+            assert_eq!(bv16.get_bit(i as u64), expected);
+        }
     }
 }

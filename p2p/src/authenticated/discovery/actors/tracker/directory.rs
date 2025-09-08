@@ -263,7 +263,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         };
 
         // Ensure that the bit vector is the same size as the peer set
-        if bit_vec.bits.len() != set.len() {
+        if bit_vec.bits.bit_count() as usize != set.len() {
             debug!(
                 index = bit_vec.index,
                 expected = set.len(),

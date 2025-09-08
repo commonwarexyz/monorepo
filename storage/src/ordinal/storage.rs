@@ -6,7 +6,7 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{hex, BitVec};
+use commonware_utils::hex;
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -15,6 +15,9 @@ use std::{
     mem::take,
 };
 use tracing::{debug, warn};
+
+const CHUNK_SIZE: usize = 1;
+type BitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -170,7 +173,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                     let bits = bits.get(section).unwrap();
                     if let Some(bits) = bits {
                         let bit_index = offset as usize / Record::<V>::SIZE;
-                        if !bits.get(bit_index).expect("invalid index") {
+                        if !bits.get_bit(bit_index as u64) {
                             offset += Record::<V>::SIZE as u64;
                             continue;
                         }

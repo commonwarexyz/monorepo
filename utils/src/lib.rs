@@ -18,7 +18,7 @@ use core::{fmt::Write as FmtWrite, time::Duration};
 pub mod sequence;
 pub use sequence::{Array, Span};
 mod bitvec;
-pub use bitvec::{BitIterator, BitVec, Bitvec2};
+pub use bitvec::{BitIterator, BitVec, BitVec2, Bitvec2Iterator};
 #[cfg(feature = "std")]
 pub mod channels;
 #[cfg(feature = "std")]

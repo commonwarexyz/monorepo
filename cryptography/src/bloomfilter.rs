@@ -11,7 +11,7 @@ use commonware_codec::{
     error::Error as CodecError,
     EncodeSize, FixedSize,
 };
-use commonware_utils::BitVec;
+use commonware_utils::BitVec2;
 use core::num::{NonZeroU8, NonZeroUsize};
 
 /// The length of a half of a [Digest].
@@ -19,6 +19,10 @@ const HALF_DIGEST_LEN: usize = 16;
 
 /// The length of a full [Digest].
 const FULL_DIGEST_LEN: usize = Digest::SIZE;
+
+const CHUNK_SIZE: usize = 1;
+
+type BitVec = BitVec2<CHUNK_SIZE>;
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
@@ -63,9 +67,9 @@ impl BloomFilter {
 
     /// Inserts an item into the [BloomFilter].
     pub fn insert(&mut self, item: &[u8]) {
-        let indices = self.indices(item, self.bits.len());
+        let indices = self.indices(item, self.bits.bit_count() as usize);
         for index in indices {
-            self.bits.set(index);
+            self.bits.set_bit(index as u64, true);
         }
     }
 
@@ -73,9 +77,9 @@ impl BloomFilter {
     ///
     /// Returns `true` if the item is probably in the set, and `false` if it is definitely not.
     pub fn contains(&self, item: &[u8]) -> bool {
-        let indices = self.indices(item, self.bits.len());
+        let indices = self.indices(item, self.bits.bit_count() as usize);
         for index in indices {
-            if !self.bits.get(index).expect("index out of bounds") {
+            if !self.bits.get_bit(index as u64) {
                 return false;
             }
         }

@@ -4,7 +4,6 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
-use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
 /// The maximum overhead (in bytes) when encoding a `message` into a [Payload::Data].
@@ -21,6 +20,9 @@ const BIT_VEC_PREFIX: u8 = 0;
 const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
 const DATA_PREFIX: u8 = 2;
+
+const CHUNK_SIZE: usize = 1;
+type UtilsBitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
 
 /// Configuration when deserializing messages.
 ///
@@ -115,7 +117,7 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: UtilsBitVec,
+    pub bits: commonware_utils::BitVec2<CHUNK_SIZE>,
 }
 
 impl EncodeSize for BitVec {

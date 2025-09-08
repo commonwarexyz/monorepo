@@ -137,13 +137,15 @@ mod tests {
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, BitVec, NZUsize, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
     const DEFAULT_WRITE_BUFFER: usize = 4096;
     const DEFAULT_REPLAY_BUFFER: usize = 1024 * 1024;
+    const CHUNK_SIZE: usize = 1;
+    type BitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
 
     #[test_traced]
     fn test_put_get() {
@@ -1684,9 +1686,9 @@ mod tests {
 
                 // Create a BitVec that marks indices 12, 15, and 18 as present
                 let mut bitvec = BitVec::zeroes(10);
-                bitvec.set(2); // Index 12 (offset 2 in section 1)
-                bitvec.set(5); // Index 15 (offset 5 in section 1)
-                bitvec.set(8); // Index 18 (offset 8 in section 1)
+                bitvec.set_bit(2, true); // Index 12 (offset 2 in section 1)
+                bitvec.set_bit(5, true); // Index 15 (offset 5 in section 1)
+                bitvec.set_bit(8, true); // Index 18 (offset 8 in section 1)
                 let bitvec_option = Some(bitvec);
 
                 bits_map.insert(1, &bitvec_option);
@@ -1883,9 +1885,9 @@ mod tests {
 
                 // Section 1: BitVec with specific indices
                 let mut bitvec1 = BitVec::zeroes(5);
-                bitvec1.set(0); // Index 5
-                bitvec1.set(2); // Index 7
-                                // Note: not setting bit for index 9, so it should be ignored
+                bitvec1.set_bit(0, true); // Index 5
+                bitvec1.set_bit(2, true); // Index 7
+                                          // Note: not setting bit for index 9, so it should be ignored
                 let bitvec1_option = Some(bitvec1);
                 bits_map.insert(1, &bitvec1_option);
 
@@ -1968,9 +1970,9 @@ mod tests {
 
                 // Create a BitVec that includes the corrupted record
                 let mut bitvec = BitVec::zeroes(5);
-                bitvec.set(0); // Index 0
-                bitvec.set(2); // Index 2 (corrupted) - this will cause a panic
-                bitvec.set(4); // Index 4
+                bitvec.set_bit(0, true); // Index 0
+                bitvec.set_bit(2, true); // Index 2 (corrupted) - this will cause a panic
+                bitvec.set_bit(4, true); // Index 4
                 let bitvec_option = Some(bitvec);
                 bits_map.insert(0, &bitvec_option);
 

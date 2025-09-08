@@ -1,7 +1,8 @@
 use commonware_cryptography::PublicKey;
-use commonware_utils::BitVec;
 use std::collections::HashMap;
 
+const CHUNK_SIZE: usize = 1;
+type BitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: PublicKey> {
     /// The list of peers, sorted.
@@ -33,7 +34,7 @@ impl<P: PublicKey> Set<P> {
     /// Marks the given peer as known or unknown.
     pub fn update(&mut self, peer: &P, known: bool) -> bool {
         if let Some(idx) = self.order.get(peer) {
-            self.knowledge.set_to(*idx, known);
+            self.knowledge.set_bit(*idx as u64, known);
             return true;
         }
         false
@@ -71,7 +72,6 @@ impl<P: PublicKey> std::ops::Index<usize> for Set<P> {
 mod tests {
     use super::*;
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-    use commonware_utils::BitVec;
     use std::collections::HashSet;
 
     fn create_test_peers() -> Vec<ed25519::PublicKey> {
