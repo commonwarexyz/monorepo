@@ -612,17 +612,20 @@ where
         "operations to keep after filtering"
     );
 
+    // Update metadata before updating log
+    write_oldest_retained_loc(metadata, lower_bound);
+    metadata.sync().await?;
+
     // Remove the old section
-    if let Some(blob) = journal.blobs.remove(&lower_section) {
-        drop(blob);
-        let name = lower_section.to_be_bytes();
-        journal
-            .context
-            .remove(&journal.cfg.partition, Some(&name))
-            .await
-            .map_err(crate::journal::Error::Runtime)?;
-        journal.tracked.dec();
-    }
+    let blob = journal.blobs.remove(&lower_section).unwrap();
+    drop(blob);
+    let name = lower_section.to_be_bytes();
+    journal
+        .context
+        .remove(&journal.cfg.partition, Some(&name))
+        .await
+        .map_err(crate::journal::Error::Runtime)?;
+    journal.tracked.dec();
 
     if !operations_to_keep.is_empty() {
         // Recreate the section with only the operations we want to keep
@@ -634,9 +637,6 @@ where
         journal.sync(lower_section).await?;
     }
 
-    // Update metadata with the new oldest_retained_loc since we removed items
-    write_oldest_retained_loc(metadata, lower_bound);
-    metadata.sync().await?;
     Ok(())
 }
 
