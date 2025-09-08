@@ -62,24 +62,21 @@ impl Read for FuzzRequest {
 
 impl EncodeSize for FuzzRequest {
     fn encode_size(&self) -> usize {
-        8 + 4 + self.data.len()
+        u64::SIZE + u32::SIZE + self.data.len()
     }
 }
 
 impl Committable for FuzzRequest {
     type Commitment = Digest;
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&self.id.to_be_bytes())
+        Sha256::hash(&self.id.encode())
     }
 }
 
 impl Digestible for FuzzRequest {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.id.to_be_bytes());
-        hasher.update(&self.data);
-        hasher.finalize()
+        Sha256::hash(&self.encode())
     }
 }
 
@@ -120,14 +117,14 @@ impl EncodeSize for FuzzResponse {
 impl Committable for FuzzResponse {
     type Commitment = Digest;
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&self.id.to_be_bytes())
+        Sha256::hash(&self.id.encode())
     }
 }
 
 impl Digestible for FuzzResponse {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(&*self.encode())
+        Sha256::hash(&self.encode())
     }
 }
 
