@@ -40,15 +40,9 @@ pub type CoreSha256 = ISha256;
 const DIGEST_LENGTH: usize = 32;
 
 /// SHA-256 hasher.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Sha256 {
     hasher: ISha256,
-}
-
-impl Default for Sha256 {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Clone for Sha256 {
@@ -68,12 +62,6 @@ impl Sha256 {
 
 impl Hasher for Sha256 {
     type Digest = Digest;
-
-    fn new() -> Self {
-        Self {
-            hasher: ISha256::new(),
-        }
-    }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
