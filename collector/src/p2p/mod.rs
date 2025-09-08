@@ -733,6 +733,8 @@ mod tests {
 
             // Start engine
             let handle = engine.start((sender1, receiver1), (sender2, receiver2));
+
+            // Stop the engine (which will result in all further requests being canceled)
             handle.abort();
 
             // Send request
