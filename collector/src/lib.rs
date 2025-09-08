@@ -10,7 +10,6 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use anyhow::Error as AnyError;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
@@ -24,7 +23,7 @@ pub mod p2p;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("send failed: {0}")]
-    SendFailed(AnyError),
+    SendFailed(anyhow::Error),
     #[error("canceled")]
     Canceled,
 }
