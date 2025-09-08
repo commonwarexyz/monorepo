@@ -10,6 +10,9 @@
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 
+use crate::{journal::fixed::Journal, mmr::journaled};
+use commonware_cryptography::Hasher;
+use commonware_runtime::{Clock, Metrics, Storage};
 use thiserror::Error;
 
 pub mod any;
@@ -18,7 +21,12 @@ pub mod immutable;
 pub mod keyless;
 pub mod sync;
 pub mod verify;
-pub use verify::{extract_pinned_nodes, verify_proof};
+use tracing::warn;
+pub use verify::{
+    create_multi_proof, create_proof, create_proof_store, create_proof_store_from_digests,
+    digests_required_for_proof, extract_pinned_nodes, verify_multi_proof, verify_proof,
+    verify_proof_and_extract_digests,
+};
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
@@ -38,4 +46,37 @@ pub enum Error {
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
     KeyNotFound,
+}
+
+/// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &
+/// variable adb recovery. Returns the aligned size.
+async fn align_mmr_and_locations<E: Storage + Clock + Metrics, H: Hasher>(
+    mmr: &mut journaled::Mmr<E, H>,
+    locations: &mut Journal<E, u32>,
+) -> Result<u64, Error> {
+    let aligned_size = {
+        let locations_size = locations.size().await?;
+        let mmr_leaves = mmr.leaves();
+        if locations_size > mmr_leaves {
+            warn!(
+                mmr_leaves,
+                locations_size, "rewinding misaligned locations journal"
+            );
+            locations.rewind(mmr_leaves).await?;
+            locations.sync().await?;
+            mmr_leaves
+        } else if mmr_leaves > locations_size {
+            warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
+            mmr.pop((mmr_leaves - locations_size) as usize).await?;
+            locations_size
+        } else {
+            locations_size // happy path
+        }
+    };
+
+    // Verify post-conditions hold.
+    assert_eq!(aligned_size, locations.size().await?);
+    assert_eq!(aligned_size, mmr.leaves());
+
+    Ok(aligned_size)
 }

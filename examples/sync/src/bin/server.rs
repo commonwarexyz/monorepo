@@ -24,6 +24,7 @@ use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
     net::{Ipv4Addr, SocketAddr},
+    num::NonZeroU64,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -185,7 +186,7 @@ where
 
     let database = state.database.read().await;
 
-    // Check if we have enough operations
+    // Check if we have enough data
     let db_size = database.size();
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
@@ -197,6 +198,8 @@ where
     // Calculate how many data items to return
     let max_data = std::cmp::min(request.max_data.get(), db_size - request.start_loc);
     let max_data = std::cmp::min(max_data, MAX_BATCH_SIZE);
+    let max_data =
+        NonZeroU64::new(max_data).expect("max_ops cannot be zero since start_loc < db_size");
 
     debug!(
         request_id = request.request_id,

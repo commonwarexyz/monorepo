@@ -199,7 +199,7 @@ loop {
     } else {
         deterministic::Runner::timed(Duration::from_secs(30))
     }.start(f);
-    
+
     if complete { break; }
     prev_ctx = Some(context.recover()); // Save state for next iteration
 }
@@ -221,8 +221,8 @@ let (resolver_sender, resolver_receiver) = oracle.register(pk, 2).await.unwrap()
 
 // Configure network links with realistic conditions
 oracle.add_link(pk1, pk2, Link {
-    latency: 10.0,      // ms
-    jitter: 2.5,        // ms
+    latency: Duration::from_millis(10),
+    jitter: Duration::from_millis(3),
     success_rate: 0.95, // 95% success
 }).await.unwrap();
 ```
@@ -238,17 +238,17 @@ link_validators(&mut oracle, &validators, Action::Unlink, Some(separated)).await
 
 // Update links dynamically
 let degraded_link = Link {
-    latency: 3_000.0,  // Simulate slow network
-    jitter: 0.0,
+    latency: Duration::from_secs(3), // Simulate slow network
+    jitter: Duration::from_millis(0),
     success_rate: 1.0,
 };
 oracle.update_link(pk1, pk2, degraded_link).await.unwrap();
 
 // Test with lossy networks
 let lossy_link = Link {
-    latency: 200.0,
-    jitter: 150.0,
-    success_rate: 0.5,  // 50% packet loss
+    latency: Duration::from_millis(200),
+    jitter: Duration::from_millis(150),
+    success_rate: 0.5, // 50% packet loss
 };
 ```
 
@@ -317,17 +317,17 @@ fn test_storage_operations() {
             .open("partition_name", &0u64.to_be_bytes())
             .await
             .expect("Failed to open blob");
-        
+
         // Write data at offset
         blob.write_at(vec![1, 2, 3, 4], 0)
             .await
             .expect("Failed to write");
-        
+
         // Read data from offset
         let data = blob.read_at(vec![0u8; 4], 0)
             .await
             .expect("Failed to read");
-        
+
         // Sync to ensure durability
         blob.sync().await.expect("Failed to sync");
     });
@@ -344,18 +344,18 @@ fn test_crash_recovery() {
         let mut journal = Journal::init(context.clone(), cfg)
             .await
             .expect("Failed to init");
-        
+
         // Append data
         journal.append(1, data).await.expect("Failed to append");
-        
+
         // Close to simulate clean shutdown
         journal.close().await.expect("Failed to close");
-        
+
         // Re-initialize to simulate restart
         let journal = Journal::init(context.clone(), cfg)
             .await
             .expect("Failed to re-init");
-        
+
         // Verify data persisted correctly
         let item = journal.get(1, 0).await.expect("Failed to get");
         assert_eq!(item, data);
@@ -373,20 +373,20 @@ fn test_corruption_recovery() {
         let mut journal = Journal::init(context.clone(), cfg).await.unwrap();
         journal.append(1, valid_data).await.unwrap();
         journal.close().await.unwrap();
-        
+
         // Manually corrupt data
         let (blob, size) = context
             .open(&cfg.partition, &1u64.to_be_bytes())
             .await
             .unwrap();
-        
+
         // Corrupt checksum or truncate data
         blob.write_at(vec![0xFF; 4], size - 4).await.unwrap();
         blob.sync().await.unwrap();
-        
+
         // Re-initialize and verify recovery
         let journal = Journal::init(context.clone(), cfg).await.unwrap();
-        
+
         // Replay should handle corruption gracefully
         let stream = journal.replay(buffer_size).await.unwrap();
         // Verify corrupted items are skipped/truncated
@@ -438,12 +438,12 @@ fn test_storage_conformance() {
             journal.append(1, i).await.unwrap();
         }
         journal.close().await.unwrap();
-        
+
         // Hash blob contents to verify format
         let (blob, size) = context.open(&partition, &name).await.unwrap();
         let buf = blob.read_at(vec![0u8; size as usize], 0).await.unwrap();
         let digest = hash(buf.as_ref());
-        
+
         // Compare against known hash
         assert_eq!(hex(&digest), "expected_hash_value");
     });
@@ -506,7 +506,7 @@ pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 
 // Extension traits for additional functionality
 pub trait PrivateKeyExt: PrivateKey {
-    fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self;
+    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self;
 }
 ```
 
@@ -551,6 +551,7 @@ mod tests {
 - Use `tracing` for structured, leveled logging throughout the codebase
 - Implement metrics (via prometheus) for performance-critical operations
 - Add comprehensive context to errors for better debugging
+- Write a failing test case for a suspected bug before claiming it is a bug
 
 ### Safety Guidelines
 - Minimize unsafe blocks with clear `// SAFETY:` comments

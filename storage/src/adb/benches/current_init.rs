@@ -55,7 +55,6 @@ fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
         translator: EightCap,
         thread_pool: pool,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        pruning_delay: 10,
     }
 }
 
@@ -102,7 +101,7 @@ fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64, threa
         db.commit().await.unwrap();
         info!(
             op_count = db.op_count(),
-            oldest_retained_loc = db.oldest_retained_loc().unwrap(),
+            inactivity_floor_loc = db.inactivity_floor_loc(),
             "DB generated.",
         );
         db.close().await.unwrap();

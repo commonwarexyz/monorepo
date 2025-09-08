@@ -620,6 +620,14 @@ impl<
         round.advance_deadline = None;
         round.nullify_retry = None;
 
+        // Get public key index, returning early if we are not a participant in consensus
+        let Some(public_key_index) = self
+            .supervisor
+            .is_participant(self.view, &self.crypto.public_key())
+        else {
+            return;
+        };
+
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
@@ -653,10 +661,6 @@ impl<
         }
 
         // Construct nullify
-        let public_key_index = self
-            .supervisor
-            .is_participant(self.view, &self.crypto.public_key())
-            .unwrap();
         let nullify = Nullify::sign(
             &self.namespace,
             &mut self.crypto,
@@ -1714,7 +1718,7 @@ impl<
         let start = self.context.current();
         {
             let stream = journal
-                .replay(self.replay_buffer)
+                .replay(0, 0, self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

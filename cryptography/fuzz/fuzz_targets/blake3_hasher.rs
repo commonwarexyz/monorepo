@@ -8,7 +8,7 @@ use commonware_cryptography::{
     Hasher,
 };
 use libfuzzer_sys::fuzz_target;
-use p256::elliptic_curve::zeroize::Zeroize;
+use zeroize::Zeroize;
 
 #[derive(Debug, Arbitrary)]
 pub struct FuzzInput {
@@ -122,6 +122,10 @@ fn fuzz_clone_and_format(chunks: &[Vec<u8>]) {
     }
 
     let mut cloned_hasher = original_hasher.clone();
+    for chunk in chunks {
+        cloned_hasher.update(chunk);
+    }
+
     let original_digest = original_hasher.finalize();
     let cloned_digest = cloned_hasher.finalize();
 
@@ -129,10 +133,27 @@ fn fuzz_clone_and_format(chunks: &[Vec<u8>]) {
     let display_str = format!("{cloned_digest}");
     assert_eq!(debug_str, display_str);
     assert!(!debug_str.is_empty());
+    assert_eq!(debug_str.len(), 64); // 32 bytes * 2 hex chars each
+}
+
+// Test From<Hash> implementation and Deref trait
+fn fuzz_from_hash_and_deref(data: &[u8]) {
+    // Test From<blake3::Hash> conversion
+    let ref_hash = RefBlake3::new().update(data).finalize();
+    let our_digest: Digest = ref_hash.into();
+
+    // Test Deref trait - should be able to use as &[u8]
+    let slice: &[u8] = &our_digest;
+    assert_eq!(slice.len(), 32);
+    assert_eq!(slice, our_digest.as_ref());
+
+    // Verify the conversion worked correctly
+    let our_hash = our_hash(data);
+    assert_eq!(our_digest.as_ref(), our_hash.as_ref());
 }
 
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 5 {
+    match input.case_selector % 8 {
         0 => fuzz_basic_hashing(&input.chunks),
         1 => fuzz_reset_functionality(&input.chunks),
         2 => fuzz_chunked_vs_whole(&input.chunks),
@@ -140,6 +161,7 @@ fn fuzz(input: FuzzInput) {
         4 => fuzz_encode_decode(&input.data),
         5 => fuzz_clone_and_format(&input.chunks),
         6 => fuzz_digest_operations(&input.data),
+        7 => fuzz_from_hash_and_deref(&input.data),
         _ => unreachable!(),
     }
 }

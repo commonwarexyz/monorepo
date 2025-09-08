@@ -75,9 +75,9 @@ where
         &self,
         size: u64,
         start_loc: u64,
-        max_data: NonZeroU64,
+        max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Data, Self::Proof>, Self::Error> {
-        self.historical_proof(size, start_loc, max_data.get())
+        self.historical_proof(size, start_loc, max_ops)
             .await
             .map(|(proof, data)| FetchResult {
                 proof,
@@ -111,7 +111,7 @@ where
         max_data: NonZeroU64,
     ) -> Result<FetchResult<Self::Data, Self::Proof>, adb::Error> {
         let db = self.read().await;
-        db.historical_proof(size, start_loc, max_data.get())
+        db.historical_proof(size, start_loc, max_data)
             .await
             .map(|(proof, data)| FetchResult {
                 proof,
@@ -140,9 +140,9 @@ where
         &self,
         size: u64,
         start_loc: u64,
-        max_data: NonZeroU64,
+        max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Data, Self::Proof>, Self::Error> {
-        self.historical_proof(size, start_loc, max_data.get())
+        self.historical_proof(size, start_loc, max_ops)
             .await
             .map(|(proof, data)| FetchResult {
                 proof,
@@ -176,7 +176,7 @@ where
         max_data: NonZeroU64,
     ) -> Result<FetchResult<Self::Data, Self::Proof>, Self::Error> {
         let db = self.read().await;
-        db.historical_proof(size, start_loc, max_data.get())
+        db.historical_proof(size, start_loc, max_data)
             .await
             .map(|(proof, data)| FetchResult {
                 proof,
