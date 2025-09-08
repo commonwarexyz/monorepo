@@ -663,13 +663,10 @@ mod tests {
     fn test_send_fails_with_network_error() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, schemes, peers, connections) =
+            let (oracle, schemes, peers, connections) =
                 setup_network_and_peers(&context, &[0, 1]).await;
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
-
-            // Link the peers
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             // Setup peer 1 with a failing sender
             let scheme = schemes.next().unwrap();
@@ -709,13 +706,10 @@ mod tests {
     fn test_send_fails_with_canceled() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, schemes, peers, connections) =
+            let (oracle, schemes, peers, connections) =
                 setup_network_and_peers(&context, &[0, 1]).await;
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
-
-            // Link the peers
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             // Setup peer 1 with a failing sender
             let scheme = schemes.next().unwrap();
