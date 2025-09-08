@@ -22,7 +22,7 @@ const PEERS_PREFIX: u8 = 1;
 const DATA_PREFIX: u8 = 2;
 
 const CHUNK_SIZE: usize = 1;
-type UtilsBitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
+type UtilsBitVec = commonware_utils::BitVec<CHUNK_SIZE>;
 
 /// Configuration when deserializing messages.
 ///
@@ -117,7 +117,7 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: commonware_utils::BitVec2<CHUNK_SIZE>,
+    pub bits: commonware_utils::BitVec<CHUNK_SIZE>,
 }
 
 impl EncodeSize for BitVec {

@@ -294,7 +294,7 @@ mod tests {
     };
     use types::PeerInfo;
 
-    type UtilsBitVec = commonware_utils::BitVec2<1>;
+    type UtilsBitVec = commonware_utils::BitVec<1>;
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(

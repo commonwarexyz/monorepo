@@ -8,8 +8,8 @@ use commonware_codec::{
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 100_000;
-const CHUNK_SIZE: usize = 1;
-type BitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
+const BITVEC_CHUNK_SIZE: usize = 1;
+type BitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
@@ -287,7 +287,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             FuzzInput::Debug(bools) => {
                 let v = BitVec::from(&bools);
                 let debug_str = format!("{v:?}");
-                assert!(debug_str.starts_with("BitVec2["));
+                assert!(debug_str.starts_with("BitVec["));
                 assert!(debug_str.ends_with("]"));
             }
 

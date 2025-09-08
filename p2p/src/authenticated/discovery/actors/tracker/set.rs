@@ -1,8 +1,8 @@
 use commonware_cryptography::PublicKey;
 use std::collections::HashMap;
 
-const CHUNK_SIZE: usize = 1;
-type BitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
+const BITVEC_CHUNK_SIZE: usize = 1;
+type BitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: PublicKey> {
     /// The list of peers, sorted.

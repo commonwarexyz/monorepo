@@ -19,8 +19,8 @@ const FREEZER_PREFIX: u8 = 0;
 /// Prefix for [Ordinal] records.
 const ORDINAL_PREFIX: u8 = 1;
 
-const CHUNK_SIZE: usize = 1;
-type BitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
+const BITVEC_CHUNK_SIZE: usize = 1;
+type BitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
 
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
 enum Record {

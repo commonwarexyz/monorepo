@@ -144,8 +144,8 @@ mod tests {
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
     const DEFAULT_WRITE_BUFFER: usize = 4096;
     const DEFAULT_REPLAY_BUFFER: usize = 1024 * 1024;
-    const CHUNK_SIZE: usize = 1;
-    type BitVec = commonware_utils::BitVec2<CHUNK_SIZE>;
+    const BITVEC_CHUNK_SIZE: usize = 1;
+    type BitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
 
     #[test_traced]
     fn test_put_get() {

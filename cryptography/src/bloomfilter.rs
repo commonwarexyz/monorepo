@@ -11,7 +11,6 @@ use commonware_codec::{
     error::Error as CodecError,
     EncodeSize, FixedSize,
 };
-use commonware_utils::BitVec2;
 use core::num::{NonZeroU8, NonZeroUsize};
 
 /// The length of a half of a [Digest].
@@ -20,9 +19,8 @@ const HALF_DIGEST_LEN: usize = 16;
 /// The length of a full [Digest].
 const FULL_DIGEST_LEN: usize = Digest::SIZE;
 
-const CHUNK_SIZE: usize = 1;
-
-type BitVec = BitVec2<CHUNK_SIZE>;
+const BITVEC_CHUNK_SIZE: usize = 1;
+type BitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
