@@ -674,7 +674,6 @@ mod tests {
             let (_, receiver1) = conn.0; // Request channel
             let sender1 = super::mocks::sender::Failing::<PublicKey>::new();
             let (sender2, receiver2) = conn.1; // Response channel
-
             let (engine, mut mailbox) = Engine::new(
                 context.with_label(&format!("engine_{}", scheme.public_key())),
                 Config {
@@ -736,7 +735,7 @@ mod tests {
             // Stop the engine (which will result in all further requests being canceled)
             handle.abort();
 
-            // Send request
+            // Send request (will return Error::Canceled instead of Error::SendFailed)
             let request = Request { id: 1, data: 1 };
             let err = mailbox
                 .send(Recipients::One(peers[1].clone()), request.clone())
