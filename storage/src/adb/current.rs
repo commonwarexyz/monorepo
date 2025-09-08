@@ -337,6 +337,8 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
 
+        // Prune the bitmap to the updated inactivity floor.
+        // This also removes cached states below the inactivity floor.
         self.status.prune_to_bit(self.any.inactivity_floor_loc);
         self.status
             .write_pruned(
@@ -510,29 +512,19 @@ impl<
             return Err(Error::OperationPruned(start_loc));
         }
 
-        // Get the historical bitmap state
+        // Get the bitmap state when the log had `historical_log_size` operations
         let historical_bitmap = self
             .status
             .get_state(historical_log_size)
             .ok_or_else(|| Error::Mmr(crate::mmr::Error::ElementPruned(historical_log_size)))?;
 
-        // Check that the range is still available in the current MMR (not pruned)
-        let mmr = &self.any.mmr;
-
-        // Calculate the actual end location, limited by max_ops, historical state, and current MMR
-        let mmr_end_pos = mmr.last_leaf_pos().unwrap();
-        let mmr_end_leaf = leaf_pos_to_num(mmr_end_pos).unwrap();
-        let end_loc = std::cmp::min(
-            std::cmp::min(start_loc + max_ops.get() - 1, historical_log_size - 1),
-            mmr_end_leaf,
-        );
-
         // Create a grafted MMR using the historical bitmap state
         let start_pos = leaf_num_to_pos(start_loc);
+        let end_loc = std::cmp::min(start_loc + max_ops.get() - 1, historical_log_size - 1);
         let end_pos = leaf_num_to_pos(end_loc);
         let height = Self::grafting_height();
         let historical_mmr_size = leaf_num_to_pos(historical_log_size);
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(historical_bitmap, mmr, height);
+        let grafted_mmr = GStorage::<'_, H, _, _>::new(historical_bitmap, &self.any.mmr, height);
 
         // Generate the proof using the grafted MMR with historical bitmap
         let mut proof = Proof::<H::Digest>::historical_range_proof(
@@ -543,7 +535,7 @@ impl<
         )
         .await?;
 
-        // Read the operations from the log (these are immutable historical records)
+        // Read the operations from the log
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
             .map(|i| self.any.log.read(i))
@@ -1431,12 +1423,12 @@ pub mod test {
         });
     }
 
-    /// Test basic historical range proof functionality
+    /// Test historical range proof functionality
     #[test_traced("DEBUG")]
     pub fn test_current_db_historical_range_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let partition = "historical_range_proof_basic";
+            let partition = "historical_range_proof";
             let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone(), partition).await;
 
