@@ -149,13 +149,13 @@ impl<
 
         let context = context.with_label("adb::current");
         let cloned_pool = cfg.thread_pool.clone();
-        let status_bitmap = Bitmap::restore_pruned(
+        let status = Bitmap::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
             cloned_pool,
         )
         .await?;
-        let mut status = HistoricalBitmap::from_bitmap(status_bitmap);
+        let mut status = HistoricalBitmap::from_bitmap(status);
 
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
@@ -343,6 +343,8 @@ impl<
                 &self.bitmap_metadata_partition,
             )
             .await?; // (2)
+
+        self.status.cache_state(self.any.op_count());
 
         Ok(())
     }

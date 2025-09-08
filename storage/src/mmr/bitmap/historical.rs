@@ -100,8 +100,7 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
         self.cached_states.get(&index)
     }
 
-    /// Get a bitmap state by index, returning the current state if index matches current
-    /// Returns None if the index is not available (not current and not cached)
+    /// Get a bitmap state by index
     pub fn get_state(&self, index: u64) -> Option<&Bitmap<H, N>> {
         self.cached_states.get(&index)
     }
