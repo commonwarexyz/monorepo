@@ -1,4 +1,4 @@
-use crate::Originator;
+use crate::{Error, Originator};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
@@ -12,7 +12,7 @@ pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
     Send {
         request: R,
         recipients: Recipients<P>,
-        responder: oneshot::Sender<Vec<P>>,
+        responder: oneshot::Sender<Result<Vec<P>, Error>>,
     },
     Cancel {
         commitment: R::Commitment,
@@ -36,7 +36,7 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Originator for Mailbox<P
     type Request = R;
     type PublicKey = P;
 
-    async fn send(&mut self, recipients: Recipients<P>, request: R) -> Vec<P> {
+    async fn send(&mut self, recipients: Recipients<P>, request: R) -> Result<Vec<P>, Error> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .sender
@@ -46,7 +46,7 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Originator for Mailbox<P
                 responder: tx,
             })
             .await;
-        rx.await.unwrap()
+        rx.await.map_err(|_| Error::Canceled)?
     }
 
     async fn cancel(&mut self, commitment: R::Commitment) {

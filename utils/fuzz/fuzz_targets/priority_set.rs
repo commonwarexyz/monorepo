@@ -13,12 +13,26 @@ struct Priority(u32);
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
-    Put { item: Item, priority: Priority },
-    Get { item: Item },
-    Remove { item: Item },
-    Reconcile { keep: Vec<Item>, default: Priority },
-    Retain { item: Item },
-    Contains { item: Item },
+    Put {
+        item: Item,
+        priority: Priority,
+    },
+    Get {
+        item: Item,
+    },
+    Remove {
+        item: Item,
+    },
+    Reconcile {
+        keep: Vec<Item>,
+        default: Priority,
+    },
+    Retain {
+        item: Item,
+    },
+    Contains {
+        item: Item,
+    },
     Peek,
     Pop,
     Len,
@@ -26,6 +40,10 @@ enum FuzzInput {
     Clear,
     Cmp,
     PartialCmp,
+    PutSamePriority {
+        items: Vec<Item>,
+        priority: Priority,
+    },
 }
 
 fn fuzz(input: Vec<FuzzInput>) {
@@ -143,6 +161,14 @@ fn fuzz(input: Vec<FuzzInput>) {
 
             FuzzInput::PartialCmp => {
                 set.iter().partial_cmp(PrioritySet::new().iter());
+            }
+
+            FuzzInput::PutSamePriority { items, priority } => {
+                // Insert multiple items with same priority to trigger Entry::partial_cmp
+                for item in items.into_iter().take(3) {
+                    set.put(item.clone(), priority);
+                    expected_items.insert(item);
+                }
             }
         }
 

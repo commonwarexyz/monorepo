@@ -21,7 +21,7 @@ use p256::{
     },
     elliptic_curve::scalar::IsHigh,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "secp256r1";
@@ -69,7 +69,7 @@ impl crate::Signer for PrivateKey {
 }
 
 impl PrivateKeyExt for PrivateKey {
-    fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self {
+    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
         let key = SigningKey::random(rng);
         let raw = key.to_bytes().into();
         Self { raw, key }

@@ -9,12 +9,12 @@ use crate::bls12381::{
         variant::Variant,
     },
 };
-use rand::RngCore;
+use rand_core::CryptoRngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
 
 /// Generate shares and a commitment.
-pub fn generate_shares<R: RngCore, V: Variant>(
+pub fn generate_shares<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     share: Option<Share>,
     n: u32,

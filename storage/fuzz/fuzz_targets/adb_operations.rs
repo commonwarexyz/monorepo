@@ -26,7 +26,6 @@ enum AdbOperation {
     Delete { key: RawKey },
     Commit,
     OpCount,
-    OldestRetainedLoC,
     Root,
     Proof { start_loc: u64, max_ops: u64 },
     Get { key: RawKey },
@@ -56,7 +55,6 @@ fn fuzz(data: FuzzInput) {
             translator: EightCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            pruning_delay: 10,
         };
 
         let mut adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
@@ -100,25 +98,6 @@ fn fuzz(data: FuzzInput) {
                         "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
                 }
 
-                AdbOperation::OldestRetainedLoC => {
-                    let oldest_loc = adb.oldest_retained_loc();
-                    // The oldest retained location should be None if no operations exist
-                    // or Some value >= 0 if operations exist
-                    let actual_op_count = adb.op_count();
-                    if actual_op_count == 0 {
-                        assert_eq!(oldest_loc, None, "Expected no oldest location when no operations exist");
-                    } else {
-                        // The oldest retained location should be Some value
-                        // It might not be 0 because commits can cause pruning
-                        assert!(oldest_loc.is_some(), "Expected Some oldest location when operations exist");
-                        if let Some(loc) = oldest_loc {
-                            assert!(loc < actual_op_count,
-                                "Oldest retained location {loc} should be less than op count {actual_op_count}",
-                            );
-                        }
-                    }
-                }
-
                 AdbOperation::Commit => {
                     adb.commit().await.expect("commit should not fail");
                     // After commit, update our last known count since commit may add more operations
@@ -155,7 +134,7 @@ fn fuzz(data: FuzzInput) {
                         let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 
                         let (proof, log) = adb
-                            .proof(adjusted_start, adjusted_max_ops)
+                            .proof(adjusted_start, NZU64!(adjusted_max_ops))
                             .await
                             .expect("proof should not fail");
 

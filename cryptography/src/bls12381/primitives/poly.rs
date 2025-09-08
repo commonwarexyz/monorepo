@@ -20,7 +20,7 @@ use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, Read
 use core::hash::Hash;
 #[cfg(feature = "std")]
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
@@ -90,7 +90,7 @@ pub fn new(degree: u32) -> Poly<Scalar> {
 // sampled at random from the provided RNG.
 ///
 /// In the context of secret sharing, the threshold is the degree + 1.
-pub fn new_from<R: RngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
+pub fn new_from<R: CryptoRngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L46-L52
     let coeffs = (0..=degree)
         .map(|_| Scalar::from_rand(rng))

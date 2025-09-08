@@ -2,7 +2,7 @@
 name = "commonware-sync"
 edition = "2021"
 publish = true
-version = "0.0.59"
+version = "0.0.61"
 license = "MIT OR Apache-2.0"
 description = "Synchronize state between a server and client."
 readme = "README.md"

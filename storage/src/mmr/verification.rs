@@ -67,16 +67,16 @@ impl<D: Digest> ProofStore<D> {
             root,
         )?;
 
-        Ok(ProofStore::new_from_digests(digests, proof.size))
+        Ok(ProofStore::new_from_digests(proof.size, digests))
     }
 
     /// Create a new [ProofStore] from the result of calling
     /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
-    pub fn new_from_digests(digests: Vec<(u64, D)>, size: u64) -> Self {
+    pub fn new_from_digests(size: u64, digests: Vec<(u64, D)>) -> Self {
         Self {
-            digests: digests.into_iter().collect(),
             size,
+            digests: digests.into_iter().collect(),
         }
     }
 }

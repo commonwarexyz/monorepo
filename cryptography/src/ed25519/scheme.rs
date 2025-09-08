@@ -3,7 +3,6 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use crate::BatchVerifier;
         use std::borrow::{Cow, ToOwned};
-        use rand::RngCore;
     } else {
         use alloc::borrow::ToOwned;
     }
@@ -17,7 +16,7 @@ use core::{
     ops::Deref,
 };
 use ed25519_consensus::{self, VerificationKey};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";
@@ -56,7 +55,7 @@ impl crate::Signer for PrivateKey {
 }
 
 impl PrivateKeyExt for PrivateKey {
-    fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self {
+    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
         let key = ed25519_consensus::SigningKey::new(rng);
         let raw = key.to_bytes();
         Self { raw, key }
@@ -360,7 +359,7 @@ impl BatchVerifier<PublicKey> for Batch {
         true
     }
 
-    fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool {
+    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
         self.verifier.verify(rng).is_ok()
     }
 }

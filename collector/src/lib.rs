@@ -15,8 +15,18 @@ use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use futures::channel::oneshot;
 use std::future::Future;
+use thiserror::Error;
 
 pub mod p2p;
+
+/// Errors that can occur when interacting with a [Originator].
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("send failed: {0}")]
+    SendFailed(anyhow::Error),
+    #[error("canceled")]
+    Canceled,
+}
 
 /// An [Originator] sends requests out to a set of [Handler]s and collects replies.
 pub trait Originator: Clone + Send + 'static {
@@ -32,7 +42,7 @@ pub trait Originator: Clone + Send + 'static {
         &mut self,
         recipients: Recipients<Self::PublicKey>,
         request: Self::Request,
-    ) -> impl Future<Output = Vec<Self::PublicKey>> + Send;
+    ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Error>> + Send;
 
     /// Cancel a request by `commitment`, ignoring any future responses.
     ///

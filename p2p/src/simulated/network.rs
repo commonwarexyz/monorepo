@@ -1,6 +1,7 @@
 //! Implementation of a simulated p2p network.
 
 use super::{
+    bandwidth,
     ingress::{self, Oracle},
     metrics, Error,
 };
@@ -21,7 +22,7 @@ use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tracing::{error, trace};
 
@@ -163,6 +164,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         &mut self.context.clone(),
                         public_key.clone(),
                         self.get_next_socket(),
+                        usize::MAX,
+                        usize::MAX,
                         self.max_size,
                     );
                     self.peers.insert(public_key.clone(), peer);
@@ -185,6 +188,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 );
                 send_result(result, Ok((sender, receiver)))
             }
+            ingress::Message::SetBandwidth {
+                public_key,
+                egress_bps,
+                ingress_bps,
+                result,
+            } => match self.peers.get_mut(&public_key) {
+                Some(peer) => {
+                    peer.set_bandwidth(egress_bps, ingress_bps);
+                    send_result(result, Ok(()));
+                }
+                None => send_result(result, Err(Error::PeerMissing)),
+            },
             ingress::Message::AddLink {
                 sender,
                 receiver,
@@ -202,7 +217,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 };
 
                 // Require link to not already exist
-                let key = (sender.clone(), receiver);
+                let key = (sender.clone(), receiver.clone());
                 if self.links.contains_key(&key) {
                     return send_result(result, Err(Error::LinkExists));
                 }
@@ -210,10 +225,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let link = Link::new(
                     &mut self.context,
                     sender,
+                    receiver,
                     peer.socket,
                     sampler,
                     success_rate,
                     self.max_size,
+                    self.received_messages.clone(),
                 );
                 self.links.insert(key, link);
                 send_result(result, Ok(()))
@@ -236,6 +253,73 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 send_result(result, Ok(self.blocks.iter().cloned().collect()))
             }
         }
+    }
+}
+
+impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
+    /// Schedule a transmission respecting bandwidth limits on both sender and receiver.
+    fn schedule_transmission(
+        &mut self,
+        sender: &P,
+        receiver: &P,
+        data_size: usize,
+        now: SystemTime,
+        should_deliver: bool,
+    ) -> SystemTime {
+        // Prune and get used bandwidth for sender and receiver
+        let sender_used = {
+            let sender_peer = self.peers.get_mut(sender).expect("sender not found");
+            sender_peer.egress.prune_and_get_usage(now)
+        };
+
+        let receiver_used = if should_deliver && sender != receiver {
+            let receiver_peer = self.peers.get_mut(receiver).expect("receiver not found");
+            Some(receiver_peer.ingress.prune_and_get_usage(now))
+        } else {
+            None
+        };
+
+        let sender_schedule = {
+            let sender = self.peers.get(sender).expect("sender not found");
+            (&sender.egress, sender_used)
+        };
+
+        let receiver_schedule = if let Some(used) = receiver_used {
+            let receiver_peer = self.peers.get(receiver).expect("receiver not found");
+            Some((&receiver_peer.ingress, used))
+        } else {
+            None
+        };
+
+        // Now calculate reservations
+        let (reservations, completion_time) =
+            bandwidth::calculate_reservations(data_size, now, sender_schedule, receiver_schedule);
+
+        // Apply reservations to sender
+        if !reservations.is_empty() {
+            let sender_peer = self.peers.get_mut(sender).expect("sender not found");
+            for reservation in &reservations {
+                sender_peer.egress.add_reservation(
+                    reservation.start,
+                    reservation.end,
+                    reservation.bandwidth,
+                );
+            }
+
+            // Apply to receiver if delivering
+            if receiver_used.is_some() {
+                let receiver_peer = self.peers.get_mut(receiver).expect("receiver not found");
+                for reservation in &reservations {
+                    receiver_peer.ingress.add_reservation(
+                        reservation.start,
+                        reservation.end,
+                        reservation.bandwidth,
+                    );
+                }
+            }
+        }
+
+        completion_time
     }
 
     /// Handle a task.
@@ -270,7 +354,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
 
             // Determine if there is a link between the sender and recipient
-            let mut link = match self.links.get(&o_r).cloned() {
+            let link = match self.links.get(&o_r) {
                 Some(link) => link,
                 None => {
                     trace!(?origin, ?recipient, reason = "no link", "dropping message",);
@@ -284,51 +368,90 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
                 .inc();
 
-            // Apply link settings
-            let delay = link.sampler.sample(&mut self.context);
-            let should_deliver = self.context.gen_bool(link.success_rate);
-            trace!(?origin, ?recipient, ?delay, "sending message",);
+            // Check bandwidth constraints and determine if the message should be delivered
+            let (sender_has_bandwidth, should_deliver) = {
+                let sender_peer = self.peers.get(&origin).expect("sender must exist");
+                let receiver_peer = self.peers.get(&recipient).expect("receiver must exist");
 
-            // Send message
-            self.context.with_label("messenger").spawn({
-                let message = message.clone();
+                let sender_has_bandwidth = sender_peer.egress.bps > 0;
+                let receiver_has_bandwidth = receiver_peer.ingress.bps > 0;
+
+                let should_deliver = self.context.gen_bool(link.success_rate);
+
+                (
+                    sender_has_bandwidth,
+                    // If the receiver has no bandwidth then we treat it as if the message
+                    // is never delivered. Still consume sender-side bandwidth.
+                    should_deliver && receiver_has_bandwidth,
+                )
+            };
+
+            if !sender_has_bandwidth {
+                // Sender has no bandwidth, skip this recipient
+                trace!(
+                    ?origin,
+                    ?recipient,
+                    "sender has zero bandwidth, skipping recipient"
+                );
+                continue;
+            }
+
+            // Sample latency and get current time
+            let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
+            let now = self.context.current();
+
+            // Schedule the transmission
+            let transmission_complete_at =
+                self.schedule_transmission(&origin, &recipient, message.len(), now, should_deliver);
+
+            // If the message should be delivered, queue it immediately on the
+            // link to preserve ordering
+            if should_deliver {
+                let link = self.links.get_mut(&o_r).unwrap();
+
+                // The final arrival time includes the per-message latency
+                let receive_complete_at = transmission_complete_at + latency;
+
+                if let Err(err) = link.send(channel, message.clone(), receive_complete_at) {
+                    // This can only happen if the receiver exited.
+                    error!(?origin, ?recipient, ?err, "failed to send");
+                    continue;
+                }
+            }
+
+            let transmission_duration = transmission_complete_at
+                .duration_since(now)
+                .unwrap_or(Duration::ZERO);
+            trace!(
+                ?origin,
+                ?recipient,
+                transmission_duration_ms = transmission_duration.as_millis(),
+                latency_ms = latency.as_millis(),
+                delivered = should_deliver,
+                "sending message",
+            );
+
+            // Spawn task to handle sender timing
+            self.context.with_label("sender-timing").spawn({
                 let recipient = recipient.clone();
-                let origin = origin.clone();
                 let mut acquired_sender = acquired_sender.clone();
-                let received_messages = self.received_messages.clone();
                 move |context| async move {
-                    // Mark as sent as soon as soon as execution starts
+                    // Wait for transmission to complete
+                    context.sleep_until(transmission_complete_at).await;
+
+                    // Mark as sent once transmission completes
                     acquired_sender.send(()).await.unwrap();
 
-                    // Apply delay to send (once link is not saturated)
-                    //
-                    // Note: messages can be sent out of order (will not occur when using a
-                    // stable TCP connection)
-                    context.sleep(Duration::from_millis(delay as u64)).await;
-
-                    // Drop message if success rate is too low
                     if !should_deliver {
                         trace!(
                             ?recipient,
                             reason = "random link failure",
                             "dropping message",
                         );
-                        return;
                     }
-
-                    // Send message
-                    if let Err(err) = link.send(channel, message).await {
-                        // This can only happen if the receiver exited.
-                        error!(?origin, ?recipient, ?err, "failed to send",);
-                        return;
-                    }
-
-                    // Only record received messages that were successfully sent
-                    received_messages
-                        .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
-                        .inc();
                 }
             });
+
             sent.push(recipient);
         }
 
@@ -493,6 +616,10 @@ struct Peer<P: PublicKey> {
 
     // Control to register new channels
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
+
+    // Bandwidth schedules for egress and ingress
+    egress: bandwidth::Schedule,
+    ingress: bandwidth::Schedule,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -500,10 +627,12 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    fn new<E: Spawner + RNetwork + Metrics>(
+    fn new<E: Spawner + RNetwork + Metrics + Clock>(
         context: &mut E,
         public_key: P,
         socket: SocketAddr,
+        egress_bps: usize,
+        ingress_bps: usize,
         max_size: usize,
     ) -> Self {
         // The control is used to register channels.
@@ -621,6 +750,8 @@ impl<P: PublicKey> Peer<P> {
         Self {
             socket,
             control: control_sender,
+            egress: bandwidth::Schedule::new(egress_bps),
+            ingress: bandwidth::Schedule::new(ingress_bps),
         }
     }
 
@@ -636,6 +767,16 @@ impl<P: PublicKey> Peer<P> {
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)?
     }
+
+    /// Set bandwidth limits for the peer.
+    ///
+    /// Bandwidth is specified for the peer's egress (upload) and ingress
+    /// (download) rates in bytes per second. Use `usize::MAX` for effectively
+    /// unlimited bandwidth.
+    fn set_bandwidth(&mut self, egress_bps: usize, ingress_bps: usize) {
+        self.egress.bps = egress_bps;
+        self.ingress.bps = ingress_bps;
+    }
 }
 
 // A unidirectional link between two peers.
@@ -644,17 +785,21 @@ impl<P: PublicKey> Peer<P> {
 struct Link {
     sampler: Normal<f64>,
     success_rate: f64,
-    inbox: mpsc::UnboundedSender<(Channel, Bytes)>,
+    // Messages with their receive time for ordered delivery
+    inbox: mpsc::UnboundedSender<(Channel, Bytes, SystemTime)>,
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork + Metrics, P: PublicKey>(
+    #[allow(clippy::too_many_arguments)]
+    fn new<E: Spawner + RNetwork + Clock + Metrics, P: PublicKey>(
         context: &mut E,
         dialer: P,
+        receiver: P,
         socket: SocketAddr,
         sampler: Normal<f64>,
         success_rate: f64,
         max_size: usize,
+        received_messages: Family<metrics::Message, Counter>,
     ) -> Self {
         let (inbox, mut outbox) = mpsc::unbounded();
         let result = Self {
@@ -676,24 +821,37 @@ impl Link {
                     return;
                 }
 
-                // For any item placed in the inbox, send it to the sink
-                while let Some((channel, message)) = outbox.next().await {
+                // Process messages in order, waiting for their receive time
+                while let Some((channel, message, receive_complete_at)) = outbox.next().await {
+                    // Wait until the message should arrive at receiver
+                    context.sleep_until(receive_complete_at).await;
+
+                    // Send the message
                     let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
                     data.extend_from_slice(&channel.to_be_bytes());
                     data.extend_from_slice(&message);
                     let data = data.freeze();
                     send_frame(&mut sink, &data, max_size).await.unwrap();
+
+                    // Bump received messages metric
+                    received_messages
+                        .get_or_create(&metrics::Message::new(&dialer, &receiver, channel))
+                        .inc();
                 }
             });
 
         result
     }
 
-    // Send a message over the link.
-    async fn send(&mut self, channel: Channel, message: Bytes) -> Result<(), Error> {
+    // Send a message over the link with receive timing.
+    fn send(
+        &mut self,
+        channel: Channel,
+        message: Bytes,
+        receive_complete_at: SystemTime,
+    ) -> Result<(), Error> {
         self.inbox
-            .send((channel, message))
-            .await
+            .unbounded_send((channel, message, receive_complete_at))
             .map_err(|_| Error::NetworkClosed)?;
         Ok(())
     }
@@ -736,8 +894,8 @@ mod tests {
 
             // Add link
             let link = ingress::Link {
-                latency: 2.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(2),
+                jitter: Duration::from_millis(1),
                 success_rate: 0.9,
             };
             oracle

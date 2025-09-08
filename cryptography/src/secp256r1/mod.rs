@@ -1,4 +1,4 @@
-//! Secp256r1 implementation of the `Scheme` trait.
+//! Secp256r1 implementation of the [crate::Verifier] and [crate::Signer] traits.
 //!
 //! This implementation operates over public keys in compressed form (SEC 1, Version 2.0, Section 2.3.3), generates
 //! deterministic signatures as specified in [RFC 6979](https://datatracker.ietf.org/doc/html/rfc6979), and enforces

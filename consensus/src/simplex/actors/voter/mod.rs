@@ -158,8 +158,8 @@ mod tests {
                     validator.clone(),
                     peer.clone(),
                     Link {
-                        latency: 0.0,
-                        jitter: 0.0,
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
                         success_rate: 1.0,
                     },
                 )
@@ -170,8 +170,8 @@ mod tests {
                     peer,
                     validator,
                     Link {
-                        latency: 0.0,
-                        jitter: 0.0,
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
                         success_rate: 1.0,
                     },
                 )
@@ -354,8 +354,8 @@ mod tests {
                     validator.clone(),
                     peer.clone(),
                     Link {
-                        latency: 0.0,
-                        jitter: 0.0,
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
                         success_rate: 1.0,
                     },
                 )
@@ -366,8 +366,8 @@ mod tests {
                     peer,
                     validator,
                     Link {
-                        latency: 0.0,
-                        jitter: 0.0,
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
                         success_rate: 1.0,
                     },
                 )

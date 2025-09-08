@@ -130,7 +130,7 @@ function insertFooter() {
             <a href="/benchmarks.html">Benchmarks</a>
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
             <a href="https://x.com/commonwarexyz">X</a>
-            <a href="https://podcasts.apple.com/us/podcast/how-things-work/id1794554748">Podcast</a>
+            <a href="https://youtube.com/playlist?list=PLnVJ5S1DIyuFQ9cIE_oE-U3Wl3JDgZQ8A">Podcast</a>
         </div>
         &copy; ${currentYear} Commonware, Inc. All rights reserved.
     </div>

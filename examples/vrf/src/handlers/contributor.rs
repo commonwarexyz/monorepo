@@ -15,13 +15,13 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::quorum;
 use futures::{channel::mpsc, SinkExt};
-use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::{collections::HashMap, time::Duration};
 use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
-pub struct Contributor<E: Clock + Rng + Spawner, C: Signer> {
+pub struct Contributor<E: Clock + CryptoRngCore + Spawner, C: Signer> {
     context: E,
     crypto: C,
     dkg_phase_timeout: Duration,
@@ -37,7 +37,7 @@ pub struct Contributor<E: Clock + Rng + Spawner, C: Signer> {
     signatures: mpsc::Sender<(u64, Output<MinSig>)>,
 }
 
-impl<E: Clock + Rng + Spawner, C: Signer> Contributor<E, C> {
+impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: E,

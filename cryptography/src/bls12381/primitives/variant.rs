@@ -19,7 +19,7 @@ use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
 };
-use rand::{CryptoRng, RngCore};
+use rand_core::CryptoRngCore;
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
@@ -43,7 +43,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     ) -> Result<(), Error>;
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
-    fn batch_verify<R: RngCore + CryptoRng>(
+    fn batch_verify<R: CryptoRngCore>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -127,7 +127,7 @@ impl Variant for MinPk {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: RngCore + CryptoRng>(
+    fn batch_verify<R: CryptoRngCore>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -273,7 +273,7 @@ impl Variant for MinSig {
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify<R: RngCore + CryptoRng>(
+    fn batch_verify<R: CryptoRngCore>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],

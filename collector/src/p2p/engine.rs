@@ -2,7 +2,10 @@ use super::{
     ingress::{Mailbox, Message},
     Config,
 };
-use crate::p2p::{Handler, Monitor};
+use crate::{
+    p2p::{Handler, Monitor},
+    Error,
+};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
@@ -143,13 +146,12 @@ where
                                     self.priority_request
                                 ).await {
                                     Ok(recipients) => {
-                                        for peer in &recipients {
-                                            entry.0.insert(peer.clone());
-                                        }
-                                        let _ = responder.send(recipients);
+                                        entry.0.extend(recipients.iter().cloned());
+                                        let _ = responder.send(Ok(recipients));
                                     }
                                     Err(err) => {
                                         error!(?err, ?commitment, "failed to send message");
+                                        let _ = responder.send(Err(Error::SendFailed(err.into())));
                                     }
                                 }
                             },

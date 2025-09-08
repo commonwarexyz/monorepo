@@ -3,21 +3,23 @@
 module types {
     import option.* from "./option"
 
-    type ReplicaId = str
-
     type Signature = str
 
     type Weight = int
 
     type ViewNumber = int
 
-    type BlockHash = str
+    type Block = str
 
     type Kind = str
 
-    type Block = str
+    type ReplicaId = str
 
-    pure val DUMMY_BLOCK_HASH: BlockHash = "DUMMY_BLOCK_HASH"
+    // Each replica id has a private/public key pair assigned to it.
+    // For testing purposes and for modeling byzantine behavior,
+    // several replica ids may have the private/key pair.
+    type ReplicaKey = str
+
     pure val GENESIS_BLOCK: Block = "GENESIS_BLOCK"
     pure val DUMMY_BLOCK: Block = "DUMMY_BLOCK"
     pure val EMPTY_BLOCK = "EMPTY_BLOCK"
@@ -30,14 +32,12 @@ module types {
 
     pure val NotarizationKind = "NOTARIZATION_KIND"
     pure val NullificationKind = "NULLIFICATION_KIND"
+    pure val FinalizationKind = "FINALIZATION_KIND"
 
-    // Get the "hash" of a string
-    pure def hash(b: Block): BlockHash = b
-
-    /// Vote for a block at height h
+    // Vote for a block at height h
     type Vote = {
         view: ViewNumber,
-        block_hash: BlockHash,
+        block: Block,
         sig: Signature,
         kind: Kind
     }
@@ -46,16 +46,16 @@ module types {
         {
             view: v,
             sig: id,
-            block_hash: DUMMY_BLOCK_HASH,
+            block: DUMMY_BLOCK,
             kind: NullifyKind
         }
     }
 
-    pure def notarize(v: ViewNumber, id: Signature, block_hash: BlockHash): Vote = {
+    pure def notarize(v: ViewNumber, id: Signature, block: Block): Vote = {
         {
             view: v,
             sig: id,
-            block_hash: block_hash,
+            block: block,
             kind: NotarizeKind
         }
     }
@@ -63,12 +63,12 @@ module types {
     type Certificate = {
         view: ViewNumber,
         kind: Kind,
-        block_hash: BlockHash,
+        block: Block,
         signatures: Set[Signature],
         ghost_sender: Signature
     }
 
-    /// Leader-proposal message ⟨propose,h,b_0,…,b_h⟩
+    // Leader-proposal message ⟨propose,h,b_0,…,b_h⟩
     type Proposal = {
         // proposed block
         block: Block,
@@ -82,11 +82,7 @@ module types {
         sig: Signature
     }
 
-
-    type Proof =
-        Empty | Nullification(Certificate) | Notarization(Certificate)
-
-    /// Local state kept by each replica
+    // Local state kept by each replica
     type ReplicaState = {
         // Current height (iteration), initially 0
         view: ViewNumber,
@@ -100,12 +96,12 @@ module types {
         // not in the original spec, the latest view that this replica has seen notarization votes for
         ghost_last_seen_notarization: ViewNumber,
         // sequence if the sent votes
-        ghost_sent_votes: ViewNumber -> List[BlockHash],
+        ghost_sent_votes: ViewNumber -> List[Block],
         // not in the original spec, the last view this replica has finalized
         last_finalized: ViewNumber,
         // not in the original spec, whether this replica has sent a proposal
         propose_sent: bool,
         // blocks that the replica notarized per view
-        notarized: ViewNumber -> BlockHash
+        notarized: ViewNumber -> Block
     }
 }

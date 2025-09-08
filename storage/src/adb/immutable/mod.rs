@@ -17,7 +17,7 @@ use crate::{
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{sequence::U32, Array, NZUsize};
+use commonware_utils::{Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
@@ -100,7 +100,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
-    locations: fixed::Journal<E, U32>,
+    locations: fixed::Journal<E, u32>,
 
     /// The location of the oldest retained operation, or 0 if no operations have been added.
     oldest_retained_loc: u64,
@@ -284,25 +284,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         log_items_per_section: NonZeroU64,
         mmr: &mut Mmr<E, H>,
         log: &mut variable::Journal<E, Variable<K, V>>,
-        locations: &mut fixed::Journal<E, U32>,
+        locations: &mut fixed::Journal<E, u32>,
         snapshot: &mut Index<T, u64>,
     ) -> Result<(u64, u64), Error> {
-        // Align the mmr with the location map. Any elements we remove here that are still in the
-        // log will be re-added later.
-        let mut mmr_leaves = leaf_pos_to_num(mmr.size()).unwrap();
-        let locations_size = locations.size().await?;
-        if locations_size > mmr_leaves {
-            warn!(
-                mmr_leaves,
-                locations_size, "rewinding misaligned locations map"
-            );
-            locations.rewind(mmr_leaves).await?;
-        }
-        if mmr_leaves > locations_size {
-            warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
-            mmr.pop((mmr_leaves - locations_size) as usize).await?;
-            mmr_leaves = locations_size;
-        }
+        // Align the mmr with the location map.
+        let mut mmr_leaves = super::align_mmr_and_locations(mmr, locations).await?;
 
         // The number of operations in the log.
         let mut log_size = 0;
@@ -316,7 +302,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // operations that must be rolled back, and any log operations that need to be re-added to
         // the MMR & locations.
         {
-            let stream = log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
+            let stream = log
+                .replay(0, 0, NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
+                .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -348,7 +336,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 offset, "operation was missing from MMR/location map"
                             );
                             mmr.add(hasher, &op.encode()).await?;
-                            locations.append(offset.into()).await?;
+                            locations.append(offset).await?;
                             mmr_leaves += 1;
                         }
                         match op {
@@ -391,6 +379,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Pop any MMR elements that are ahead of the last log commit point.
         if mmr_leaves > log_size {
             locations.rewind(log_size).await?;
+            locations.sync().await?;
 
             let op_count = mmr_leaves - log_size;
             warn!(op_count, "popping uncommitted MMR operations");
@@ -420,8 +409,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Prunes the db of up to all operations that have location less than `loc`. The actual number
     /// pruned may be fewer than requested due to blob boundaries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
-        assert!(loc <= self.log_size);
+        assert!(loc <= self.last_commit.unwrap_or(0));
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
@@ -464,7 +457,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::OperationPruned(loc));
         }
 
-        let offset = self.locations.read(loc).await?.into();
+        let offset = self.locations.read(loc).await?;
         let section = loc / self.log_items_per_section;
         let op = self.log.get(section, offset).await?.expect("invalid loc");
 
@@ -481,7 +474,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         match self.locations.read(loc).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc, offset.into()).await;
+                return self.get_from_offset(key, loc, offset).await;
             }
             Err(e) => Err(Error::Journal(e)),
         }
@@ -540,13 +533,28 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
     pub(super) async fn apply_op(&mut self, op: Variable<K, V>) -> Result<(), Error> {
-        self.mmr.add_batched(&mut self.hasher, &op.encode()).await?;
-
         let section = self.current_section();
-        let (offset, _) = self.log.append(section, op).await?;
-        self.log_size += 1;
-        self.locations.append(offset.into()).await?;
+        let encoded_op = op.encode();
 
+        // Create a future that updates the MMR.
+        let mmr_fut = async {
+            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
+            Ok::<(), Error>(())
+        };
+
+        // Create a future that appends the operation to the log and writes the resulting offset
+        // locations.
+        let log_fut = async {
+            let (offset, _) = self.log.append(section, op).await?;
+            self.locations.append(offset).await?;
+            Ok::<(), Error>(())
+        };
+
+        // Run the 2 futures in parallel.
+        try_join!(mmr_fut, log_fut)?;
+        self.log_size += 1;
+
+        // Maintain invariant that all filled sections are synced and immutable.
         if section != self.current_section() {
             self.log.sync(section).await?;
         }
@@ -567,7 +575,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn proof(
         &self,
         start_index: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_index, max_ops)
             .await
@@ -578,14 +586,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
         if start_loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(start_loc));
         }
 
         let start_pos = leaf_num_to_pos(start_loc);
-        let end_loc = std::cmp::min(size - 1, start_loc + max_ops - 1);
+        let end_loc = std::cmp::min(size - 1, start_loc + max_ops.get() - 1);
         let end_pos = leaf_num_to_pos(end_loc);
         let mmr_size = leaf_num_to_pos(size);
 
@@ -596,7 +604,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         for loc in start_loc..=end_loc {
             let section = loc / self.log_items_per_section;
-            let offset = self.locations.read(loc).await?.into();
+            let offset = self.locations.read(loc).await?;
             let Some(op) = self.log.get(section, offset).await? else {
                 panic!("no log item at location {loc}");
             };
@@ -606,13 +614,41 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok((proof, ops))
     }
 
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Batch operations will be parallelized if a thread pool
-    /// is provided. Caller can associate an arbitrary `metadata` value with the commit.
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Caller can associate an arbitrary `metadata` value with the commit.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         self.last_commit = Some(self.log_size);
-        self.apply_op(Variable::Commit(metadata)).await?;
-        self.sync().await
+        let op = Variable::<K, V>::Commit(metadata);
+        let encoded_op = op.encode();
+        let section = self.current_section();
+
+        // Create a future that updates the MMR.
+        let mmr_fut = async {
+            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
+            self.mmr.process_updates(&mut self.hasher);
+            Ok::<(), Error>(())
+        };
+
+        // Create a future that appends the operation to the log, syncs it, and writes the resulting
+        // offset locations.
+        let log_fut = async {
+            let (offset, _) = self.log.append(section, op).await?;
+            // Sync the log and update locations in parallel.
+            try_join!(
+                self.log.sync(section).map_err(Error::Journal),
+                self.locations.append(offset).map_err(Error::Journal),
+            )?;
+            Ok::<(), Error>(())
+        };
+
+        // Run the 2 futures in parallel.
+        try_join!(mmr_fut, log_fut)?;
+        self.log_size += 1;
+
+        Ok(())
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
@@ -622,7 +658,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Ok(None);
         };
         let section = last_commit / self.log_items_per_section;
-        let offset = self.locations.read(last_commit).await?.into();
+        let offset = self.locations.read(last_commit).await?;
         let Some(Variable::Commit(metadata)) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
@@ -630,8 +666,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(Some((last_commit, metadata)))
     }
 
-    /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
-    /// parallelized if a thread pool is provided.
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         let section = self.current_section();
         try_join!(
@@ -909,7 +946,7 @@ pub(super) mod test {
 
             // Make sure all ranges of 5 operations are provable, including truncated ranges at the
             // end.
-            let max_ops = 5;
+            let max_ops = NZU64!(5);
             for i in 0..db.op_count() {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
                 assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
@@ -1121,7 +1158,7 @@ pub(super) mod test {
 
             // Confirm behavior of trying to create a proof of pruned items is as expected.
             let pruned_pos = ELEMENTS / 2;
-            let proof_result = db.proof(pruned_pos, pruned_pos + 100).await;
+            let proof_result = db.proof(pruned_pos, NZU64!(pruned_pos + 100)).await;
             assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
 
             db.destroy().await.unwrap();

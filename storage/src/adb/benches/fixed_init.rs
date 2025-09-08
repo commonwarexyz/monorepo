@@ -46,7 +46,6 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
         translator: EightCap,
         thread_pool: Some(pool),
         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-        pruning_delay: 10,
     }
 }
 
@@ -89,7 +88,7 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
         db.commit().await.unwrap();
         info!(
             op_count = db.op_count(),
-            oldest_retained_loc = db.oldest_retained_loc().unwrap(),
+            inactivity_floor_loc = db.inactivity_floor_loc(),
             "DB generated.",
         );
         db.close().await.unwrap();
