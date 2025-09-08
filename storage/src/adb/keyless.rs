@@ -116,6 +116,9 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
 
 impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Find the last valid log operation that has a corresponding location entry.
+    ///
+    /// Accepts the `aligned_size` of the MMR and locations journal and the `log_items_per_section` of a [Keyless] instance.
+    /// Returns the index of the last operation and its offset in the section it belongs to.
     async fn find_last_operation(
         locations: &FJournal<E, u32>,
         log: &VJournal<E, Operation<V>>,
@@ -147,6 +150,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Replay log operations from a given position and sync MMR and locations.
+    ///
     /// Returns None if the log is empty (for initial replay), otherwise returns
     /// the offset and the last operation processed.
     async fn replay_operations(
@@ -209,7 +213,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Find the last commit point and rewind to it if necessary.
-    /// Returns the final size after rewinding.
+    ///
+    /// Accepts the `op_count` of the MMR, the `last_offset` of the last log operation, and the `log_items_per_section` of a [Keyless] instance.
+    /// Returns the index of the last operation after rewinding.
     async fn rewind_to_last_commit(
         mmr: &mut Mmr<E, H>,
         locations: &mut FJournal<E, u32>,
@@ -314,8 +320,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        // Find the section+offset of the most recent log operation that has a valid location offset
-        // in locations.
+        // Find the location of the most recent log operation that is at an index less than or equal to the `aligned_size`.
         let log_items_per_section = cfg.log_items_per_section.get();
         let (valid_size, section_offset) =
             Self::find_last_operation(&locations, &log, aligned_size, log_items_per_section)
@@ -334,10 +339,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         }
         assert_eq!(mmr.leaves(), locations.size().await?);
 
-        // The tip of the locations journal & mmr, if they exist, must now correspond to a valid log
-        // location represented by `section_offset`. We use this as the starting point to replay the
-        // log in order to add back any missing items. If they don't exist, we use the very first
-        // log operation as our starting point.
+        // Apply operations from the log at indices beyond the `aligned_size` to the MMR and locations journal.
+        //
+        // Because we don't sync the MMR and locations journal during commit, it is possible that they are (far) behind
+        // the log.
         let replay_result =
             Self::replay_operations(&mut mmr, &mut hasher, &mut locations, &log, section_offset)
                 .await?;
