@@ -13,7 +13,10 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
-use core::{fmt::Write as FmtWrite, time::Duration};
+use core::{
+    fmt::{Debug, Write as FmtWrite},
+    time::Duration,
+};
 
 pub mod sequence;
 pub use sequence::{Array, Span};

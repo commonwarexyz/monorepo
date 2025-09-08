@@ -25,6 +25,7 @@ tracing = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
 thiserror = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
