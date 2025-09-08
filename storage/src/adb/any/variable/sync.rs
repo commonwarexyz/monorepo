@@ -509,38 +509,46 @@ async fn count_items_in_section<E: Storage + Metrics, V: Codec>(
     Ok(item_count)
 }
 
-/// Prune the section containing `lower_bound`.
-/// If existing items are contiguous with `lower_bound`, preserves all items and sets
-/// `oldest_retained_loc` to the section boundary. Otherwise, rebuilds the section to
-/// remove items before `lower_bound` and updates metadata accordingly.
+/// Prune items before `lower_bound` from the section containing it.
+///
+/// This function handles the case where the lower bound of our sync range falls
+/// in the middle of a section. We need to (logically) remove any items in that section that
+/// come before `lower_bound`.
+///
+/// **Contiguity optimization**: If the existing items in the section flow directly
+/// into our sync range (no gap between the last existing item and `lower_bound`),
+/// we can simply leave the section unchanged. The items before `lower_bound` will
+/// be logically excluded by updating metadata elsewhere.
+///
+/// **Non-contiguous case**: If there's a gap between existing items and `lower_bound`,
+/// we must physically rebuild the section to remove the unwanted items. This ensures
+/// that items that are "physically" adjacent in the section are also logically adjacent.
 async fn prune_lower<E, V>(
     journal: &mut VJournal<E, V>,
     metadata: &mut Metadata<E, U64, u64>,
     lower_bound: u64,
-    items_per_section: NonZeroU64,
+    items_per_section: u64,
 ) -> Result<(), crate::journal::Error>
 where
     E: Storage + Metrics + Clock,
     V: Codec,
 {
-    // Find which section contains the lower_bound item
-    let lower_section = lower_bound / items_per_section.get();
+    // The section containing the lower bound
+    let lower_section = lower_bound / items_per_section;
 
     if !journal.blobs.contains_key(&lower_section) {
         return Ok(()); // Section doesn't exist, nothing to prune
     };
 
+    // The oldest retained location in the journal
     let oldest_retained_loc = read_oldest_retained_loc(metadata);
 
     // Scan the section to find the location of its first and last items
-    let mut existing_bounds = None;
+    let mut lower_section_max_loc = oldest_retained_loc;
     {
         let mut loc = oldest_retained_loc; // Location of the current item in stream below
-        let mut min_loc = None; // Minimum location of the existing items in the section
-        let mut max_loc = None; // Maximum location of the existing items in the section
-
         let stream = journal
-            .replay(0, 0, commonware_utils::NZUsize!(1024))
+            .replay(lower_section, 0, commonware_utils::NZUsize!(1024))
             .await?;
         pin_mut!(stream);
         while let Some(result) = stream.next().await {
@@ -552,27 +560,15 @@ where
                 break; // We've moved past our target section
             }
 
-            if min_loc.is_none() {
-                min_loc = Some(loc);
-            }
-            max_loc = Some(loc);
+            lower_section_max_loc = loc;
             loc += 1;
-        }
-
-        if let (Some(min), Some(max)) = (min_loc, max_loc) {
-            existing_bounds = Some((min, max));
         }
     }
 
-    // Determine if existing items are contiguous with the new lower_bound
-    let Some((existing_min, existing_max)) = existing_bounds else {
-        return Ok(()); // Nothing in this section; nothing to rebuild
-    };
-    let is_contiguous = lower_bound <= existing_max + 1;
+    let is_contiguous = lower_bound <= lower_section_max_loc + 1;
     if is_contiguous {
         debug!(
-            existing_min,
-            existing_max,
+            lower_section_max_loc,
             lower_bound,
             oldest_retained_loc,
             "existing items are contiguous with new range, skipping rebuild"
@@ -581,18 +577,15 @@ where
     }
 
     debug!(
-        existing_min,
-        existing_max,
-        lower_bound,
-        oldest_retained_loc,
-        "existing items are non-contiguous, rebuilding section"
+        lower_section_max_loc,
+        lower_bound, oldest_retained_loc, "existing items are non-contiguous, rebuilding section"
     );
 
     // Read all operations from the current section
     let mut operations_to_keep = Vec::new();
     {
         let stream = journal
-            .replay(0, 0, commonware_utils::NZUsize!(1024))
+            .replay(lower_section, 0, commonware_utils::NZUsize!(1024))
             .await?;
         pin_mut!(stream);
 
@@ -677,9 +670,11 @@ where
     }
 
     let oldest_retained_loc = read_oldest_retained_loc(metadata);
-    let items_per_section_val = items_per_section.get();
-    let lower_section = lower_bound / items_per_section_val;
-    let upper_section = upper_bound / items_per_section_val;
+    let items_per_section = items_per_section.get();
+    // The section containing the lower bound
+    let lower_section = lower_bound / items_per_section;
+    // The section containing the upper bound
+    let upper_section = upper_bound / items_per_section;
 
     debug!(
         lower_bound,
@@ -687,16 +682,16 @@ where
         oldest_retained_loc,
         lower_section,
         upper_section,
-        items_per_section = items_per_section_val,
+        items_per_section,
         "pruning journal"
     );
 
     // Remove sections before the lower_section
-    let lower_section_start = lower_section * items_per_section_val;
     if lower_section > 0 {
         debug!(lower_section, "removing sections before lower_section");
         // Update metadata before pruning to ensure recovery is possible
-        // if we crash during pruning.
+        // if we crash after writing metadata but before pruning journal.
+        let lower_section_start = lower_section * items_per_section;
         if oldest_retained_loc < lower_section_start {
             write_oldest_retained_loc(metadata, lower_section_start);
             metadata.sync().await?;
@@ -725,13 +720,10 @@ where
     }
 
     // Prune the lower section if needed
-    if lower_bound > lower_section_start {
-        debug!(lower_section, "pruning lower section");
-        prune_lower(journal, metadata, lower_bound, items_per_section).await?;
-    }
+    prune_lower(journal, metadata, lower_bound, items_per_section).await?;
 
     // Prune the upper section if needed
-    prune_upper(journal, upper_bound, items_per_section_val).await?;
+    prune_upper(journal, upper_bound, items_per_section).await?;
 
     // Compute the next location to write and the new oldest_retained_loc
     // If journal is empty, return (lower_bound, lower_bound)
@@ -754,7 +746,7 @@ where
         journal.cfg.compression.is_some(),
     )
     .await?;
-    let last_section_start = last_section * items_per_section_val;
+    let last_section_start = last_section * items_per_section;
     let next_loc = last_section_start + items_in_last_section as u64;
     Ok(next_loc)
 }

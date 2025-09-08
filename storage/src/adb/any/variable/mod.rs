@@ -150,7 +150,18 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
     /// The location of the oldest operation in the log that remains readable.
     oldest_retained_loc: u64,
 
-    /// Metadata storage for persisting database state.
+    /// Metadata that stores the oldest retained location in the log.
+    /// This is needed because state sync may cause the first log section to be populated only
+    /// after some offset into it.
+    ///
+    /// For example, if log_items_per_section is 5, and we state sync with lower_bound 17, then
+    /// the oldest_retained_loc stored here is 17 because section 3 (operations 15-19) doesn't
+    /// contain operations 15/16 even though their locations fall within the section.
+    ///
+    /// # Invariant
+    ///
+    /// The oldest_retained_loc stored here is always advanced before the log is pruned
+    /// up to the given location.
     metadata: Metadata<E, U64, u64>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
@@ -267,7 +278,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
         let mut current_index = self.oldest_retained_loc().unwrap_or(0);
-        let first_section = current_index / self.log_items_per_section;
+        let expected_first_section = current_index / self.log_items_per_section;
         let mut warned_about_first_section = false;
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
@@ -281,7 +292,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             while let Some(result) = stream.next().await {
                 let (section, offset, _, op) = result.map_err(Error::Journal)?;
 
-                if section < first_section {
+                if section < expected_first_section {
                     // There is data in the log before the first section given by the oldest
                     // retained location given in metadata. In commit(), we write the oldest
                     // retained location to metadata before actually pruning the log and MMR.
