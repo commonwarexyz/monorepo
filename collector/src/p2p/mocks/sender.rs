@@ -1,9 +1,16 @@
 //! Mock sender implementations for testing.
 
-use crate::Error;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Recipients, Sender};
+use thiserror::Error;
+
+/// Errors that can be returned by [Failing].
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("send failed")]
+    Failed,
+}
 
 /// A sender that always fails with [Error::Canceled].
 #[derive(Clone, Debug)]
@@ -30,6 +37,6 @@ impl<P: PublicKey> Sender for Failing<P> {
         _message: Bytes,
         _priority: bool,
     ) -> Result<Vec<P>, Self::Error> {
-        Err(Error::Canceled)
+        Err(Error::Failed)
     }
 }
