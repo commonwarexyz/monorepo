@@ -115,6 +115,166 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
 }
 
 impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
+    /// Find the last valid log operation that has a corresponding location entry.
+    ///
+    /// Accepts the `aligned_size` of the MMR and locations journal and the `log_items_per_section` of a [Keyless] instance.
+    /// Returns the index of the last operation and its offset in the section it belongs to.
+    async fn find_last_operation(
+        locations: &FJournal<E, u32>,
+        log: &VJournal<E, Operation<V>>,
+        aligned_size: u64,
+        log_items_per_section: u64,
+    ) -> Result<(u64, Option<(u64, u32)>), Error> {
+        let mut valid_size = aligned_size;
+        let mut section_offset = None;
+
+        while valid_size > 0 {
+            let loc = valid_size - 1;
+            let offset = locations.read(loc).await?;
+            let section = loc / log_items_per_section;
+            match log.get(section, offset).await {
+                Ok(Some(_)) => {
+                    section_offset = Some((section, offset));
+                    break;
+                }
+                Ok(None) => (),
+                Err(e) => {
+                    warn!(loc, err=?e, "log operation missing");
+                }
+            };
+            warn!(loc, offset, section, "walking back locations");
+            valid_size -= 1;
+        }
+
+        Ok((valid_size, section_offset))
+    }
+
+    /// Replay log operations from a given position and sync MMR and locations.
+    ///
+    /// Returns None if the log is empty (for initial replay), otherwise returns
+    /// the offset and the last operation processed.
+    async fn replay_operations(
+        mmr: &mut Mmr<E, H>,
+        hasher: &mut Standard<H>,
+        locations: &mut FJournal<E, u32>,
+        log: &VJournal<E, Operation<V>>,
+        section_offset: Option<(u64, u32)>,
+    ) -> Result<Option<(u32, Operation<V>)>, Error> {
+        // Initialize stream from section_offset
+        let (section, offset, skip_first) = match section_offset {
+            Some((s, o)) => (s, o, true),
+            None => (0, 0, false),
+        };
+        let stream = log.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
+        pin_mut!(stream);
+
+        // Get first operation and handle empty log case
+        let first_op = stream.next().await;
+        let (mut last_offset, mut last_op) = if skip_first {
+            // We expect the first operation to exist (already processed)
+            let first_op = first_op.expect("operation known to exist")?;
+            (offset, first_op.3)
+        } else {
+            // Check if log is empty
+            let Some(first_op) = first_op else {
+                debug!("no starting log operation found, returning empty db");
+                return Ok(None);
+            };
+            let first_op = first_op?;
+            let encoded_op = first_op.3.encode();
+
+            // Add first operation to mmr and locations
+            mmr.add_batched(hasher, &encoded_op).await?;
+            locations.append(first_op.1).await?;
+            (first_op.1, first_op.3)
+        };
+
+        // Process remaining operations
+        while let Some(result) = stream.next().await {
+            let (section, offset, _, next_op) = result?;
+            let encoded_op = next_op.encode();
+            last_offset = offset;
+            last_op = next_op;
+            warn!(
+                location = mmr.leaves(),
+                section, offset, "adding missing operation to MMR/location map"
+            );
+            mmr.add_batched(hasher, &encoded_op).await?;
+            locations.append(offset).await?;
+        }
+
+        // Sync if needed
+        if mmr.is_dirty() {
+            mmr.sync(hasher).await?;
+            locations.sync().await?;
+        }
+
+        Ok(Some((last_offset, last_op)))
+    }
+
+    /// Find the last commit point and rewind to it if necessary.
+    ///
+    /// Accepts the `op_count` of the MMR, the `last_offset` of the last log operation, and the `log_items_per_section` of a [Keyless] instance.
+    /// Returns the index of the last operation after rewinding.
+    async fn rewind_to_last_commit(
+        mmr: &mut Mmr<E, H>,
+        locations: &mut FJournal<E, u32>,
+        log: &mut VJournal<E, Operation<V>>,
+        last_log_op: Operation<V>,
+        op_count: u64,
+        last_offset: u32,
+        log_items_per_section: u64,
+    ) -> Result<u64, Error> {
+        let mut first_uncommitted: Option<(u64, u32)> = None;
+        let mut op_index = op_count - 1;
+        let mut op = last_log_op;
+        let mut offset = last_offset;
+        let oldest_retained_loc = locations
+            .oldest_retained_pos()
+            .await?
+            .expect("location should be nonempty");
+
+        // Walk backwards through the log until we find the last commit point.
+        loop {
+            match op {
+                Operation::Commit(_) => {
+                    break;
+                }
+                Operation::Append(_) => {
+                    // Track the earliest uncommitted append (index, offset) encountered while
+                    // walking backwards. If none is found before we hit a Commit, there is
+                    // nothing to rewind.
+                    first_uncommitted = Some((op_index, offset));
+                }
+            }
+            if op_index == oldest_retained_loc {
+                assert_eq!(op_index, 0, "no commit operation found");
+                break;
+            }
+            op_index -= 1;
+            offset = locations.read(op_index).await?;
+            let section = op_index / log_items_per_section;
+            op = log.get(section, offset).await?.expect("no operation found");
+        }
+
+        // If there are no uncommitted operations, exit early.
+        let Some((rewind_size, rewind_offset)) = first_uncommitted else {
+            return Ok(op_index + 1);
+        };
+
+        // Rewind the log and MMR to the last commit point.
+        let ops_to_rewind = (op_count - rewind_size) as usize;
+        warn!(ops_to_rewind, rewind_size, "rewinding log to last commit");
+        locations.rewind(rewind_size).await?;
+        locations.sync().await?;
+        mmr.pop(ops_to_rewind).await?; // sync is handled by pop
+        let section = rewind_size / log_items_per_section;
+        log.rewind_to_offset(section, rewind_offset).await?;
+        log.sync(section).await?;
+
+        Ok(rewind_size)
+    }
+
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -160,169 +320,57 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        // Find the section+offset of the most recent log operation that has a valid location offset
-        // in locations.
-        let mut has_offset_size = aligned_size;
-        let mut section_offset = None;
+        // Find the location of the most recent log operation that is at an index less than or equal to the `aligned_size`.
         let log_items_per_section = cfg.log_items_per_section.get();
-        while has_offset_size > 0 {
-            let loc = has_offset_size - 1;
-            let offset = locations.read(loc).await?;
-            let section = loc / log_items_per_section;
-            match log.get(section, offset).await {
-                Ok(Some(_)) => {
-                    section_offset = Some((section, offset));
-                    break; // operation exists in the log
-                }
-                Ok(None) => (),
-                Err(e) => {
-                    warn!(
-                        loc = loc,
-                        err = e.to_string(),
-                        "error finding operation in log"
-                    );
-                }
-            };
-            warn!(
-                loc = loc,
-                offset, section, "locations is ahead of log, walking back"
-            );
-            has_offset_size -= 1;
-        }
+        let (valid_size, section_offset) =
+            Self::find_last_operation(&locations, &log, aligned_size, log_items_per_section)
+                .await?;
 
         // Trim any locations/mmr elements that do not have corresponding operations in log.
-        if aligned_size != has_offset_size {
+        if aligned_size != valid_size {
             warn!(
                 size = aligned_size,
-                new_size = has_offset_size,
+                new_size = valid_size,
                 "trimming locations & mmr elements ahead of log"
             );
-            locations.rewind(has_offset_size).await?;
+            locations.rewind(valid_size).await?;
             locations.sync().await?;
-            mmr.pop((aligned_size - has_offset_size) as usize).await?;
+            mmr.pop((aligned_size - valid_size) as usize).await?;
         }
         assert_eq!(mmr.leaves(), locations.size().await?);
 
-        // The tip of the locations journal & mmr, if they exist, must now correspond to a valid log
-        // location represented by `section_offset`. We use this as the starting point to replay the
-        // log in order to add back any missing items. If they don't exist, we use the very first
-        // log operation as our starting point.
-        let (section, offset) = if let Some((s, o)) = section_offset {
-            (s, o)
-        } else {
-            // Since locations & mmr are empty, find the very first log operation as our starting
-            // point. If there is no such operation, it means the db is empty.
-            let op = {
-                let stream = log.replay(0, 0, REPLAY_BUFFER_SIZE).await?;
-                pin_mut!(stream);
-                stream.next().await
-            };
-            let Some(op) = op else {
-                warn!("no starting log operation found, returning empty db");
-                return Ok(Self {
-                    mmr,
-                    log,
-                    size: 0,
-                    locations,
-                    log_items_per_section,
-                    hasher,
-                    last_commit_loc: None,
-                });
-            };
-            // Add the very first log operation to mmr and locations.
-            let op = op?;
-            mmr.add_batched(&mut hasher, &op.3.encode()).await?;
-            mmr.sync(&mut hasher).await?;
-            locations.append(op.1).await?;
-            locations.sync().await?;
-
-            (op.0, op.1)
+        // Apply operations from the log at indices beyond the `aligned_size` to the MMR and locations journal.
+        //
+        // Because we don't sync the MMR and locations journal during commit, it is possible that they are (far) behind
+        // the log.
+        let replay_result =
+            Self::replay_operations(&mut mmr, &mut hasher, &mut locations, &log, section_offset)
+                .await?;
+        let Some((last_offset, last_op)) = replay_result else {
+            // Empty database
+            return Ok(Self {
+                mmr,
+                log,
+                size: 0,
+                locations,
+                log_items_per_section,
+                hasher,
+                last_commit_loc: None,
+            });
         };
 
-        // Replay any log operations that are missing from the other structures, returning the
-        // operation at the log's tip.
-        let last_log_op = {
-            let stream = log.replay(section, offset, REPLAY_BUFFER_SIZE).await?;
-            pin_mut!(stream);
-            let op = stream.next().await;
-            // Very first operation is known to exist & be valid.
-            let op = op.expect("operation known to exist");
-            let mut op = op?.3;
-            while let Some(result) = stream.next().await {
-                let (section, offset, _, next_op) = result?;
-                let encoded_op = next_op.encode();
-                op = next_op;
-                warn!(
-                    location = mmr.leaves(),
-                    section, offset, "adding missing operation to MMR/location map"
-                );
-                mmr.add_batched(&mut hasher, &encoded_op).await?;
-                locations.append(offset).await?;
-            }
-            if mmr.is_dirty() {
-                mmr.sync(&mut hasher).await?;
-                locations.sync().await?;
-            }
-
-            op
-        };
-
-        // Find the last commit point and return the location/offset of the first operation to
-        // follow it, or the tip of the log (+ offset 0) if none exists.
+        // Find the last commit point and rewind to it (if necessary).
         let op_count = mmr.leaves();
-        let rewind_point = {
-            // Walk backwards from the last log operation until we hit the first commit.
-            let mut rewind_point = None;
-            let mut op_index = op_count - 1;
-            let mut op = last_log_op;
-            let mut offset = offset;
-            let oldest_retained_loc = locations
-                .oldest_retained_pos()
-                .await?
-                .expect("location should be nonempty");
-            loop {
-                match op {
-                    Operation::Commit(_) => {
-                        if rewind_point.is_none() {
-                            rewind_point = Some((op_index + 1, 0));
-                        }
-                        break;
-                    }
-                    Operation::Append(_) => {
-                        rewind_point = Some((op_index, offset));
-                    }
-                }
-                if op_index == oldest_retained_loc {
-                    if op_index != 0 {
-                        panic!(
-                            "no commit operation found, oldest_retained_loc: {}",
-                            oldest_retained_loc
-                        );
-                    }
-                    break;
-                }
-                op_index -= 1;
-                offset = locations.read(op_index).await?;
-                let section = op_index / log_items_per_section;
-                op = log.get(section, offset).await?.expect("no operation found");
-            }
-
-            rewind_point.expect("rewind point should exist")
-        };
-
-        // If any operations follow the last commit, rewind them.
-        let size = rewind_point.0;
-        let ops_to_rewind = (mmr.leaves() - size) as usize;
-        if ops_to_rewind > 0 {
-            warn!(ops_to_rewind, size, "rewinding log to last commit");
-            locations.rewind(size).await?;
-            locations.sync().await?;
-            mmr.pop(ops_to_rewind).await?;
-            let section = size / log_items_per_section;
-            log.rewind_to_offset(section, rewind_point.1).await?;
-            log.sync(section).await?;
-        }
-        // Final alignment check.
+        let size = Self::rewind_to_last_commit(
+            &mut mmr,
+            &mut locations,
+            &mut log,
+            last_op,
+            op_count,
+            last_offset,
+            log_items_per_section,
+        )
+        .await?;
         assert_eq!(size, mmr.leaves());
         assert_eq!(size, locations.size().await?);
 
@@ -1322,6 +1370,99 @@ mod test {
                     "Should be able to prove remaining operations after extensive pruning"
                 );
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_keyless_db_replay_with_trailing_appends() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create initial database with committed data
+            let mut db = open_db(context.clone()).await;
+
+            // Add some initial operations and commit
+            for i in 0..10 {
+                let v = vec![i as u8; 10];
+                db.append(v).await.unwrap();
+            }
+            db.commit(None).await.unwrap();
+            let committed_root = db.root(&mut hasher);
+            let committed_size = db.op_count();
+
+            // Add exactly one more append (uncommitted)
+            let uncommitted_value = vec![99u8; 20];
+            db.append(uncommitted_value.clone()).await.unwrap();
+
+            // Sync only the log (not MMR or locations)
+            db.simulate_failure(true, false, false).await.unwrap();
+
+            // Reopen database
+            let mut db = open_db(context.clone()).await;
+
+            // Verify correct recovery
+            assert_eq!(
+                db.op_count(),
+                committed_size,
+                "Should rewind to last commit"
+            );
+            assert_eq!(
+                db.root(&mut hasher),
+                committed_root,
+                "Root should match last commit"
+            );
+            assert_eq!(
+                db.last_commit_loc(),
+                Some(committed_size - 1),
+                "Last commit location should be correct"
+            );
+
+            // Verify the uncommitted append was properly discarded
+            // We should be able to append new data without issues
+            let new_value = vec![77u8; 15];
+            let loc = db.append(new_value.clone()).await.unwrap();
+            assert_eq!(
+                loc, committed_size,
+                "New append should get the expected location"
+            );
+
+            // Verify we can read the new value
+            assert_eq!(db.get(loc).await.unwrap(), Some(new_value));
+
+            // Test with multiple trailing appends to ensure robustness
+            db.commit(None).await.unwrap();
+            let new_committed_root = db.root(&mut hasher);
+            let new_committed_size = db.op_count();
+
+            // Add multiple uncommitted appends
+            for i in 0..5 {
+                let v = vec![(200 + i) as u8; 10];
+                db.append(v).await.unwrap();
+            }
+
+            // Simulate the same partial failure scenario
+            db.simulate_failure(true, false, false).await.unwrap();
+
+            // Reopen and verify correct recovery
+            let db = open_db(context.clone()).await;
+            assert_eq!(
+                db.op_count(),
+                new_committed_size,
+                "Should rewind to last commit with multiple trailing appends"
+            );
+            assert_eq!(
+                db.root(&mut hasher),
+                new_committed_root,
+                "Root should match last commit after multiple appends"
+            );
+            assert_eq!(
+                db.last_commit_loc(),
+                Some(new_committed_size - 1),
+                "Last commit location should be correct after multiple appends"
+            );
 
             db.destroy().await.unwrap();
         });
