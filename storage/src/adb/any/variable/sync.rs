@@ -311,7 +311,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     }
 
     // Remove any items beyond upper_bound
-    prune_upper(&mut journal, upper_bound, items_per_section).await?;
+    rewind_upper(&mut journal, upper_bound, items_per_section).await?;
 
     Ok(journal)
 }
@@ -347,9 +347,8 @@ where
     /// Arguments:
     /// - `inner`: The wrapped [VJournal], whose logical last operation location is `size - 1`.
     /// - `items_per_section`: Operations per section.
-    /// - `lower_bound`: Lower bound of the range being synced.
-    /// - `upper_bound`: Upper bound of the range being synced.
     /// - `metadata`: Metadata for the journal. Tracks the oldest retained location.
+    /// - `size`: Location of the next operation to append.
     pub async fn new(
         inner: VJournal<E, Variable<K, V>>,
         items_per_section: NonZeroU64,
@@ -398,7 +397,7 @@ where
 
 /// Remove items beyond the `upper_bound` location (inclusive).
 /// Assumes each section contains `items_per_section` items.
-async fn prune_upper<E: Storage + Metrics, V: Codec>(
+async fn rewind_upper<E: Storage + Metrics, V: Codec>(
     journal: &mut VJournal<E, V>,
     upper_bound: u64,
     items_per_section: u64,
@@ -689,8 +688,7 @@ where
     // Remove sections before the lower_section
     if lower_section > 0 {
         debug!(lower_section, "removing sections before lower_section");
-        // Update metadata before pruning to ensure recovery is possible
-        // if we crash after writing metadata but before pruning journal.
+        // Satisfy metadata invariant by updating oldest_retained_loc before log.
         let lower_section_start = lower_section * items_per_section;
         if oldest_retained_loc < lower_section_start {
             write_oldest_retained_loc(metadata, lower_section_start);
@@ -722,8 +720,8 @@ where
     // Prune the lower section if needed
     prune_lower(journal, metadata, lower_bound, items_per_section).await?;
 
-    // Prune the upper section if needed
-    prune_upper(journal, upper_bound, items_per_section).await?;
+    // Rewind the upper section if needed
+    rewind_upper(journal, upper_bound, items_per_section).await?;
 
     // Compute the next location to write and the new oldest_retained_loc
     // If journal is empty, return (lower_bound, lower_bound)
@@ -746,7 +744,11 @@ where
         journal.cfg.compression.is_some(),
     )
     .await?;
-    let last_section_start = last_section * items_per_section;
+    let last_section_start = if last_section == lower_section {
+        read_oldest_retained_loc(metadata)
+    } else {
+        last_section * items_per_section
+    };
     let next_loc = last_section_start + items_in_last_section as u64;
     Ok(next_loc)
 }
@@ -1425,7 +1427,7 @@ mod tests {
             {
                 let mut journal = create_journal().await;
                 let upper_bound = 9; // End of section 1 (section 1: ops 5-9)
-                prune_upper(&mut journal, upper_bound, items_per_section)
+                rewind_upper(&mut journal, upper_bound, items_per_section)
                     .await
                     .unwrap();
 
@@ -1439,7 +1441,7 @@ mod tests {
             {
                 let mut journal = create_journal().await;
                 let upper_bound = 7; // Middle of section 1 (keep ops 5, 6, 7)
-                prune_upper(&mut journal, upper_bound, items_per_section)
+                rewind_upper(&mut journal, upper_bound, items_per_section)
                     .await
                     .unwrap();
 
@@ -1461,7 +1463,7 @@ mod tests {
             // Test 3: Non-existent section (should not error)
             {
                 let mut journal = create_journal().await;
-                prune_upper(
+                rewind_upper(
                     &mut journal,
                     99, // upper_bound that would be in a non-existent section
                     items_per_section,
@@ -1476,7 +1478,7 @@ mod tests {
                 let mut journal = create_journal().await;
                 let upper_bound = 15; // Beyond section 2
                 let original_section_2_size = journal.size(2).await.unwrap();
-                prune_upper(&mut journal, upper_bound, items_per_section)
+                rewind_upper(&mut journal, upper_bound, items_per_section)
                     .await
                     .unwrap();
 
