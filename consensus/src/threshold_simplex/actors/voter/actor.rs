@@ -756,11 +756,6 @@ impl<
         pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
     ) {
-        // Ignore if we are not a validator
-        if self.supervisor.share(self.view).is_none() {
-            return;
-        }
-
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
