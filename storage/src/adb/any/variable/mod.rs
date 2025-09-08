@@ -361,66 +361,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 }
                 current_index += 1;
             }
-
-            /*
-                // Track the position and offset after the last commit.
-                if after_last_commit.is_none() {
-                    after_last_commit = Some((current_index, offset));
-                }
-
-                if current_index >= mmr_leaves {
-                    // Add operations that are missing from the MMR/location map.
-                    debug!(
-                        section,
-                        offset, "operation was missing from MMR/location map"
-                    );
-                    self.mmr.add(&mut self.hasher, &op.encode()).await?;
-                    self.locations.append(offset.into()).await?;
-                    mmr_leaves += 1;
-                }
-
-                match op {
-                    Operation::Delete(key) => {
-                        let result = self.get_key_loc(&key).await?;
-                        if let Some(old_loc) = result {
-                            uncommitted_ops.insert(key, (Some(old_loc), None));
-                        } else {
-                            uncommitted_ops.remove(&key);
-                        }
-                    }
-                    Operation::Update(key, _) => {
-                        let result = self.get_key_loc(&key).await?;
-                        if let Some(old_loc) = result {
-                            uncommitted_ops.insert(key, (Some(old_loc), Some(current_index)));
-                        } else {
-                            uncommitted_ops.insert(key, (None, Some(current_index)));
-                        }
-                    }
-                    Operation::CommitFloor(_, loc) => {
-                        // Apply all uncommitted operations.
-                        for (key, (old_loc, new_loc)) in uncommitted_ops.iter() {
-                            if let Some(old_loc) = old_loc {
-                                if let Some(new_loc) = new_loc {
-                                    Self::update_loc(&mut self.snapshot, key, *old_loc, *new_loc);
-                                } else {
-                                    Self::delete_loc(&mut self.snapshot, key, *old_loc);
-                                }
-                            } else {
-                                self.snapshot.insert(key, new_loc.unwrap());
-                            }
-                        }
-                        uncommitted_ops.clear();
-
-                        after_last_commit = None;
-                        self.inactivity_floor_loc = loc;
-                        self.log_size = current_index + 1;
-                    }
-                    _ => unreachable!(
-                        "unexpected operation type at offset {offset} of section {section}"
-                    ),
-                }
-                current_index += 1;
-            }*/
         }
 
         // Rewind the operations log if necessary.
