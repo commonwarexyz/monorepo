@@ -208,7 +208,8 @@ mod tests {
             let request = Request { id: 1, data: 1 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
+                .await
+                .expect("send failed");
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify peer 2 received the request
@@ -275,7 +276,8 @@ mod tests {
             let commitment = request.commitment();
             let recipients = mailbox
                 .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
+                .await
+                .expect("send failed");
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Cancel immediately
@@ -356,7 +358,10 @@ mod tests {
 
             // Broadcast request
             let request = Request { id: 3, data: 3 };
-            let recipients = mailbox1.send(Recipients::All, request.clone()).await;
+            let recipients = mailbox1
+                .send(Recipients::All, request.clone())
+                .await
+                .expect("send failed");
             assert_eq!(recipients.len(), 2);
             assert!(recipients.contains(&peers[1]));
             assert!(recipients.contains(&peers[2]));
@@ -434,7 +439,8 @@ mod tests {
             for _ in 0..3 {
                 let recipients = mailbox1
                     .send(Recipients::One(peers[1].clone()), request.clone())
-                    .await;
+                    .await
+                    .expect("send failed");
                 assert_eq!(recipients, vec![peers[1].clone()]);
             }
 
@@ -507,10 +513,12 @@ mod tests {
             let request2 = Request { id: 20, data: 20 };
             mailbox1
                 .send(Recipients::One(peers[1].clone()), request1)
-                .await;
+                .await
+                .expect("send failed");
             mailbox1
                 .send(Recipients::One(peers[1].clone()), request2)
-                .await;
+                .await
+                .expect("send failed");
 
             // Collect both responses
             let mut response10_received = false;
@@ -585,7 +593,8 @@ mod tests {
             let request = Request { id: 100, data: 100 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
+                .await
+                .expect("send failed");
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify handler received request but didn't respond
@@ -632,7 +641,10 @@ mod tests {
 
             // Send request with empty recipients list
             let request = Request { id: 1, data: 1 };
-            let recipients = mailbox.send(Recipients::All, request.clone()).await;
+            let recipients = mailbox
+                .send(Recipients::All, request.clone())
+                .await
+                .expect("send failed");
             assert_eq!(recipients, Vec::<PublicKey>::new());
 
             // Verify no responses collected
@@ -701,7 +713,8 @@ mod tests {
             let request_to_peer2 = Request { id: 42, data: 42 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request_to_peer2.clone())
-                .await;
+                .await
+                .expect("send failed");
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Send a response from peer 3 to peer 1
