@@ -6,7 +6,7 @@ use commonware_storage::{
     adb,
     mmr::{hasher::Standard, verification::Proof},
 };
-use std::future::Future;
+use std::{future::Future, num::NonZeroU64};
 
 pub mod fixed;
 pub mod immutable;
@@ -76,7 +76,7 @@ pub trait Syncable {
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send;
 
     /// Get the database type name for logging.

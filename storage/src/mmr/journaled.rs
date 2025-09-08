@@ -397,6 +397,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound)
                 .await?;
         }
+        metadata.sync().await?;
 
         Ok(Self {
             mem_mmr,
@@ -413,6 +414,21 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.mem_mmr.size()
     }
 
+    /// Return the total number of leaves in the MMR.
+    pub fn leaves(&self) -> u64 {
+        self.mem_mmr.leaves()
+    }
+
+    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
+    pub fn last_leaf_pos(&self) -> Option<u64> {
+        self.mem_mmr.last_leaf_pos()
+    }
+
+    /// Returns whether there are pending updates.
+    pub fn is_dirty(&self) -> bool {
+        self.mem_mmr.is_dirty()
+    }
+
     pub async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
         if let Some(node) = self.mem_mmr.get_node(position) {
             return Ok(Some(node));
@@ -423,12 +439,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::JournalError(e)),
         }
-    }
-
-    /// Return the position of the last leaf in an MMR with this MMR's size, or None if the MMR is
-    /// empty.
-    pub fn last_leaf_pos(&self) -> Option<u64> {
-        self.mem_mmr.last_leaf_pos()
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
@@ -564,12 +574,17 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.mem_mmr.root(h)
     }
 
+    /// Process all batched updates without syncing to disk.
+    pub fn process_updates(&mut self, h: &mut impl Hasher<H>) {
+        self.mem_mmr.sync(h)
+    }
+
     /// Process all batched updates and sync the MMR to disk. If `pool` is non-null, then it will be
     /// used to parallelize the sync.
     pub async fn sync(&mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
-        // Write the nodes cached in the memory-resident MMR to the journal.
-        self.mem_mmr.sync(h);
+        self.process_updates(h);
 
+        // Write the nodes cached in the memory-resident MMR to the journal.
         for i in self.journal_size..self.size() {
             let node = *self.mem_mmr.get_node_unchecked(i);
             self.journal.append(node).await?;
@@ -641,7 +656,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Proof::<H::Digest>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
     }
 
-    /// Analagous to range_proof but for a previous database state.
+    /// Analogous to range_proof but for a previous database state.
     /// Specifically, the state when the MMR had `size` elements.
     pub async fn historical_range_proof(
         &self,

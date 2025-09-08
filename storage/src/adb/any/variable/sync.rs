@@ -144,7 +144,6 @@ where
             uncommitted_ops: 0,
             snapshot,
             hasher: Standard::<H>::new(),
-            pruning_delay: db_config.pruning_delay,
         };
 
         // Build the database from the log
@@ -527,7 +526,7 @@ where
     // Find which section contains the lower_bound item
     let lower_section = lower_bound / items_per_section.get();
 
-    if journal.blobs.get(&lower_section).is_none() {
+    if !journal.blobs.contains_key(&lower_section) {
         return Ok(()); // Section doesn't exist, nothing to prune
     };
 
@@ -540,7 +539,9 @@ where
         let mut min_loc = None; // Minimum location of the existing items in the section
         let mut max_loc = None; // Maximum location of the existing items in the section
 
-        let stream = journal.replay(commonware_utils::NZUsize!(1024)).await?;
+        let stream = journal
+            .replay(0, 0, commonware_utils::NZUsize!(1024))
+            .await?;
         pin_mut!(stream);
         while let Some(result) = stream.next().await {
             let (section, _offset, _size, _operation) = result?;
@@ -590,7 +591,9 @@ where
     // Read all operations from the current section
     let mut operations_to_keep = Vec::new();
     {
-        let stream = journal.replay(commonware_utils::NZUsize!(1024)).await?;
+        let stream = journal
+            .replay(0, 0, commonware_utils::NZUsize!(1024))
+            .await?;
         pin_mut!(stream);
 
         let mut loc = oldest_retained_loc;
@@ -760,14 +763,11 @@ where
 mod tests {
     use super::*;
     use crate::{
-        adb::{
-            any::fixed::test::{PAGE_CACHE_SIZE, PAGE_SIZE},
-            sync::{
-                self,
-                engine::{Config, NextStep},
-                resolver::tests::FailResolver,
-                Engine, Target,
-            },
+        adb::sync::{
+            self,
+            engine::{Config, NextStep},
+            resolver::tests::FailResolver,
+            Engine, Target,
         },
         journal::variable::ITEM_ALIGNMENT,
         mmr::hasher::Standard,
@@ -786,6 +786,10 @@ mod tests {
     fn test_hasher() -> Standard<Sha256> {
         Standard::<Sha256>::new()
     }
+
+    // Use some jank sizes to exercise boundary conditions.
+    const PAGE_SIZE: usize = 101;
+    const PAGE_CACHE_SIZE: usize = 2;
 
     /// Test `init_journal` when there is no existing data on disk.
     #[test_traced]
@@ -816,7 +820,7 @@ mod tests {
 
             // Verify the journal is ready for sync items
             assert!(journal.blobs.is_empty()); // No sections created yet
-            assert_eq!(journal.oldest_allowed, None); // No pruning applied
+            assert_eq!(journal.oldest_section(), None); // No pruning applied
 
             // Verify that items can be appended starting from the sync position
             let lower_section = lower_bound / items_per_section; // 10/5 = 2
@@ -886,7 +890,7 @@ mod tests {
             // Verify pruning: sections before lower_section are pruned
             let lower_section = lower_bound / items_per_section; // 8/5 = 1
             assert_eq!(lower_section, 1);
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify section 0 is pruned (< lower_section), section 1+ are retained (>= lower_section)
             assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
@@ -1000,7 +1004,7 @@ mod tests {
 
             // Verify pruning to lower bound
             let lower_section = lower_bound / items_per_section; // 5/5 = 1
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify section 0 is pruned, sections 1-3 are retained
             assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
@@ -1088,7 +1092,7 @@ mod tests {
 
             // Verify pruning to lower bound and rewinding beyond upper bound
             let lower_section = lower_bound / items_per_section; // 8/5 = 1
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify section 0 is pruned (< lower_section)
             assert!(!journal.blobs.contains_key(&0));
@@ -1177,7 +1181,7 @@ mod tests {
 
             // Verify fresh journal (all old data destroyed)
             assert!(journal.blobs.is_empty());
-            assert_eq!(journal.oldest_allowed, None);
+            assert_eq!(journal.oldest_section(), None);
 
             // Verify old sections don't exist
             assert!(!journal.blobs.contains_key(&0));
@@ -1231,7 +1235,7 @@ mod tests {
 
             // Verify correct section range
             let lower_section = lower_bound / items_per_section; // 2
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify sections 2, 3, 4 exist, others don't
             assert!(!journal.blobs.contains_key(&0));
@@ -1304,7 +1308,7 @@ mod tests {
 
             // Both operations are in section 1, so section 0 should be pruned, section 1+ retained
             let target_section = lower_bound / items_per_section; // 6/5 = 1
-            assert_eq!(journal.oldest_allowed, Some(target_section));
+            assert_eq!(journal.oldest_section(), Some(target_section));
 
             // Verify pruning and retention
             assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
@@ -1588,7 +1592,6 @@ mod tests {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            pruning_delay: 10,
         }
     }
 

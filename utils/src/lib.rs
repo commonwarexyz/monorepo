@@ -45,14 +45,29 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Converts a hexadecimal string to bytes.
 pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
+    let bytes = hex.as_bytes();
+    if bytes.len() % 2 != 0 {
         return None;
     }
 
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+    bytes
+        .chunks_exact(2)
+        .map(|chunk| {
+            let hi = decode_hex_digit(chunk[0])?;
+            let lo = decode_hex_digit(chunk[1])?;
+            Some((hi << 4) | lo)
+        })
         .collect()
+}
+
+#[inline]
+fn decode_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used
@@ -254,6 +269,13 @@ mod tests {
         // Test case 4: invalid hexadecimal character
         let h = "01g3";
         assert!(from_hex(h).is_none());
+
+        // Test case 5: invalid `+` in string
+        let h = "+123";
+        assert!(from_hex(h).is_none());
+
+        // Test case 6: empty string
+        assert_eq!(from_hex(""), Some(vec![]));
     }
 
     #[test]

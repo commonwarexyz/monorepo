@@ -159,6 +159,9 @@ fn fuzz(input: FuzzInput) {
 
     let final_checksum = lthash.checksum();
     assert_eq!(initial_checksum, final_checksum, "Final check failed");
+
+    lthash.reset();
+    assert!(lthash.is_zero(), "Reset failed");
 }
 
 fuzz_target!(|input: FuzzInput| {

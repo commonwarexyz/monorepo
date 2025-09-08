@@ -24,9 +24,9 @@ use commonware_codec::{CodecFixed, Encode as _, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
-use futures::future::try_join_all;
+use futures::{future::try_join_all, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
@@ -63,9 +63,6 @@ pub struct Config<T: Translator> {
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
-
-    /// The number of operations to keep below the inactivity floor before pruning.
-    pub pruning_delay: u64,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -147,7 +144,6 @@ impl<
             translator: config.translator.clone(),
             thread_pool: config.thread_pool,
             buffer_pool: config.buffer_pool,
-            pruning_delay: config.pruning_delay,
         };
 
         let context = context.with_label("adb::current");
@@ -161,39 +157,18 @@ impl<
 
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
-        let (mut mmr, log) =
+        let (inactivity_floor_loc, mmr, log) =
             Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
 
-        // Ensure consistency between the bitmap and the db's MMR.
-        let mmr_pruned_pos = mmr.pruned_to_pos();
-        let mut start_leaf_num = leaf_pos_to_num(mmr_pruned_pos).unwrap();
-        let bit_count = status.bit_count();
-        if start_leaf_num < bit_count {
-            // This can happen if the commit operation failed before the mmr was pruned.
-            warn!(
-                start_leaf_num,
-                bit_count, "mmr starting leaf precedes bitmap pruning point"
-            );
-            start_leaf_num = bit_count;
-        }
-
-        let pruned_bits = status.pruned_bits();
-        let bitmap_pruned_pos = leaf_num_to_pos(pruned_bits);
-        let mmr_pruned_leaves = leaf_pos_to_num(mmr_pruned_pos).unwrap();
-
+        // Ensure consistency between the bitmap and the db.
         let mut grafter = Grafting::new(&mut hasher, Self::grafting_height());
-        if bitmap_pruned_pos < mmr_pruned_pos {
-            // The bitmap should never be behind the mmr more than one chunk's worth of bits, since
-            // the mmr is always pruned after it.
-            let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
-            assert!(
-                mmr_pruned_leaves <= chunk_bits || pruned_bits >= mmr_pruned_leaves - chunk_bits
-            );
+        if status.bit_count() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
-            // pruned to a chunk boundary, with the MMR's pruning boundary.
-            for _ in pruned_bits..mmr_pruned_leaves {
+            // pruned to a chunk boundary.
+            while status.bit_count() < inactivity_floor_loc {
                 status.append(false);
             }
+
             // Load the digests of the grafting destination nodes from `mmr` into the grafting
             // hasher so the new leaf digests can be computed during sync.
             grafter
@@ -204,29 +179,13 @@ impl<
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
         let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
-        let inactivity_floor_loc =
-            Any::build_snapshot_from_log(start_leaf_num, &log, &mut snapshot, Some(&mut status))
-                .await
-                .unwrap();
+        Any::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, Some(&mut status))
+            .await
+            .unwrap();
         grafter
             .load_grafted_digests(&status.dirty_chunks(), &mmr)
             .await?;
         status.sync(&mut grafter).await?;
-        assert!(
-            pruned_bits <= inactivity_floor_loc,
-            "bitmap is pruned beyond where bits should be retained"
-        );
-
-        let target_prune_loc = inactivity_floor_loc.saturating_sub(config.pruning_delay);
-        if target_prune_loc > start_leaf_num {
-            // Advance the pruning boundary if we failed to prune to the correct position for any reason.
-            warn!(
-                inactivity_floor_loc,
-                target_prune_loc, start_leaf_num, "pruning MMR to correct position"
-            );
-            mmr.prune_to_pos(grafter.standard(), leaf_num_to_pos(target_prune_loc))
-                .await?;
-        }
 
         let any = Any {
             mmr,
@@ -235,7 +194,6 @@ impl<
             inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
-            pruning_delay: config.pruning_delay,
         };
 
         Ok(Self {
@@ -252,9 +210,9 @@ impl<
         self.any.op_count()
     }
 
-    /// Return the oldest location that remains readable & provable.
-    pub fn oldest_retained_loc(&self) -> Option<u64> {
-        self.any.oldest_retained_loc()
+    /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
+    pub fn inactivity_floor_loc(&self) -> u64 {
+        self.any.inactivity_floor_loc()
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -311,7 +269,16 @@ impl<
         // commit op that will be appended.
         self.raise_inactivity_floor(self.any.uncommitted_ops + 1)
             .await?;
+
+        // Sync the log and process the updates to the MMR in parallel.
+        let log_fut = async { self.any.log.sync().await.map_err(Error::Journal) };
+        let mmr_fut = async {
+            self.any.mmr.process_updates(&mut self.any.hasher);
+            Ok::<(), Error>(())
+        };
+        try_join!(log_fut, mmr_fut)?;
         self.any.uncommitted_ops = 0;
+
         self.any.sync().await
     }
 
@@ -348,14 +315,12 @@ impl<
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations more than `self.any.pruning_delay` below it. Leverages parallel
-    /// Merkleization of the MMR structures if a thread pool is provided.
+    /// upon return from this function. Also raises the inactivity floor according to the schedule.
+    /// Leverages parallel Merkleization of the MMR structures if a thread pool is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Failure recovery relies on this specific order of these three disk-based operations:
-        //  (1) commit/sync the any db to disk (which raises the inactivity floor).
-        //  (2) prune the bitmap to the updated pruning boundary and write its state to disk.
-        //  (3) prune the any db of inactive operations.
+        //  (1) commit the any db to disk (which raises the inactivity floor).
+        //  (2) prune the bitmap to the updated inactivity floor and write its state to disk.
         self.commit_ops().await?; // (1)
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
@@ -364,11 +329,7 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
 
-        let target_prune_loc = self
-            .any
-            .inactivity_floor_loc
-            .saturating_sub(self.any.pruning_delay);
-        self.status.prune_to_bit(target_prune_loc);
+        self.status.prune_to_bit(self.any.inactivity_floor_loc);
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -376,11 +337,21 @@ impl<
             )
             .await?; // (2)
 
-        // Prune inactive elements from the any db. We do this last, because bitmap recovery could
-        // require access to the hashes of these inactive nodes due to node grafting.
-        self.any.prune_inactive().await?; // (3)
-
         Ok(())
+    }
+
+    /// Sync data to disk, ensuring clean recovery.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.any.sync().await
+    }
+
+    /// Prune all operations prior to `target_prune_loc` from the db.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `target_prune_loc` is greater than the inactivity floor.
+    pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
+        self.any.prune(target_prune_loc).await
     }
 
     /// Return the root of the db.
@@ -426,33 +397,39 @@ impl<
     /// looking at the length of the returned operations vector. Also returns the bitmap chunks
     /// required to verify the proof.
     ///
-    /// # Warning
+    /// # Panics
     ///
-    /// Panics if there are uncommitted operations.
+    /// Panics if there are uncommitted operations or if `start_loc` is invalid.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>, Vec<[u8; N]>), Error> {
         assert!(
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
+
+        // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
         let start_pos = leaf_num_to_pos(start_loc);
-        let end_pos_last = mmr.last_leaf_pos().unwrap();
-        let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
-        let (end_pos, end_loc) = if end_pos_last < end_pos_max {
-            (end_pos_last, leaf_pos_to_num(end_pos_last).unwrap())
+        let leaves = mmr.leaves();
+        assert!(start_loc < leaves, "start_loc is invalid");
+        let max_loc = start_loc + max_ops.get();
+        let end_loc = if max_loc > leaves {
+            leaves - 1
         } else {
-            (end_pos_max, start_loc + max_ops - 1)
+            max_loc - 1
         };
+        let end_pos = leaf_num_to_pos(end_loc);
+
+        // Generate the proof from the grafted MMR.
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, mmr, height);
-
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, start_pos, end_pos).await?;
 
+        // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
             .map(|i| self.any.log.read(i))
@@ -731,10 +708,7 @@ impl<
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
-        let target_prune_loc = self
-            .any
-            .inactivity_floor_loc
-            .saturating_sub(self.any.pruning_delay);
+        let target_prune_loc = self.any.inactivity_floor_loc;
         self.status.prune_to_bit(target_prune_loc);
         self.status
             .write_pruned(
@@ -756,6 +730,7 @@ pub mod test {
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use tracing::warn;
 
     const PAGE_SIZE: usize = 88;
     const PAGE_CACHE_SIZE: usize = 8;
@@ -773,7 +748,6 @@ pub mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            pruning_delay: 10,
         }
     }
 
@@ -796,7 +770,7 @@ pub mod test {
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.oldest_retained_loc(), None);
+            assert_eq!(db.inactivity_floor_loc(), 0);
             let root0 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
@@ -1015,12 +989,13 @@ pub mod test {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.op_count();
-            let start_pos = db.any.mmr.pruned_to_pos();
-            let start_loc = leaf_pos_to_num(start_pos).unwrap();
+            let start_loc = db.any.inactivity_floor_loc();
 
             for i in start_loc..end_loc {
-                let (proof, ops, chunks) =
-                    db.range_proof(hasher.inner(), i, max_ops).await.unwrap();
+                let (proof, ops, chunks) = db
+                    .range_proof(hasher.inner(), i, NZU64!(max_ops))
+                    .await
+                    .unwrap();
                 assert!(
                     CurrentTest::verify_range_proof(&mut hasher, &proof, i, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
@@ -1048,7 +1023,7 @@ pub mod test {
             let res = db.key_value_proof(hasher.inner(), bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
-            let start = db.oldest_retained_loc().unwrap();
+            let start = db.inactivity_floor_loc();
             for i in start..db.status.bit_count() {
                 if !db.status.get_bit(i) {
                     continue;
@@ -1191,13 +1166,7 @@ pub mod test {
             let committed_root = db.root(&mut hasher).await.unwrap();
             let committed_op_count = db.op_count();
             let committed_inactivity_floor = db.any.inactivity_floor_loc;
-            let committed_pruning_loc = db.any.oldest_retained_loc().unwrap();
-
-            // Verify the `pruning_delay` is correctly handled (default is 10)
-            assert_eq!(
-                committed_pruning_loc,
-                committed_inactivity_floor.saturating_sub(10)
-            );
+            db.prune(committed_inactivity_floor).await.unwrap();
 
             // Perform more random operations without committing any of them.
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
@@ -1210,14 +1179,6 @@ pub mod test {
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
-
-            // Verify `pruning_delay` is persisted correctly.
-            let recovered_pruning_loc = db.any.oldest_retained_loc().unwrap();
-            assert_eq!(recovered_pruning_loc, committed_pruning_loc);
-            assert_eq!(
-                recovered_pruning_loc,
-                db.any.inactivity_floor_loc.saturating_sub(10)
-            );
 
             // Re-apply the exact same uncommitted operations.
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
@@ -1234,14 +1195,6 @@ pub mod test {
             // the op count should be greater than before.
             let db = open_db(context.clone(), partition).await;
             let scenario_2_root = db.root(&mut hasher).await.unwrap();
-            let scenario_2_pruning_loc = db.any.oldest_retained_loc().unwrap();
-            let scenario_2_inactivity_floor = db.any.inactivity_floor_loc;
-
-            // Verify `pruning_delay` is persisted correctly.
-            assert_eq!(
-                scenario_2_pruning_loc,
-                scenario_2_inactivity_floor.saturating_sub(10)
-            );
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
@@ -1254,21 +1207,13 @@ pub mod test {
                 .await
                 .unwrap();
             db.commit().await.unwrap();
-            // State & pruning boundary from scenario #2 should match that of a successful commit.
+            db.prune(db.any.inactivity_floor_loc()).await.unwrap();
+            // State from scenario #2 should match that of a successful commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
-            let successful_pruning_loc = db.any.oldest_retained_loc().unwrap();
-            assert_eq!(successful_pruning_loc, scenario_2_pruning_loc);
-
-            // Verify `pruning_delay` is persisted correctly.
-            assert_eq!(
-                successful_pruning_loc,
-                db.any.inactivity_floor_loc.saturating_sub(10)
-            );
             db.close().await.unwrap();
 
             // SCENARIO #3: Simulate a crash that happens after the any db has been committed and
-            // the bitmap is written, but before the any db is pruned. Full state restoration should
-            // remain possible, and pruning point should match a successful commit.
+            // the bitmap is written. Full state restoration should remain possible.
             let fresh_partition = "build_random_fail_commit_fresh_2";
             let mut db = open_db(context.clone(), fresh_partition).await;
             apply_random_ops(ELEMENTS, true, rng_seed, &mut db)
@@ -1281,200 +1226,89 @@ pub mod test {
                 .await
                 .unwrap();
             let db = open_db(context.clone(), fresh_partition).await;
-            // State & pruning boundary should match that of the successful commit.
+            // State should match that of the successful commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
-            let recovered_pruning_loc_3 = db.any.oldest_retained_loc().unwrap();
-            assert_eq!(recovered_pruning_loc_3, successful_pruning_loc);
-
-            // Verify `pruning_delay` is persisted correctly.
-            assert_eq!(
-                recovered_pruning_loc_3,
-                db.any.inactivity_floor_loc.saturating_sub(10)
-            );
 
             db.destroy().await.unwrap();
         });
     }
 
-    /// Test that the `pruning_delay` works as expected.
-    #[test_traced("WARN")]
-    pub fn test_current_db_pruning_delay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create database with enough operations to trigger pruning
-            let mut hasher = Standard::<Sha256>::new();
-            let db_config = current_db_config("pruning_boundary_test");
-
-            let mut db = CurrentTest::init(context.clone(), db_config.clone())
-                .await
-                .unwrap();
-
-            const NUM_OPERATIONS: u64 = 500;
-            for i in 0..NUM_OPERATIONS {
-                let key = Sha256::hash(&i.to_be_bytes());
-                let value = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(key, value).await.unwrap();
-
-                // Commit periodically to advance the inactivity floor
-                if i % 100 == 99 {
-                    db.commit().await.unwrap();
-                }
-            }
-
-            // Final commit to establish the inactivity floor
-            db.commit().await.unwrap();
-
-            // Get the root digest
-            let original_root = db.root(&mut hasher).await.unwrap();
-
-            // Verify the pruning boundary is correct
-            let oldest_retained = db.oldest_retained_loc().unwrap();
-            let inactivity_floor = db.any.inactivity_floor_loc;
-            assert_eq!(
-                oldest_retained,
-                inactivity_floor.saturating_sub(db_config.pruning_delay)
-            );
-
-            // Get proof of items below inactivity floor but after pruning boundary
-            let proof_start = oldest_retained;
-            let proof_end = std::cmp::min(inactivity_floor, oldest_retained + 10);
-            let max_ops = proof_end - proof_start;
-
-            let (original_proof, original_ops, original_chunks) = db
-                .range_proof(hasher.inner(), proof_start, max_ops)
-                .await
-                .unwrap();
-
-            // Verify the proof works
-            assert!(CurrentTest::verify_range_proof(
-                &mut hasher,
-                &original_proof,
-                proof_start,
-                &original_ops,
-                &original_chunks,
-                &original_root
-            ));
-
-            // Close and reopen the database
-            db.close().await.unwrap();
-            let db = CurrentTest::init(context.clone(), db_config).await.unwrap();
-
-            // Confirm root is identical after restart
-            let reopened_root = db.root(&mut hasher).await.unwrap();
-            assert_eq!(original_root, reopened_root);
-
-            // Get proof of items below inactivity floor again
-            let (reopened_proof, reopened_ops, reopened_chunks) = db
-                .range_proof(hasher.inner(), proof_start, max_ops)
-                .await
-                .unwrap();
-
-            // Verify the proof still works and is identical
-            assert_eq!(original_proof.size, reopened_proof.size);
-            assert_eq!(original_proof.digests, reopened_proof.digests);
-            assert_eq!(original_ops, reopened_ops);
-            assert_eq!(original_chunks, reopened_chunks);
-
-            assert!(CurrentTest::verify_range_proof(
-                &mut hasher,
-                &reopened_proof,
-                proof_start,
-                &reopened_ops,
-                &reopened_chunks,
-                &reopened_root
-            ));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Test that databases with different `pruning_delay` values generate the same root.
     #[test_traced("WARN")]
     pub fn test_current_db_different_pruning_delays_same_root() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
 
-            // Create two databases with different pruning delays
-            let mut db_config_no_delay = current_db_config("no_delay_test");
-            db_config_no_delay.pruning_delay = 0;
+            // Create two databases that are identical other than how they are pruned.
+            let db_config_no_pruning = current_db_config("no_pruning_test");
 
-            let mut db_config_max_delay = current_db_config("max_delay_test");
-            db_config_max_delay.pruning_delay = u64::MAX;
+            let db_config_pruning = current_db_config("pruning_test");
 
-            let mut db_no_delay = CurrentTest::init(context.clone(), db_config_no_delay.clone())
+            let mut db_no_pruning =
+                CurrentTest::init(context.clone(), db_config_no_pruning.clone())
+                    .await
+                    .unwrap();
+            let mut db_pruning = CurrentTest::init(context.clone(), db_config_pruning.clone())
                 .await
                 .unwrap();
-            let mut db_max_delay = CurrentTest::init(context.clone(), db_config_max_delay.clone())
-                .await
-                .unwrap();
 
-            // Apply identical operations to both databases
+            // Apply identical operations to both databases, but only prune one.
             const NUM_OPERATIONS: u64 = 1000;
             for i in 0..NUM_OPERATIONS {
                 let key = Sha256::hash(&i.to_be_bytes());
                 let value = Sha256::hash(&(i * 1000).to_be_bytes());
 
-                db_no_delay.update(key, value).await.unwrap();
-                db_max_delay.update(key, value).await.unwrap();
+                db_no_pruning.update(key, value).await.unwrap();
+                db_pruning.update(key, value).await.unwrap();
 
                 // Commit periodically
                 if i % 50 == 49 {
-                    db_no_delay.commit().await.unwrap();
-                    db_max_delay.commit().await.unwrap();
+                    db_no_pruning.commit().await.unwrap();
+                    db_pruning.commit().await.unwrap();
+                    db_pruning
+                        .prune(db_no_pruning.any.inactivity_floor_loc())
+                        .await
+                        .unwrap();
                 }
             }
 
             // Final commit
-            db_no_delay.commit().await.unwrap();
-            db_max_delay.commit().await.unwrap();
-            let inactivity_floor = db_no_delay.any.inactivity_floor_loc;
+            db_no_pruning.commit().await.unwrap();
+            db_pruning.commit().await.unwrap();
 
             // Get roots from both databases
-            let root_no_delay = db_no_delay.root(&mut hasher).await.unwrap();
-            let root_max_delay = db_max_delay.root(&mut hasher).await.unwrap();
+            let root_no_pruning = db_no_pruning.root(&mut hasher).await.unwrap();
+            let root_pruning = db_pruning.root(&mut hasher).await.unwrap();
 
             // Verify they generate the same roots
-            assert_eq!(root_no_delay, root_max_delay);
-
-            // Verify different pruning behaviors
-            let oldest_no_delay = db_no_delay.oldest_retained_loc().unwrap();
-            let oldest_max_delay = db_max_delay.oldest_retained_loc().unwrap();
-
-            // With pruning_delay=0, more operations should be pruned
-            // With pruning_delay=u64::MAX, no operations should be pruned (oldest retained should be 0)
-            assert_eq!(oldest_no_delay, inactivity_floor);
-            assert_eq!(oldest_max_delay, 0);
+            assert_eq!(root_no_pruning, root_pruning);
 
             // Close both databases
-            db_no_delay.close().await.unwrap();
-            db_max_delay.close().await.unwrap();
+            db_no_pruning.close().await.unwrap();
+            db_pruning.close().await.unwrap();
 
             // Restart both databases
-            let db_no_delay = CurrentTest::init(context.clone(), db_config_no_delay)
+            let db_no_pruning = CurrentTest::init(context.clone(), db_config_no_pruning)
                 .await
                 .unwrap();
-            let db_max_delay = CurrentTest::init(context.clone(), db_config_max_delay)
+            let db_pruning = CurrentTest::init(context.clone(), db_config_pruning)
                 .await
                 .unwrap();
+            assert_eq!(
+                db_no_pruning.inactivity_floor_loc(),
+                db_pruning.inactivity_floor_loc()
+            );
 
             // Get roots after restart
-            let root_no_delay_restart = db_no_delay.root(&mut hasher).await.unwrap();
-            let root_max_delay_restart = db_max_delay.root(&mut hasher).await.unwrap();
+            let root_no_pruning_restart = db_no_pruning.root(&mut hasher).await.unwrap();
+            let root_pruning_restart = db_pruning.root(&mut hasher).await.unwrap();
 
             // Ensure roots still match after restart
-            assert_eq!(root_no_delay, root_no_delay_restart);
-            assert_eq!(root_max_delay, root_max_delay_restart);
+            assert_eq!(root_no_pruning, root_no_pruning_restart);
+            assert_eq!(root_pruning, root_pruning_restart);
 
-            // Verify pruning boundaries are still different
-            let oldest_no_delay_restart = db_no_delay.oldest_retained_loc().unwrap();
-            let oldest_max_delay_restart = db_max_delay.oldest_retained_loc().unwrap();
-
-            assert_eq!(oldest_no_delay_restart, inactivity_floor);
-            assert_eq!(oldest_max_delay_restart, 0);
-
-            db_no_delay.destroy().await.unwrap();
-            db_max_delay.destroy().await.unwrap();
+            db_no_pruning.destroy().await.unwrap();
+            db_pruning.destroy().await.unwrap();
         });
     }
 }

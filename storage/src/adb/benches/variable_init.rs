@@ -54,7 +54,6 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg, (
         translator: EightCap,
         thread_pool: Some(pool),
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        pruning_delay: 0,
     }
 }
 

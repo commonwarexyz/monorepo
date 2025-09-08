@@ -75,7 +75,9 @@
 //! commitments they did not acknowledge (or that the dealer said they didn't acknowledge). With this, they can recover
 //! the new group polynomial and derive their share of the secret. If this distribution is not received by time `5t`, exit.
 //!
-//! # Synchrony Assumption
+//! # Caveats
+//!
+//! ## Synchrony Assumption
 //!
 //! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
 //! this construction can be used to maintain a shared secret where at least `f + 1` honest players must participate to
@@ -101,7 +103,7 @@
 //! that were in the second partition will be able to derive the shared secret without collusion (using their private share
 //! and the `2f` public shares). It will not be possible for any external observer, however, to recover the shared secret.
 //!
-//! ## Future Work: Dropping the Synchrony Assumption?
+//! ### Future Work: Dropping the Synchrony Assumption?
 //!
 //! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
 //! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
@@ -113,12 +115,26 @@
 //! cryptographic assumptions, don't scale to hundreds of participants (unless dealers have powerful hardware), and provide
 //! observers the opportunity to brute force decrypt shares (even if honest players are online).
 //!
-//! # Tracking Complaints
+//! ## Tracking Complaints
 //!
 //! This crate does not provide an integrated mechanism for tracking complaints from players (of malicious dealers). However, it is
 //! possible to implement your own mechanism and to manually disqualify dealers from a given round in the arbiter. This decision was made
 //! because the mechanism for communicating commitments/shares/acknowledgements is highly dependent on the context in which this
 //! construction is used.
+//!
+//! ## Non-Uniform Distribution
+//!
+//! The Joint-Feldman DKG protocol does not guarantee a uniformly random secret key is generated. An adversary
+//! can introduce `O(lg N)` bits of bias into the key with `O(poly(N))` amount of computation. For uses
+//! like signing, threshold encryption, where the security of the scheme reduces to that of
+//! the underlying assumption that cryptographic constructions using the curve are secure (i.e.
+//! that the Discrete Logarithm Problem, or stronger variants, are hard), then this caveat does
+//! not affect the security of the scheme. This must be taken into account when integrating this
+//! component into more esoteric schemes.
+//!
+//! This choice was explicitly made, because the best known protocols guaranteeing a uniform output
+//! require an extra round of broadcast ([GJKR02](https://www.researchgate.net/publication/2558744_Revisiting_the_Distributed_Key_Generation_for_Discrete-Log_Based_Cryptosystems),
+//! [BK25](https://eprint.iacr.org/2025/819)).
 //!
 //! # Example
 //!
