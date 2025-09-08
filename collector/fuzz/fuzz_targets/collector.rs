@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_collector::{
     p2p::{Config, Engine, Mailbox},
     Handler, Monitor, Originator,
@@ -113,7 +113,7 @@ impl Read for FuzzResponse {
 
 impl EncodeSize for FuzzResponse {
     fn encode_size(&self) -> usize {
-        8 + 4 + self.result.len()
+        u64::SIZE + u32::SIZE + self.result.len()
     }
 }
 
@@ -127,10 +127,7 @@ impl Committable for FuzzResponse {
 impl Digestible for FuzzResponse {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.id.to_be_bytes());
-        hasher.update(&self.result);
-        hasher.finalize()
+        Sha256::hash(&*self.encode())
     }
 }
 
