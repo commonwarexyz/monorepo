@@ -1654,8 +1654,8 @@ mod tests {
             assert_eq!(synced_db.op_count(), upper_bound + 1);
             assert_eq!(synced_db.oldest_retained_loc().unwrap_or(0), lower_bound);
 
-            // Smoke: verify some keys
-            for (k, v) in updates.iter().take(10).copied() {
+            // Verify data
+            for (k, v) in updates.iter().copied() {
                 let got = synced_db.get(&k).await.unwrap();
                 assert_eq!(got, Some(v));
             }
@@ -1698,7 +1698,6 @@ mod tests {
                     db.commit(*metadata).await.unwrap();
                 }
                 Variable::CommitFloor(metadata, _floor) => {
-                    // variable::Any doesn't have commit_floor, just use regular commit
                     db.commit(*metadata).await.unwrap();
                 }
             }
@@ -1787,16 +1786,13 @@ mod tests {
 
             // Verify operation counts match
             let target_guard = target_db.read().await;
-            assert_eq!(got_db.op_count(), target_guard.op_count(),);
+            assert_eq!(got_db.op_count(), target_guard.op_count());
 
             // Verify oldest retained location matches the sync lower bound
             // (synced database should only retain operations from lower_bound onwards)
-            assert_eq!(
-                got_db.oldest_retained_loc,
-                target_inactivity_floor, // This should be the sync lower_bound
-            );
+            assert_eq!(got_db.oldest_retained_loc, target_inactivity_floor);
 
-            // Verify root hashes match (already checked above, but let's be explicit)
+            // Verify root hashes match (already checked in sync engine, but let's be explicit)
             let mut target_hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             assert_eq!(
                 got_db.root(&mut hasher),
@@ -2113,7 +2109,7 @@ mod tests {
             };
             let sync_db: AnyTest = sync::sync(config).await.unwrap();
 
-            // Verify database state matches exactly
+            // Verify database state matches
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(
