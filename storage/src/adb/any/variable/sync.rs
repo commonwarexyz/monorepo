@@ -1,4 +1,7 @@
-use crate::journal::variable::{Config as VConfig, Journal as VJournal};
+use crate::journal::{
+    variable::{Config as VConfig, Journal as VJournal},
+    Error,
+};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use std::{num::NonZeroU64, ops::Bound};
@@ -41,12 +44,9 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<VJournal<E, V>, crate::journal::Error> {
+) -> Result<VJournal<E, V>, Error> {
     if lower_bound > upper_bound {
-        return Err(crate::journal::Error::InvalidSyncRange(
-            lower_bound,
-            upper_bound,
-        ));
+        return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
     }
 
     // Calculate the section ranges based on item locations
@@ -130,7 +130,7 @@ async fn truncate_upper_section<E: Storage + Metrics, V: Codec>(
     journal: &mut VJournal<E, V>,
     upper_bound: u64,
     items_per_section: u64,
-) -> Result<(), crate::journal::Error> {
+) -> Result<(), Error> {
     // Find which section contains the upper_bound item
     let upper_section = upper_bound / items_per_section;
     let Some(blob) = journal.blobs.get(&upper_section) else {
@@ -185,7 +185,7 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
     codec_config: &V::Cfg,
     compressed: bool,
     items_count: u32,
-) -> Result<u64, crate::journal::Error> {
+) -> Result<u64, Error> {
     use crate::journal::variable::{Journal, ITEM_ALIGNMENT};
 
     if items_count == 0 {
@@ -200,9 +200,7 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
             Ok((next_slot, _item_len, _item)) => {
                 current_offset = next_slot;
             }
-            Err(crate::journal::Error::Runtime(
-                commonware_runtime::Error::BlobInsufficientLength,
-            )) => {
+            Err(Error::Runtime(commonware_runtime::Error::BlobInsufficientLength)) => {
                 // This section has fewer than `items_count` items.
                 break;
             }
@@ -349,11 +347,8 @@ mod tests {
             assert_eq!(item, Some(34)); // Last item in section 3 (3*10+4)
             let next_element_section = 20 / items_per_section;
             let next_element_offset = (20 % items_per_section.get()) as u32;
-            let item = journal
-                .get(next_element_section, next_element_offset)
-                .await
-                .unwrap();
-            assert_eq!(item, None); // Next element should not exist
+            let result = journal.get(next_element_section, next_element_offset).await;
+            assert!(matches!(result, Err(Error::SectionOutOfRange(4)))); // Next element should not exist
 
             // Assert journal can accept new items
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
@@ -388,10 +383,7 @@ mod tests {
                 NZU64!(5), // items_per_section
             )
             .await;
-            assert!(matches!(
-                result,
-                Err(crate::journal::Error::InvalidSyncRange(10, 5))
-            ));
+            assert!(matches!(result, Err(Error::InvalidSyncRange(10, 5))));
         });
     }
 
@@ -462,11 +454,8 @@ mod tests {
             assert_eq!(item, Some(304)); // Last item in section 3 (3*100+4)
             let next_element_section = 20 / items_per_section;
             let next_element_offset = (20 % items_per_section.get()) as u32;
-            let item = journal
-                .get(next_element_section, next_element_offset)
-                .await
-                .unwrap();
-            assert_eq!(item, None); // Next element should not exist
+            let result = journal.get(next_element_section, next_element_offset).await;
+            assert!(matches!(result, Err(Error::SectionOutOfRange(4)))); // Next element should not exist
 
             // Assert journal can accept new operations
             let mut journal = journal;
@@ -684,8 +673,8 @@ mod tests {
             let item = journal.get(3, 4).await.unwrap();
             assert_eq!(item, Some(304)); // Last element
             let next_element_section = 4;
-            let item = journal.get(next_element_section, 0).await.unwrap();
-            assert_eq!(item, None); // Next element should not exist
+            let result = journal.get(next_element_section, 0).await;
+            assert!(matches!(result, Err(Error::SectionOutOfRange(4))));
 
             // Assert journal can accept new operations
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
@@ -765,8 +754,8 @@ mod tests {
             let result = journal.get(1, 4).await;
             assert!(result.is_err()); // Operation 9 should be inaccessible (beyond upper_bound=8)
 
-            let item = journal.get(2, 0).await.unwrap();
-            assert_eq!(item, None); // Section 2 was removed, so no items
+            let result = journal.get(2, 0).await;
+            assert!(matches!(result, Err(Error::SectionOutOfRange(2)))); // Section 2 was removed, so no items
 
             // Assert journal can accept new operations
             let mut journal = journal;

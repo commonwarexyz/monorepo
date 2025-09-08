@@ -609,11 +609,20 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
+    ///
+    /// # Errors
+    ///  - [Error::AlreadyPrunedToSection] if the requested `section` has been pruned during the
+    ///    current execution.
+    ///  - [Error::SectionOutOfRange] if the requested `section` is empty (i.e. has never had any
+    ///    data appended to it, or has been pruned in a previous execution).
+    ///  - An invalid `offset` for a given section (that is, an offset that doesn't correspond to a
+    ///    previously appended item) will result in an error, with the specific type being
+    ///    undefined.
     pub async fn get(&self, section: u64, offset: u32) -> Result<Option<V>, Error> {
         self.prune_guard(section)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
-            None => return Ok(None),
+            None => return Err(Error::SectionOutOfRange(section)),
         };
 
         // Perform a multi-op read.
