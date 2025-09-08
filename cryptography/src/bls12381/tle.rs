@@ -110,7 +110,7 @@ impl From<Digest> for Block {
 }
 
 /// Encrypted message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Hash, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ciphertext<V: Variant> {
     /// First group element U = r * Public::one().
     pub u: V::Public,

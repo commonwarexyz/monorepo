@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{
     codec::{EncodeSize, Read, Write},
     RangeCfg,
@@ -33,10 +33,11 @@ enum FuzzInput {
     Xor(Vec<bool>, Vec<bool>),
     Invert(Vec<bool>),
     Default,
-    FromVecBool(Vec<bool>),
     FromSliceBool(Vec<bool>),
-    FromArrayBool(Vec<bool>),
-    FromRefArrayBool(Vec<bool>),
+    FromVecBool(Vec<bool>),
+    BoolInto(Vec<bool>),
+    FromArrayBool(FixedBoolArray),
+    FromRefArrayBool(FixedBoolArray),
     ToVecBool(Vec<bool>),
     Debug(Vec<bool>),
     Index(Vec<bool>, usize),
@@ -45,6 +46,91 @@ enum FuzzInput {
     BitXorOp(Vec<bool>, Vec<bool>),
     Codec(Vec<bool>),
     IteratorOps(Vec<bool>),
+}
+
+#[derive(Debug)]
+enum FixedBoolArray {
+    V0([bool; 0]),
+    V1([bool; 1]),
+    V2([bool; 2]),
+    V7([bool; 7]),
+    V8([bool; 8]),
+    V9([bool; 9]),
+    V15([bool; 15]),
+    V16([bool; 16]),
+    V17([bool; 17]),
+    V31([bool; 31]),
+    V32([bool; 32]),
+    V33([bool; 33]),
+    V63([bool; 63]),
+    V64([bool; 64]),
+    V65([bool; 65]),
+    V127([bool; 127]),
+    V128([bool; 128]),
+    V129([bool; 129]),
+    V255([bool; 255]),
+    V256([bool; 256]),
+    V257([bool; 257]),
+}
+
+fn gen_array<const N: usize>(u: &mut Unstructured) -> arbitrary::Result<[bool; N]> {
+    let mut arr = [false; N];
+    for e in &mut arr {
+        let b: u8 = Arbitrary::arbitrary(u)?;
+        *e = (b & 1) != 0;
+    }
+    Ok(arr)
+}
+
+impl<'a> Arbitrary<'a> for FixedBoolArray {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        const COUNT: usize = 21;
+        let idx = u.choose_index(COUNT)?;
+        Ok(match idx {
+            0 => Self::V0(gen_array::<0>(u)?),
+            1 => Self::V1(gen_array::<1>(u)?),
+            2 => Self::V2(gen_array::<2>(u)?),
+            3 => Self::V7(gen_array::<7>(u)?),
+            4 => Self::V8(gen_array::<8>(u)?),
+            5 => Self::V9(gen_array::<9>(u)?),
+            6 => Self::V15(gen_array::<15>(u)?),
+            7 => Self::V16(gen_array::<16>(u)?),
+            8 => Self::V17(gen_array::<17>(u)?),
+            9 => Self::V31(gen_array::<31>(u)?),
+            10 => Self::V32(gen_array::<32>(u)?),
+            11 => Self::V33(gen_array::<33>(u)?),
+            12 => Self::V63(gen_array::<63>(u)?),
+            13 => Self::V64(gen_array::<64>(u)?),
+            14 => Self::V65(gen_array::<65>(u)?),
+            15 => Self::V127(gen_array::<127>(u)?),
+            16 => Self::V128(gen_array::<128>(u)?),
+            17 => Self::V129(gen_array::<129>(u)?),
+            18 => Self::V255(gen_array::<255>(u)?),
+            19 => Self::V256(gen_array::<256>(u)?),
+            20 => Self::V257(gen_array::<257>(u)?),
+            _ => unreachable!(),
+        })
+    }
+}
+
+fn check_from_array<const N: usize>(arr: [bool; N]) {
+    let bv_a: BitVec = arr.into();
+    let bv_b: BitVec = <BitVec as From<&[bool; N]>>::from(&arr);
+    let bv_c = BitVec::from_bools(&arr);
+    assert_eq!(bv_a.len(), N);
+    assert_eq!(bv_a, bv_b);
+    assert_eq!(bv_a, bv_c);
+
+    for (i, &b) in arr.iter().enumerate() {
+        assert_eq!(bv_a.get(i), Some(b));
+        assert_eq!(bv_b.get(i), Some(b));
+    }
+
+    let round_a: Vec<bool> = bv_a.into();
+    assert_eq!(round_a.as_slice(), &arr);
+
+    let round_b: Vec<bool> = bv_b.into();
+    assert_eq!(round_b.as_slice(), &arr);
 }
 
 fn fuzz(input: Vec<FuzzInput>) {
@@ -241,14 +327,6 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(v.len(), 0);
             }
 
-            FuzzInput::FromVecBool(bools) => {
-                let v: BitVec = bools.clone().into();
-                assert_eq!(v.len(), bools.len());
-                for (i, &b) in bools.iter().enumerate() {
-                    assert_eq!(v.get(i), Some(b));
-                }
-            }
-
             FuzzInput::FromSliceBool(bools) => {
                 let v: BitVec = bools.as_slice().into();
                 assert_eq!(v.len(), bools.len());
@@ -257,22 +335,67 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::FromArrayBool(bools) => {
+            FuzzInput::FromVecBool(bools) => {
                 let ln = bools.len();
-                if ln <= MAX_SIZE {
-                    let v: BitVec = bools.into();
-                    assert_eq!(v.len(), ln);
+                let v = BitVec::from(bools);
+                assert_eq!(v.len(), ln);
+            }
+
+            FuzzInput::BoolInto(bools) => {
+                let v: BitVec = bools.clone().into();
+                assert_eq!(v.len(), bools.len());
+                for (i, &b) in bools.iter().enumerate() {
+                    assert_eq!(v.get(i), Some(b));
                 }
             }
 
-            FuzzInput::FromRefArrayBool(bools) => {
-                let ln = bools.len();
-                if ln <= MAX_SIZE {
-                    let arr = bools;
-                    let v: BitVec = (&(*arr)).into();
-                    assert_eq!(v.len(), arr.len());
-                }
-            }
+            FuzzInput::FromArrayBool(case) => match case {
+                FixedBoolArray::V0(arr) => check_from_array::<0>(arr),
+                FixedBoolArray::V1(arr) => check_from_array::<1>(arr),
+                FixedBoolArray::V2(arr) => check_from_array::<2>(arr),
+                FixedBoolArray::V7(arr) => check_from_array::<7>(arr),
+                FixedBoolArray::V8(arr) => check_from_array::<8>(arr),
+                FixedBoolArray::V9(arr) => check_from_array::<9>(arr),
+                FixedBoolArray::V15(arr) => check_from_array::<15>(arr),
+                FixedBoolArray::V16(arr) => check_from_array::<16>(arr),
+                FixedBoolArray::V17(arr) => check_from_array::<17>(arr),
+                FixedBoolArray::V31(arr) => check_from_array::<31>(arr),
+                FixedBoolArray::V32(arr) => check_from_array::<32>(arr),
+                FixedBoolArray::V33(arr) => check_from_array::<33>(arr),
+                FixedBoolArray::V63(arr) => check_from_array::<63>(arr),
+                FixedBoolArray::V64(arr) => check_from_array::<64>(arr),
+                FixedBoolArray::V65(arr) => check_from_array::<65>(arr),
+                FixedBoolArray::V127(arr) => check_from_array::<127>(arr),
+                FixedBoolArray::V128(arr) => check_from_array::<128>(arr),
+                FixedBoolArray::V129(arr) => check_from_array::<129>(arr),
+                FixedBoolArray::V255(arr) => check_from_array::<255>(arr),
+                FixedBoolArray::V256(arr) => check_from_array::<256>(arr),
+                FixedBoolArray::V257(arr) => check_from_array::<257>(arr),
+            },
+
+            FuzzInput::FromRefArrayBool(case) => match case {
+                FixedBoolArray::V0(arr) => check_from_array::<0>(arr),
+                FixedBoolArray::V1(arr) => check_from_array::<1>(arr),
+                FixedBoolArray::V2(arr) => check_from_array::<2>(arr),
+                FixedBoolArray::V7(arr) => check_from_array::<7>(arr),
+                FixedBoolArray::V8(arr) => check_from_array::<8>(arr),
+                FixedBoolArray::V9(arr) => check_from_array::<9>(arr),
+                FixedBoolArray::V15(arr) => check_from_array::<15>(arr),
+                FixedBoolArray::V16(arr) => check_from_array::<16>(arr),
+                FixedBoolArray::V17(arr) => check_from_array::<17>(arr),
+                FixedBoolArray::V31(arr) => check_from_array::<31>(arr),
+                FixedBoolArray::V32(arr) => check_from_array::<32>(arr),
+                FixedBoolArray::V33(arr) => check_from_array::<33>(arr),
+                FixedBoolArray::V63(arr) => check_from_array::<63>(arr),
+                FixedBoolArray::V64(arr) => check_from_array::<64>(arr),
+                FixedBoolArray::V65(arr) => check_from_array::<65>(arr),
+                FixedBoolArray::V127(arr) => check_from_array::<127>(arr),
+                FixedBoolArray::V128(arr) => check_from_array::<128>(arr),
+                FixedBoolArray::V129(arr) => check_from_array::<129>(arr),
+                FixedBoolArray::V255(arr) => check_from_array::<255>(arr),
+                FixedBoolArray::V256(arr) => check_from_array::<256>(arr),
+                FixedBoolArray::V257(arr) => check_from_array::<257>(arr),
+            },
 
             FuzzInput::ToVecBool(bools) => {
                 let v = BitVec::from_bools(&bools);

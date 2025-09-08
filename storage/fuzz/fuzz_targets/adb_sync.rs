@@ -25,6 +25,7 @@ enum SyncOp {
     Update { key: [u8; 32], value: [u8; 32] },
     Delete { key: [u8; 32] },
     Commit,
+    Prune,
 
     // Sync scenarios
     SyncFull { fetch_batch_size: u64 },
@@ -33,12 +34,11 @@ enum SyncOp {
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     ops: Vec<SyncOp>,
-    pruning_delay: u64,
 }
 
 const PAGE_SIZE: usize = 128;
 
-fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
+fn test_config(test_name: &str) -> Config<TwoCap> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
@@ -50,7 +50,6 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
         translator: TwoCap,
         thread_pool: None,
         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(1)),
-        pruning_delay: (pruning_delay % 1000) + 1,
     }
 }
 
@@ -65,9 +64,8 @@ async fn test_sync<
     target: sync::Target<commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
-    pruning_delay: u64,
 ) -> bool {
-    let db_config = test_config(test_name, pruning_delay);
+    let db_config = test_config(test_name);
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<Any<_, Key, Value, Sha256, TwoCap>, R> =
@@ -100,12 +98,10 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut src = Any::<_, Key, Value, Sha256, TwoCap>::init(
-            context.clone(),
-            test_config("src", input.pruning_delay),
-        )
-        .await
-        .expect("Failed to init source db");
+        let mut src =
+            Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config("src"))
+                .await
+                .expect("Failed to init source db");
 
         let mut sync_id = 0;
 
@@ -125,6 +121,12 @@ fn fuzz(input: FuzzInput) {
 
                 SyncOp::Commit => {
                     src.commit().await.expect("Commit should not fail");
+                }
+
+                SyncOp::Prune => {
+                    src.prune(src.inactivity_floor_loc())
+                        .await
+                        .expect("Prune should not fail");
                 }
 
                 SyncOp::SyncFull { fetch_batch_size } => {
@@ -149,7 +151,6 @@ fn fuzz(input: FuzzInput) {
                         target,
                         *fetch_batch_size,
                         &format!("full_{sync_id}"),
-                        input.pruning_delay,
                     )
                     .await;
                     src = Arc::try_unwrap(wrapped_src)
