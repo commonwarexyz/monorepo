@@ -716,7 +716,6 @@ mod tests {
             let conn = connections.next().unwrap();
             let (sender1, receiver1) = conn.0; // Request channel
             let (sender2, receiver2) = conn.1; // Response channel
-
             let (engine, mut mailbox) = Engine::new(
                 context.with_label(&format!("engine_{}", scheme.public_key())),
                 Config {
