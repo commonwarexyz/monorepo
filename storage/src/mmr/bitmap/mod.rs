@@ -28,7 +28,6 @@ use commonware_utils::sequence::prefixed_u64::U64;
 use std::collections::{HashSet, VecDeque};
 use tracing::{debug, error, warn};
 
-pub mod historical;
 
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///

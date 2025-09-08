@@ -16,7 +16,6 @@ use crate::{
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         storage::Grafting as GStorage,
         verification::Proof,
-        HistoricalBitmap,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -28,6 +27,9 @@ use commonware_utils::Array;
 use futures::{future::try_join_all, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
+
+mod historical_bitmap;
+use historical_bitmap::HistoricalBitmap;
 
 /// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
@@ -87,7 +89,7 @@ pub struct Current<
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value. Caches past bitmap
     /// states in order to serve historical proofs.
-    pub status: HistoricalBitmap<H, N>,
+    status: HistoricalBitmap<H, N>,
 
     context: E,
 
@@ -156,7 +158,7 @@ impl<
             cloned_pool,
         )
         .await?;
-        let mut status = HistoricalBitmap::from(status);
+        let mut status = HistoricalBitmap::from_bitmap(status);
 
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
@@ -348,7 +350,8 @@ impl<
             .await?; // (2)
 
         // Save the current state of the bitmap for historical range proofs.
-        self.status.cache_state(self.any.op_count());
+        self.status
+            .cache_state(self.any.inactivity_floor_loc, self.any.op_count());
 
         Ok(())
     }
@@ -364,7 +367,13 @@ impl<
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
-        self.any.prune(target_prune_loc).await
+        // Prune the database
+        self.any.prune(target_prune_loc).await?;
+
+        // Remove cached bitmap states that correspond to physically removed data
+        self.status.prune_cached_states(target_prune_loc);
+
+        Ok(())
     }
 
     /// Return the root of the db.
@@ -453,7 +462,7 @@ impl<
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
+        let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let start = start_loc / chunk_bits;
         let end = end_loc / chunk_bits;
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
@@ -546,7 +555,7 @@ impl<
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof from the historical bitmap
-        let chunk_bits = HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
+        let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let start_chunk = start_loc / chunk_bits;
         let end_chunk = end_loc / chunk_bits;
         let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
@@ -742,7 +751,7 @@ impl<
             }
         };
 
-        let next_bit = op_count % HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
+        let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let reconstructed_root = HistoricalBitmap::<H, N>::partial_chunk_root(
             hasher,
             &mmr_root,
