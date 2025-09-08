@@ -244,8 +244,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let db = Self {
             mmr,
             log,
-            log_size: oldest_retained_loc, // Updated in build_snapshot_from_log
-            inactivity_floor_loc: 0,
+            log_size: 0,             // Updated in build_snapshot_from_log
+            inactivity_floor_loc: 0, // Updated in build_snapshot_from_log
             oldest_retained_loc,
             metadata,
             locations,
@@ -277,7 +277,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut after_last_commit = None;
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
-        let mut current_index = self.oldest_retained_loc().unwrap_or(0);
+        let mut current_index = self.oldest_retained_loc;
         let expected_first_section = current_index / self.log_items_per_section;
         let mut warned_about_first_section = false;
 
