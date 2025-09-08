@@ -281,8 +281,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             while let Some(result) = stream.next().await {
                 let (section, offset, _, op) = result.map_err(Error::Journal)?;
 
-                if section != first_section {
-                    assert!(section < first_section);
+                if section < first_section {
                     // There is data in the log before the first section given by the oldest
                     // retained location given in metadata. In commit(), we write the oldest
                     // retained location to metadata before actually pruning the log and MMR.
