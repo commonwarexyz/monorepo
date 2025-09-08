@@ -560,17 +560,18 @@ where
             }
 
             lower_section_max_loc = loc;
-            let is_contiguous = lower_bound <= lower_section_max_loc + 1;
-            if is_contiguous {
-                debug!(
-                    lower_section_max_loc,
-                    lower_bound,
-                    oldest_retained_loc,
-                    "existing items are contiguous with new range, skipping rebuild"
-                );
-                return Ok(());
-            }
             loc += 1;
+        }
+
+        let is_contiguous = lower_bound <= lower_section_max_loc + 1;
+        if is_contiguous {
+            debug!(
+                lower_section_max_loc,
+                lower_bound,
+                oldest_retained_loc,
+                "existing items are contiguous with new range, skipping rebuild"
+            );
+            return Ok(());
         }
     }
 
