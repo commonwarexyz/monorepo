@@ -1384,13 +1384,13 @@ mod tests {
         });
     }
 
-    /// Test `prune_upper` correctly removes items beyond sync boundaries.
+    /// Test `rewind_upper` correctly removes items beyond sync boundaries.
     #[test_traced]
-    fn test_prune_upper() {
+    fn test_rewind_upper() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = VConfig {
-                partition: "test_prune_upper".into(),
+                partition: "test_rewind_upper".into(),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
