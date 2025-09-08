@@ -692,11 +692,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         debug!(log_size = self.log_size, "commit complete");
         self.uncommitted_ops = 0;
 
-        debug!(
-            oldest_retained_loc = self.oldest_retained_loc,
-            "prune complete"
-        );
-
         Ok(())
     }
 
@@ -818,19 +813,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.locations.sync().map_err(Error::Journal),
         )?;
 
-        // Prune the log up to the section containing the requested pruning location. We always
-        // prune the log first, and then prune the MMR+locations structures based on the log's
-        // actual pruning boundary. This procedure ensures all log operations always have
-        // corresponding MMR & location entries, even in the event of failures, with no need for
-        // special recovery.
+        // Prune the log up to the section containing the requested pruning location.
+        // First, we write the oldest retained location to metadata before pruning the log.
+        // Then, we prune the log and update the oldest retained location.
+        // Finally, we prune the MMR+locations structures based on the log's actual pruning boundary.
+        // This procedure allows for failure recovery by ensuring:
+        // * The metadata's oldest_retained_loc can be rewound to the actual oldest retained location
+        // * All log operations always have corresponding MMR & location entries,
         let section_with_target = target_prune_loc / self.log_items_per_section;
-        let oldest_retained_loc = section_with_target * self.log_items_per_section;
-        write_oldest_retained_loc(&mut self.metadata, oldest_retained_loc);
+        let new_oldest_retained_loc = section_with_target * self.log_items_per_section;
+        write_oldest_retained_loc(&mut self.metadata, new_oldest_retained_loc);
         self.metadata.sync().await?;
         if !self.log.prune(section_with_target).await? {
             return Ok(());
         }
-        self.oldest_retained_loc = section_with_target * self.log_items_per_section;
+        self.oldest_retained_loc = new_oldest_retained_loc;
 
         debug!(
             log_size = self.log_size,
