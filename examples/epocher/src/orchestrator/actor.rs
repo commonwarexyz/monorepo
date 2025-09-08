@@ -1,14 +1,18 @@
 use super::{Config, Mailbox, Message};
 use crate::{
-    reporter::Forwarder,
+    forwarder::Forwarder,
+    orchestrator::EpochCert,
     types::block::{Block, GENESIS_BLOCK},
 };
 use commonware_codec::EncodeFixed;
 use commonware_consensus::{
     marshal,
-    threshold_simplex::{self, types::Context},
+    threshold_simplex::{
+        self,
+        types::{Activity, Context},
+    },
     types::Epoch,
-    Automaton, Relay, Reporters,
+    Automaton, Relay, Reporter, Reporters,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::MinSig},
@@ -187,13 +191,30 @@ impl<
         // Keep waiting for epoch updates.
         while let Some(message) = self.mailbox.next().await {
             match message {
-                Message::EnterEpoch { epoch, seed } => {
+                Message::EpochTransition(cert) => {
                     // Skip if already entered this epoch.
-                    if epoch <= self.epoch {
+                    if cert.epoch() <= self.epoch {
                         continue;
                     }
-                    self.enter_epoch(epoch, seed, &mut p_mux, &mut rc_mux, &mut rs_mux)
+
+                    // Send the finalization to marshal which can help it catch up if behind.
+                    let finalization = match &cert {
+                        EpochCert::Single(f0) => f0.clone(),
+                        EpochCert::Double(_f1, f2) => f2.clone(),
+                    };
+                    self.marshal
+                        .report(Activity::Finalization(finalization))
                         .await;
+
+                    // Enter the epoch.
+                    self.enter_epoch(
+                        cert.epoch(),
+                        cert.seed(),
+                        &mut p_mux,
+                        &mut rc_mux,
+                        &mut rs_mux,
+                    )
+                    .await;
                 }
             }
         }
@@ -287,6 +308,8 @@ impl<
         let p_sc = p_mux.register(epoch as u32).await.unwrap();
         let rc_sc = rc_mux.register(epoch as u32).await.unwrap();
         let rs_sc = rs_mux.register(epoch as u32).await.unwrap();
+
+        info!(epoch, "orchestrator: registered epoch-specific subchannels");
 
         // Start consensus
         let engine_handle = engine.start(p_sc, rc_sc, rs_sc);

@@ -25,25 +25,23 @@ use commonware_epocher::{
 use commonware_runtime::{
     buffer::PoolRef,
     tokio::{Config as TokioConfig, Context as TokioContext, Runner as TokioRunner},
-    Runner,
+    Metrics, Runner,
 };
-use commonware_storage::archive::{immutable, Archive as _, Identifier};
+use commonware_storage::cache;
 use commonware_utils::{NZUsize, NZU64};
 use rand::SeedableRng;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
-use tokio::{net::TcpListener, sync::Mutex};
-use tracing::{error, info, warn};
-
-type Finalizations =
-    immutable::Archive<TokioContext, Sha256Digest, Finalization<MinSig, Sha256Digest>>;
+use tokio::{net::TcpListener, sync::RwLock};
+use tracing::{error, warn};
 
 #[derive(Clone)]
 struct AppState {
+    cursor: u64,
     identity: <MinSig as commonware_cryptography::bls12381::primitives::variant::Variant>::Public,
-    finalizations: Arc<Mutex<Finalizations>>,
+    cache: Arc<RwLock<cache::Cache<TokioContext, Finalization<MinSig, Sha256Digest>>>>,
 }
 
 fn main() {
@@ -88,32 +86,24 @@ fn main() {
                 .clone();
             format!("epocher-indexer-{}", me.replace('@', "-"))
         };
-        let finalizations = immutable::Archive::init(
-            <TokioContext as commonware_runtime::Metrics>::with_label(&context, "finalizations"),
-            immutable::Config {
-                metadata_partition: format!("{}-finalizations-metadata", prefix),
-                freezer_table_partition: format!("{}-finalizations-freezer-table", prefix),
-                freezer_table_initial_size: 65_536,
-                freezer_table_resize_frequency: 4,
-                freezer_table_resize_chunk_size: 16_384,
-                freezer_journal_partition: format!("{}-finalizations-freezer-journal", prefix),
-                freezer_journal_target_size: 8 * 1024 * 1024, // 8MB
-                freezer_journal_compression: Some(3),
-                freezer_journal_buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(1_000)),
-                ordinal_partition: format!("{}-finalizations-ordinal", prefix),
-                items_per_section: NZU64!(1024),
-                codec_config: (),
-                replay_buffer: NZUsize!(1_024 * 1_024),
-                write_buffer: NZUsize!(1_024 * 1_024),
-            },
-        )
-        .await
-        .expect("failed to initialize finalizations archive");
+        let cache_cfg = cache::Config {
+            partition: format!("{}-finalizations-cache", prefix),
+            compression: None,
+            codec_config: (),
+            items_per_blob: NZU64!(8),
+            write_buffer: NZUsize!(1_024 * 1_024),
+            replay_buffer: NZUsize!(1_024 * 1_024),
+            buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(1_000)),
+        };
+        let cache = cache::Cache::init(context.with_label("cache"), cache_cfg)
+            .await
+            .expect("failed to initialize cache");
 
         // Build HTTP server with axum
         let state = AppState {
+            cursor: 0,
             identity,
-            finalizations: Arc::new(Mutex::new(finalizations)),
+            cache: Arc::new(RwLock::new(cache)),
         };
         let app = Router::new()
             .route("/upload", post(upload))
@@ -162,37 +152,40 @@ async fn upload(State(state): State<AppState>, body: AxumBytes) -> StatusCode {
     }
 
     // Early return if key already exists
-    let mut finals = state.finalizations.lock().await;
+    let finals = state.cache.read().await;
+    if finals.has(epoch) {
+        error!("indexer: finalization already exists: {}", epoch);
+        return StatusCode::ALREADY_REPORTED;
+    }
+    drop(finals);
 
-    // Persist finalization to immutable archive, indexed by epoch and keyed by block commitment
-    if finals
-        .put_sync(epoch, block.commitment(), finalization.clone())
-        .await
-        .is_err()
-    {
+    // Persist finalization
+    let mut finals = state.cache.write().await;
+    if finals.put(epoch, finalization.clone()).await.is_err() {
         error!("indexer: failed to put finalization: {}", epoch);
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
+    finals.sync().await.expect("failed to sync cache");
+    drop(finals);
 
     warn!("indexer: persisted finalization: {}", epoch);
     StatusCode::OK
 }
 
-async fn latest(State(state): State<AppState>) -> impl IntoResponse {
+async fn latest(State(mut state): State<AppState>) -> impl IntoResponse {
     // Find the latest finalized epoch present by scanning gaps from 0 upward
     // We probe with increasing cursors to find the last continuous segment.
     // For simplicity, probe in steps until no next range is found.
-    let mut cursor = 0u64;
     let mut tip = None;
     {
-        let finals = state.finalizations.lock().await;
+        let finals = state.cache.read().await;
         loop {
-            let (end, next) = finals.next_gap(cursor);
+            let (end, next) = finals.next_gap(state.cursor);
             if let Some(end) = end {
                 tip = Some(end);
             }
             if let Some(next) = next {
-                cursor = next;
+                state.cursor = next;
             } else {
                 break;
             }
@@ -203,13 +196,13 @@ async fn latest(State(state): State<AppState>) -> impl IntoResponse {
     let mut finals_vec = Vec::new();
     if let Some(end) = tip {
         // Read end
-        let finals = state.finalizations.lock().await;
-        if let Ok(Some(f)) = finals.get(Identifier::Index(end)).await {
+        let finals = state.cache.read().await;
+        if let Ok(Some(f)) = finals.get(end).await {
             finals_vec.push(f);
         }
         // Read end-1 if present
         if end > 0 {
-            if let Ok(Some(f)) = finals.get(Identifier::Index(end - 1)).await {
+            if let Ok(Some(f)) = finals.get(end - 1).await {
                 finals_vec.push(f);
                 finals_vec.sort_by_key(|f| f.proposal.round.epoch());
             } else {

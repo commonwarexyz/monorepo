@@ -25,6 +25,7 @@ pub enum Message<D: Digest> {
     },
     Report {
         block: Block,
+        response: oneshot::Sender<()>,
     },
 }
 
@@ -91,9 +92,14 @@ impl<D: Digest> Reporter for Mailbox<D> {
     type Activity = Block;
 
     async fn report(&mut self, activity: Self::Activity) {
+        let (tx, rx) = oneshot::channel();
         self.sender
-            .send(Message::Report { block: activity })
+            .send(Message::Report {
+                block: activity,
+                response: tx,
+            })
             .await
             .expect("Failed to send report");
+        let _ = rx.await; // It's ok if the receiver is dropped
     }
 }

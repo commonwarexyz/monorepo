@@ -1,17 +1,16 @@
-use crate::{orchestrator::EpochUpdate, GENESIS_BLOCK, NAMESPACE};
+use crate::{orchestrator::EpochCert, NAMESPACE};
 use commonware_codec::extensions::DecodeRangeExt;
 use commonware_consensus::{threshold_simplex::types::Finalization, Reporter};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     sha256::Digest as Sha256Digest,
-    Committable,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use rand::{seq::SliceRandom, Rng};
 use std::time::Duration;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
-pub struct Config<O: Reporter<Activity = EpochUpdate>> {
+pub struct Config<O: Reporter<Activity = EpochCert>> {
     pub identity: <MinSig as Variant>::Public,
     pub indexers: Vec<String>,
     pub poll_interval: Duration,
@@ -24,7 +23,7 @@ pub struct Config<O: Reporter<Activity = EpochUpdate>> {
 pub struct Poller<E, O>
 where
     E: Clock + Spawner + Metrics + Rng,
-    O: Reporter<Activity = EpochUpdate>,
+    O: Reporter<Activity = EpochCert>,
 {
     context: E,
     identity: <MinSig as Variant>::Public,
@@ -37,14 +36,17 @@ where
 impl<E, O> Poller<E, O>
 where
     E: Clock + Spawner + Metrics + Rng,
-    O: Reporter<Activity = EpochUpdate> + Clone,
+    O: Reporter<Activity = EpochCert> + Clone,
 {
     pub fn new(context: E, cfg: Config<O>) -> Self {
         Self {
             context,
             identity: cfg.identity,
             indexers: cfg.indexers,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
             orchestrator: cfg.orchestrator,
             poll_interval: cfg.poll_interval,
         }
@@ -66,7 +68,9 @@ where
 
         loop {
             // Sleep between indexer polls.
+            debug!("poller: sleeping");
             self.context.sleep(self.poll_interval).await;
+            debug!("poller: awake");
 
             // Pick a random indexer to poll.
             let indexer = self
@@ -79,13 +83,13 @@ where
             let resp = match self.client.get(&url).send().await {
                 Ok(resp) => match resp.bytes().await {
                     Ok(bytes) => bytes,
-                    Err(e) => {
-                        debug!(url = %url, error = %e, "poller: failed to read response body");
+                    Err(err) => {
+                        warn!(?err, "poller: failed to read response body");
                         continue;
                     }
                 },
-                Err(e) => {
-                    debug!(url = %url, error = %e, "poller: latest fetch failed");
+                Err(err) => {
+                    warn!(?err, "poller: latest fetch failed");
                     continue;
                 }
             };
@@ -94,71 +98,33 @@ where
             let Ok(finals) =
                 <Vec<Finalization<MinSig, Sha256Digest>>>::decode_range(resp.as_ref(), 0..=2)
             else {
-                debug!(url = %url, "poller: failed to decode latest finalizations");
+                warn!("poller: failed to decode latest finalizations");
                 continue;
             };
 
             // Validate the finalization epochs.
-            match finals.len() {
-                0 => {
-                    debug!(url = %url, "poller: no finalizations");
-                    continue;
-                }
-                1 => {
-                    // If there is only one finalization, it must have the epoch of 0.
-                    let f = &finals[0];
-                    if f.proposal.round.epoch() != 0 {
-                        debug!(url = %url, "poller: finalization has invalid epoch");
-                        continue;
-                    };
-                }
-                2 => {
-                    // If there are two finalizations, they must have consecutive epochs.
-                    let f1 = &finals[0];
-                    let f2 = &finals[1];
-                    if f1.proposal.round.epoch().checked_add(1).unwrap()
-                        != f2.proposal.round.epoch()
-                    {
-                        debug!(url = %url, "poller: finalizations have invalid epochs");
-                        continue;
-                    }
-                }
-                _ => {
-                    unreachable!();
-                }
-            }
-
-            // Verify the finalization signatures.
-            for f in finals.iter() {
-                if !f.verify(NAMESPACE, &self.identity) {
-                    warn!(url = %url, "poller: finalization failed verification");
-                    continue;
-                }
-            }
-
-            // The last finalization must be the highest-epoch finalization.
-            let epoch = finals[finals.len() - 1].proposal.round.epoch();
-            if epoch <= highest_reported_epoch {
-                trace!(url = %url, "poller: skipping finalization");
+            let cert = match finals.len() {
+                0 => continue, // No finalizations found
+                1 => EpochCert::Single(finals[0].clone()),
+                2 => EpochCert::Double(finals[0].clone(), finals[1].clone()),
+                _ => unreachable!(),
+            };
+            if !cert.verify(NAMESPACE, &self.identity) {
+                warn!("poller: finalization failed verification");
                 continue;
             }
 
-            // Get the seed.
-            let seed = match epoch {
-                0 => GENESIS_BLOCK.commitment(),
-                _ => finals[0].proposal.payload,
-            };
+            // The last finalization must be the highest-epoch finalization.
+            let epoch = cert.epoch();
+            if epoch <= highest_reported_epoch {
+                warn!("poller: skipping finalization");
+                continue;
+            }
 
             // Report the epoch transition to the orchestrator.
-            let next_epoch = epoch + 1;
-            info!(next_epoch, "poller: reporting epoch transition");
+            info!(epoch, "poller: reporting epoch transition");
             let mut orchestrator = self.orchestrator.clone();
-            orchestrator
-                .report(EpochUpdate {
-                    epoch: next_epoch,
-                    seed,
-                })
-                .await;
+            orchestrator.report(cert).await;
             highest_reported_epoch = epoch;
         }
     }

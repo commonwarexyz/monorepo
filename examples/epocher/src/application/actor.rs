@@ -1,48 +1,45 @@
 use super::ingress::{Mailbox, Message};
 use crate::{
-    orchestrator::EpochUpdate,
+    orchestrator::EpochCert,
     types::{
         block::{Block, GENESIS_BLOCK, GENESIS_ROUND},
         epoch,
     },
 };
 use commonware_consensus::{
-    marshal, threshold_simplex::types::Context, types::Round, Block as _, Reporter,
+    marshal,
+    threshold_simplex::types::{Context, Finalization},
+    types::Round,
+    Block as _, Reporter,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, sha256::Digest as Sha256Digest, Committable,
 };
 use commonware_macros::select;
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{Handle, Metrics, Spawner, Storage};
 use futures::{
     channel::{mpsc, oneshot},
     task::{Context as FuturesContext, Poll},
     StreamExt,
 };
 use rand::Rng;
-use std::{
-    collections::BTreeMap,
-    future::Future,
-    pin::Pin,
-    sync::{Arc, Mutex},
-};
-use tracing::{debug, info};
+use std::{collections::BTreeMap, future::Future, pin::Pin};
+use tracing::{debug, info, warn};
 
 /// Application actor for a single-network epocher.
 ///
 /// This actor is responsible for proposing and verifying blocks.
 /// It also tracks the finalized blocks and reports to the orchestrator when the epoch is complete.
-pub struct Application<R: Rng + Spawner> {
+pub struct Application<R: Rng + Spawner + Metrics + Storage> {
     context: R,
     mailbox: mpsc::Receiver<Message<Sha256Digest>>,
     marshal: marshal::Mailbox<MinSig, Block>,
-    finalized: Arc<Mutex<BTreeMap<u64, Block>>>,
 
     /// Responders for block heights.
     responders: BTreeMap<u64, Vec<oneshot::Sender<Sha256Digest>>>,
 }
 
-impl<R: Rng + Spawner> Application<R> {
+impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
     pub fn new(
         context: R,
         mailbox_size: usize,
@@ -54,18 +51,17 @@ impl<R: Rng + Spawner> Application<R> {
                 context,
                 mailbox,
                 marshal,
-                finalized: Arc::new(Mutex::new(BTreeMap::new())),
                 responders: BTreeMap::new(),
             },
             Mailbox::new(sender),
         )
     }
 
-    pub fn start<O: Reporter<Activity = EpochUpdate>>(mut self, orchestrator: O) -> Handle<()> {
+    pub fn start<O: Reporter<Activity = EpochCert>>(mut self, orchestrator: O) -> Handle<()> {
         self.context.spawn_ref()(self.run(orchestrator))
     }
 
-    async fn run<O: Reporter<Activity = EpochUpdate>>(mut self, mut orchestrator: O) {
+    async fn run<O: Reporter<Activity = EpochCert>>(mut self, mut orchestrator: O) {
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { epoch, response } => {
@@ -77,8 +73,7 @@ impl<R: Rng + Spawner> Application<R> {
 
                     // Case: Non-genesis.
                     let height = epoch::get_last_height(epoch - 1);
-                    let finalized = self.finalized.lock().unwrap();
-                    let Some(block) = finalized.get(&height) else {
+                    let Ok(Some(block)) = self.marshal.get_by_height(height).await.await else {
                         // No block exists, put the response in the responders map for later.
                         self.responders.entry(height).or_default().push(response);
                         continue;
@@ -114,9 +109,8 @@ impl<R: Rng + Spawner> Application<R> {
                         }
                     }
                 }
-                Message::Report { block } => {
+                Message::Report { block, response } => {
                     let height = block.height;
-                    self.finalized.lock().unwrap().insert(height, block.clone());
                     info!(height, "finalized-delivered-to-app");
 
                     // Return early if not the last block in the epoch.
@@ -131,27 +125,45 @@ impl<R: Rng + Spawner> Application<R> {
                         }
                     }
 
-                    let seed = if epoch == 0 {
-                        GENESIS_BLOCK.commitment()
-                    } else {
-                        let seed_height = epoch::get_last_height(epoch - 1);
-                        self.finalized
-                            .lock()
-                            .unwrap()
-                            .get(&seed_height)
-                            .expect("seed block should exist")
-                            .commitment()
+                    // Get the finalization for this block.
+                    let cert = match epoch {
+                        0 => {
+                            let Some(f0) = self.get_finalization(height).await else {
+                                continue;
+                            };
+                            EpochCert::Single(f0)
+                        }
+                        _ => {
+                            let Some(f2) = self.get_finalization(height).await else {
+                                continue;
+                            };
+                            let previous_height = epoch::get_last_height(epoch - 1);
+                            let Some(f1) = self.get_finalization(previous_height).await else {
+                                continue;
+                            };
+                            EpochCert::Double(f1, f2)
+                        }
                     };
 
-                    orchestrator
-                        .report(EpochUpdate {
-                            epoch: epoch + 1,
-                            seed,
-                        })
-                        .await;
+                    orchestrator.report(cert).await;
+
+                    let _ = response.send(());
                 }
             }
         }
+    }
+
+    /// Gets the finalization for a given height from marshal.
+    async fn get_finalization(
+        &mut self,
+        height: u64,
+    ) -> Option<Finalization<MinSig, Sha256Digest>> {
+        let Ok(Some((finalization, _block))) = self.marshal.get_finalization(height).await.await
+        else {
+            warn!("finalization not found for height {}", height);
+            return None;
+        };
+        Some(finalization)
     }
 
     /// Proposes a new block.
@@ -242,11 +254,8 @@ impl<R: Rng + Spawner> Application<R> {
         if round == GENESIS_ROUND {
             return GENESIS_BLOCK;
         }
-        self.marshal
-            .subscribe(Some(round), commitment)
-            .await
-            .await
-            .unwrap()
+        let block_rx = self.marshal.subscribe(Some(round), commitment).await;
+        block_rx.await.unwrap()
     }
 }
 

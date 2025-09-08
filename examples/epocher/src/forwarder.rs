@@ -4,7 +4,8 @@ use commonware_consensus::{marshal, threshold_simplex::types::Activity, Block as
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, sha256::Digest as Sha256Digest,
 };
-use tracing::{debug, error, info};
+use std::time::Duration;
+use tracing::{error, info};
 
 /// Reporter implementation for forwarding finalizations to multiple indexers.
 #[derive(Clone)]
@@ -18,7 +19,10 @@ impl Forwarder {
     pub fn new(marshal: marshal::Mailbox<MinSig, Block>, indexers: Vec<String>) -> Self {
         Self {
             marshal,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
             indexers,
         }
     }
@@ -46,17 +50,13 @@ impl Reporter for Forwarder {
         let height = block.height();
         let epoch = finalization.proposal.round.epoch();
         if height != epoch::get_last_height(epoch) {
-            debug!(
-                "forwarder: skipping finalization: height: {}, epoch: {}",
-                height, epoch
-            );
             return;
         }
 
         // TODO: remove?
         info!(
-            "forwarder: reporting finalization: height: {}, epoch: {}",
-            height, epoch
+            "forwarder: reporting finalization: height: {}, epoch: {}, indexers: {:?}",
+            height, epoch, self.indexers
         );
 
         // Encode (finalization, block) and POST to indexer

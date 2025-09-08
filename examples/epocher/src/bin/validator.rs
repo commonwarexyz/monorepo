@@ -189,7 +189,7 @@ fn main() {
             identity,
             indexers: indexers.clone(),
             orchestrator: orchestrator.clone(),
-            poll_interval: Duration::from_secs(15),
+            poll_interval: Duration::from_secs(5),
         };
         let poller_actor = poller::Poller::new(context.with_label("poller"), poller_cfg);
 
