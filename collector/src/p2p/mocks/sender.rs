@@ -5,7 +5,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Recipients, Sender};
 
-/// A sender that always fails with an error.
+/// A sender that always fails with [Error::Canceled].
 #[derive(Clone, Debug)]
 pub struct Failing<P: PublicKey> {
     _phantom: std::marker::PhantomData<P>,
