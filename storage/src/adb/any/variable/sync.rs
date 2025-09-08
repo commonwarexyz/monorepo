@@ -532,87 +532,79 @@ where
     E: Storage + Metrics + Clock,
     V: Codec,
 {
-    // The section containing the lower bound
     let lower_section = lower_bound / items_per_section;
 
     if !journal.blobs.contains_key(&lower_section) {
         return Ok(()); // Section doesn't exist, nothing to prune
-    };
-
-    // The oldest retained location in the journal
-    let oldest_retained_loc = read_oldest_retained_loc(metadata);
-
-    // Scan the section to find the location of its first and last items
-    let mut lower_section_max_loc = oldest_retained_loc;
-    {
-        let mut loc = oldest_retained_loc; // Location of the current item in stream below
-        let stream = journal
-            .replay(lower_section, 0, commonware_utils::NZUsize!(1024))
-            .await?;
-        pin_mut!(stream);
-        while let Some(result) = stream.next().await {
-            let (section, _offset, _size, _operation) = result?;
-
-            // Only process operations from the target section
-            if section != lower_section {
-                assert!(section > lower_section); // lower_section should be the first section
-                break; // We've moved past our target section
-            }
-
-            lower_section_max_loc = loc;
-            loc += 1;
-        }
-
-        let is_contiguous = lower_bound <= lower_section_max_loc + 1;
-        if is_contiguous {
-            debug!(
-                lower_section_max_loc,
-                lower_bound,
-                oldest_retained_loc,
-                "existing items are contiguous with new range, skipping rebuild"
-            );
-            return Ok(());
-        }
     }
 
-    debug!(
-        lower_section_max_loc,
-        lower_bound, oldest_retained_loc, "existing items are non-contiguous, rebuilding section"
-    );
+    let oldest_retained_loc = read_oldest_retained_loc(metadata);
 
-    // Read all operations from the current section
-    let mut operations_to_keep = Vec::new();
+    // Single scan: collect operations and find bounds in one pass
+    let mut operations_in_section = Vec::new();
+    let mut section_max_loc = None;
+    let mut loc = oldest_retained_loc;
+
     {
         let stream = journal
             .replay(lower_section, 0, commonware_utils::NZUsize!(1024))
             .await?;
         pin_mut!(stream);
 
-        let mut loc = oldest_retained_loc;
         while let Some(result) = stream.next().await {
             let (section, _offset, _size, operation) = result?;
 
-            // Only process operations from the target section
             if section != lower_section {
-                assert!(section > lower_section); // lower_section should be the first section
-                break; // We've moved past our target section
+                assert!(section > lower_section);
+                break;
             }
 
-            // Keep operations that are >= lower_bound
-            if loc >= lower_bound {
-                operations_to_keep.push(operation);
-            }
-
+            operations_in_section.push((loc, operation));
+            section_max_loc = Some(loc);
             loc += 1;
         }
     }
+
+    // Check if we have any operations in this section
+    let Some(max_loc) = section_max_loc else {
+        return Ok(()); // No operations in section. Nothing to prune.
+    };
+
+    // Check contiguity: no gap between existing items and lower_bound
+    let is_contiguous = lower_bound <= max_loc + 1;
+    if is_contiguous {
+        debug!(
+            max_loc,
+            lower_bound,
+            oldest_retained_loc,
+            "existing items are contiguous with new range, skipping rebuild"
+        );
+        return Ok(());
+    }
+
+    debug!(
+        max_loc,
+        lower_bound, oldest_retained_loc, "existing items are non-contiguous, rebuilding section"
+    );
+
+    // Filter operations to keep only those >= lower_bound
+    let operations_to_keep: Vec<_> = operations_in_section
+        .into_iter()
+        .filter_map(|(op_loc, operation)| {
+            if op_loc >= lower_bound {
+                Some(operation)
+            } else {
+                None
+            }
+        })
+        .collect();
 
     debug!(
         operations_to_keep = operations_to_keep.len(),
         "operations to keep after filtering"
     );
 
-    // Update metadata before updating log
+    // Update metadata before modifying the journal
     write_oldest_retained_loc(metadata, lower_bound);
     metadata.sync().await?;
 
@@ -627,8 +619,8 @@ where
         .map_err(crate::journal::Error::Runtime)?;
     journal.tracked.dec();
 
+    // Recreate section with only the operations we want to keep
     if !operations_to_keep.is_empty() {
-        // Recreate the section with only the operations we want to keep
         for operation in operations_to_keep {
             journal.append(lower_section, operation).await?;
         }
