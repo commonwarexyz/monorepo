@@ -85,7 +85,8 @@ pub struct Current<
     pub any: Any<E, K, V, H, T>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
-    /// order to further prove whether a key _currently_ has a specific value.
+    /// order to further prove whether a key _currently_ has a specific value. Caches past bitmap
+    /// states in order to serve historical proofs.
     pub status: HistoricalBitmap<H, N>,
 
     context: E,
@@ -155,7 +156,7 @@ impl<
             cloned_pool,
         )
         .await?;
-        let mut status = HistoricalBitmap::from_bitmap(status);
+        let mut status = HistoricalBitmap::from(status);
 
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();

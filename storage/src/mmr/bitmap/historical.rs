@@ -33,14 +33,6 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
         }
     }
 
-    /// Create a new historical bitmap from an existing bitmap
-    pub fn from_bitmap(bitmap: Bitmap<H, N>) -> Self {
-        Self {
-            bitmap,
-            cached_states: HashMap::new(),
-        }
-    }
-
     /// Get a reference to the current bitmap
     pub fn current(&self) -> &Bitmap<H, N> {
         &self.bitmap
@@ -199,6 +191,15 @@ impl<H: Hasher, const N: usize> Default for HistoricalBitmap<H, N> {
     }
 }
 
+impl<H: Hasher, const N: usize> From<Bitmap<H, N>> for HistoricalBitmap<H, N> {
+    fn from(bitmap: Bitmap<H, N>) -> Self {
+        Self {
+            bitmap,
+            cached_states: HashMap::new(),
+        }
+    }
+}
+
 // Implement the Storage trait for HistoricalBitmap
 impl<H: Hasher, const N: usize> crate::mmr::storage::Storage<H::Digest> for HistoricalBitmap<H, N> {
     fn size(&self) -> u64 {
@@ -229,12 +230,12 @@ mod tests {
 
     #[test]
     fn test_from_bitmap() {
-        // Tests that from_bitmap() creates a HistoricalBitmap that preserves the existing bitmap's state
+        // Tests that From<Bitmap<H, N>> creates a HistoricalBitmap that preserves the existing bitmap's state
         let mut bitmap = crate::mmr::bitmap::Bitmap::new();
         bitmap.append(true);
         bitmap.append(false);
 
-        let hb = TestHistoricalBitmap::from_bitmap(bitmap);
+        let hb = TestHistoricalBitmap::from(bitmap);
         assert_eq!(hb.current().bit_count(), 2);
         assert_eq!(hb.cached_count(), 0);
         assert!(hb.current().get_bit(0));
