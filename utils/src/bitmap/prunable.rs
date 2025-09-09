@@ -1,15 +1,12 @@
-//! A prunable wrapper around BitVec that tracks pruned chunks.
-//!
-//! This provides the same interface as the Bitmap type in storage/mmr/bitmap.rs
-//! but built on top of the BitVec implementation.
+//! A prunable wrapper around BitMap that tracks pruned chunks.
 
-use super::BitVec;
+use super::BitMap;
 
 /// A prunable bitmap that stores data in chunks of N bytes.
 #[derive(Clone, Debug)]
 pub struct Prunable<const N: usize> {
-    /// The underlying BitVec storing the actual bits.
-    bitvec: BitVec<N>,
+    /// The underlying BitMap storing the actual bits.
+    bitmap: BitMap<N>,
 
     /// The number of bitmap chunks that have been pruned.
     pruned_chunks: usize,
@@ -22,7 +19,7 @@ impl<const N: usize> Prunable<N> {
     /// Create a new empty prunable bitmap.
     pub fn new() -> Self {
         Self {
-            bitvec: BitVec::new(),
+            bitmap: BitMap::new(),
             pruned_chunks: 0,
         }
     }
@@ -30,7 +27,7 @@ impl<const N: usize> Prunable<N> {
     /// Create a new empty prunable bitmap with the given number of pruned chunks.
     pub fn new_with_pruned_chunks(pruned_chunks: usize) -> Self {
         Self {
-            bitvec: BitVec::new(),
+            bitmap: BitMap::new(),
             pruned_chunks,
         }
     }
@@ -38,7 +35,7 @@ impl<const N: usize> Prunable<N> {
     /// Return the number of bits in the bitmap, irrespective of any pruning.
     #[inline]
     pub fn len(&self) -> u64 {
-        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS + self.bitvec.len()
+        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS + self.bitmap.len()
     }
 
     /// Returns true if the bitmap is empty.
@@ -56,7 +53,7 @@ impl<const N: usize> Prunable<N> {
     /// Return the last chunk of the bitmap and its size in bits.
     #[inline]
     pub fn last_chunk(&self) -> (&[u8; N], u64) {
-        self.bitvec.last_chunk()
+        self.bitmap.last_chunk()
     }
 
     /// Returns the bitmap chunk containing the specified bit.
@@ -71,7 +68,7 @@ impl<const N: usize> Prunable<N> {
 
         // Adjust bit_offset to account for pruning
         let adjusted_offset = bit_offset - self.pruned_bits();
-        self.bitvec.get_chunk(adjusted_offset)
+        self.bitmap.get_chunk(adjusted_offset)
     }
 
     /// Get the value of a bit.
@@ -86,18 +83,18 @@ impl<const N: usize> Prunable<N> {
 
         // Adjust bit_offset to account for pruning
         let adjusted_offset = bit_offset - self.pruned_bits();
-        self.bitvec.get_bit(adjusted_offset)
+        self.bitmap.get_bit(adjusted_offset)
     }
 
     /// Get the value of a bit from its chunk.
     #[inline]
     pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
-        BitVec::<N>::get_bit_from_chunk(chunk, bit_offset)
+        BitMap::<N>::get_bit_from_chunk(chunk, bit_offset)
     }
 
     /// Add a single bit to the bitmap.
     pub fn append(&mut self, bit: bool) {
-        self.bitvec.append(bit);
+        self.bitmap.append(bit);
     }
 
     /// Efficiently add a byte to the bitmap.
@@ -106,7 +103,7 @@ impl<const N: usize> Prunable<N> {
     ///
     /// Assumes self.next_bit is currently byte aligned, and panics otherwise.
     pub fn append_byte_unchecked(&mut self, byte: u8) {
-        self.bitvec.append_byte_unchecked(byte);
+        self.bitmap.append_byte_unchecked(byte);
     }
 
     /// Efficiently add a chunk of bits to the bitmap.
@@ -115,7 +112,7 @@ impl<const N: usize> Prunable<N> {
     ///
     /// Assumes we are at a chunk boundary (that is, `self.next_bit` is 0) and panics otherwise.
     pub fn append_chunk_unchecked(&mut self, chunk: &[u8; N]) {
-        self.bitvec.append_chunk_unchecked(chunk);
+        self.bitmap.append_chunk_unchecked(chunk);
     }
 
     /// Set the value of the given bit.
@@ -129,7 +126,7 @@ impl<const N: usize> Prunable<N> {
 
         // Adjust bit_offset to account for pruning
         let adjusted_offset = bit_offset - self.pruned_bits();
-        self.bitvec.set(adjusted_offset, bit);
+        self.bitmap.set(adjusted_offset, bit);
     }
 
     /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit.
@@ -144,20 +141,20 @@ impl<const N: usize> Prunable<N> {
         }
 
         let chunks_to_prune = chunk_num - self.pruned_chunks;
-        self.bitvec.prune_chunks(chunks_to_prune);
+        self.bitmap.prune_chunks(chunks_to_prune);
         self.pruned_chunks = chunk_num;
     }
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
     #[inline]
     pub fn chunk_byte_bitmask(bit_offset: u64) -> u8 {
-        BitVec::<N>::chunk_byte_bitmask(bit_offset)
+        BitMap::<N>::chunk_byte_bitmask(bit_offset)
     }
 
     /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
     #[inline]
     pub fn chunk_byte_offset(bit_offset: u64) -> usize {
-        BitVec::<N>::chunk_byte_offset(bit_offset)
+        BitMap::<N>::chunk_byte_offset(bit_offset)
     }
 
     /// Convert a bit offset into the index of the chunk it belongs to within the bitmap.
@@ -177,17 +174,17 @@ impl<const N: usize> Prunable<N> {
     /// Convert a bit offset into the number of the chunk it belongs to.
     #[inline]
     pub fn chunk_num(bit_offset: u64) -> usize {
-        BitVec::<N>::chunk_index(bit_offset)
+        BitMap::<N>::chunk_index(bit_offset)
     }
 
     /// Get the number of chunks in the bitmap
     pub fn chunks_len(&self) -> usize {
-        self.bitvec.chunks_len()
+        self.bitmap.chunks_len()
     }
 
     /// Get a reference to a chunk by its index in the current bitmap
     pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
-        self.bitvec.get_chunk_by_index(index)
+        self.bitmap.get_chunk_by_index(index)
     }
 
     /// Get the number of pruned chunks

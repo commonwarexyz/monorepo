@@ -14,15 +14,15 @@ use std::net::SocketAddr;
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
 
-/// Prefix byte used to identify a [Payload] with variant BitVec.
-const BIT_VEC_PREFIX: u8 = 0;
+/// Prefix byte used to identify a [Payload] with variant BitMap.
+const BITMAP_PREFIX: u8 = 0;
 /// Prefix byte used to identify a [Payload] with variant Peers.
 const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
 const DATA_PREFIX: u8 = 2;
 
-const BITVEC_CHUNK_SIZE: usize = 1;
-type UtilsBitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
+const BITMAP_CHUNK_SIZE: usize = 1;
+type UtilsBitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 /// Configuration when deserializing messages.
 ///
@@ -65,7 +65,7 @@ impl<C: PublicKey> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::BitVec(bit_vec) => {
-                BIT_VEC_PREFIX.write(buf);
+                BITMAP_PREFIX.write(buf);
                 bit_vec.write(buf);
             }
             Payload::Peers(peers) => {
@@ -86,7 +86,7 @@ impl<C: PublicKey> Read for Payload<C> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
-            BIT_VEC_PREFIX => {
+            BITMAP_PREFIX => {
                 let bit_vec = BitVec::read_cfg(buf, &cfg.max_bit_vec)?;
                 Ok(Payload::BitVec(bit_vec))
             }
@@ -116,8 +116,8 @@ pub struct BitVec {
     /// The index that the bit vector applies to.
     pub index: u64,
 
-    /// The bit vector itself.
-    pub bits: UtilsBitVec,
+    /// The bitmap itself.
+    pub bits: UtilsBitMap,
 }
 
 impl EncodeSize for BitVec {
@@ -138,7 +138,7 @@ impl Read for BitVec {
 
     fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
         let index = UInt::read(buf)?.into();
-        let bits = UtilsBitVec::read_cfg(buf, &(..=*max_bits).into())?;
+        let bits = UtilsBitMap::read_cfg(buf, &(..=*max_bits).into())?;
         Ok(Self { index, bits })
     }
 }
@@ -245,7 +245,7 @@ mod tests {
     fn test_bit_vec_codec() {
         let original = BitVec {
             index: 1234,
-            bits: UtilsBitVec::ones(71),
+            bits: UtilsBitMap::ones(71),
         };
         let decoded = BitVec::decode_cfg(original.encode(), &71).unwrap();
         assert_eq!(original, decoded);
@@ -284,7 +284,7 @@ mod tests {
         // Test BitVec
         let original = BitVec {
             index: 1234,
-            bits: UtilsBitVec::ones(100),
+            bits: UtilsBitMap::ones(100),
         };
         let encoded: BytesMut = Payload::<secp256r1::PublicKey>::BitVec(original.clone()).encode();
         let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {

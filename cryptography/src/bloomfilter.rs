@@ -19,8 +19,8 @@ const HALF_DIGEST_LEN: usize = 16;
 /// The length of a full [Digest].
 const FULL_DIGEST_LEN: usize = Digest::SIZE;
 
-const BITVEC_CHUNK_SIZE: usize = 1;
-type BitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
+const BITMAP_CHUNK_SIZE: usize = 1;
+type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
@@ -30,7 +30,7 @@ type BitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BloomFilter {
     hashers: u8,
-    bits: BitVec,
+    bits: BitMap,
 }
 
 impl BloomFilter {
@@ -38,7 +38,7 @@ impl BloomFilter {
     pub fn new(hashers: NonZeroU8, bits: NonZeroUsize) -> Self {
         Self {
             hashers: hashers.get(),
-            bits: BitVec::zeroes(bits.get() as u64),
+            bits: BitMap::zeroes(bits.get() as u64),
         }
     }
 
@@ -103,7 +103,7 @@ impl Read for BloomFilter {
         if !hashers_cfg.contains(&(hashers as usize)) {
             return Err(CodecError::Invalid("BloomFilter", "invalid hashers"));
         }
-        let bits = BitVec::read_cfg(buf, bits_cfg)?;
+        let bits = BitMap::read_cfg(buf, bits_cfg)?;
         Ok(Self { hashers, bits })
     }
 }

@@ -20,7 +20,7 @@ use core::{
 
 pub mod sequence;
 pub use sequence::{Array, Span};
-pub mod bitvec;
+pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
 #[cfg(feature = "std")]

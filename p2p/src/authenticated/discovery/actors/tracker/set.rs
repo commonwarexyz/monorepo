@@ -1,8 +1,8 @@
 use commonware_cryptography::PublicKey;
 use std::collections::HashMap;
 
-const BITVEC_CHUNK_SIZE: usize = 1;
-type BitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
+const BITMAP_CHUNK_SIZE: usize = 1;
+type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: PublicKey> {
@@ -13,7 +13,7 @@ pub struct Set<P: PublicKey> {
     order: HashMap<P, usize>,
 
     /// For each peer, whether I know their peer info or not.
-    knowledge: BitVec,
+    knowledge: BitMap,
 }
 
 impl<P: PublicKey> Set<P> {
@@ -24,7 +24,7 @@ impl<P: PublicKey> Set<P> {
         for (i, peer) in peers.iter().enumerate() {
             order.insert(peer.clone(), i);
         }
-        let knowledge = BitVec::zeroes(peers.len() as u64);
+        let knowledge = BitMap::zeroes(peers.len() as u64);
         Self {
             sorted: peers,
             order,
@@ -47,7 +47,7 @@ impl<P: PublicKey> Set<P> {
     }
 
     /// Returns the bit vector indicating which peers are known.
-    pub fn knowledge(&self) -> BitVec {
+    pub fn knowledge(&self) -> BitMap {
         self.knowledge.clone()
     }
 }
@@ -109,7 +109,7 @@ mod tests {
         }
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, false, false]),
+            BitMap::from(vec![false, false, false]),
             "Initial knowledge should be all false"
         );
     }
@@ -123,7 +123,7 @@ mod tests {
 
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, false, false]),
+            BitMap::from(vec![false, false, false]),
             "Initial state"
         );
 
@@ -131,7 +131,7 @@ mod tests {
         assert!(update_result, "Update for existing peer should return true");
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, false, true]),
+            BitMap::from(vec![false, false, true]),
             "Peer 3 should be known"
         );
 
@@ -139,7 +139,7 @@ mod tests {
         assert!(update_result_again, "Idempotent update should return true");
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, false, true]),
+            BitMap::from(vec![false, false, true]),
             "Knowledge should be unchanged after idempotent update"
         );
 
@@ -150,7 +150,7 @@ mod tests {
         );
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, false, false]),
+            BitMap::from(vec![false, false, false]),
             "Peer 3 should be unknown again"
         );
 
@@ -161,7 +161,7 @@ mod tests {
         );
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, false, false]),
+            BitMap::from(vec![false, false, false]),
             "Knowledge should be unchanged after failed update"
         );
     }
@@ -179,7 +179,7 @@ mod tests {
         assert!(set.update(&peer2, true));
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![true, true, true]),
+            BitMap::from(vec![true, true, true]),
             "All peers should be known"
         );
 
@@ -187,7 +187,7 @@ mod tests {
         assert!(set.update(&peer3, false));
         assert_eq!(
             set.knowledge(),
-            BitVec::from(vec![false, false, true]),
+            BitMap::from(vec![false, false, true]),
             "Only peer 3 should be known"
         );
     }
@@ -217,14 +217,14 @@ mod tests {
         let knowledge_before_updates = set.knowledge();
         assert_eq!(
             knowledge_before_updates,
-            BitVec::from(vec![false, false, false])
+            BitMap::from(vec![false, false, false])
         );
 
         set.update(&peer1, true);
         let knowledge_after_first_update = set.knowledge();
         assert_eq!(
             knowledge_after_first_update,
-            BitVec::from(vec![false, true, false])
+            BitMap::from(vec![false, true, false])
         );
         assert_ne!(
             knowledge_before_updates, knowledge_after_first_update,
@@ -235,7 +235,7 @@ mod tests {
         let knowledge_after_second_update = set.knowledge();
         assert_eq!(
             knowledge_after_second_update,
-            BitVec::from(vec![false, true, true])
+            BitMap::from(vec![false, true, true])
         );
         assert_ne!(
             knowledge_after_first_update, knowledge_after_second_update,
@@ -244,7 +244,7 @@ mod tests {
 
         assert_eq!(
             knowledge_before_updates,
-            BitVec::from(vec![false, false, false]),
+            BitMap::from(vec![false, false, false]),
             "Original clone must remain unchanged"
         );
     }
@@ -296,7 +296,7 @@ mod tests {
         let mut set = Set::new(peers);
 
         assert_eq!(set.len(), 0);
-        assert_eq!(set.knowledge(), BitVec::zeroes(0));
+        assert_eq!(set.knowledge(), BitMap::zeroes(0));
 
         let update_result = set.update(&ed25519::PrivateKey::from_seed(1).public_key(), true);
         assert!(!update_result, "Update on empty set should fail");
@@ -323,13 +323,13 @@ mod tests {
                 .get(&ed25519::PrivateKey::from_seed(42).public_key()),
             Some(&0)
         );
-        assert_eq!(set.knowledge(), BitVec::from(vec![false]));
+        assert_eq!(set.knowledge(), BitMap::from(vec![false]));
 
         assert!(set.update(&ed25519::PrivateKey::from_seed(42).public_key(), true));
-        assert_eq!(set.knowledge(), BitVec::from(vec![true]));
+        assert_eq!(set.knowledge(), BitMap::from(vec![true]));
 
         assert!(set.update(&ed25519::PrivateKey::from_seed(42).public_key(), false));
-        assert_eq!(set.knowledge(), BitVec::from(vec![false]));
+        assert_eq!(set.knowledge(), BitMap::from(vec![false]));
 
         assert_eq!(set[0], ed25519::PrivateKey::from_seed(42).public_key());
 

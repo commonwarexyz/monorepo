@@ -18,7 +18,7 @@ impl Peer {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum MessageType {
-    BitVec,
+    BitMap,
     Peers,
     Data(u32),
     Invalid,
@@ -27,7 +27,7 @@ pub enum MessageType {
 impl EncodeLabelValue for MessageType {
     fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
         match self {
-            MessageType::BitVec => encoder.write_str("bit_vec"),
+            MessageType::BitMap => encoder.write_str("bitmap"),
             MessageType::Peers => encoder.write_str("peers"),
             MessageType::Data(channel) => encoder.write_str(&format!("data_{channel}")),
             MessageType::Invalid => encoder.write_str("invalid"),
@@ -45,7 +45,7 @@ impl Message {
     pub fn new_bit_vec(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
-            message: MessageType::BitVec,
+            message: MessageType::BitMap,
         }
     }
     pub fn new_peers(peer: &impl Array) -> Self {

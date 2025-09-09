@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{bitvec::Prunable as BitVec, sequence::prefixed_u64::U64};
+use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64};
 use std::collections::HashSet;
 use tracing::{debug, error, warn};
 
@@ -39,7 +39,7 @@ use tracing::{debug, error, warn};
 /// limited to (u32::MAX * N * 8).
 pub struct MerkleizedBitmap<H: CHasher, const N: usize> {
     /// The core bitmap functionality
-    bitmap: BitVec<N>,
+    bitmap: BitMap<N>,
 
     /// The length of the bitmap range that is currently included in the `mmr`.
     authenticated_len: usize,
@@ -84,7 +84,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     /// Return a new empty bitmap.
     pub fn new() -> Self {
         MerkleizedBitmap {
-            bitmap: BitVec::new(),
+            bitmap: BitMap::new(),
             authenticated_len: 0,
             mmr: Mmr::new(),
             dirty_chunks: HashSet::new(),
@@ -161,7 +161,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
         });
 
         Ok(Self {
-            bitmap: BitVec::new_with_pruned_chunks(pruned_chunks),
+            bitmap: BitMap::new_with_pruned_chunks(pruned_chunks),
             authenticated_len: 0,
             mmr,
             dirty_chunks: HashSet::new(),
@@ -222,7 +222,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     ///
     /// - Panics if there are unprocessed updates.
     pub fn prune_to_bit(&mut self, bit_offset: u64) {
-        let chunk_num = BitVec::<N>::chunk_num(bit_offset);
+        let chunk_num = BitMap::<N>::chunk_num(bit_offset);
         if chunk_num < self.bitmap.pruned_chunks() {
             return;
         }
@@ -279,7 +279,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        let chunk_num = BitVec::<N>::chunk_num(bit_offset);
+        let chunk_num = BitMap::<N>::chunk_num(bit_offset);
         leaf_num_to_pos(chunk_num as u64)
     }
 
@@ -296,7 +296,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     #[inline]
     /// Get the value of a bit from its chunk.
     pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
-        BitVec::<N>::get_bit_from_chunk(chunk, bit_offset)
+        BitMap::<N>::get_bit_from_chunk(chunk, bit_offset)
     }
 
     /// Set the value of the referenced bit.
@@ -867,8 +867,8 @@ mod tests {
     }
 
     fn flip_bit<const N: usize>(bit_offset: u64, chunk: &[u8; N]) -> [u8; N] {
-        let byte_offset = BitVec::<N>::chunk_byte_offset(bit_offset);
-        let mask = BitVec::<N>::chunk_byte_bitmask(bit_offset);
+        let byte_offset = BitMap::<N>::chunk_byte_offset(bit_offset);
+        let mask = BitMap::<N>::chunk_byte_bitmask(bit_offset);
         let mut tmp = chunk.to_vec();
         tmp[byte_offset] ^= mask;
         tmp.try_into().unwrap()

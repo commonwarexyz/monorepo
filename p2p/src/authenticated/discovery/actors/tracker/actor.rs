@@ -294,8 +294,8 @@ mod tests {
     };
     use types::PeerInfo;
 
-    const BITVEC_CHUNK_SIZE: usize = 1;
-    type UtilsBitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
+    const BITMAP_CHUNK_SIZE: usize = 1;
+    type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(
@@ -592,7 +592,7 @@ mod tests {
             let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::test();
             let bit_vec_unknown_idx = types::BitVec {
                 index: 99,
-                bits: UtilsBitVec::ones(1),
+                bits: BitMap::ones(1),
             };
 
             let _r1 = connect_to_peer(
@@ -747,7 +747,7 @@ mod tests {
                 connect_to_peer(&mut mailbox, &pk2, &peer_mailbox_s2, &mut peer_receiver_s2).await;
 
             // Act as if pk1 received a bit vector where pk2 is not known.
-            let mut bv = UtilsBitVec::zeroes(set1.len() as u64);
+            let mut bv = BitMap::zeroes(set1.len() as u64);
             let idx_tracker_in_set1 = set1.iter().position(|p| p == &tracker_pk).unwrap();
             let idx_pk1_in_set1 = set1.iter().position(|p| p == &pk1).unwrap();
             bv.set(idx_tracker_in_set1 as u64, true);
@@ -834,7 +834,7 @@ mod tests {
 
             let mut sorted_set0_peers = peer_set_0_peers.clone();
             sorted_set0_peers.sort();
-            let mut knowledge_for_set0 = UtilsBitVec::zeroes(sorted_set0_peers.len() as u64);
+            let mut knowledge_for_set0 = BitMap::zeroes(sorted_set0_peers.len() as u64);
             let idx_tracker_in_set0 = sorted_set0_peers
                 .iter()
                 .position(|p| p == &tracker_pk)
@@ -1158,7 +1158,7 @@ mod tests {
             let (peer_mailbox, mut peer_receiver) = Mailbox::test();
             let invalid_bit_vec = types::BitVec {
                 index: 0,
-                bits: UtilsBitVec::ones(2),
+                bits: BitMap::ones(2),
             };
             mailbox.bit_vec(invalid_bit_vec, peer_mailbox.clone()).await;
             assert!(matches!(
@@ -1249,7 +1249,7 @@ mod tests {
 
             // --- Peer1 sends BitVec for set 0, indicating it only knows tracker ---
             // Tracker should respond with PeerInfo for peer1_pk (as it just learned it)
-            let mut peer1_knowledge_s0 = UtilsBitVec::zeroes(set0_peers.len() as u64);
+            let mut peer1_knowledge_s0 = BitMap::zeroes(set0_peers.len() as u64);
             peer1_knowledge_s0.set(tracker_idx_s0 as u64, true); // Peer1 knows tracker
             mailbox
                 .bit_vec(

@@ -19,13 +19,13 @@ const FREEZER_PREFIX: u8 = 0;
 /// Prefix for [Ordinal] records.
 const ORDINAL_PREFIX: u8 = 1;
 
-const BITVEC_CHUNK_SIZE: usize = 1;
-type BitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
+const BITMAP_CHUNK_SIZE: usize = 1;
+type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
 enum Record {
     Freezer(Checkpoint),
-    Ordinal(Option<BitVec>),
+    Ordinal(Option<BitMap>),
 }
 
 impl Record {
@@ -37,8 +37,8 @@ impl Record {
         }
     }
 
-    /// Get the [Ordinal] [BitVec] from the [Record].
-    fn ordinal(&self) -> &Option<BitVec> {
+    /// Get the [Ordinal] [BitMap] from the [Record].
+    fn ordinal(&self) -> &Option<BitMap> {
         match self {
             Self::Ordinal(indices) => indices,
             _ => panic!("incorrect record"),
@@ -67,7 +67,7 @@ impl Read for Record {
         let tag = u8::read(buf)?;
         match tag {
             0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),
-            1 => Ok(Self::Ordinal(Option::<BitVec>::read_cfg(
+            1 => Ok(Self::Ordinal(Option::<BitMap>::read_cfg(
                 buf,
                 &(0..=usize::MAX).into(),
             )?)),
@@ -219,7 +219,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     /// Initialize the section.
     async fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
-        let bits = BitVec::zeroes(self.items_per_section);
+        let bits = BitMap::zeroes(self.items_per_section);
 
         // Store record
         let key = U64::new(ORDINAL_PREFIX, section);
