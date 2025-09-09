@@ -242,7 +242,7 @@ impl<
         let journal = Journal::init(self.context.with_label("journal"), journal_cfg)
             .await
             .expect("init failed");
-        self.replay(&journal).await;
+        let mut unverified_indices = self.replay(&journal).await;
         self.journal = Some(journal);
 
         // Initialize the tip manager
@@ -254,6 +254,30 @@ impl<
 
         loop {
             self.metrics.tip.set(self.tip as i64);
+
+            // First, request digests for unverified indices from replay (respecting window)
+            if !unverified_indices.is_empty() {
+                // Check if we have room in the window
+                let in_flight = self.digest_requests.len();
+                if in_flight < self.window as usize {
+                    let index = unverified_indices.remove(0);
+                    debug!("requesting digest for unverified index from replay: {}", index);
+                    
+                    // Request the digest (don't insert to pending, it's already there)
+                    let mut automaton = self.automaton.clone();
+                    let timer = self.metrics.digest_duration.timer();
+                    self.digest_requests.push(async move {
+                        let receiver = automaton.propose(index).await;
+                        let result = receiver.await.map_err(Error::AppProposeCanceled);
+                        DigestRequest {
+                            index,
+                            result,
+                            timer,
+                        }
+                    });
+                    continue;
+                }
+            }
 
             // Propose a new digest if we are processing less than the window
             let next = self.next();
@@ -760,7 +784,8 @@ impl<
     }
 
     /// Replays the journal, updating the state of the engine.
-    async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) {
+    /// Returns a list of unverified pending indices that need digest requests.
+    async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) -> Vec<Index> {
         let mut tip = Index::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
@@ -853,7 +878,22 @@ impl<
             }
         }
 
-        info!(self.tip, next = self.next(), "replayed journal");
+        // Collect unverified indices that need digest requests
+        let mut unverified_indices = Vec::new();
+        for (index, pending) in &self.pending {
+            if matches!(pending, Pending::Unverified(_)) {
+                unverified_indices.push(*index);
+            }
+        }
+
+        info!(
+            self.tip, 
+            next = self.next(), 
+            unverified = unverified_indices.len(),
+            "replayed journal"
+        );
+        
+        unverified_indices
     }
 
     /// Appends an activity to the journal.
