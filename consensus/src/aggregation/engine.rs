@@ -242,8 +242,13 @@ impl<
         let journal = Journal::init(self.context.with_label("journal"), journal_cfg)
             .await
             .expect("init failed");
-        let mut unverified_indices = self.replay(&journal).await;
+        let unverified_indices = self.replay(&journal).await;
         self.journal = Some(journal);
+
+        // Request digests for unverified indices
+        for index in unverified_indices {
+            self.get_digest(index, true);
+        }
 
         // Initialize the tip manager
         self.safe_tip.init(
@@ -255,38 +260,11 @@ impl<
         loop {
             self.metrics.tip.set(self.tip as i64);
 
-            // First, request digests for unverified indices from replay (respecting window)
-            if !unverified_indices.is_empty() {
-                // Check if we have room in the window
-                let in_flight = self.digest_requests.len();
-                if in_flight < self.window as usize {
-                    let index = unverified_indices.remove(0);
-                    debug!(
-                        "requesting digest for unverified index from replay: {}",
-                        index
-                    );
-
-                    // Request the digest (don't insert to pending, it's already there)
-                    let mut automaton = self.automaton.clone();
-                    let timer = self.metrics.digest_duration.timer();
-                    self.digest_requests.push(async move {
-                        let receiver = automaton.propose(index).await;
-                        let result = receiver.await.map_err(Error::AppProposeCanceled);
-                        DigestRequest {
-                            index,
-                            result,
-                            timer,
-                        }
-                    });
-                    continue;
-                }
-            }
-
             // Propose a new digest if we are processing less than the window
             let next = self.next();
             if next < self.tip + self.window {
                 trace!("requesting new digest: index {}", next);
-                self.get_digest(next);
+                self.get_digest(next, false);
                 continue;
             }
 
@@ -676,11 +654,15 @@ impl<
     // ---------- Helpers ----------
 
     /// Sets `index` as pending and requests the digest from the automaton.
-    fn get_digest(&mut self, index: Index) {
-        assert!(self
-            .pending
-            .insert(index, Pending::Unverified(BTreeMap::new()))
-            .is_none());
+    fn get_digest(&mut self, index: Index, replay: bool) {
+        if replay {
+            assert!(self.pending.contains_key(&index));
+        } else {
+            assert!(self
+                .pending
+                .insert(index, Pending::Unverified(BTreeMap::new()))
+                .is_none());
+        }
 
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.digest_duration.timer();
