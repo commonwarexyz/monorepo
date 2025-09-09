@@ -218,7 +218,7 @@ where
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1))
                         .await;
-                    IndexedFetchResult::<DB::Op, DB::Digest, R::Error> { start_loc, result }
+                    IndexedFetchResult { start_loc, result }
                 }),
             );
         }
@@ -261,7 +261,7 @@ where
                     let result = resolver
                         .get_operations(target_size, start_loc, batch_size)
                         .await;
-                    IndexedFetchResult::<DB::Op, DB::Digest, R::Error> { start_loc, result }
+                    IndexedFetchResult { start_loc, result }
                 }),
             );
         }

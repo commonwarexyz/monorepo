@@ -1,7 +1,7 @@
 //! Defines the abstraction allowing MMRs with differing backends and representations to be
 //! uniformly accessed.
 
-use crate::mmr::{core::Mmr as MemMmr, Error};
+use crate::mmr::{mem::Mmr as MemMmr, Error};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use std::future::Future;
 

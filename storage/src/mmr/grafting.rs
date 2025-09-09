@@ -59,9 +59,10 @@
 //! base MMR, yielding node 13 as its grafting point.
 
 use crate::mmr::{
+    hasher::Hasher as HasherTrait,
     iterator::{leaf_num_to_pos, leaf_pos_to_num, pos_to_height, PeakIterator},
     storage::Storage as StorageTrait,
-    Error, Hasher as HasherTrait, StandardHasher as Standard,
+    Error, StandardHasher,
 };
 use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
@@ -69,7 +70,7 @@ use std::collections::HashMap;
 use tracing::debug;
 
 pub struct Hasher<'a, H: CHasher> {
-    hasher: &'a mut Standard<H>,
+    hasher: &'a mut StandardHasher<H>,
     height: u32,
 
     /// Maps a leaf's position to the digest of the node on which the leaf is grafted.
@@ -77,7 +78,7 @@ pub struct Hasher<'a, H: CHasher> {
 }
 
 impl<'a, H: CHasher> Hasher<'a, H> {
-    pub fn new(hasher: &'a mut Standard<H>, height: u32) -> Self {
+    pub fn new(hasher: &'a mut StandardHasher<H>, height: u32) -> Self {
         Self {
             hasher,
             height,
@@ -85,8 +86,8 @@ impl<'a, H: CHasher> Hasher<'a, H> {
         }
     }
 
-    /// Access the underlying [Standard] (non-grafting) hasher.
-    pub fn standard(&mut self) -> &mut Standard<H> {
+    /// Access the underlying [StandardHasher] for non-grafted hashing.
+    pub fn standard(&mut self) -> &mut StandardHasher<H> {
         self.hasher
     }
 
@@ -130,7 +131,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
 /// A lightweight, short-lived shallow copy of a Grafting hasher that can be used in parallel
 /// computations.
 pub struct HasherFork<'a, H: CHasher> {
-    hasher: Standard<H>,
+    hasher: StandardHasher<H>,
     height: u32,
     grafted_digests: &'a HashMap<u64, H::Digest>,
 }
@@ -226,7 +227,7 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
 
     fn fork(&self) -> impl HasherTrait<H> {
         HasherFork {
-            hasher: Standard::new(),
+            hasher: StandardHasher::new(),
             height: self.height,
             grafted_digests: &self.grafted_digests,
         }
@@ -276,7 +277,7 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
 
     fn fork(&self) -> impl HasherTrait<H> {
         HasherFork {
-            hasher: Standard::new(),
+            hasher: StandardHasher::new(),
             height: self.height,
             grafted_digests: self.grafted_digests,
         }
@@ -312,7 +313,7 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
 
 /// A [Hasher] implementation to use when verifying proofs over GraftedStorage.
 pub struct Verifier<'a, H: CHasher> {
-    hasher: Standard<H>,
+    hasher: StandardHasher<H>,
     height: u32,
 
     /// The required leaf elements from the peak tree that we are verifying.
@@ -325,14 +326,14 @@ pub struct Verifier<'a, H: CHasher> {
 impl<'a, H: CHasher> Verifier<'a, H> {
     pub fn new(height: u32, num: u64, elements: Vec<&'a [u8]>) -> Self {
         Self {
-            hasher: Standard::new(),
+            hasher: StandardHasher::new(),
             height,
             elements,
             num,
         }
     }
 
-    pub fn standard(&mut self) -> &mut Standard<H> {
+    pub fn standard(&mut self) -> &mut StandardHasher<H> {
         &mut self.hasher
     }
 }
@@ -344,7 +345,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
 
     fn fork(&self) -> impl HasherTrait<H> {
         Verifier {
-            hasher: Standard::new(),
+            hasher: StandardHasher::new(),
             height: self.height,
             elements: self.elements.clone(),
             num: self.num,
@@ -439,7 +440,7 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
         }
     }
 
-    pub async fn root(&self, hasher: &mut Standard<H>) -> Result<H::Digest, Error> {
+    pub async fn root(&self, hasher: &mut StandardHasher<H>) -> Result<H::Digest, Error> {
         let size = self.size();
         let peak_futures = PeakIterator::new(size).map(|(peak_pos, _)| self.get_node(peak_pos));
         let peaks = try_join_all(peak_futures).await?;
@@ -475,14 +476,15 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{core::Mmr, iterator::leaf_num_to_pos, verification};
+    use crate::mmr::{
+        iterator::leaf_num_to_pos,
+        mem::Mmr,
+        stability::{build_test_mmr, ROOTS},
+        verification, StandardHasher,
+    };
     use commonware_cryptography::{Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
-    use commonware_storage_core::mmr::{
-        stability::{build_test_mmr, ROOTS},
-        Hasher as _,
-    };
     use commonware_utils::hex;
 
     #[test]
@@ -509,7 +511,7 @@ mod tests {
     fn test_leaf_digest<H: CHasher>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut mmr_hasher: Standard<H> = Standard::new();
+            let mut mmr_hasher: StandardHasher<H> = StandardHasher::new();
             // input hashes to use
             let digest1 = test_digest::<H>(1);
             let digest2 = test_digest::<H>(2);
@@ -529,7 +531,7 @@ mod tests {
     }
 
     fn test_node_digest<H: CHasher>() {
-        let mut mmr_hasher: Standard<H> = Standard::new();
+        let mut mmr_hasher: StandardHasher<H> = StandardHasher::new();
         // input hashes to use
 
         let d1 = test_digest::<H>(1);
@@ -565,7 +567,7 @@ mod tests {
     }
 
     fn test_root<H: CHasher>() {
-        let mut mmr_hasher: Standard<H> = Standard::new();
+        let mut mmr_hasher: StandardHasher<H> = StandardHasher::new();
         // input digests to use
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
@@ -637,7 +639,7 @@ mod tests {
     fn test_hasher_grafting() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut standard: Standard<Sha256> = Standard::new();
+            let mut standard: StandardHasher<Sha256> = StandardHasher::new();
             let mut base_mmr = Mmr::new();
             build_test_mmr(&mut standard, &mut base_mmr);
             let root = base_mmr.root(&mut standard);
@@ -712,7 +714,7 @@ mod tests {
             let b2 = Sha256::fill(0x02);
             let b3 = Sha256::fill(0x03);
             let b4 = Sha256::fill(0x04);
-            let mut standard: Standard<Sha256> = Standard::new();
+            let mut standard: StandardHasher<Sha256> = StandardHasher::new();
 
             // Make a base MMR with 4 leaves.
             let mut base_mmr = Mmr::new();

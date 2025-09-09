@@ -13,7 +13,6 @@ members = [
     "runtime",
     "storage",
     "stream",
-    "storage-core",
     "utils",
     "examples/bridge",
     "examples/chat",
@@ -52,8 +51,7 @@ commonware-macros = { version = "0.0.62", path = "macros" }
 commonware-p2p = { version = "0.0.62", path = "p2p" }
 commonware-resolver = { version = "0.0.62", path = "resolver" }
 commonware-runtime = { version = "0.0.62", path = "runtime" }
-commonware-storage = { version = "0.0.62", path = "storage" }
-commonware-storage-core = { version = "0.0.62", path = "storage-core", default-features = false }
+commonware-storage = { version = "0.0.62", path = "storage", default-features = false }
 commonware-stream = { version = "0.0.62", path = "stream" }
 commonware-utils = { version = "0.0.62", path = "utils", default-features = false }
 anyhow = { version = "1.0.99", default-features = false }

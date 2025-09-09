@@ -722,7 +722,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::verify_proof,
-        mmr::{core::Mmr as MemMmr, StandardHasher as Standard},
+        mmr::{mem::Mmr as MemMmr, StandardHasher as Standard},
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};

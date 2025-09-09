@@ -12,10 +12,10 @@ use crate::{
     index::Index,
     mmr::{
         bitmap::Bitmap,
-        core::proof,
-        grafting::{Hasher as Grafting, Storage as GStorage, Verifier as GraftingVerifier},
+        grafting::{Hasher as GraftingHasher, Storage as GStorage, Verifier as GraftingVerifier},
+        hasher::Hasher,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        verification, Hasher, Proof, StandardHasher as Standard,
+        proof, verification, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -161,7 +161,7 @@ impl<
             Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
 
         // Ensure consistency between the bitmap and the db.
-        let mut grafter = Grafting::new(&mut hasher, Self::grafting_height());
+        let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
         if status.bit_count() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
@@ -323,7 +323,7 @@ impl<
         //  (2) prune the bitmap to the updated inactivity floor and write its state to disk.
         self.commit_ops().await?; // (1)
 
-        let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
+        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
         grafter
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
@@ -704,7 +704,7 @@ impl<
         // Only successfully complete operations (1) and (2) of the commit process.
         self.commit_ops().await?; // (1)
 
-        let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
+        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
         grafter
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;

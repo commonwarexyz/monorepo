@@ -5,8 +5,9 @@
 //! parent module.
 
 use crate::mmr::{
+    hasher::Hasher,
     iterator::{leaf_num_to_pos, leaf_pos_to_num, nodes_to_pin, PathIterator, PeakIterator},
-    Error, Hasher,
+    Error,
 };
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
@@ -595,7 +596,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, Mmr};
+    use crate::mmr::{hasher::Standard, mem::Mmr};
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Sha256};

@@ -12,10 +12,13 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        core,
+        hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
+        mem::{Config as MemConfig, Mmr as MemMmr},
         storage::Storage,
-        verification, Error, Hasher, Proof,
+        verification, Error,
+        Error::*,
+        Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -80,7 +83,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
-    mem_mmr: core::Mmr<H>,
+    mem_mmr: MemMmr<H>,
 
     /// Stores all unpruned MMR nodes.
     journal: Journal<E, H::Digest>,
@@ -162,7 +165,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.sync().await.map_err(Error::MetadataError)?;
 
         // Create in-memory MMR in fully pruned state
-        let mem_mmr = core::Mmr::init(core::Config {
+        let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: mmr_size,
             pinned_nodes,
@@ -200,7 +203,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         if journal_size == 0 {
             return Ok(Self {
-                mem_mmr: core::Mmr::init(core::Config {
+                mem_mmr: MemMmr::init(MemConfig {
                     nodes: vec![],
                     pruned_to_pos: 0,
                     pinned_nodes: vec![],
@@ -267,7 +270,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
-        let mut mem_mmr = core::Mmr::init(core::Config {
+        let mut mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: journal_size,
             pinned_nodes,
@@ -298,7 +301,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
     async fn add_extra_pinned_nodes(
-        mem_mmr: &mut core::Mmr<H>,
+        mem_mmr: &mut MemMmr<H>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, H::Digest>,
         prune_pos: u64,
@@ -372,7 +375,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             mem_pinned_nodes.push(digest);
         }
-        let mut mem_mmr = core::Mmr::init(core::Config {
+        let mut mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: journal_size,
             pinned_nodes: mem_pinned_nodes,
@@ -498,8 +501,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 Ok(_) => {
                     leaves_to_pop -= 1;
                 }
-                Err(core::Error::ElementPruned(_)) => break,
-                Err(core::Error::Empty) => {
+                Err(ElementPruned(_)) => break,
+                Err(Empty) => {
                     return Err(Error::Empty);
                 }
                 _ => unreachable!(),
@@ -782,11 +785,13 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Mmr<E, H>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{iterator::leaf_num_to_pos, StandardHasher as Standard};
+    use crate::mmr::{
+        hasher::Hasher as _, iterator::leaf_num_to_pos, stability::ROOTS,
+        StandardHasher as Standard,
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_storage_core::mmr::{stability::ROOTS, Hasher as _};
     use commonware_utils::{hex, NZUsize, NZU64};
 
     fn test_digest(v: usize) -> Digest {
@@ -1636,7 +1641,7 @@ mod tests {
             empty_mmr.destroy().await.unwrap();
 
             // === TEST 2: Single element MMR ===
-            let mut single_mem_mmr = core::Mmr::new();
+            let mut single_mem_mmr = MemMmr::new();
             single_mem_mmr.add(&mut hasher, &test_digest(42));
             let single_size = single_mem_mmr.size();
             let single_root = single_mem_mmr.root(&mut hasher);

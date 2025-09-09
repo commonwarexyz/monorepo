@@ -1,6 +1,6 @@
 //! Defines functions for generating various [Proof] types from any MMR implementing the [Storage]
-//! trait. Also defines a [ProofStore] type that can be used to generate proofs over any sub-range
-//! of the original range.
+//! trait. Also defines a [ProofStore] type that can be used to generate proofs over any subset or
+//! sub-range of the original range.
 //!
 //! ## Historical Proof Generation
 //!
@@ -11,7 +11,7 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::mmr::{core::proof, storage::Storage, Error, Hasher, Proof};
+use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Proof};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap};
@@ -163,7 +163,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{core::Mmr, StandardHasher as Standard};
+    use crate::mmr::{mem::Mmr, StandardHasher as Standard};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};

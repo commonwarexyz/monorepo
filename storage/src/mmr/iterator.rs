@@ -279,7 +279,7 @@ pub fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, Mmr};
+    use crate::mmr::{hasher::Standard, mem::Mmr};
     use commonware_cryptography::Sha256;
 
     #[test]

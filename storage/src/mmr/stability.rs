@@ -1,4 +1,4 @@
-use crate::mmr::{hasher::Hasher, Mmr};
+use crate::mmr::{hasher::Hasher, mem::Mmr};
 use commonware_cryptography::{Hasher as CHasher, Sha256};
 
 /// Build an MMR for testing with 199 elements whose root should always equal

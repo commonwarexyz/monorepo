@@ -1,9 +1,6 @@
 use crate::mmr::{
-    core,
-    core::{iterator::leaf_num_to_pos, proof},
-    verification,
-    verification::ProofStore,
-    Proof, StandardHasher as Standard,
+    iterator::leaf_num_to_pos, proof, verification, verification::ProofStore, Error, Proof,
+    StandardHasher as Standard,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
@@ -31,7 +28,7 @@ pub fn extract_pinned_nodes<D: Digest>(
     proof: &Proof<D>,
     start_loc: u64,
     operations_len: u64,
-) -> Result<Vec<D>, core::Error> {
+) -> Result<Vec<D>, Error> {
     let start_pos_mmr = leaf_num_to_pos(start_loc);
     let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
     proof::extract_pinned_nodes(proof, start_pos_mmr, end_pos_mmr)
@@ -45,7 +42,7 @@ pub fn verify_proof_and_extract_digests<Op, H, D>(
     start_loc: u64,
     operations: &[Op],
     target_root: &D,
-) -> Result<Vec<(u64, D)>, core::Error>
+) -> Result<Vec<(u64, D)>, Error>
 where
     Op: Encode,
     H: Hasher<Digest = D>,
@@ -85,7 +82,7 @@ pub fn create_proof_store<Op, H, D>(
     start_loc: u64,
     operations: &[Op],
     root: &D,
-) -> Result<ProofStore<D>, crate::mmr::Error>
+) -> Result<ProofStore<D>, Error>
 where
     Op: Encode,
     H: Hasher<Digest = D>,
@@ -115,7 +112,7 @@ pub fn create_proof_store_from_digests<D: Digest>(
 pub async fn create_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
     locations: &[u64],
-) -> Result<Proof<D>, crate::mmr::Error> {
+) -> Result<Proof<D>, Error> {
     // Convert locations to MMR positions
     let positions: Vec<u64> = locations.iter().map(|&loc| leaf_num_to_pos(loc)).collect();
 
@@ -148,7 +145,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{core::Mmr, iterator::nodes_to_pin};
+    use crate::mmr::{iterator::nodes_to_pin, mem::Mmr};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};

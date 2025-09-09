@@ -1,5 +1,5 @@
 use commonware_cryptography::{sha256, Digest as _, Sha256};
-use commonware_storage::mmr::{core::Mmr, StandardHasher};
+use commonware_storage::mmr::{mem::Mmr, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, SeedableRng};

@@ -13,12 +13,14 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        core::{proof, Config, Mmr},
+        hasher::Hasher,
         iterator::{leaf_num_to_pos, nodes_to_pin},
+        mem::{Config, Mmr},
+        proof,
         storage::Storage,
         verification, Error,
         Error::*,
-        Hasher, Proof,
+        Proof,
     },
 };
 use commonware_codec::DecodeExt;
