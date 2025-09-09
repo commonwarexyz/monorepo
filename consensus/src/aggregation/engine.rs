@@ -248,7 +248,7 @@ impl<
         // Request digests for unverified indices
         for index in unverified_indices {
             trace!(index, "requesting digest for unverified index from replay");
-            self.get_digest(index, true);
+            self.get_digest(index);
         }
 
         // Initialize the tip manager
@@ -265,7 +265,11 @@ impl<
             let next = self.next();
             if next < self.tip + self.window {
                 trace!(next, "requesting new digest");
-                self.get_digest(next, false);
+                assert!(self
+                    .pending
+                    .insert(next, Pending::Unverified(BTreeMap::new()))
+                    .is_none());
+                self.get_digest(next);
                 continue;
             }
 
@@ -654,17 +658,11 @@ impl<
 
     // ---------- Helpers ----------
 
-    /// Sets `index` as pending and requests the digest from the automaton.
-    fn get_digest(&mut self, index: Index, replay: bool) {
-        if replay {
-            assert!(self.pending.contains_key(&index));
-        } else {
-            assert!(self
-                .pending
-                .insert(index, Pending::Unverified(BTreeMap::new()))
-                .is_none());
-        }
-
+    /// Requests the digest from the automaton.
+    ///
+    /// Pending must contain the index.
+    fn get_digest(&mut self, index: Index) {
+        assert!(self.pending.contains_key(&index));
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.digest_duration.timer();
         self.digest_requests.push(async move {
