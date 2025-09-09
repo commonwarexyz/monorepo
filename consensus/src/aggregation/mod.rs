@@ -573,6 +573,7 @@ mod tests {
         let skip_index = 50u64; // Index where no one will sign
         let window = 10u64;
         let target_index = 100u64;
+        let namespace = b"my testing namespace";
 
         // Generate shares once
         let all_validators = Arc::new(Mutex::new(Vec::new()));
@@ -602,13 +603,6 @@ mod tests {
                     *pks_lock = pks.clone();
                 }
 
-                let automatons =
-                    Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-
-                // Use unique journal partitions for each validator to enable restart recovery
-                let mut engine_monitors = HashMap::new();
-                let namespace = b"my testing namespace";
-
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
                     namespace,
@@ -618,6 +612,9 @@ mod tests {
                 context.with_label("reporter").spawn(|_| reporter.run());
 
                 // Start validator engines with NoSignature strategy for skip_index
+                let mut engine_monitors = HashMap::new();
+                let automatons =
+                    Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
                 for (validator, _, share) in validators.iter() {
                     let validator_context = context.with_label(&validator.to_string());
                     let monitor = mocks::Monitor::new(111);
@@ -627,7 +624,6 @@ mod tests {
                         s.add_epoch(111, share.clone(), polynomial_clone.clone(), pks.to_vec());
                         s
                     };
-
                     let blocker = oracle.control(validator.clone());
 
                     // All validators use NoSignature strategy for skip_index
@@ -693,11 +689,6 @@ mod tests {
                 )
                 .await;
 
-                let automatons =
-                    Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-
-                let namespace = b"my testing namespace";
-
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
                     namespace,
@@ -707,6 +698,8 @@ mod tests {
                 context.with_label("reporter").spawn(|_| reporter.run());
 
                 // Start validator engines with Correct strategy (will sign everything now)
+                let automatons =
+                    Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
                 for (validator, _, share) in validators.iter() {
                     let validator_context = context.with_label(&validator.to_string());
                     let monitor = mocks::Monitor::new(111);
@@ -761,7 +754,6 @@ mod tests {
                             tip_index,
                             skip_index, target_index, "reporter status on restart",
                         );
-                        // Ensure we still reach target and skip_index was confirmed
                         if tip_index >= target_index {
                             break;
                         }
