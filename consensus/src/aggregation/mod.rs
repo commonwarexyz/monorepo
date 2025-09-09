@@ -632,7 +632,7 @@ mod tests {
                     let blocker = oracle.control(validator.clone());
 
                     // All validators use NoSignature strategy for skip_index
-                    let automaton = mocks::Application::new(Strategy::NoSignature { skip_index });
+                    let automaton = mocks::Application::new(Strategy::Skip { index: skip_index });
                     automatons
                         .lock()
                         .unwrap()

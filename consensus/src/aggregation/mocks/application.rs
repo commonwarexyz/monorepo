@@ -7,7 +7,7 @@ use tracing::trace;
 pub enum Strategy {
     Correct,
     Incorrect,
-    NoSignature { skip_index: u64 },
+    Skip { index: u64 },
 }
 
 #[derive(Clone)]
@@ -18,6 +18,11 @@ pub struct Application {
 impl Application {
     pub fn new(strategy: Strategy) -> Self {
         Self { strategy }
+    }
+
+    fn correct_message(context: Index) -> <Sha256 as Hasher>::Digest {
+        let payload = format!("data for index {context}");
+        Sha256::hash(payload.as_bytes())
     }
 }
 
@@ -35,21 +40,17 @@ impl A for Application {
         let (sender, receiver) = oneshot::channel();
 
         let digest = match &self.strategy {
-            Strategy::Correct => {
-                let payload = format!("data for index {context}");
-                Sha256::hash(payload.as_bytes())
-            }
+            Strategy::Correct => Self::correct_message(context),
             Strategy::Incorrect => {
                 let conflicting_payload = format!("conflicting_data for index {context}");
                 Sha256::hash(conflicting_payload.as_bytes())
             }
-            Strategy::NoSignature { skip_index } => {
-                if context == *skip_index {
-                    // Don't send anything - receiver will be dropped
+            Strategy::Skip { index } => {
+                if context == *index {
+                    // Receiver will be canceled (sender dropped)
                     return receiver;
                 }
-                let payload = format!("data for index {context}");
-                Sha256::hash(payload.as_bytes())
+                Self::correct_message(context)
             }
         };
 
@@ -65,14 +66,9 @@ impl A for Application {
         trace!(?context, ?payload, "verify");
         let (sender, receiver) = oneshot::channel();
 
-        // Compute the expected valid digest
-        let expected_payload = format!("data for index {context}");
-        let mut hasher = Sha256::default();
-        hasher.update(expected_payload.as_bytes());
-        let expected_digest = hasher.finalize();
-
         // Return true only if the payload matches the expected digest
-        sender.send(payload == expected_digest).unwrap();
+        let expected_payload = Self::correct_message(context);
+        sender.send(payload == expected_payload).unwrap();
         receiver
     }
 }
