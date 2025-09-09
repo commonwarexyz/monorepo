@@ -160,8 +160,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         let record = self
             .journal
             .get_exact(section, location.offset, location.len)
-            .await?
-            .ok_or(Error::RecordCorrupted)?;
+            .await?;
         Ok(Some(record.value))
     }
 

@@ -785,13 +785,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Get the value for a given [Cursor].
-    async fn get_cursor(&self, cursor: Cursor) -> Result<Option<V>, Error> {
+    async fn get_cursor(&self, cursor: Cursor) -> Result<V, Error> {
         let entry = self.journal.get(cursor.section(), cursor.offset()).await?;
-        let Some(entry) = entry else {
-            return Ok(None);
-        };
 
-        Ok(Some(entry.value))
+        Ok(entry.value)
     }
 
     /// Get the first value for a given key.
@@ -808,10 +805,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Follow the linked list chain to find the first matching key
         loop {
             // Get the entry from the variable journal
-            let entry = match self.journal.get(section, offset).await? {
-                Some(entry) => entry,
-                None => unreachable!("missing entry"),
-            };
+            let entry = self.journal.get(section, offset).await?;
 
             // Check if this key matches
             if entry.key.as_ref() == key.as_ref() {
@@ -838,7 +832,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// is much faster to use it than searching for a `key`.
     pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
         match identifier {
-            Identifier::Cursor(cursor) => self.get_cursor(cursor).await,
+            Identifier::Cursor(cursor) => self.get_cursor(cursor).await.map(Some),
             Identifier::Key(key) => self.get_key(key).await,
         }
     }
