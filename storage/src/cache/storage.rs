@@ -170,7 +170,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.intervals.next_gap(index)
     }
 
-    /// Returns the first value in the [Cache].
+    /// Returns the first index in the [Cache].
     pub fn first(&self) -> Option<u64> {
         self.intervals.iter().next().map(|(&start, _)| start)
     }
