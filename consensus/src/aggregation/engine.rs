@@ -885,6 +885,20 @@ impl<
             }
         }
 
+        // After replay, ensure we have all indices from tip to tip+window in pending or confirmed
+        // This handles the case where we restart and some indices have no acks yet
+        for index in self.tip..self.tip.saturating_add(self.window) {
+            // If we already have the index in pending or confirmed, skip
+            if self.pending.contains_key(&index) || self.confirmed.contains_key(&index) {
+                continue;
+            }
+
+            // Add to pending
+            self.pending
+                .insert(index, Pending::Unverified(BTreeMap::new()));
+            unverified_indices.push(index);
+            debug!("adding missing index {} to pending after replay", index);
+        }
         info!(
             self.tip,
             next = self.next(),
