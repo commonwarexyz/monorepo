@@ -587,7 +587,7 @@ mod tests {
         let mut shares_vec_clone = shares_vec.clone();
         let polynomial_clone = polynomial.clone();
 
-        let f = move |mut context: Context| {
+        let f = move |context: Context| {
             async move {
                 let (oracle, validators, pks, mut registrations) = initialize_simulation(
                     context.with_label("simulation"),
@@ -619,7 +619,7 @@ mod tests {
                 context.with_label("reporter").spawn(|_| reporter.run());
 
                 // Start validator engines with NoSignature strategy for skip_index
-                for (_, (validator, _, share)) in validators.iter().enumerate() {
+                for (validator, _, share) in validators.iter() {
                     let validator_context = context.with_label(&validator.to_string());
                     let monitor = mocks::Monitor::new(111);
                     engine_monitors.insert(validator.clone(), monitor.clone());
@@ -702,14 +702,14 @@ mod tests {
 
         // First run should complete with skip_index unsigned
         assert!(complete, "First run should complete successfully");
-        let prev_ctx = Some(context.recover());
+        let prev_ctx = context.recover();
 
         // Second run: restart and verify the skip_index gets confirmed
-        let all_validators_clone = all_validators.clone();
+        let _all_validators_clone = all_validators.clone();
         let mut shares_vec_clone = shares_vec.clone();
         let polynomial_clone = polynomial.clone();
 
-        let f2 = move |mut context: Context| {
+        let f2 = move |context: Context| {
             async move {
                 let (oracle, validators, pks, mut registrations) = initialize_simulation(
                     context.with_label("simulation"),
@@ -733,7 +733,7 @@ mod tests {
                 context.with_label("reporter").spawn(|_| reporter.run());
 
                 // Start validator engines with Correct strategy (will sign everything now)
-                for (_, (validator, _, share)) in validators.iter().enumerate() {
+                for (validator, _, share) in validators.iter() {
                     let validator_context = context.with_label(&validator.to_string());
                     let monitor = mocks::Monitor::new(111);
                     let supervisor = {
@@ -815,7 +815,7 @@ mod tests {
             }
         };
 
-        let (complete, _) = deterministic::Runner::from(prev_ctx.unwrap()).start(f2);
+        let (complete, _) = deterministic::Runner::from(prev_ctx).start(f2);
         assert!(
             complete,
             "Second run should complete with skip_index confirmed"
