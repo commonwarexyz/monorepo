@@ -1,6 +1,9 @@
 //! Types used in [crate::simplex].
 
-use crate::{types::View, Viewable};
+use crate::{
+    types::{Epoch, View},
+    Epochable, Viewable,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -22,6 +25,22 @@ pub struct Context<D: Digest> {
     /// payload (any view without a nullification may eventually be finalized and skipping
     /// it would result in a fork).
     pub parent: (View, D),
+}
+
+impl<D: Digest> Epochable for Context<D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.view
+    }
+}
+
+impl<D: Digest> Viewable for Context<D> {
+    type View = View;
+
+    fn view(&self) -> View {
+        self.view
+    }
 }
 
 /// Attributable is a trait that provides access to the signer index.

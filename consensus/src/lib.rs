@@ -73,16 +73,13 @@ cfg_if::cfg_if! {
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
             /// This often includes things like the proposer, view number, the height, or the epoch.
-            type Context;
+            type Context: Epochable;
 
             /// Hash of an arbitrary payload.
             type Digest: Digest;
 
-            /// Epoch of the consensus engine.
-            type Epoch;
-
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self, epoch: Self::Epoch) -> impl Future<Output = Self::Digest> + Send;
+            fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> impl Future<Output = Self::Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///

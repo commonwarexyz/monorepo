@@ -1,5 +1,5 @@
 use super::relay::Relay;
-use crate::{simplex::types::Context, types::Epoch, Automaton as Au, Relay as Re};
+use crate::{simplex::types::Context, types::Epoch, Automaton as Au, Epochable, Relay as Re};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
@@ -50,9 +50,8 @@ impl<D: Digest> Mailbox<D> {
 impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<D>;
-    type Epoch = Epoch;
 
-    async fn genesis(&mut self, epoch: Self::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Genesis { epoch, response })
