@@ -17,7 +17,6 @@ use core::{
 use std::collections::VecDeque;
 
 pub mod prunable;
-
 pub use prunable::Prunable;
 
 /// A bitmap that stores data in chunks of N bytes.
@@ -28,10 +27,10 @@ pub struct BitVec<const N: usize> {
     /// higher order bits in the bit ordering.
     ///
     /// Invariant: The last chunk in the bitmap always has room for at least one more bit.
-    /// This implies that !bitmap.is_empty() always holds.
-    bitmap: VecDeque<[u8; N]>,
+    /// This implies that !chunks.is_empty() always holds.
+    chunks: VecDeque<[u8; N]>,
 
-    /// The position within the last chunk of the bitmap where the next bit is to be appended.
+    /// The position within the last chunk where the next bit is to be appended.
     ///
     /// Invariant: This value is always in the range [0, N * 8).
     next_bit: u64,
@@ -39,67 +38,67 @@ pub struct BitVec<const N: usize> {
 
 impl<const N: usize> BitVec<N> {
     /// The size of a chunk in bytes.
-    pub const CHUNK_SIZE: usize = N;
+    const CHUNK_SIZE: usize = N;
 
     /// The size of a chunk in bits.
-    pub const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
+    const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
 
     /// A chunk of all 0s.
-    pub const EMPTY_CHUNK: [u8; N] = [0u8; N];
+    const EMPTY_CHUNK: [u8; N] = [0u8; N];
 
     /// A chunk of all 1s.
-    pub const FULL_CHUNK: [u8; N] = [u8::MAX; N];
+    const FULL_CHUNK: [u8; N] = [u8::MAX; N];
 
     /// Create a new empty bitmap.
     pub fn new() -> Self {
-        // Always allocate at least one chunk
+        // Invariant: chunks is never empty
         let bitmap = VecDeque::from([Self::EMPTY_CHUNK]);
         Self {
-            bitmap,
+            chunks: bitmap,
             next_bit: 0,
         }
     }
 
     // Create a new empty bitmap with the capacity to hold `size` bits without reallocating.
     pub fn with_capacity(size: u64) -> Self {
-        let num_chunks = Self::chunks_needed(size).get();
+        let num_chunks = Self::num_chunks_at_size(size).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
-        // Always allocate at least one chunk
+        // Invariant: chunks is never empty
         bitmap.push_back(Self::EMPTY_CHUNK);
         Self {
-            bitmap,
+            chunks: bitmap,
             next_bit: 0,
         }
     }
 
     // Returns the number of chunks in a bitvec with `size` bits.
     // Recall the invariant that the last chunk always has room for at least one more bit.
-    fn chunks_needed(size: u64) -> NonZeroUsize {
+    fn num_chunks_at_size(size: u64) -> NonZeroUsize {
         NZUsize!((size / Self::CHUNK_SIZE_BITS) as usize + 1)
     }
 
     /// Create a new bitmap with `size` bits, with all bits set to 0.
     pub fn zeroes(size: u64) -> Self {
-        let num_chunks = Self::chunks_needed(size).get();
-        let mut bitmap = VecDeque::with_capacity(num_chunks);
+        let num_chunks = Self::num_chunks_at_size(size).get();
+        let mut chunks = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
-            bitmap.push_back(Self::EMPTY_CHUNK);
+            chunks.push_back(Self::EMPTY_CHUNK);
         }
         Self {
-            bitmap,
+            chunks,
             next_bit: size % Self::CHUNK_SIZE_BITS,
         }
     }
 
     /// Create a new bitmap with `size` bits, with all bits set to 1.
     pub fn ones(size: u64) -> Self {
-        let num_chunks = Self::chunks_needed(size).get();
-        let mut bitmap = VecDeque::with_capacity(num_chunks);
+        let num_chunks = Self::num_chunks_at_size(size).get();
+        let mut chunks = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
-            bitmap.push_back(Self::FULL_CHUNK);
+            chunks.push_back(Self::FULL_CHUNK);
         }
         Self {
-            bitmap,
+            chunks,
             next_bit: size % Self::CHUNK_SIZE_BITS,
         }
     }
@@ -107,20 +106,21 @@ impl<const N: usize> BitVec<N> {
     /// Return the number of bits currently stored in the bitmap.
     #[inline]
     pub fn bit_count(&self) -> u64 {
-        (self.bitmap.len() as u64 - 1) * Self::CHUNK_SIZE_BITS + self.next_bit
+        (self.chunks.len() as u64 - 1) * Self::CHUNK_SIZE_BITS + self.next_bit
     }
 
-    /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
-    /// last chunk is empty).
+    /// Return the last chunk of the bitmap and its size in bits.
+    /// The size can be 0 (meaning the last chunk is empty).
     #[inline]
     pub fn last_chunk(&self) -> (&[u8; N], u64) {
-        (self.bitmap.back().unwrap(), self.next_bit)
+        (self.chunks.back().unwrap(), self.next_bit)
     }
 
-    /// Return the last chunk of the bitmap as a mutable slice.
+    /// Return the last chunk of the bitmap and its size in bits.
+    /// The size can be 0 (meaning the last chunk is empty).
     #[inline]
-    pub fn last_chunk_mut(&mut self) -> &mut [u8] {
-        self.bitmap.back_mut().unwrap()
+    fn last_chunk_mut(&mut self) -> &mut [u8; N] {
+        self.chunks.back_mut().unwrap()
     }
 
     /// Returns the bitmap chunk containing the specified bit.
@@ -129,8 +129,8 @@ impl<const N: usize> BitVec<N> {
     ///
     /// Panics if the bit doesn't exist.
     #[inline]
-    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
-        &self.bitmap[self.chunk_index(bit_offset)]
+    pub fn get_chunk_containing(&self, bit_offset: u64) -> &[u8; N] {
+        &self.chunks[self.chunk_index(bit_offset)]
     }
 
     /// Get the value of a bit.
@@ -140,7 +140,8 @@ impl<const N: usize> BitVec<N> {
     /// Panics if the bit doesn't exist.
     #[inline]
     pub fn get(&self, bit_offset: u64) -> bool {
-        Self::get_bit_from_chunk(self.get_chunk(bit_offset), bit_offset)
+        let chunk = self.get_chunk_containing(bit_offset);
+        Self::get_bit_from_chunk(chunk, bit_offset)
     }
 
     /// Get the value of a bit from its chunk.
@@ -172,7 +173,7 @@ impl<const N: usize> BitVec<N> {
         }
     }
 
-    /// Remove the last bit from the bitmap.
+    /// Remove and return the last bit from the bitmap.
     ///
     /// # Warning
     ///
@@ -180,7 +181,7 @@ impl<const N: usize> BitVec<N> {
     pub fn pop(&mut self) -> bool {
         if self.next_bit == 0 {
             // Remove the last (empty) chunk
-            self.bitmap.pop_back();
+            self.chunks.pop_back();
             self.next_bit = Self::CHUNK_SIZE_BITS - 1;
         } else {
             self.next_bit -= 1;
@@ -196,10 +197,10 @@ impl<const N: usize> BitVec<N> {
     pub fn prune_front_chunks(&mut self, n: usize) {
         let available_chunks = if self.next_bit == 0 {
             // Last chunk is empty, so we can't prune it
-            self.bitmap.len().saturating_sub(1)
+            self.chunks.len().saturating_sub(1)
         } else {
             // Last chunk has bits, so we can prune all but the last
-            self.bitmap.len().saturating_sub(1)
+            self.chunks.len().saturating_sub(1)
         };
 
         assert!(
@@ -208,12 +209,12 @@ impl<const N: usize> BitVec<N> {
         );
 
         for _ in 0..n {
-            self.bitmap.pop_front();
+            self.chunks.pop_front();
         }
 
         // Ensure we always have at least one chunk
-        if self.bitmap.is_empty() {
-            self.bitmap.push_back(Self::EMPTY_CHUNK);
+        if self.chunks.is_empty() {
+            self.chunks.push_back(Self::EMPTY_CHUNK);
             self.next_bit = 0;
         }
     }
@@ -222,7 +223,7 @@ impl<const N: usize> BitVec<N> {
     /// This returns the actual VecDeque length, which includes the invariant
     /// that there's always at least one chunk with room for one more bit.
     pub fn chunks_count(&self) -> usize {
-        self.bitmap.len()
+        self.chunks.len()
     }
 
     /// Efficiently add a byte's worth of bits to the bitmap.
@@ -268,7 +269,7 @@ impl<const N: usize> BitVec<N> {
     /// Panics if the bit doesn't exist.
     pub fn set(&mut self, bit_offset: u64, bit: bool) {
         let chunk_index = self.chunk_index(bit_offset);
-        let chunk = &mut self.bitmap[chunk_index];
+        let chunk = &mut self.chunks[chunk_index];
 
         let byte_offset = Self::chunk_byte_offset(bit_offset);
         let mask = Self::chunk_byte_bitmask(bit_offset);
@@ -284,7 +285,7 @@ impl<const N: usize> BitVec<N> {
     /// for one more bit.
     pub(crate) fn prepare_next_chunk(&mut self) {
         self.next_bit = 0;
-        self.bitmap.push_back([0u8; N]);
+        self.chunks.push_back([0u8; N]);
     }
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
@@ -328,7 +329,7 @@ impl<const N: usize> BitVec<N> {
 
     /// Get a reference to a chunk by its index in the current bitmap
     pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
-        &self.bitmap[index]
+        &self.chunks[index]
     }
 
     /// Flips the bit at `index`.
@@ -342,13 +343,13 @@ impl<const N: usize> BitVec<N> {
         let chunk_index = Self::chunk_num(index);
         let byte_offset = Self::chunk_byte_offset(index);
         let mask = Self::chunk_byte_bitmask(index);
-        self.bitmap[chunk_index][byte_offset] ^= mask;
+        self.chunks[chunk_index][byte_offset] ^= mask;
     }
 
     /// Sets all bits to 0.
     #[inline]
     pub fn clear_all(&mut self) {
-        for chunk in &mut self.bitmap {
+        for chunk in &mut self.chunks {
             chunk.fill(0u8);
         }
     }
@@ -356,7 +357,7 @@ impl<const N: usize> BitVec<N> {
     /// Sets all bits to 1.
     #[inline]
     pub fn set_all(&mut self) {
-        for chunk in &mut self.bitmap {
+        for chunk in &mut self.chunks {
             chunk.fill(u8::MAX);
         }
     }
@@ -365,8 +366,8 @@ impl<const N: usize> BitVec<N> {
     #[inline]
     pub fn count_ones(&self) -> u64 {
         let mut count: u64 = 0;
-        for (i, chunk) in self.bitmap.iter().enumerate() {
-            if i == self.bitmap.len() - 1 {
+        for (i, chunk) in self.chunks.iter().enumerate() {
+            if i == self.chunks.len() - 1 {
                 // For the last chunk, only count bits up to next_bit
                 let bytes_to_count = self.next_bit.div_ceil(8) as usize; // Round up to nearest byte
                 for (byte_idx, byte) in chunk.iter().enumerate().take(bytes_to_count) {
@@ -424,7 +425,7 @@ impl<const N: usize> BitVec<N> {
 
     /// Flips all bits (1s become 0s and vice versa).
     pub fn invert(&mut self) {
-        for chunk in &mut self.bitmap {
+        for chunk in &mut self.chunks {
             for byte in chunk {
                 *byte = !*byte;
             }
@@ -448,15 +449,15 @@ impl<const N: usize> BitVec<N> {
     }
 
     /// Creates an iterator over the bits.
-    pub fn iter(&self) -> BitVecIterator<'_, N> {
-        BitVecIterator { vec: self, pos: 0 }
+    pub fn iter(&self) -> Iterator<'_, N> {
+        Iterator { vec: self, pos: 0 }
     }
 
     /// Helper for binary operations (AND, OR, XOR)
     #[inline]
     fn binary_op<F: Fn(u8, u8) -> u8>(&mut self, other: &BitVec<N>, op: F) {
         self.assert_eq_len(other);
-        for (a_chunk, b_chunk) in self.bitmap.iter_mut().zip(other.bitmap.iter()) {
+        for (a_chunk, b_chunk) in self.chunks.iter_mut().zip(other.chunks.iter()) {
             for (a_byte, b_byte) in a_chunk.iter_mut().zip(b_chunk.iter()) {
                 *a_byte = op(*a_byte, *b_byte);
             }
@@ -606,7 +607,7 @@ impl<const N: usize> Write for BitVec<N> {
         self.next_bit.write(buf);
 
         // Write all chunks
-        for chunk in &self.bitmap {
+        for chunk in &self.chunks {
             for &byte in chunk {
                 byte.write(buf);
             }
@@ -633,7 +634,7 @@ impl<const N: usize> Read for BitVec<N> {
         }
 
         // Parse chunks
-        let num_chunks = Self::chunks_needed(bit_count).get();
+        let num_chunks = Self::num_chunks_at_size(bit_count).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
             let mut chunk = [0u8; N];
@@ -657,19 +658,22 @@ impl<const N: usize> Read for BitVec<N> {
             ));
         }
 
-        Ok(BitVec { bitmap, next_bit })
+        Ok(BitVec {
+            chunks: bitmap,
+            next_bit,
+        })
     }
 }
 
 impl<const N: usize> EncodeSize for BitVec<N> {
     fn encode_size(&self) -> usize {
         // Size of bit_count (u64) + next_bit (u64) + all chunks
-        self.bit_count().encode_size() + self.next_bit.encode_size() + (self.bitmap.len() * N)
+        self.bit_count().encode_size() + self.next_bit.encode_size() + (self.chunks.len() * N)
     }
 }
 
 /// Iterator over bits in a [BitVec].
-pub struct BitVecIterator<'a, const N: usize> {
+pub struct Iterator<'a, const N: usize> {
     /// Reference to the BitVec being iterated over
     vec: &'a BitVec<N>,
 
@@ -677,7 +681,7 @@ pub struct BitVecIterator<'a, const N: usize> {
     pos: u64,
 }
 
-impl<const N: usize> Iterator for BitVecIterator<'_, N> {
+impl<const N: usize> core::iter::Iterator for Iterator<'_, N> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -696,7 +700,7 @@ impl<const N: usize> Iterator for BitVecIterator<'_, N> {
     }
 }
 
-impl<const N: usize> ExactSizeIterator for BitVecIterator<'_, N> {}
+impl<const N: usize> ExactSizeIterator for Iterator<'_, N> {}
 
 #[cfg(test)]
 mod tests {
@@ -822,7 +826,7 @@ mod tests {
         assert_eq!(bv.bit_count(), 32); // 4 bytes * 8 bits
 
         // Test get_chunk
-        let chunk = bv.get_chunk(0);
+        let chunk = bv.get_chunk_containing(0);
         assert_eq!(chunk, &test_chunk);
 
         // Test get_chunk_by_index
@@ -1205,7 +1209,7 @@ mod tests {
 
         // Now manually corrupt trailing bits in one of them
         {
-            let last_chunk = bv1.bitmap.back_mut().unwrap();
+            let last_chunk = bv1.chunks.back_mut().unwrap();
             last_chunk[0] |= 0xF8; // Set bits 3-7 (invalid bits)
         }
 
@@ -1701,28 +1705,28 @@ mod tests {
     #[test]
     fn test_chunks_needed() {
         // Test with different chunk sizes
-        assert_eq!(BitVec::<1>::chunks_needed(0).get(), 1);
-        assert_eq!(BitVec::<1>::chunks_needed(1).get(), 1);
-        assert_eq!(BitVec::<1>::chunks_needed(8).get(), 2);
-        assert_eq!(BitVec::<1>::chunks_needed(9).get(), 2);
-        assert_eq!(BitVec::<1>::chunks_needed(16).get(), 3);
-        assert_eq!(BitVec::<1>::chunks_needed(17).get(), 3);
+        assert_eq!(BitVec::<1>::num_chunks_at_size(0).get(), 1);
+        assert_eq!(BitVec::<1>::num_chunks_at_size(1).get(), 1);
+        assert_eq!(BitVec::<1>::num_chunks_at_size(8).get(), 2);
+        assert_eq!(BitVec::<1>::num_chunks_at_size(9).get(), 2);
+        assert_eq!(BitVec::<1>::num_chunks_at_size(16).get(), 3);
+        assert_eq!(BitVec::<1>::num_chunks_at_size(17).get(), 3);
 
-        assert_eq!(BitVec::<3>::chunks_needed(0).get(), 1);
-        assert_eq!(BitVec::<3>::chunks_needed(1).get(), 1);
-        assert_eq!(BitVec::<3>::chunks_needed(23).get(), 1);
-        assert_eq!(BitVec::<3>::chunks_needed(24).get(), 2);
-        assert_eq!(BitVec::<3>::chunks_needed(25).get(), 2);
-        assert_eq!(BitVec::<3>::chunks_needed(48).get(), 3);
-        assert_eq!(BitVec::<3>::chunks_needed(49).get(), 3);
+        assert_eq!(BitVec::<3>::num_chunks_at_size(0).get(), 1);
+        assert_eq!(BitVec::<3>::num_chunks_at_size(1).get(), 1);
+        assert_eq!(BitVec::<3>::num_chunks_at_size(23).get(), 1);
+        assert_eq!(BitVec::<3>::num_chunks_at_size(24).get(), 2);
+        assert_eq!(BitVec::<3>::num_chunks_at_size(25).get(), 2);
+        assert_eq!(BitVec::<3>::num_chunks_at_size(48).get(), 3);
+        assert_eq!(BitVec::<3>::num_chunks_at_size(49).get(), 3);
 
-        assert_eq!(BitVec::<4>::chunks_needed(0).get(), 1);
-        assert_eq!(BitVec::<4>::chunks_needed(1).get(), 1);
-        assert_eq!(BitVec::<4>::chunks_needed(31).get(), 1);
-        assert_eq!(BitVec::<4>::chunks_needed(32).get(), 2);
-        assert_eq!(BitVec::<4>::chunks_needed(33).get(), 2);
-        assert_eq!(BitVec::<4>::chunks_needed(63).get(), 2);
-        assert_eq!(BitVec::<4>::chunks_needed(64).get(), 3);
-        assert_eq!(BitVec::<4>::chunks_needed(65).get(), 3);
+        assert_eq!(BitVec::<4>::num_chunks_at_size(0).get(), 1);
+        assert_eq!(BitVec::<4>::num_chunks_at_size(1).get(), 1);
+        assert_eq!(BitVec::<4>::num_chunks_at_size(31).get(), 1);
+        assert_eq!(BitVec::<4>::num_chunks_at_size(32).get(), 2);
+        assert_eq!(BitVec::<4>::num_chunks_at_size(33).get(), 2);
+        assert_eq!(BitVec::<4>::num_chunks_at_size(63).get(), 2);
+        assert_eq!(BitVec::<4>::num_chunks_at_size(64).get(), 3);
+        assert_eq!(BitVec::<4>::num_chunks_at_size(65).get(), 3);
     }
 }

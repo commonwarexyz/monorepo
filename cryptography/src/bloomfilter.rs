@@ -20,7 +20,7 @@ const HALF_DIGEST_LEN: usize = 16;
 const FULL_DIGEST_LEN: usize = Digest::SIZE;
 
 const BITVEC_CHUNK_SIZE: usize = 1;
-type BitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
+type BitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///

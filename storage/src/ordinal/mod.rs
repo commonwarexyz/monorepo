@@ -47,7 +47,7 @@
 //! synced until [Ordinal::sync] is called. As a result, data is not guaranteed to be atomically
 //! persisted (i.e. shutdown before [Ordinal::sync] may lead to some writes being lost).
 //!
-//! _If you want atomicity for sparse writes, pair [commonware_utils::BitVec] and
+//! _If you want atomicity for sparse writes, pair [commonware_utils::bitvec::BitVec] and
 //! [crate::metadata::Metadata] with [Ordinal] (use bits to indicate which items have been atomically
 //! written)._
 //!

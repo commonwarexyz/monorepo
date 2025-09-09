@@ -9,7 +9,7 @@ use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: u64 = 100_000;
 const BITVEC_CHUNK_SIZE: usize = 1;
-type BitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
+type BitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {

@@ -17,7 +17,7 @@ use std::{
 use tracing::{debug, warn};
 
 const BITVEC_CHUNK_SIZE: usize = 1;
-pub type BitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
+pub type BitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]

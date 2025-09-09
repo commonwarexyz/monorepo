@@ -20,8 +20,7 @@ use core::{
 
 pub mod sequence;
 pub use sequence::{Array, Span};
-mod bitvec;
-pub use bitvec::{BitVec, BitVecIterator, Prunable};
+pub mod bitvec;
 #[cfg(feature = "std")]
 pub mod channels;
 #[cfg(feature = "std")]

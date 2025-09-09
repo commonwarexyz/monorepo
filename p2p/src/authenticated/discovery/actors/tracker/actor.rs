@@ -295,7 +295,7 @@ mod tests {
     use types::PeerInfo;
 
     const BITVEC_CHUNK_SIZE: usize = 1;
-    type UtilsBitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
+    type UtilsBitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(

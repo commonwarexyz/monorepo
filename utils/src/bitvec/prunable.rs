@@ -67,7 +67,7 @@ impl<const N: usize> Prunable<N> {
 
         // Adjust bit_offset to account for pruning
         let adjusted_offset = bit_offset - self.pruned_bits();
-        self.bitvec.get_chunk(adjusted_offset)
+        self.bitvec.get_chunk_containing(adjusted_offset)
     }
 
     /// Get the value of a bit.
