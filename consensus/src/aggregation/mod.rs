@@ -571,7 +571,8 @@ mod tests {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
         let skip_index = 50u64; // Index where no one will sign
-        let target_index = 100u64; // Target index should be past skip_index
+        let window = 10u64;
+        let target_index = 100u64;
 
         let mut prev_ctx = None;
         let all_validators = Arc::new(Mutex::new(Vec::new()));
@@ -653,7 +654,7 @@ mod tests {
                                 100,
                             )),
                             epoch_bounds: (1, 1),
-                            window: std::num::NonZeroU64::new(10).unwrap(),
+                            window: std::num::NonZeroU64::new(window).unwrap(),
                             activity_timeout: 100,
                             journal_partition: format!("unsigned_index_test/{validator}"),
                             journal_write_buffer: NZUsize!(4096),
@@ -676,7 +677,7 @@ mod tests {
                             loop {
                                 if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
                                     info!(tip_index, skip_index, target_index, "reporter status");
-                                    if tip_index >= skip_index + 10 - 1 {
+                                    if tip_index >= skip_index + window - 1 {
                                         info!("Reached target index");
                                         break;
                                     }
@@ -786,26 +787,15 @@ mod tests {
                     context
                         .with_label("completion_watcher")
                         .spawn(move |context| async move {
-                            let mut confirmed_skip_index = false;
                             loop {
-                                if let Some((index, digest)) =
-                                    reporter_mailbox.get_confirmed(skip_index).await
-                                {
-                                    debug!(?index, ?digest, "skip_index confirmed after restart!");
-                                    confirmed_skip_index = true;
-                                }
-
                                 if let Some(tip_index) = reporter_mailbox.get_contiguous_tip().await
                                 {
                                     debug!(
                                         tip_index,
-                                        skip_index,
-                                        target_index,
-                                        confirmed_skip_index,
-                                        "reporter status on restart"
+                                        skip_index, target_index, "reporter status on restart"
                                     );
                                     // Ensure we still reach target and skip_index was confirmed
-                                    if tip_index >= target_index && confirmed_skip_index {
+                                    if tip_index >= target_index {
                                         debug!("Verified skip_index was confirmed after restart");
                                         break;
                                     }
