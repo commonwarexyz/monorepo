@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 const BITVEC_CHUNK_SIZE: usize = 1;
 type BitVec = commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>;
+
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: PublicKey> {
     /// The list of peers, sorted.
