@@ -65,7 +65,9 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { epoch, response } => {
+                    // Sanity check. We don't support multiple epochs.
                     assert_eq!(epoch, 0, "epoch must be 0");
+
                     // Use the digest of the genesis message as the initial payload.
                     self.hasher.update(GENESIS);
                     let digest = self.hasher.finalize();

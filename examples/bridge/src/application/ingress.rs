@@ -1,7 +1,7 @@
 use commonware_consensus::{
     threshold_simplex::types::{Activity, Context},
     types::{Epoch, Round},
-    Automaton as Au, Relay as Re, Reporter,
+    Automaton as Au, Epochable, Relay as Re, Reporter,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
 use futures::{
@@ -43,9 +43,8 @@ impl<D: Digest> Mailbox<D> {
 impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest>;
-    type Epoch = Epoch;
 
-    async fn genesis(&mut self, epoch: Self::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Genesis { epoch, response })

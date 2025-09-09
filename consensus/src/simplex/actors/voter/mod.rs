@@ -15,7 +15,7 @@ use std::{num::NonZeroUsize, time::Duration};
 pub struct Config<
     C: Signer,
     D: Digest,
-    A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch>,
+    A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View>,

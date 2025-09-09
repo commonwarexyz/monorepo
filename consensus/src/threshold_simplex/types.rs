@@ -41,6 +41,22 @@ pub struct Context<D: Digest> {
     pub parent: (View, D),
 }
 
+impl<D: Digest> Epochable for Context<D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
+    }
+}
+
+impl<D: Digest> Viewable for Context<D> {
+    type View = View;
+
+    fn view(&self) -> View {
+        self.round.view()
+    }
+}
+
 /// Attributable is a trait that provides access to the signer index.
 /// This is used to identify which participant signed a given message.
 pub trait Attributable {

@@ -1,4 +1,4 @@
-use crate::{ordered_broadcast::types::Context, types::Epoch, Automaton as A, Relay as R};
+use crate::{ordered_broadcast::types::Context, Automaton as A, Epochable, Relay as R};
 use bytes::Bytes;
 use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
 use futures::channel::oneshot;
@@ -22,9 +22,8 @@ impl<P: PublicKey> Automaton<P> {
 impl<P: PublicKey> A for Automaton<P> {
     type Context = Context<P>;
     type Digest = sha256::Digest;
-    type Epoch = Epoch;
 
-    async fn genesis(&mut self, _epoch: Self::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, _epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         unimplemented!()
     }
 

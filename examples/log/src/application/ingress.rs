@@ -1,4 +1,6 @@
-use commonware_consensus::{simplex::types::Context, types::Epoch, Automaton as Au, Relay as Re};
+use commonware_consensus::{
+    simplex::types::Context, types::Epoch, Automaton as Au, Epochable, Relay as Re,
+};
 use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
@@ -33,9 +35,8 @@ impl<D: Digest> Mailbox<D> {
 impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest>;
-    type Epoch = Epoch;
 
-    async fn genesis(&mut self, epoch: Self::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Genesis { epoch, response })

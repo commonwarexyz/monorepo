@@ -18,7 +18,7 @@ pub struct Config<
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
-    A: Automaton<Context = Context<D>, Epoch = Epoch>,
+    A: Automaton<Context = Context<D>>,
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
@@ -114,7 +114,7 @@ impl<
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
-        A: Automaton<Context = Context<D>, Epoch = Epoch>,
+        A: Automaton<Context = Context<D>>,
         R: Relay,
         F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
