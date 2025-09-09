@@ -16,7 +16,7 @@ use core::{
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
 
-mod prunable;
+pub mod prunable;
 
 pub use prunable::Prunable;
 
@@ -204,9 +204,7 @@ impl<const N: usize> BitVec<N> {
 
         assert!(
             n <= available_chunks,
-            "cannot prune {} chunks, only {} available",
-            n,
-            available_chunks
+            "cannot prune {n} chunks, only {available_chunks} available"
         );
 
         for _ in 0..n {
@@ -218,6 +216,13 @@ impl<const N: usize> BitVec<N> {
             self.bitmap.push_back(Self::EMPTY_CHUNK);
             self.next_bit = 0;
         }
+    }
+
+    /// Get the number of chunks currently in the bitmap.
+    /// This returns the actual VecDeque length, which includes the invariant
+    /// that there's always at least one chunk with room for one more bit.
+    pub fn chunks_count(&self) -> usize {
+        self.bitmap.len()
     }
 
     /// Efficiently add a byte's worth of bits to the bitmap.

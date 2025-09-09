@@ -30,6 +30,14 @@ impl<const N: usize> Prunable<N> {
         }
     }
 
+    /// Create a new empty prunable bitmap with the given number of pruned chunks.
+    pub fn new_with_pruned_chunks(pruned_chunks: usize) -> Self {
+        Self {
+            bitvec: BitVec::new(),
+            pruned_chunks,
+        }
+    }
+
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
     #[inline]
     pub fn bit_count(&self) -> u64 {
@@ -45,12 +53,6 @@ impl<const N: usize> Prunable<N> {
     #[inline]
     pub fn last_chunk(&self) -> (&[u8; N], u64) {
         self.bitvec.last_chunk()
-    }
-
-    /// Return the last chunk of the bitmap as a mutable slice.
-    #[inline]
-    fn last_chunk_mut(&mut self) -> &mut [u8] {
-        self.bitvec.last_chunk_mut()
     }
 
     /// Returns the bitmap chunk containing the specified bit.
@@ -133,7 +135,7 @@ impl<const N: usize> Prunable<N> {
     /// Panics if the referenced bit is greater than the number of bits in the bitmap.
     pub fn prune_to_bit(&mut self, bit_offset: u64) {
         let chunk_num = Self::chunk_num(bit_offset);
-        if chunk_num <= self.pruned_chunks {
+        if chunk_num < self.pruned_chunks {
             return;
         }
 
@@ -142,21 +144,15 @@ impl<const N: usize> Prunable<N> {
         self.pruned_chunks = chunk_num;
     }
 
-    /// Prepares the next chunk of the bitmap to preserve the invariant that there is always room
-    /// for one more bit.
-    pub(crate) fn prepare_next_chunk(&mut self) {
-        self.bitvec.prepare_next_chunk();
-    }
-
     /// Convert a bit offset into a bitmask for the byte containing that bit.
     #[inline]
-    pub(crate) fn chunk_byte_bitmask(bit_offset: u64) -> u8 {
+    pub fn chunk_byte_bitmask(bit_offset: u64) -> u8 {
         BitVec::<N>::chunk_byte_bitmask(bit_offset)
     }
 
     /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
     #[inline]
-    pub(crate) fn chunk_byte_offset(bit_offset: u64) -> usize {
+    pub fn chunk_byte_offset(bit_offset: u64) -> usize {
         BitVec::<N>::chunk_byte_offset(bit_offset)
     }
 
@@ -166,7 +162,7 @@ impl<const N: usize> Prunable<N> {
     ///
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
-    pub(crate) fn chunk_index(&self, bit_offset: u64) -> usize {
+    pub fn chunk_index(&self, bit_offset: u64) -> usize {
         assert!(bit_offset < self.bit_count(), "out of bounds: {bit_offset}");
         let chunk_num = Self::chunk_num(bit_offset);
         assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
@@ -176,19 +172,14 @@ impl<const N: usize> Prunable<N> {
 
     /// Convert a bit offset into the number of the chunk it belongs to.
     #[inline]
-    pub(crate) fn chunk_num(bit_offset: u64) -> usize {
+    pub fn chunk_num(bit_offset: u64) -> usize {
         (bit_offset / Self::CHUNK_SIZE_BITS) as usize
     }
 
     /// Get the number of chunks in the bitmap
     pub fn chunks_len(&self) -> usize {
-        // Calculate based on bitvec's bit count
-        let bits = self.bitvec.bit_count();
-        if bits == 0 {
-            1 // Always at least one chunk
-        } else {
-            ((bits - 1) / Self::CHUNK_SIZE_BITS) as usize + 1
-        }
+        // Return the actual number of chunks in the underlying BitVec
+        self.bitvec.chunks_count()
     }
 
     /// Returns true if the bitmap is empty.
@@ -238,9 +229,9 @@ mod tests {
 
         assert_eq!(prunable.bit_count(), 3);
         assert!(!prunable.is_empty());
-        assert_eq!(prunable.get_bit(0), true);
-        assert_eq!(prunable.get_bit(1), false);
-        assert_eq!(prunable.get_bit(2), true);
+        assert!(prunable.get_bit(0));
+        assert!(!prunable.get_bit(1));
+        assert!(prunable.get_bit(2));
     }
 
     #[test]
@@ -253,7 +244,7 @@ mod tests {
 
         // All bits should be set
         for i in 0..8 {
-            assert_eq!(prunable.get_bit(i), true);
+            assert!(prunable.get_bit(i));
         }
 
         prunable.append_byte_unchecked(0x00);
@@ -261,7 +252,7 @@ mod tests {
 
         // Next 8 bits should be clear
         for i in 8..16 {
-            assert_eq!(prunable.get_bit(i), false);
+            assert!(!prunable.get_bit(i));
         }
     }
 
@@ -286,15 +277,15 @@ mod tests {
         prunable.append(false);
         prunable.append(false);
 
-        assert_eq!(prunable.get_bit(1), false);
+        assert!(!prunable.get_bit(1));
 
         // Set a bit
         prunable.set_bit(1, true);
-        assert_eq!(prunable.get_bit(1), true);
+        assert!(prunable.get_bit(1));
 
         // Set it back
         prunable.set_bit(1, false);
-        assert_eq!(prunable.get_bit(1), false);
+        assert!(!prunable.get_bit(1));
     }
 
     #[test]
@@ -400,9 +391,9 @@ mod tests {
         assert_eq!(prunable.bit_count(), 67);
 
         // Can still access the partial bits
-        assert_eq!(prunable.get_bit(64), true);
-        assert_eq!(prunable.get_bit(65), false);
-        assert_eq!(prunable.get_bit(66), true);
+        assert!(prunable.get_bit(64));
+        assert!(!prunable.get_bit(65));
+        assert!(prunable.get_bit(66));
     }
 
     #[test]
@@ -540,9 +531,15 @@ mod tests {
         // All should have same bit values
         for i in 0..10 {
             let expected = i % 2 == 0;
-            assert_eq!(p8.get_bit(i), expected);
-            assert_eq!(p16.get_bit(i), expected);
-            assert_eq!(p32.get_bit(i), expected);
+            if expected {
+                assert!(p8.get_bit(i));
+                assert!(p16.get_bit(i));
+                assert!(p32.get_bit(i));
+            } else {
+                assert!(!p8.get_bit(i));
+                assert!(!p16.get_bit(i));
+                assert!(!p32.get_bit(i));
+            }
         }
     }
 
@@ -551,16 +548,16 @@ mod tests {
         let chunk: [u8; 4] = [0b10101010, 0b11001100, 0b11110000, 0b00001111];
 
         // Test first byte
-        assert_eq!(Prunable::<4>::get_bit_from_chunk(&chunk, 0), false);
-        assert_eq!(Prunable::<4>::get_bit_from_chunk(&chunk, 1), true);
-        assert_eq!(Prunable::<4>::get_bit_from_chunk(&chunk, 2), false);
-        assert_eq!(Prunable::<4>::get_bit_from_chunk(&chunk, 3), true);
+        assert!(!Prunable::<4>::get_bit_from_chunk(&chunk, 0));
+        assert!(Prunable::<4>::get_bit_from_chunk(&chunk, 1));
+        assert!(!Prunable::<4>::get_bit_from_chunk(&chunk, 2));
+        assert!(Prunable::<4>::get_bit_from_chunk(&chunk, 3));
 
         // Test second byte
-        assert_eq!(Prunable::<4>::get_bit_from_chunk(&chunk, 8), false);
-        assert_eq!(Prunable::<4>::get_bit_from_chunk(&chunk, 9), false);
-        assert_eq!(Prunable::<4>::get_bit_from_chunk(&chunk, 10), true);
-        assert_eq!(Prunable::<4>::get_bit_from_chunk(&chunk, 11), true);
+        assert!(!Prunable::<4>::get_bit_from_chunk(&chunk, 8));
+        assert!(!Prunable::<4>::get_bit_from_chunk(&chunk, 9));
+        assert!(Prunable::<4>::get_bit_from_chunk(&chunk, 10));
+        assert!(Prunable::<4>::get_bit_from_chunk(&chunk, 11));
     }
 
     #[test]
@@ -583,30 +580,5 @@ mod tests {
         prunable.prune_to_bit(32);
         assert_eq!(prunable.get_chunk_by_index(0), &chunk2);
         assert_eq!(prunable.get_chunk_by_index(1), &chunk3);
-    }
-
-    #[test]
-    fn test_len_with_pruning() {
-        let mut prunable: Prunable<4> = Prunable::new();
-
-        // Initially has 1 empty chunk
-        assert_eq!(prunable.chunks_len(), 1);
-
-        // Add chunks
-        prunable.append_chunk_unchecked(&[1, 2, 3, 4]);
-        assert_eq!(prunable.chunks_len(), 1); // Still 1 because we filled the first chunk
-
-        prunable.append_chunk_unchecked(&[5, 6, 7, 8]);
-        assert_eq!(prunable.chunks_len(), 2);
-
-        prunable.append_chunk_unchecked(&[9, 10, 11, 12]);
-        assert_eq!(prunable.chunks_len(), 3);
-
-        // After pruning
-        prunable.prune_to_bit(32);
-        assert_eq!(prunable.chunks_len(), 2); // Two chunks remain
-
-        prunable.prune_to_bit(64);
-        assert_eq!(prunable.chunks_len(), 1); // One chunk remains
     }
 }

@@ -24,256 +24,9 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::sequence::prefixed_u64::U64;
-use std::collections::{HashSet, VecDeque};
+use commonware_utils::{sequence::prefixed_u64::U64, Prunable as BitVec};
+use std::collections::HashSet;
 use tracing::{debug, error, warn};
-
-/// A bitmap that stores data in chunks of N bytes.
-#[derive(Clone, Debug)]
-pub struct Bitmap<const N: usize> {
-    /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
-    /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
-    /// higher order bits in the bit ordering.
-    ///
-    /// Invariant: The last chunk in the bitmap always has room for at least one more bit. This
-    /// implies there is always at least one chunk in the bitmap, it's just empty if no bits have
-    /// been added yet.
-    bitmap: VecDeque<[u8; N]>,
-
-    /// The position within the last chunk of the bitmap where the next bit is to be appended.
-    ///
-    /// Invariant: This value is always in the range [0, N * 8).
-    next_bit: u64,
-
-    /// The number of bitmap chunks that have been pruned.
-    pruned_chunks: usize,
-}
-
-impl<const N: usize> Bitmap<N> {
-    /// The size of a chunk in bytes.
-    pub const CHUNK_SIZE: usize = N;
-
-    /// The size of a chunk in bits.
-    pub const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
-
-    /// Create a new empty bitmap.
-    pub fn new() -> Self {
-        let bitmap = VecDeque::from([[0u8; N]]);
-        Self {
-            bitmap,
-            next_bit: 0,
-            pruned_chunks: 0,
-        }
-    }
-
-    /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
-    #[inline]
-    pub fn bit_count(&self) -> u64 {
-        (self.pruned_chunks + self.bitmap.len()) as u64 * Self::CHUNK_SIZE_BITS
-            - Self::CHUNK_SIZE_BITS
-            + self.next_bit
-    }
-
-    /// Return the number of bits that have been pruned from this bitmap.
-    pub fn pruned_bits(&self) -> u64 {
-        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS
-    }
-
-    /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
-    /// last chunk is empty).
-    #[inline]
-    pub fn last_chunk(&self) -> (&[u8; N], u64) {
-        (self.bitmap.back().unwrap(), self.next_bit)
-    }
-
-    /// Return the last chunk of the bitmap as a mutable slice.
-    #[inline]
-    fn last_chunk_mut(&mut self) -> &mut [u8] {
-        self.bitmap.back_mut().unwrap()
-    }
-
-    /// Returns the bitmap chunk containing the specified bit.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the bit doesn't exist or has been pruned.
-    #[inline]
-    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
-        &self.bitmap[self.chunk_index(bit_offset)]
-    }
-
-    /// Get the value of a bit.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the bit doesn't exist or has been pruned.
-    #[inline]
-    pub fn get_bit(&self, bit_offset: u64) -> bool {
-        Self::get_bit_from_chunk(self.get_chunk(bit_offset), bit_offset)
-    }
-
-    /// Get the value of a bit from its chunk.
-    #[inline]
-    pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
-        let byte_offset = Self::chunk_byte_offset(bit_offset);
-        let byte = chunk[byte_offset];
-        let mask = Self::chunk_byte_bitmask(bit_offset);
-
-        (byte & mask) != 0
-    }
-
-    /// Add a single bit to the bitmap.
-    pub fn append(&mut self, bit: bool) {
-        if bit {
-            let chunk_byte = (self.next_bit / 8) as usize;
-            self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bitmask(self.next_bit);
-        }
-        self.next_bit += 1;
-        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
-
-        if self.next_bit == Self::CHUNK_SIZE_BITS {
-            self.prepare_next_chunk();
-        }
-    }
-
-    /// Efficiently add a byte's worth of bits to the bitmap.
-    ///
-    /// # Warning
-    ///
-    /// Assumes self.next_bit is currently byte aligned, and panics otherwise.
-    pub fn append_byte_unchecked(&mut self, byte: u8) {
-        assert!(
-            self.next_bit.is_multiple_of(8),
-            "cannot add byte when not byte aligned"
-        );
-
-        let chunk_byte = (self.next_bit / 8) as usize;
-        self.last_chunk_mut()[chunk_byte] = byte;
-        self.next_bit += 8;
-        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
-
-        if self.next_bit == Self::CHUNK_SIZE_BITS {
-            self.prepare_next_chunk();
-        }
-    }
-
-    /// Efficiently add a chunk of bits to the bitmap.
-    ///
-    /// # Warning
-    ///
-    /// Assumes we are at a chunk boundary (that is, `self.next_bit` is 0) and panics otherwise.
-    pub fn append_chunk_unchecked(&mut self, chunk: &[u8; N]) {
-        assert!(
-            self.next_bit == 0,
-            "cannot add chunk when not chunk aligned"
-        );
-
-        self.last_chunk_mut().copy_from_slice(chunk.as_ref());
-        self.prepare_next_chunk();
-    }
-
-    /// Set the value of the referenced bit.
-    pub fn set_bit(&mut self, bit_offset: u64, bit: bool) {
-        let chunk_index = self.chunk_index(bit_offset);
-        let chunk = &mut self.bitmap[chunk_index];
-
-        let byte_offset = Self::chunk_byte_offset(bit_offset);
-        let mask = Self::chunk_byte_bitmask(bit_offset);
-
-        if bit {
-            chunk[byte_offset] |= mask;
-        } else {
-            chunk[byte_offset] &= !mask;
-        }
-    }
-
-    /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the referenced bit is greater than the number of bits in the bitmap.
-    pub fn prune_to_bit(&mut self, bit_offset: u64) {
-        let chunk_num = Self::chunk_num(bit_offset);
-        if chunk_num < self.pruned_chunks {
-            return;
-        }
-
-        let chunk_index = chunk_num - self.pruned_chunks;
-        self.bitmap.drain(0..chunk_index);
-        self.pruned_chunks = chunk_num;
-    }
-
-    /// Prepares the next chunk of the bitmap to preserve the invariant that there is always room
-    /// for one more bit.
-    pub(crate) fn prepare_next_chunk(&mut self) {
-        self.next_bit = 0;
-        self.bitmap.push_back([0u8; N]);
-    }
-
-    /// Convert a bit offset into a bitmask for the byte containing that bit.
-    #[inline]
-    pub(crate) fn chunk_byte_bitmask(bit_offset: u64) -> u8 {
-        1 << (bit_offset % 8)
-    }
-
-    /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
-    #[inline]
-    pub(crate) fn chunk_byte_offset(bit_offset: u64) -> usize {
-        (bit_offset / 8) as usize % Self::CHUNK_SIZE
-    }
-
-    /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
-    #[inline]
-    pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        leaf_num_to_pos(Self::chunk_num(bit_offset) as u64)
-    }
-
-    /// Convert a bit offset into the index of the chunk it belongs to within self.bitmap.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the bit doesn't exist or has been pruned.
-    #[inline]
-    pub(crate) fn chunk_index(&self, bit_offset: u64) -> usize {
-        assert!(bit_offset < self.bit_count(), "out of bounds: {bit_offset}");
-        let chunk_num = Self::chunk_num(bit_offset);
-        assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
-
-        chunk_num - self.pruned_chunks
-    }
-
-    /// Convert a bit offset into the number of the chunk it belongs to.
-    #[inline]
-    pub(crate) fn chunk_num(bit_offset: u64) -> usize {
-        (bit_offset / Self::CHUNK_SIZE_BITS) as usize
-    }
-
-    /// Get the number of chunks in the bitmap
-    pub fn len(&self) -> usize {
-        self.bitmap.len()
-    }
-
-    /// Returns true if the bitmap is empty.
-    pub fn is_empty(&self) -> bool {
-        self.bitmap.is_empty()
-    }
-
-    /// Get a reference to a chunk by its index in the current bitmap
-    pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
-        &self.bitmap[index]
-    }
-
-    /// Get the number of pruned chunks
-    pub fn pruned_chunks(&self) -> usize {
-        self.pruned_chunks
-    }
-}
-
-impl<const N: usize> Default for Bitmap<N> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///
@@ -286,7 +39,7 @@ impl<const N: usize> Default for Bitmap<N> {
 /// limited to (u32::MAX * N * 8).
 pub struct MerkleizedBitmap<H: CHasher, const N: usize> {
     /// The core bitmap functionality
-    bitmap: Bitmap<N>,
+    bitmap: BitVec<N>,
 
     /// The length of the bitmap range that is currently included in the `mmr`.
     authenticated_len: usize,
@@ -331,7 +84,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     /// Return a new empty bitmap.
     pub fn new() -> Self {
         MerkleizedBitmap {
-            bitmap: Bitmap::new(),
+            bitmap: BitVec::new(),
             authenticated_len: 0,
             mmr: Mmr::new(),
             dirty_chunks: HashSet::new(),
@@ -408,11 +161,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
         });
 
         Ok(Self {
-            bitmap: Bitmap {
-                bitmap: VecDeque::from([[0u8; N]]),
-                next_bit: 0,
-                pruned_chunks,
-            },
+            bitmap: BitVec::new_with_pruned_chunks(pruned_chunks),
             authenticated_len: 0,
             mmr,
             dirty_chunks: HashSet::new(),
@@ -437,10 +186,10 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        metadata.put(key, self.bitmap.pruned_chunks.to_be_bytes().to_vec());
+        metadata.put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
 
         // Write the pinned nodes.
-        let mmr_size = leaf_num_to_pos(self.bitmap.pruned_chunks as u64);
+        let mmr_size = leaf_num_to_pos(self.bitmap.pruned_chunks() as u64);
         for (i, digest) in Proof::<H::Digest>::nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
@@ -469,7 +218,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     ///
     /// - Panics if there are unprocessed updates.
     pub fn prune_to_bit(&mut self, bit_offset: u64) {
-        let chunk_num = Bitmap::<N>::chunk_num(bit_offset);
+        let chunk_num = BitVec::<N>::chunk_num(bit_offset);
         if chunk_num < self.bitmap.pruned_chunks() {
             return;
         }
@@ -479,7 +228,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
         self.bitmap.prune_to_bit(bit_offset);
 
         // Update authenticated length
-        self.authenticated_len = self.bitmap.len() - 1;
+        self.authenticated_len = self.bitmap.chunks_len() - 1;
 
         // Update MMR
         let mmr_pos = leaf_num_to_pos(chunk_num as u64);
@@ -537,7 +286,8 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        Bitmap::<N>::leaf_pos(bit_offset)
+        let chunk_num = BitVec::<N>::chunk_num(bit_offset);
+        leaf_num_to_pos(chunk_num as u64)
     }
 
     /// Get the value of a bit.
@@ -553,7 +303,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     #[inline]
     /// Get the value of a bit from its chunk.
     pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
-        Bitmap::<N>::get_bit_from_chunk(chunk, bit_offset)
+        BitVec::<N>::get_bit_from_chunk(chunk, bit_offset)
     }
 
     /// Set the value of the referenced bit.
@@ -575,7 +325,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
 
     /// Whether there are any updates that are not yet reflected in this bitmap's root.
     pub fn is_dirty(&self) -> bool {
-        !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.len() - 1
+        !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.chunks_len() - 1
     }
 
     /// The chunks (identified by their number) that have been modified or added since the last `sync`.
@@ -583,10 +333,10 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
         let mut chunks: Vec<u64> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| (chunk_index + self.bitmap.pruned_chunks) as u64)
+            .map(|&chunk_index| (chunk_index + self.bitmap.pruned_chunks()) as u64)
             .collect();
-        for i in self.authenticated_len..self.bitmap.len() - 1 {
-            chunks.push((i + self.bitmap.pruned_chunks) as u64);
+        for i in self.authenticated_len..self.bitmap.chunks_len() - 1 {
+            chunks.push((i + self.bitmap.pruned_chunks()) as u64);
         }
 
         chunks
@@ -596,8 +346,8 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
     pub async fn sync(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
         // Add newly appended chunks to the MMR (other than the very last).
         let start = self.authenticated_len;
-        assert!(!self.bitmap.is_empty());
-        let end = self.bitmap.len() - 1;
+        assert!(self.bitmap.chunks_len() > 0);
+        let end = self.bitmap.chunks_len() - 1;
         for i in start..end {
             self.mmr
                 .add_batched(hasher, self.bitmap.get_chunk_by_index(i));
@@ -609,7 +359,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
             .dirty_chunks
             .iter()
             .map(|chunk_index| {
-                let pos = leaf_num_to_pos((*chunk_index + self.bitmap.pruned_chunks) as u64);
+                let pos = leaf_num_to_pos((*chunk_index + self.bitmap.pruned_chunks()) as u64);
                 (pos, self.bitmap.get_chunk_by_index(*chunk_index))
             })
             .collect::<Vec<_>>();
@@ -1112,8 +862,8 @@ mod tests {
     }
 
     fn flip_bit<const N: usize>(bit_offset: u64, chunk: &[u8; N]) -> [u8; N] {
-        let byte_offset = Bitmap::<N>::chunk_byte_offset(bit_offset);
-        let mask = Bitmap::<N>::chunk_byte_bitmask(bit_offset);
+        let byte_offset = BitVec::<N>::chunk_byte_offset(bit_offset);
+        let mask = BitVec::<N>::chunk_byte_bitmask(bit_offset);
         let mut tmp = chunk.to_vec();
         tmp[byte_offset] ^= mask;
         tmp.try_into().unwrap()

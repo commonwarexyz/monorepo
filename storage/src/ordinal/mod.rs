@@ -96,7 +96,7 @@
 mod storage;
 
 use std::num::{NonZeroU64, NonZeroUsize};
-pub use storage::Ordinal;
+pub use storage::{BitVec, Ordinal};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the [Ordinal].
@@ -133,6 +133,7 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ordinal::storage::BitVec;
     use bytes::{Buf, BufMut};
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
@@ -144,8 +145,6 @@ mod tests {
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
     const DEFAULT_WRITE_BUFFER: usize = 4096;
     const DEFAULT_REPLAY_BUFFER: usize = 1024 * 1024;
-    const BITVEC_CHUNK_SIZE: usize = 1;
-    type BitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
 
     #[test_traced]
     fn test_put_get() {
