@@ -247,6 +247,7 @@ impl<
 
         // Request digests for unverified indices
         for index in unverified_indices {
+            trace!(index, "requesting digest for unverified index from replay");
             self.get_digest(index, true);
         }
 
@@ -263,7 +264,7 @@ impl<
             // Propose a new digest if we are processing less than the window
             let next = self.next();
             if next < self.tip + self.window {
-                trace!("requesting new digest: index {}", next);
+                trace!(next, "requesting new digest");
                 self.get_digest(next, false);
                 continue;
             }
