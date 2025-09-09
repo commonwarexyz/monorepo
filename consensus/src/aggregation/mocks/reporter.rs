@@ -24,7 +24,6 @@ enum Message<V: Variant, D: Digest> {
     GetTip(oneshot::Sender<Option<(Index, Epoch)>>),
     GetContiguousTip(oneshot::Sender<Option<Index>>),
     Get(Index, oneshot::Sender<Option<(D, Epoch)>>),
-    GetConfirmed(Index, oneshot::Sender<Option<(Index, D)>>),
 }
 
 pub struct Reporter<V: Variant, D: Digest> {
@@ -152,10 +151,6 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     let digest = self.digests.get(&index).cloned();
                     sender.send(digest).unwrap();
                 }
-                Message::GetConfirmed(index, sender) => {
-                    let result = self.digests.get(&index).map(|(d, _e)| (index, *d));
-                    sender.send(result).unwrap();
-                }
             }
         }
     }
@@ -204,15 +199,6 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetContiguousTip(sender))
-            .await
-            .unwrap();
-        receiver.await.unwrap()
-    }
-
-    pub async fn get_confirmed(&mut self, index: Index) -> Option<(Index, D)> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::GetConfirmed(index, sender))
             .await
             .unwrap();
         receiver.await.unwrap()
