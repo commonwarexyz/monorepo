@@ -98,7 +98,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::{debug, info};
+    use tracing::debug;
 
     type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
 
@@ -665,7 +665,7 @@ mod tests {
                 // Wait for validators to reach target_index (past skip_index)
                 loop {
                     if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
-                        info!(tip_index, skip_index, target_index, "reporter status");
+                        debug!(tip_index, skip_index, target_index, "reporter status");
                         if tip_index >= skip_index + window - 1 {
                             // max we can proceed before item confirmed
                             return context;
@@ -750,7 +750,7 @@ mod tests {
                 // Wait for skip_index to be confirmed (should happen on replay)
                 loop {
                     if let Some(tip_index) = reporter_mailbox.get_contiguous_tip().await {
-                        info!(
+                        debug!(
                             tip_index,
                             skip_index, target_index, "reporter status on restart",
                         );
