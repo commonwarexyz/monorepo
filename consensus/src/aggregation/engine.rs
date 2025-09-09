@@ -866,7 +866,7 @@ impl<
             }
         }
 
-        // After replay, ensure we have all indices from tip to tip+window in pending or confirmed
+        // After replay, ensure we have all indices from tip to next in pending or confirmed
         // to handle the case where we restart and some indices have no acks yet
         let next = self.next();
         for index in self.tip..next {
