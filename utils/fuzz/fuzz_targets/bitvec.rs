@@ -191,18 +191,14 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Pop(bools) => {
-                // TODO uncomment
-                // let mut v = BitVec::from(&bools);
-                // let old_len = v.bit_count();
-                // let popped = v.pop();
-
-                // if old_len > 0 {
-                //     assert!(popped.is_some());
-                //     assert_eq!(v.bit_count(), old_len - 1);
-                // } else {
-                //     assert!(popped.is_none());
-                //     assert_eq!(v.bit_count(), 0);
-                // }
+                let mut v = BitVec::from(&bools);
+                let old_len = v.bit_count();
+                if old_len == 0 {
+                    return;
+                }
+                let popped = v.pop();
+                assert_eq!(v.bit_count(), old_len - 1);
+                assert_eq!(popped, bools[old_len as usize - 1]);
             }
 
             FuzzInput::Iter(bools) => {
@@ -212,13 +208,15 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Get(bools, index) => {
-                // let v = BitVec::from(&bools);
-                // let result = v.get_bit(index as u64);
-                // if index as u64 < v.bit_count() {
-                //     assert!(result.is_some());
-                // } else {
-                //     assert!(result.is_none());
-                // }
+                let v = BitVec::from(&bools);
+                let v_len = v.bit_count();
+
+                if index as u64 >= v_len {
+                    return;
+                }
+
+                let result = v.get_bit(index as u64);
+                assert_eq!(result, bools[index as usize]);
             }
 
             FuzzInput::GetUnchecked(bools, index) => {

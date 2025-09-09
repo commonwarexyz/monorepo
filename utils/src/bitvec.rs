@@ -40,9 +40,13 @@ impl<const N: usize> BitVec<N> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
 
+    /// An empty chunk of N bytes.
+    pub const EMPTY_CHUNK: [u8; N] = [0u8; N];
+
     /// Create a new empty bitmap.
     pub fn new() -> Self {
-        let bitmap = VecDeque::from([[0u8; N]]);
+        // Always allocate at least one chunk
+        let bitmap = VecDeque::from([Self::EMPTY_CHUNK]);
         Self {
             bitmap,
             next_bit: 0,
@@ -54,14 +58,15 @@ impl<const N: usize> BitVec<N> {
         let num_chunks = Self::chunks_needed(size).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         // Always allocate at least one chunk
-        bitmap.push_back([0u8; N]);
+        bitmap.push_back(Self::EMPTY_CHUNK);
         Self {
             bitmap,
             next_bit: 0,
         }
     }
 
-    // Returns the number of chunks the BitVec will have when it contains `size` bits.
+    // Returns the number of chunks in a bitvec with `size` bits.
+    // Recall the invariant that the last chunk always has room for at least one more bit.
     fn chunks_needed(size: usize) -> NonZeroUsize {
         NZUsize!((size / Self::CHUNK_SIZE_BITS as usize) + 1)
     }
@@ -87,7 +92,7 @@ impl<const N: usize> BitVec<N> {
     /// Return the number of bits currently stored in the bitmap.
     #[inline]
     pub fn bit_count(&self) -> u64 {
-        self.bitmap.len() as u64 * Self::CHUNK_SIZE_BITS - Self::CHUNK_SIZE_BITS + self.next_bit
+        (self.bitmap.len() as u64 - 1) * Self::CHUNK_SIZE_BITS + self.next_bit
     }
 
     /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
@@ -135,9 +140,14 @@ impl<const N: usize> BitVec<N> {
 
     /// Add a single bit to the bitmap.
     pub fn append(&mut self, bit: bool) {
+        let chunk_byte = (self.next_bit / 8) as usize;
+        let next_bit = self.next_bit;
+        let last_chunk = self.last_chunk_mut();
+        // Ensure the bit is set correctly
         if bit {
-            let chunk_byte = (self.next_bit / 8) as usize;
-            self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bitmask(self.next_bit);
+            last_chunk[chunk_byte] |= Self::chunk_byte_bitmask(next_bit);
+        } else {
+            last_chunk[chunk_byte] &= !Self::chunk_byte_bitmask(next_bit);
         }
         self.next_bit += 1;
         assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
@@ -145,6 +155,22 @@ impl<const N: usize> BitVec<N> {
         if self.next_bit == Self::CHUNK_SIZE_BITS {
             self.prepare_next_chunk();
         }
+    }
+
+    /// Remove the last bit from the bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bitmap is empty.
+    pub fn pop(&mut self) -> bool {
+        if self.next_bit == 0 {
+            // Remove the last (empty) chunk
+            self.bitmap.pop_back();
+            self.next_bit = Self::CHUNK_SIZE_BITS - 1;
+        } else {
+            self.next_bit -= 1;
+        }
+        Self::get_bit_from_chunk(self.last_chunk().0, self.next_bit)
     }
 
     /// Efficiently add a byte's worth of bits to the bitmap.
@@ -257,7 +283,10 @@ impl<const N: usize> BitVec<N> {
     #[inline]
     pub fn toggle(&mut self, index: u64) {
         self.assert_index(index);
-        self.toggle_bit_unchecked(index);
+        let chunk_index = Self::chunk_num(index);
+        let byte_offset = Self::chunk_byte_offset(index);
+        let mask = Self::chunk_byte_bitmask(index);
+        self.bitmap[chunk_index][byte_offset] ^= mask;
     }
 
     /// Sets all bits to 0.
@@ -285,15 +314,13 @@ impl<const N: usize> BitVec<N> {
                 // For the last chunk, only count bits up to next_bit
                 let bytes_to_count = (self.next_bit + 7) / 8; // Round up to nearest byte
                 for byte_idx in 0..bytes_to_count as usize {
-                    if byte_idx < chunk.len() {
-                        if byte_idx == (bytes_to_count - 1) as usize && self.next_bit % 8 != 0 {
-                            // For the last byte, only count bits up to next_bit % 8
-                            let bits_in_last_byte = self.next_bit % 8;
-                            let mask = (1u8 << bits_in_last_byte) - 1;
-                            count += (chunk[byte_idx] & mask).count_ones() as usize;
-                        } else {
-                            count += chunk[byte_idx].count_ones() as usize;
-                        }
+                    if byte_idx == (bytes_to_count - 1) as usize && self.next_bit % 8 != 0 {
+                        // For the last byte, only count bits up to next_bit % 8
+                        let bits_in_last_byte = self.next_bit % 8;
+                        let mask = (1u8 << bits_in_last_byte) - 1;
+                        count += (chunk[byte_idx] & mask).count_ones() as usize;
+                    } else {
+                        count += chunk[byte_idx].count_ones() as usize;
                     }
                 }
             } else {
@@ -346,15 +373,6 @@ impl<const N: usize> BitVec<N> {
                 *byte = !*byte;
             }
         }
-    }
-
-    /// Flips the bit at the specified index without bounds checking.
-    #[inline(always)]
-    fn toggle_bit_unchecked(&mut self, index: u64) {
-        let chunk_index = Self::chunk_num(index);
-        let byte_offset = Self::chunk_byte_offset(index);
-        let mask = Self::chunk_byte_bitmask(index);
-        self.bitmap[chunk_index][byte_offset] ^= mask;
     }
 
     /// Asserts that the index is within bounds.
@@ -698,6 +716,38 @@ mod tests {
         let (last_chunk, next_bit) = bv.last_chunk();
         assert_eq!(next_bit, 0); // Should be at chunk boundary
         assert_eq!(last_chunk, &[0u8; 4]); // Empty next chunk
+    }
+
+    #[test]
+    fn test_pop() {
+        let mut bv: BitVec<3> = BitVec::new();
+        bv.append(true);
+        assert_eq!(bv.pop(), true);
+        assert_eq!(bv.bit_count(), 0);
+
+        bv.append(false);
+        assert_eq!(bv.pop(), false);
+        assert_eq!(bv.bit_count(), 0);
+
+        bv.append(true);
+        bv.append(false);
+        bv.append(true);
+        assert_eq!(bv.pop(), true);
+        assert_eq!(bv.bit_count(), 2);
+        assert_eq!(bv.pop(), false);
+        assert_eq!(bv.bit_count(), 1);
+        assert_eq!(bv.pop(), true);
+        assert_eq!(bv.bit_count(), 0);
+
+        for i in 0..100 {
+            bv.append(if i % 2 == 0 { true } else { false });
+        }
+        assert_eq!(bv.bit_count(), 100);
+        for i in (0..100).rev() {
+            assert_eq!(bv.pop(), if i % 2 == 0 { true } else { false });
+        }
+        assert_eq!(bv.bit_count(), 0);
+        assert!(bv.is_empty());
     }
 
     #[test]
