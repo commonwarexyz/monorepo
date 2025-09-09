@@ -67,7 +67,7 @@ impl BloomFilter {
     pub fn insert(&mut self, item: &[u8]) {
         let indices = self.indices(item, self.bits.bit_count() as usize);
         for index in indices {
-            self.bits.set_bit(index as u64, true);
+            self.bits.set(index as u64, true);
         }
     }
 
@@ -77,7 +77,7 @@ impl BloomFilter {
     pub fn contains(&self, item: &[u8]) -> bool {
         let indices = self.indices(item, self.bits.bit_count() as usize);
         for index in indices {
-            if !self.bits.get_bit(index as u64) {
+            if !self.bits.get(index as u64) {
                 return false;
             }
         }

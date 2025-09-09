@@ -71,22 +71,30 @@ impl<const N: usize> BitVec<N> {
         NZUsize!((size / Self::CHUNK_SIZE_BITS as usize) + 1)
     }
 
-    // TODO optimize this
+    /// Create a new bitmap with `size` bits, with all bits set to 0.
     pub fn zeroes(size: usize) -> Self {
-        let mut bitmap = Self::new();
-        for _ in 0..size {
-            bitmap.append(false);
+        let num_chunks = Self::chunks_needed(size).get();
+        let mut bitmap = VecDeque::with_capacity(num_chunks);
+        for _ in 0..num_chunks {
+            bitmap.push_back(Self::EMPTY_CHUNK);
         }
-        bitmap
+        Self {
+            bitmap,
+            next_bit: size as u64 % Self::CHUNK_SIZE_BITS,
+        }
     }
 
-    // TODO optimize this
+    /// Create a new bitmap with `size` bits, with all bits set to 1.
     pub fn ones(size: usize) -> Self {
-        let mut bitmap = Self::new();
-        for _ in 0..size {
-            bitmap.append(true);
+        let num_chunks = Self::chunks_needed(size).get();
+        let mut bitmap = VecDeque::with_capacity(num_chunks);
+        for _ in 0..num_chunks {
+            bitmap.push_back([u8::MAX; N]);
         }
-        bitmap
+        Self {
+            bitmap,
+            next_bit: size as u64 % Self::CHUNK_SIZE_BITS,
+        }
     }
 
     /// Return the number of bits currently stored in the bitmap.
@@ -124,7 +132,7 @@ impl<const N: usize> BitVec<N> {
     ///
     /// Panics if the bit doesn't exist.
     #[inline]
-    pub fn get_bit(&self, bit_offset: u64) -> bool {
+    pub fn get(&self, bit_offset: u64) -> bool {
         Self::get_bit_from_chunk(self.get_chunk(bit_offset), bit_offset)
     }
 
@@ -210,7 +218,11 @@ impl<const N: usize> BitVec<N> {
     }
 
     /// Set the value of the referenced bit.
-    pub fn set_bit(&mut self, bit_offset: u64, bit: bool) {
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bit doesn't exist.
+    pub fn set(&mut self, bit_offset: u64, bit: bool) {
         let chunk_index = self.chunk_index(bit_offset);
         let chunk = &mut self.bitmap[chunk_index];
 
@@ -428,7 +440,7 @@ impl<const N: usize> PartialEq for BitVec<N> {
 
         // Compare each valid bit
         for i in 0..self.bit_count() {
-            if self.get_bit(i) != other.get_bit(i) {
+            if self.get(i) != other.get(i) {
                 return false;
             }
         }
@@ -464,7 +476,7 @@ impl<const N: usize> fmt::Debug for BitVec<N> {
 
         // Closure for writing a bit
         let write_bit = |formatter: &mut Formatter<'_>, index: u64| -> core::fmt::Result {
-            formatter.write_char(if self.get_bit(index) { '1' } else { '0' })
+            formatter.write_char(if self.get(index) { '1' } else { '0' })
         };
 
         f.write_str("BitVec[")?;
@@ -499,7 +511,7 @@ impl<const N: usize> Index<usize> for BitVec<N> {
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         self.assert_index(index as u64);
-        let value = self.get_bit(index as u64);
+        let value = self.get(index as u64);
         if value {
             &true
         } else {
@@ -630,7 +642,7 @@ impl<const N: usize> Iterator for BitVecIterator<'_, N> {
             return None;
         }
 
-        let bit = self.vec.get_bit(self.pos);
+        let bit = self.vec.get(self.pos);
         self.pos += 1;
         Some(bit)
     }
@@ -647,23 +659,73 @@ impl<const N: usize> ExactSizeIterator for BitVecIterator<'_, N> {}
 mod tests {
     use super::*;
     use commonware_codec::{Decode, Encode};
+
     #[test]
     fn test_constructors() {
         // Test new()
         let bv: BitVec<4> = BitVec::new();
         assert_eq!(bv.bit_count(), 0);
         assert!(bv.is_empty());
-        assert_eq!(bv.len(), 0); // Empty bitvec has 0 bits
 
         // Test default()
-        let bv: BitVec<8> = Default::default();
+        let bv: BitVec<4> = Default::default();
         assert_eq!(bv.bit_count(), 0);
         assert!(bv.is_empty());
-        assert_eq!(bv.len(), 0); // Empty bitvec has 0 bits
+
+        // Test with_capacity()
+        let bv: BitVec<4> = BitVec::with_capacity(0);
+        assert_eq!(bv.bit_count(), 0);
+        assert!(bv.is_empty());
+
+        let bv: BitVec<4> = BitVec::with_capacity(10);
+        assert_eq!(bv.bit_count(), 0);
+        assert!(bv.is_empty());
     }
 
     #[test]
-    fn test_basic_operations() {
+    fn test_zeroes() {
+        let bv: BitVec<1> = BitVec::zeroes(0);
+        assert_eq!(bv.bit_count(), 0);
+        assert!(bv.is_empty());
+
+        let bv: BitVec<1> = BitVec::zeroes(1);
+        assert_eq!(bv.bit_count(), 1);
+        assert!(!bv.is_empty());
+        assert_eq!(bv.len(), 1);
+        assert_eq!(bv.get(0), false);
+
+        let bv: BitVec<1> = BitVec::zeroes(10);
+        assert_eq!(bv.bit_count(), 10);
+        assert!(!bv.is_empty());
+        assert_eq!(bv.len(), 10);
+        for i in 0..10 {
+            assert_eq!(bv.get(i), false);
+        }
+    }
+
+    #[test]
+    fn test_ones() {
+        let bv: BitVec<1> = BitVec::ones(0);
+        assert_eq!(bv.bit_count(), 0);
+        assert!(bv.is_empty());
+
+        let bv: BitVec<1> = BitVec::ones(1);
+        assert_eq!(bv.bit_count(), 1);
+        assert!(!bv.is_empty());
+        assert_eq!(bv.len(), 1);
+        assert_eq!(bv.get(0), true);
+
+        let bv: BitVec<1> = BitVec::ones(10);
+        assert_eq!(bv.bit_count(), 10);
+        assert!(!bv.is_empty());
+        assert_eq!(bv.len(), 10);
+        for i in 0..10 {
+            assert_eq!(bv.get(i), true);
+        }
+    }
+
+    #[test]
+    fn test_get_set() {
         let mut bv: BitVec<4> = BitVec::new();
 
         // Test initial state
@@ -678,21 +740,21 @@ mod tests {
         assert!(!bv.is_empty());
 
         // Test get_bit
-        assert_eq!(bv.get_bit(0), true);
-        assert_eq!(bv.get_bit(1), false);
-        assert_eq!(bv.get_bit(2), true);
+        assert_eq!(bv.get(0), true);
+        assert_eq!(bv.get(1), false);
+        assert_eq!(bv.get(2), true);
 
         // Test set_bit
-        bv.set_bit(1, true);
-        assert_eq!(bv.get_bit(1), true);
-        bv.set_bit(2, false);
-        assert_eq!(bv.get_bit(2), false);
+        bv.set(1, true);
+        assert_eq!(bv.get(1), true);
+        bv.set(2, false);
+        assert_eq!(bv.get(2), false);
 
         // Test toggle
         bv.toggle(0); // true -> false
-        assert_eq!(bv.get_bit(0), false);
+        assert_eq!(bv.get(0), false);
         bv.toggle(0); // false -> true
-        assert_eq!(bv.get_bit(0), true);
+        assert_eq!(bv.get(0), true);
     }
 
     #[test]
@@ -760,7 +822,7 @@ mod tests {
 
         // All bits in the byte should be set
         for i in 0..8 {
-            assert_eq!(bv.get_bit(i), true);
+            assert_eq!(bv.get(i), true);
         }
 
         bv.append_byte_unchecked(0x00);
@@ -768,7 +830,7 @@ mod tests {
 
         // All bits in the second byte should be clear
         for i in 8..16 {
-            assert_eq!(bv.get_bit(i), false);
+            assert_eq!(bv.get(i), false);
         }
     }
 
@@ -855,11 +917,11 @@ mod tests {
         assert_eq!(bv.count_zeros(), original_ones);
 
         // Check specific bits
-        assert_eq!(bv.get_bit(0), false); // was true
-        assert_eq!(bv.get_bit(1), true); // was false
-        assert_eq!(bv.get_bit(2), false); // was true
-        assert_eq!(bv.get_bit(3), true); // was false
-        assert_eq!(bv.get_bit(4), false); // was true
+        assert_eq!(bv.get(0), false); // was true
+        assert_eq!(bv.get(1), true); // was false
+        assert_eq!(bv.get(2), false); // was true
+        assert_eq!(bv.get(3), true); // was false
+        assert_eq!(bv.get(4), false); // was true
     }
 
     #[test]
@@ -883,7 +945,7 @@ mod tests {
 
         assert_eq!(bv1.bit_count(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get_bit(i as u64), expected_bit, "Mismatch at bit {}", i);
+            assert_eq!(bv1.get(i as u64), expected_bit, "Mismatch at bit {}", i);
         }
     }
 
@@ -908,7 +970,7 @@ mod tests {
 
         assert_eq!(bv1.bit_count(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get_bit(i as u64), expected_bit, "Mismatch at bit {}", i);
+            assert_eq!(bv1.get(i as u64), expected_bit, "Mismatch at bit {}", i);
         }
     }
 
@@ -933,7 +995,7 @@ mod tests {
 
         assert_eq!(bv1.bit_count(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get_bit(i as u64), expected_bit, "Mismatch at bit {}", i);
+            assert_eq!(bv1.get(i as u64), expected_bit, "Mismatch at bit {}", i);
         }
     }
 
@@ -1096,7 +1158,7 @@ mod tests {
         assert_eq!(bv1, bv2);
 
         // But if we change a valid bit, they should be different
-        bv1.set_bit(1, true); // Change bit 1 from false to true
+        bv1.set(1, true); // Change bit 1 from false to true
         assert_ne!(bv1, bv2);
     }
 
@@ -1264,7 +1326,7 @@ mod tests {
 
         // Verify the decoded bitvec has the same bits
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(decoded.get_bit(i as u64), expected);
+            assert_eq!(decoded.get(i as u64), expected);
         }
 
         // Test larger bitvec across multiple chunks
@@ -1280,7 +1342,7 @@ mod tests {
         // Verify all bits match
         assert_eq!(decoded.bit_count(), 100);
         for i in 0..100 {
-            assert_eq!(decoded.get_bit(i), i % 7 == 0);
+            assert_eq!(decoded.get(i), i % 7 == 0);
         }
     }
 
@@ -1310,9 +1372,9 @@ mod tests {
 
         // All should have the same logical content
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(decoded4.get_bit(i as u64), expected);
-            assert_eq!(decoded8.get_bit(i as u64), expected);
-            assert_eq!(decoded16.get_bit(i as u64), expected);
+            assert_eq!(decoded4.get(i as u64), expected);
+            assert_eq!(decoded8.get(i as u64), expected);
+            assert_eq!(decoded16.get(i as u64), expected);
         }
     }
 
@@ -1409,7 +1471,7 @@ mod tests {
         assert_eq!(bv.count_ones(), 3);
         assert_eq!(bv.count_zeros(), 2);
         for (i, &expected) in [true, false, true, false, true].iter().enumerate() {
-            assert_eq!(bv.get_bit(i as u64), expected);
+            assert_eq!(bv.get(i as u64), expected);
         }
 
         // Test with array slice
@@ -1419,7 +1481,7 @@ mod tests {
         assert_eq!(bv.count_ones(), 2);
         assert_eq!(bv.count_zeros(), 2);
         for (i, &expected) in array.iter().enumerate() {
-            assert_eq!(bv.get_bit(i as u64), expected);
+            assert_eq!(bv.get(i as u64), expected);
         }
 
         // Test with empty slice
@@ -1433,7 +1495,7 @@ mod tests {
         let bv: BitVec<8> = large.clone().into();
         assert_eq!(bv.bit_count(), 100);
         for (i, &expected) in large.iter().enumerate() {
-            assert_eq!(bv.get_bit(i as u64), expected);
+            assert_eq!(bv.get(i as u64), expected);
         }
     }
 
@@ -1507,7 +1569,7 @@ mod tests {
             assert_eq!(bv.count_ones(), 4);
             assert_eq!(bv.count_zeros(), 3);
             for (i, &expected) in pattern.iter().enumerate() {
-                assert_eq!(bv.get_bit(i as u64), expected);
+                assert_eq!(bv.get(i as u64), expected);
             }
         }
 
@@ -1515,14 +1577,14 @@ mod tests {
         assert_eq!(bv8.count_ones(), 4);
         assert_eq!(bv8.count_zeros(), 3);
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(bv8.get_bit(i as u64), expected);
+            assert_eq!(bv8.get(i as u64), expected);
         }
 
         assert_eq!(bv16.bit_count(), 7);
         assert_eq!(bv16.count_ones(), 4);
         assert_eq!(bv16.count_zeros(), 3);
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(bv16.get_bit(i as u64), expected);
+            assert_eq!(bv16.get(i as u64), expected);
         }
     }
 

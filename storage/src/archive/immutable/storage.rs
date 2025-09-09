@@ -250,7 +250,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
 
         // Update active bits
         let done = if let Record::Ordinal(Some(bits)) = record {
-            bits.set_bit((index % self.items_per_section) as u64, true);
+            bits.set((index % self.items_per_section) as u64, true);
             bits.count_ones() == self.items_per_section as usize
         } else {
             false

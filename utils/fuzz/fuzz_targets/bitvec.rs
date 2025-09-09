@@ -123,8 +123,8 @@ fn check_from_array<const N: usize>(arr: [bool; N]) {
     assert_eq!(bv_a, bv_c);
 
     for (i, &b) in arr.iter().enumerate() {
-        assert_eq!(bv_a.get_bit(i as u64), b);
-        assert_eq!(bv_b.get_bit(i as u64), b);
+        assert_eq!(bv_a.get(i as u64), b);
+        assert_eq!(bv_b.get(i as u64), b);
     }
 
     let round_a: Vec<bool> = bv_a.into();
@@ -157,7 +157,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(v.count_ones(), 0);
 
                 for i in 0..size {
-                    assert_eq!(v.get_bit(i as u64), false);
+                    assert_eq!(v.get(i as u64), false);
                 }
             }
 
@@ -169,7 +169,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(v.count_zeros(), 0);
 
                 for i in 0..size {
-                    assert_eq!(v.get_bit(i as u64), true);
+                    assert_eq!(v.get(i as u64), true);
                 }
             }
 
@@ -178,7 +178,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(v.bit_count(), bools.len() as u64);
 
                 for (i, &b) in bools.iter().enumerate() {
-                    assert_eq!(v.get_bit(i as u64), b);
+                    assert_eq!(v.get(i as u64), b);
                 }
             }
 
@@ -187,7 +187,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let old_len = v.bit_count();
                 v.append(value);
                 assert_eq!(v.bit_count(), old_len + 1);
-                assert_eq!(v.get_bit(old_len), value);
+                assert_eq!(v.get(old_len), value);
             }
 
             FuzzInput::Pop(bools) => {
@@ -215,7 +215,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                     return;
                 }
 
-                let result = v.get_bit(index as u64);
+                let result = v.get(index as u64);
                 assert_eq!(result, bools[index as usize]);
             }
 
@@ -225,39 +225,39 @@ fn fuzz(input: Vec<FuzzInput>) {
                 if index as u64 >= v.bit_count() {
                     return;
                 }
-                v.get_bit(index as u64);
+                v.get(index as u64);
             }
 
             FuzzInput::Set(bools, index) => {
                 let mut v = BitVec::from(&bools);
                 if (index as u64) < v.bit_count() {
-                    v.set_bit(index as u64, true);
-                    assert_eq!(v.get_bit(index as u64), true);
+                    v.set(index as u64, true);
+                    assert_eq!(v.get(index as u64), true);
                 }
             }
 
             FuzzInput::Clear(bools, index) => {
                 let mut v = BitVec::from(&bools);
                 if (index as u64) < v.bit_count() {
-                    v.set_bit(index as u64, false);
-                    assert_eq!(v.get_bit(index as u64), false);
+                    v.set(index as u64, false);
+                    assert_eq!(v.get(index as u64), false);
                 }
             }
 
             FuzzInput::Toggle(bools, index) => {
                 let mut v = BitVec::from(&bools);
                 if (index as u64) < v.bit_count() {
-                    let old_value = v.get_bit(index as u64);
+                    let old_value = v.get(index as u64);
                     v.toggle(index as u64);
-                    assert_eq!(v.get_bit(index as u64), !old_value);
+                    assert_eq!(v.get(index as u64), !old_value);
                 }
             }
 
             FuzzInput::SetTo(bools, index, value) => {
                 let mut v = BitVec::from(&bools);
                 if (index as u64) < v.bit_count() {
-                    v.set_bit(index as u64, value);
-                    assert_eq!(v.get_bit(index as u64), value);
+                    v.set(index as u64, value);
+                    assert_eq!(v.get(index as u64), value);
                 }
             }
 
@@ -331,7 +331,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let v: BitVec = bools.as_slice().into();
                 assert_eq!(v.bit_count(), bools.len() as u64);
                 for (i, &b) in bools.iter().enumerate() {
-                    assert_eq!(v.get_bit(i as u64), b);
+                    assert_eq!(v.get(i as u64), b);
                 }
             }
 
@@ -345,7 +345,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let v: BitVec = bools.clone().into();
                 assert_eq!(v.len(), bools.len());
                 for (i, &b) in bools.iter().enumerate() {
-                    assert_eq!(v.get_bit(i as u64), b);
+                    assert_eq!(v.get(i as u64), b);
                 }
             }
 
@@ -415,7 +415,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let v = BitVec::from(&bools);
                 if index < v.bit_count() as usize {
                     let indexed_value = v[index];
-                    assert_eq!(indexed_value, v.get_bit(index as u64));
+                    assert_eq!(indexed_value, v.get(index as u64));
                 }
             }
 
@@ -430,7 +430,7 @@ fn fuzz(input: Vec<FuzzInput>) {
 
                 for i in 0..result.bit_count() as usize {
                     let expected = bools1[i] && bools2[i];
-                    assert_eq!(result.get_bit(i as u64), expected);
+                    assert_eq!(result.get(i as u64), expected);
                 }
             }
 
@@ -445,7 +445,7 @@ fn fuzz(input: Vec<FuzzInput>) {
 
                 for i in 0..result.bit_count() as usize {
                     let expected = bools1[i] || bools2[i];
-                    assert_eq!(result.get_bit(i as u64), expected);
+                    assert_eq!(result.get(i as u64), expected);
                 }
             }
 
@@ -460,7 +460,7 @@ fn fuzz(input: Vec<FuzzInput>) {
 
                 for i in 0..result.bit_count() as usize {
                     let expected = bools1[i] ^ bools2[i];
-                    assert_eq!(result.get_bit(i as u64), expected);
+                    assert_eq!(result.get(i as u64), expected);
                 }
             }
 
@@ -479,7 +479,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 if let Ok(decoded) = BitVec::read_cfg(&mut cursor, &range_cfg) {
                     assert_eq!(decoded.bit_count(), v.bit_count());
                     for i in 0..decoded.bit_count() {
-                        assert_eq!(decoded.get_bit(i as u64), v.get_bit(i as u64));
+                        assert_eq!(decoded.get(i as u64), v.get(i as u64));
                     }
                 }
             }
