@@ -98,7 +98,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::debug;
+    use tracing::{debug, info};
 
     type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
 
@@ -564,6 +564,280 @@ mod tests {
     fn test_unclean_byzantine_shutdown() {
         unclean_byzantine_shutdown::<MinPk>();
         unclean_byzantine_shutdown::<MinSig>();
+    }
+
+    fn unclean_shutdown_with_unsigned_index<V: Variant>() {
+        // Test parameters
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let skip_index = 50u64; // Index where no one will sign
+        let target_index = 100u64; // Target index should be past skip_index
+
+        let mut prev_ctx = None;
+        let all_validators = Arc::new(Mutex::new(Vec::new()));
+
+        // Generate shares once
+        let mut rng = StdRng::seed_from_u64(0);
+        let (polynomial, mut shares_vec) =
+            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+        let identity = *poly::public::<V>(&polynomial);
+        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+        // First run: let validators skip signing at skip_index and reach beyond it
+        let all_validators_clone = all_validators.clone();
+        let mut shares_vec_clone = shares_vec.clone();
+        let polynomial_clone = polynomial.clone();
+
+        let f = move |mut context: Context| {
+            async move {
+                let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                    context.with_label("simulation"),
+                    num_validators,
+                    &mut shares_vec_clone,
+                    RELIABLE_LINK,
+                )
+                .await;
+
+                // Store all validator public keys if not already done
+                if all_validators_clone.lock().unwrap().is_empty() {
+                    let mut pks_lock = all_validators_clone.lock().unwrap();
+                    *pks_lock = pks.clone();
+                }
+
+                let automatons =
+                    Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+
+                // Use unique journal partitions for each validator to enable restart recovery
+                let mut engine_monitors = HashMap::new();
+                let namespace = b"my testing namespace";
+
+                // Create a shared reporter
+                let (reporter, mut reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+                    namespace,
+                    num_validators,
+                    polynomial_clone.clone(),
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+
+                // Start validator engines with NoSignature strategy for skip_index
+                for (_, (validator, _, share)) in validators.iter().enumerate() {
+                    let validator_context = context.with_label(&validator.to_string());
+                    let monitor = mocks::Monitor::new(111);
+                    engine_monitors.insert(validator.clone(), monitor.clone());
+                    let supervisor = {
+                        let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
+                        s.add_epoch(111, share.clone(), polynomial_clone.clone(), pks.to_vec());
+                        s
+                    };
+
+                    let blocker = oracle.control(validator.clone());
+
+                    // All validators use NoSignature strategy for skip_index
+                    let automaton = mocks::Application::new(Strategy::NoSignature { skip_index });
+                    automatons
+                        .lock()
+                        .unwrap()
+                        .insert(validator.clone(), automaton.clone());
+
+                    let engine = Engine::new(
+                        validator_context.with_label("engine"),
+                        Config {
+                            monitor,
+                            validators: supervisor,
+                            automaton,
+                            reporter: reporter_mailbox.clone(),
+                            blocker,
+                            namespace: namespace.to_vec(),
+                            priority_acks: false,
+                            rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
+                                100,
+                            )),
+                            epoch_bounds: (1, 1),
+                            window: std::num::NonZeroU64::new(10).unwrap(),
+                            activity_timeout: 100,
+                            journal_partition: format!("unsigned_index_test/{validator}"),
+                            journal_write_buffer: NZUsize!(4096),
+                            journal_replay_buffer: NZUsize!(4096),
+                            journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
+                            journal_compression: Some(3),
+                            journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        },
+                    );
+
+                    let (sender, receiver) = registrations.remove(validator).unwrap();
+                    engine.start((sender, receiver));
+                }
+
+                // Wait for validators to reach target_index (past skip_index)
+                let completion =
+                    context
+                        .with_label("completion_watcher")
+                        .spawn(move |context| async move {
+                            loop {
+                                if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
+                                    info!(tip_index, skip_index, target_index, "reporter status");
+                                    if tip_index >= skip_index + 10 - 1 {
+                                        info!("Reached target index");
+                                        break;
+                                    }
+                                }
+                                context.sleep(Duration::from_millis(50)).await;
+                            }
+                        });
+
+                // Wait for completion or timeout
+                select! {
+                    _ = context.sleep(Duration::from_secs(30)) => {
+                        debug!("First run timed out - simulating unclean shutdown");
+                        (false, context)
+                    },
+                    _ = completion => {
+                        debug!("First run completed successfully");
+                        (true, context)
+                    },
+                }
+            }
+        };
+
+        let (complete, context) = deterministic::Runner::timed(Duration::from_secs(60)).start(f);
+
+        // First run should complete with skip_index unsigned
+        assert!(complete, "First run should complete successfully");
+        prev_ctx = Some(context.recover());
+
+        // Second run: restart and verify the skip_index gets confirmed
+        let all_validators_clone = all_validators.clone();
+        let mut shares_vec_clone = shares_vec.clone();
+        let polynomial_clone = polynomial.clone();
+
+        let f2 = move |mut context: Context| {
+            async move {
+                let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                    context.with_label("simulation"),
+                    num_validators,
+                    &mut shares_vec_clone,
+                    RELIABLE_LINK,
+                )
+                .await;
+
+                let automatons =
+                    Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+
+                let namespace = b"my testing namespace";
+
+                // Create a shared reporter
+                let (reporter, mut reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+                    namespace,
+                    num_validators,
+                    polynomial_clone.clone(),
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+
+                // Start validator engines with Correct strategy (will sign everything now)
+                for (_, (validator, _, share)) in validators.iter().enumerate() {
+                    let validator_context = context.with_label(&validator.to_string());
+                    let monitor = mocks::Monitor::new(111);
+                    let supervisor = {
+                        let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
+                        s.add_epoch(111, share.clone(), polynomial_clone.clone(), pks.to_vec());
+                        s
+                    };
+
+                    let blocker = oracle.control(validator.clone());
+
+                    // Now all validators use Correct strategy
+                    let automaton = mocks::Application::new(Strategy::Correct);
+                    automatons
+                        .lock()
+                        .unwrap()
+                        .insert(validator.clone(), automaton.clone());
+
+                    let engine = Engine::new(
+                        validator_context.with_label("engine"),
+                        Config {
+                            monitor,
+                            validators: supervisor,
+                            automaton,
+                            reporter: reporter_mailbox.clone(),
+                            blocker,
+                            namespace: namespace.to_vec(),
+                            priority_acks: false,
+                            rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
+                                100,
+                            )),
+                            epoch_bounds: (1, 1),
+                            window: std::num::NonZeroU64::new(10).unwrap(),
+                            activity_timeout: 100,
+                            journal_partition: format!("unsigned_index_test/{validator}"),
+                            journal_write_buffer: NZUsize!(4096),
+                            journal_replay_buffer: NZUsize!(4096),
+                            journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
+                            journal_compression: Some(3),
+                            journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        },
+                    );
+
+                    let (sender, receiver) = registrations.remove(validator).unwrap();
+                    engine.start((sender, receiver));
+                }
+
+                // Wait for skip_index to be confirmed (should happen on replay)
+                let completion =
+                    context
+                        .with_label("completion_watcher")
+                        .spawn(move |context| async move {
+                            let mut confirmed_skip_index = false;
+                            loop {
+                                if let Some((index, digest)) =
+                                    reporter_mailbox.get_confirmed(skip_index).await
+                                {
+                                    debug!(?index, ?digest, "skip_index confirmed after restart!");
+                                    confirmed_skip_index = true;
+                                }
+
+                                if let Some(tip_index) = reporter_mailbox.get_contiguous_tip().await
+                                {
+                                    debug!(
+                                        tip_index,
+                                        skip_index,
+                                        target_index,
+                                        confirmed_skip_index,
+                                        "reporter status on restart"
+                                    );
+                                    // Ensure we still reach target and skip_index was confirmed
+                                    if tip_index >= target_index && confirmed_skip_index {
+                                        debug!("Verified skip_index was confirmed after restart");
+                                        break;
+                                    }
+                                }
+                                context.sleep(Duration::from_millis(50)).await;
+                            }
+                        });
+
+                // Wait for completion
+                select! {
+                    _ = context.sleep(Duration::from_secs(30)) => {
+                        panic!("Second run timed out - skip_index should have been confirmed");
+                    },
+                    _ = completion => {
+                        debug!("Second run completed - skip_index confirmed");
+                        (true, context)
+                    },
+                }
+            }
+        };
+
+        let (complete, _) = deterministic::Runner::from(prev_ctx.unwrap()).start(f2);
+        assert!(
+            complete,
+            "Second run should complete with skip_index confirmed"
+        );
+    }
+
+    #[test_traced("INFO")]
+    fn test_unclean_shutdown_with_unsigned_index() {
+        unclean_shutdown_with_unsigned_index::<MinPk>();
+        unclean_shutdown_with_unsigned_index::<MinSig>();
     }
 
     fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {

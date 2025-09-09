@@ -7,6 +7,7 @@ use tracing::trace;
 pub enum Strategy {
     Correct,
     Incorrect,
+    NoSignature { skip_index: u64 },
 }
 
 #[derive(Clone)]
@@ -33,7 +34,7 @@ impl A for Application {
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
 
-        let digest = match self.strategy {
+        let digest = match &self.strategy {
             Strategy::Correct => {
                 let payload = format!("data for index {context}");
                 Sha256::hash(payload.as_bytes())
@@ -41,6 +42,14 @@ impl A for Application {
             Strategy::Incorrect => {
                 let conflicting_payload = format!("conflicting_data for index {context}");
                 Sha256::hash(conflicting_payload.as_bytes())
+            }
+            Strategy::NoSignature { skip_index } => {
+                if context == *skip_index {
+                    // Don't send anything - receiver will be dropped
+                    return receiver;
+                }
+                let payload = format!("data for index {context}");
+                Sha256::hash(payload.as_bytes())
             }
         };
 
