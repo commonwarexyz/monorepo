@@ -133,11 +133,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             let offset = locations.read(loc).await?;
             let section = loc / log_items_per_section;
             match log.get(section, offset).await {
-                Ok(Some(_)) => {
+                Ok(_) => {
                     section_offset = Some((section, offset));
                     break;
                 }
-                Ok(None) => (),
                 Err(e) => {
                     warn!(loc, err=?e, "log operation missing");
                 }
@@ -254,7 +253,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             op_index -= 1;
             offset = locations.read(op_index).await?;
             let section = op_index / log_items_per_section;
-            op = log.get(section, offset).await?.expect("no operation found");
+            op = log.get(section, offset).await?;
         }
 
         // If there are no uncommitted operations, exit early.
@@ -385,26 +384,15 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         })
     }
 
-    /// Get the value at location `loc` in the database. Returns None if the location is valid but
-    /// does not correspond to an append.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` is greater than or equal to the number of operations.
+    /// Get the value at location `loc` in the database.
     pub async fn get(&self, loc: u64) -> Result<Option<V>, Error> {
         assert!(loc < self.size);
         let offset = self.locations.read(loc).await?;
 
         let section = loc / self.log_items_per_section;
         let op = self.log.get(section, offset).await?;
-        let Some(op) = op else {
-            return Ok(None);
-        };
 
-        match op {
-            Operation::Append(v) => Ok(Some(v)),
-            Operation::Commit(v) => Ok(v),
-        }
+        Ok(op.into_value())
     }
 
     /// Get the number of operations (appends + commits) that have been applied to the db since
@@ -573,9 +561,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         };
         let offset = self.locations.read(loc).await?;
         let section = loc / self.log_items_per_section;
-        let Some(op) = self.log.get(section, offset).await? else {
-            panic!("didn't find operation at location {loc} and offset {offset}");
-        };
+        let op = self.log.get(section, offset).await?;
         let Operation::Commit(metadata) = op else {
             return Ok(None);
         };
@@ -630,11 +616,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         for loc in start_loc..=end_index {
             let offset = self.locations.read(loc).await?;
             let section = loc / self.log_items_per_section;
-            let value = self
-                .log
-                .get(section, offset)
-                .await?
-                .expect("no value found");
+            let value = self.log.get(section, offset).await?;
             ops.push(value);
         }
 

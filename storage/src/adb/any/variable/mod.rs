@@ -380,7 +380,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let offset = self.locations.read(loc).await?;
         let section = loc / self.log_items_per_section;
-        let op = self.log.get(section, offset).await?.expect("invalid loc");
+        let op = self.log.get(section, offset).await?;
 
         Ok(op.into_value())
     }
@@ -445,7 +445,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Get the operation at location `loc` in the log.
-    async fn get_op(&self, loc: u64) -> Result<Option<Operation<K, V>>, Error> {
+    async fn get_op(&self, loc: u64) -> Result<Operation<K, V>, Error> {
         match self.locations.read(loc).await {
             Ok(offset) => {
                 let section = loc / self.log_items_per_section;
@@ -459,7 +459,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// matches `key`.
     async fn get_from_offset(&self, key: &K, loc: u64, offset: u32) -> Result<Option<V>, Error> {
         let section = loc / self.log_items_per_section;
-        let Some(Operation::Update(k, v)) = self.log.get(section, offset).await? else {
+        let Operation::Update(k, v) = self.log.get(section, offset).await? else {
             panic!("didn't find Update operation at location {loc} and offset {offset}");
         };
 
@@ -615,9 +615,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         for loc in start_loc..=end_index {
             let section = loc / self.log_items_per_section;
             let offset = self.locations.read(loc).await?;
-            let Some(op) = self.log.get(section, offset).await? else {
-                panic!("no log item at location {loc}");
-            };
+            let op = self.log.get(section, offset).await?;
             ops.push(op);
         }
 
@@ -661,7 +659,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         last_commit -= 1;
         let section = last_commit / self.log_items_per_section;
         let offset = self.locations.read(last_commit).await?;
-        let Some(Operation::CommitFloor(metadata, _)) = self.log.get(section, offset).await? else {
+        let Operation::CommitFloor(metadata, _) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
@@ -732,9 +730,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             if self.inactivity_floor_loc == self.op_count() {
                 break;
             }
-            let Some(op) = self.get_op(self.inactivity_floor_loc).await? else {
-                panic!("no operation at location {}", self.inactivity_floor_loc);
-            };
+            let op = self.get_op(self.inactivity_floor_loc).await?;
             self.move_op_if_active(op, self.inactivity_floor_loc)
                 .await?;
             self.inactivity_floor_loc += 1;
