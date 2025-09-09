@@ -820,7 +820,7 @@ impl<
         }
 
         // Process each index's acks
-        let mut unverified_indices = Vec::new();
+        let mut unverified = Vec::new();
         for (index, mut acks_group) in acks_by_index {
             // Check if we have our own ack (which means we've verified the digest)
             let our_share = self.validators.share(self.epoch);
@@ -861,34 +861,33 @@ impl<
                 None => {
                     self.pending.insert(index, Pending::Unverified(epoch_map));
 
-                    // Add to unverified indices (to be requested from automaton)
-                    unverified_indices.push(index);
+                    // Add to unverified indices
+                    unverified.push(index);
                 }
             }
         }
 
         // After replay, ensure we have all indices from tip to tip+window in pending or confirmed
-        // This handles the case where we restart and some indices have no acks yet
+        // to handle the case where we restart and some indices have no acks yet
         for index in self.tip..self.tip.saturating_add(self.window) {
             // If we already have the index in pending or confirmed, skip
             if self.pending.contains_key(&index) || self.confirmed.contains_key(&index) {
                 continue;
             }
 
-            // Add to pending
+            // Add missing index to pending
             self.pending
                 .insert(index, Pending::Unverified(BTreeMap::new()));
-            unverified_indices.push(index);
-            debug!("adding missing index {} to pending after replay", index);
+            unverified.push(index);
         }
         info!(
             self.tip,
             next = self.next(),
-            unverified = unverified_indices.len(),
+            ?unverified,
             "replayed journal"
         );
 
-        unverified_indices
+        unverified
     }
 
     /// Appends an activity to the journal.
