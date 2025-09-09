@@ -568,9 +568,6 @@ impl<const N: usize> Write for BitMap<N> {
         // Prefix with the number of bits
         self.len().write(buf);
 
-        // Write the next_bit position
-        self.next_bit.write(buf);
-
         // Write all chunks
         for chunk in &self.chunks {
             for &byte in chunk {
@@ -590,14 +587,6 @@ impl<const N: usize> Read for BitMap<N> {
             return Err(CodecError::InvalidLength(len as usize));
         }
 
-        // Parse next_bit position
-        let next_bit = u64::read(buf)?;
-
-        // Validate next_bit is within chunk bounds
-        if next_bit >= Self::CHUNK_SIZE_BITS {
-            return Err(CodecError::Invalid("BitMap", "next_bit out of bounds"));
-        }
-
         // Parse chunks
         let num_chunks = Self::num_chunks_at_size(len).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
@@ -609,31 +598,17 @@ impl<const N: usize> Read for BitMap<N> {
             bitmap.push_back(chunk);
         }
 
-        // Validate the length and next_bit are consistent
-        let expected_len = if bitmap.len() == 1 && next_bit == 0 {
-            0 // Empty bitmap
-        } else {
-            (bitmap.len() - 1) as u64 * Self::CHUNK_SIZE_BITS + next_bit
-        };
-
-        if len != expected_len {
-            return Err(CodecError::Invalid(
-                "BitMap",
-                "inconsistent length and next_bit",
-            ));
-        }
-
         Ok(BitMap {
             chunks: bitmap,
-            next_bit,
+            next_bit: len % Self::CHUNK_SIZE_BITS,
         })
     }
 }
 
 impl<const N: usize> EncodeSize for BitMap<N> {
     fn encode_size(&self) -> usize {
-        // Size of length (u64) + next_bit (u64) + all chunks
-        self.len().encode_size() + self.next_bit.encode_size() + (self.chunks.len() * N)
+        // Size of length (u64) + all chunks
+        self.len().encode_size() + (self.chunks.len() * N)
     }
 }
 
@@ -1449,32 +1424,30 @@ mod tests {
 
     #[test]
     fn test_codec_error_cases() {
-        // Test invalid next_bit (too large)
+        // Test invalid length with range check
         let mut buf = BytesMut::new();
-        5u64.write(&mut buf); // bits length
-        100u64.write(&mut buf); // next_bit (invalid for chunk size 4 = 32 bits max)
+        100u64.write(&mut buf); // bits length
+
+        // 100 bits requires 4 chunks (3 full + partially filled)
+        for _ in 0..4 {
+            [0u8; 4].write(&mut buf);
+        }
+
+        // Test with a restricted range that excludes 100
+        let result = BitMap::<4>::decode_cfg(&mut buf, &(0..100).into());
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
+
+        // Test truncated buffer (not enough chunks)
+        let mut buf = BytesMut::new();
+        100u64.write(&mut buf); // bits length requiring 4 chunks (3 full + partially filled)
+                                // Only write 3 chunks
+        [0u8; 4].write(&mut buf);
+        [0u8; 4].write(&mut buf);
+        [0u8; 4].write(&mut buf);
 
         let result = BitMap::<4>::decode_cfg(&mut buf, &(..).into());
-        assert!(matches!(
-            result,
-            Err(CodecError::Invalid("BitMap", "next_bit out of bounds"))
-        ));
-
-        // Test inconsistent bits length and next_bit
-        let mut buf = BytesMut::new();
-        10u64.write(&mut buf); // bits length
-        5u64.write(&mut buf); // next_bit
-                              // This would imply 5 bits in first chunk, but bit length says 10
-        [0u8; 4].write(&mut buf); // One chunk
-
-        let result = BitMap::<4>::decode_cfg(&mut buf, &(..).into());
-        assert!(matches!(
-            result,
-            Err(CodecError::Invalid(
-                "BitMap",
-                "inconsistent length and next_bit"
-            ))
-        ));
+        // Should fail when trying to read missing chunks
+        assert!(result.is_err());
     }
 
     #[test]
