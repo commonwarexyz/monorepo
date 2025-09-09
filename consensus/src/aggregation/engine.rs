@@ -870,7 +870,8 @@ impl<
 
         // After replay, ensure we have all indices from tip to tip+window in pending or confirmed
         // to handle the case where we restart and some indices have no acks yet
-        for index in self.tip..self.tip.saturating_add(self.window) {
+        let next = self.next();
+        for index in self.tip..next {
             // If we already have the index in pending or confirmed, skip
             if self.pending.contains_key(&index) || self.confirmed.contains_key(&index) {
                 continue;
@@ -881,12 +882,7 @@ impl<
                 .insert(index, Pending::Unverified(BTreeMap::new()));
             unverified.push(index);
         }
-        info!(
-            self.tip,
-            next = self.next(),
-            ?unverified,
-            "replayed journal"
-        );
+        info!(self.tip, next, ?unverified, "replayed journal");
 
         unverified
     }
