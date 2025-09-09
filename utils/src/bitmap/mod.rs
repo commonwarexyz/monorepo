@@ -1451,6 +1451,54 @@ mod tests {
     }
 
     #[test]
+    fn test_codec_range_config() {
+        // Test RangeCfg validation in read_cfg
+
+        // Create a bitmap with 100 bits
+        let mut original: BitMap<4> = BitMap::new();
+        for i in 0..100 {
+            original.append(i % 3 == 0);
+        }
+
+        // Write to a buffer
+        let mut buf = BytesMut::new();
+        original.write(&mut buf);
+
+        // Test with range that excludes the actual size (should fail)
+        let result = BitMap::<4>::decode_cfg(&mut buf.as_ref(), &(0..50).into());
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
+
+        // Test with range that includes the actual size (should succeed)
+        let decoded = BitMap::<4>::decode_cfg(&mut buf.as_ref(), &(0..101).into()).unwrap();
+        assert_eq!(decoded.len(), 100);
+        assert_eq!(decoded, original);
+
+        // Test with exact range (should succeed)
+        let decoded = BitMap::<4>::decode_cfg(&mut buf.as_ref(), &(100..=100).into()).unwrap();
+        assert_eq!(decoded.len(), 100);
+        assert_eq!(decoded, original);
+
+        // Test with unbounded range (should succeed)
+        let decoded = BitMap::<4>::decode_cfg(&mut buf.as_ref(), &(..).into()).unwrap();
+        assert_eq!(decoded.len(), 100);
+        assert_eq!(decoded, original);
+
+        // Test empty bitmap with restricted range
+        let empty = BitMap::<4>::new();
+        let mut buf = BytesMut::new();
+        empty.write(&mut buf);
+
+        // Empty bitmap should work with range starting at 0
+        let decoded = BitMap::<4>::decode_cfg(&mut buf.as_ref(), &(0..10).into()).unwrap();
+        assert_eq!(decoded.len(), 0);
+        assert!(decoded.is_empty());
+
+        // Empty bitmap should fail with range not including 0
+        let result = BitMap::<4>::decode_cfg(&mut buf.as_ref(), &(1..10).into());
+        assert!(matches!(result, Err(CodecError::InvalidLength(0))));
+    }
+
+    #[test]
     fn test_from() {
         // Test From trait with different input types
 
