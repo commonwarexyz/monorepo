@@ -117,7 +117,7 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: commonware_utils::bitvec::BitVec<BITVEC_CHUNK_SIZE>,
+    pub bits: UtilsBitVec,
 }
 
 impl EncodeSize for BitVec {
