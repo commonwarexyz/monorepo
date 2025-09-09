@@ -574,10 +574,8 @@ mod tests {
         let window = 10u64;
         let target_index = 100u64;
 
-        let mut prev_ctx = None;
-        let all_validators = Arc::new(Mutex::new(Vec::new()));
-
         // Generate shares once
+        let all_validators = Arc::new(Mutex::new(Vec::new()));
         let mut rng = StdRng::seed_from_u64(0);
         let (polynomial, mut shares_vec) =
             ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
@@ -704,7 +702,7 @@ mod tests {
 
         // First run should complete with skip_index unsigned
         assert!(complete, "First run should complete successfully");
-        prev_ctx = Some(context.recover());
+        let prev_ctx = Some(context.recover());
 
         // Second run: restart and verify the skip_index gets confirmed
         let all_validators_clone = all_validators.clone();
