@@ -277,8 +277,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut after_last_commit = None;
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
-        let mut current_index = self.oldest_retained_loc;
-        let expected_first_section = current_index / self.log_items_per_section;
+        let mut current_loc = self.oldest_retained_loc;
+        let expected_first_section = current_loc / self.log_items_per_section;
         let mut warned_about_first_section = false;
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
@@ -300,7 +300,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     // actually pruned the log. Skip data before the oldest retained location.
                     if !warned_about_first_section {
                         warn!(
-                            current_index,
+                            current_loc,
                             section,
                             "metadata oldest_retained_loc after first log section; skipping"
                         );
@@ -309,17 +309,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     continue;
                 }
 
-                if current_index < self.inactivity_floor_loc {
+                if current_loc < self.inactivity_floor_loc {
                     // Don't include operations before the inactivity floor.
-                    current_index += 1;
+                    current_loc += 1;
                     continue;
                 }
 
                 if after_last_commit.is_none() {
-                    after_last_commit = Some((current_index, offset));
+                    after_last_commit = Some((current_loc, offset));
                 }
 
-                if current_index >= mmr_leaves {
+                if current_loc >= mmr_leaves {
                     warn!(
                         section,
                         offset, "operation was missing from MMR/location map"
@@ -341,9 +341,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     Operation::Update(key, _) => {
                         let result = self.get_key_loc(&key).await?;
                         if let Some(old_loc) = result {
-                            uncommitted_ops.insert(key, (Some(old_loc), Some(current_index)));
+                            uncommitted_ops.insert(key, (Some(old_loc), Some(current_loc)));
                         } else {
-                            uncommitted_ops.insert(key, (None, Some(current_index)));
+                            uncommitted_ops.insert(key, (None, Some(current_loc)));
                         }
                     }
                     Operation::CommitFloor(_, loc) => {
@@ -363,13 +363,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                         uncommitted_ops.clear();
                         after_last_commit = None;
                         self.inactivity_floor_loc = loc;
-                        self.log_size = current_index + 1;
+                        self.log_size = current_loc + 1;
                     }
                     _ => unreachable!(
                         "unexpected operation type at offset {offset} of section {section}"
                     ),
                 }
-                current_index += 1;
+                current_loc += 1;
             }
         }
 
@@ -731,8 +731,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.log.sync(section).map_err(Error::Journal),
             self.locations.sync().map_err(Error::Journal),
-            // Don't sync metadata -- it should have been synced before
-            // we synced it when we last wrote oldest_retained_loc
+            // No need to sync metadata -- it should have already been synced
+            // when we last wrote oldest_retained_loc
         )?;
 
         Ok(())
@@ -824,7 +824,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )?;
 
         // Prune the log up to the section containing the requested pruning location.
-        // First, we write the oldest retained location to metadata before pruning the log.
+        // First, we write the new oldest retained location (i.e. what it will be after pruning)
+        // to metadata.
         // Then, we prune the log and update the oldest retained location.
         // Finally, we prune the MMR+locations structures based on the log's actual pruning boundary.
         // This procedure allows for failure recovery by ensuring:
@@ -871,8 +872,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
             self.log.close().map_err(Error::Journal),
             self.locations.close().map_err(Error::Journal),
-            // Don't sync metadata -- it should have been synced before
-            // we synced it when we last wrote oldest_retained_loc
+            self.metadata.close().map_err(Error::Metadata),
         )?;
 
         Ok(())
