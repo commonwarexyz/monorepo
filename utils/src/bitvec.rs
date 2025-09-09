@@ -3,6 +3,7 @@
 //! The bit-vector is a compact representation of a sequence of bits, using "chunks" of bytes for a
 //! more-efficient memory layout than doing a [`Vec<bool>`].
 
+use crate::NZUsize;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec, vec::Vec};
 use bytes::{Buf, BufMut};
@@ -14,8 +15,6 @@ use core::{
 };
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
-
-use crate::NZUsize;
 /// A bitmap that stores data in chunks of N bytes.
 #[derive(Clone)]
 pub struct BitVec<const N: usize> {
@@ -40,8 +39,11 @@ impl<const N: usize> BitVec<N> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
 
-    /// An empty chunk of N bytes.
+    /// A chunk of all 0s.
     pub const EMPTY_CHUNK: [u8; N] = [0u8; N];
+
+    /// A chunk of all 1s.
+    pub const FULL_CHUNK: [u8; N] = [u8::MAX; N];
 
     /// Create a new empty bitmap.
     pub fn new() -> Self {
@@ -89,7 +91,7 @@ impl<const N: usize> BitVec<N> {
         let num_chunks = Self::chunks_needed(size).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
-            bitmap.push_back([u8::MAX; N]);
+            bitmap.push_back(Self::FULL_CHUNK);
         }
         Self {
             bitmap,
