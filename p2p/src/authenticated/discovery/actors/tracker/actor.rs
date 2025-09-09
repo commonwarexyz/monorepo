@@ -1212,7 +1212,7 @@ mod tests {
                 _ => panic!("Expected BitVec for set 0"),
             };
             assert_eq!(bit_vec0.index, 0);
-            assert_eq!(bit_vec0.bits.len(), set0_peers.len());
+            assert_eq!(bit_vec0.bits.len(), set0_peers.len() as u64);
             let tracker_idx_s0 = set0_peers.iter().position(|p| p == &tracker_pk).unwrap();
             assert!(
                 bit_vec0.bits.get(tracker_idx_s0 as u64),

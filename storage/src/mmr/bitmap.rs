@@ -263,17 +263,6 @@ impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
         self.bitmap.append_chunk_unchecked(chunk);
     }
 
-    /// Efficiently add a byte's worth of bits to the bitmap.
-    ///
-    /// # Warning
-    ///
-    /// - The update will not impact the root until `sync` is called.
-    ///
-    /// - Assumes self.next_bit is currently byte aligned, and panics otherwise.
-    pub fn append_byte_unchecked(&mut self, byte: u8) {
-        self.bitmap.append_byte_unchecked(byte);
-    }
-
     /// Add a single bit to the bitmap.
     ///
     /// # Warning
@@ -564,6 +553,19 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
+
+    impl<H: CHasher, const N: usize> MerkleizedBitmap<H, N> {
+        /// Efficiently add a byte's worth of bits to the bitmap.
+        ///
+        /// # Warning
+        ///
+        /// - The update will not impact the root until `sync` is called.
+        ///
+        /// - Assumes self.next_bit is currently byte aligned, and panics otherwise.
+        fn append_byte_unchecked(&mut self, byte: u8) {
+            self.bitmap.append_byte_unchecked(byte);
+        }
+    }
 
     fn test_chunk<const N: usize>(s: &[u8]) -> [u8; N] {
         assert_eq!(N % 32, 0);

@@ -41,7 +41,7 @@ impl<const N: usize> Prunable<N> {
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
     #[inline]
     pub fn bit_count(&self) -> u64 {
-        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS + self.bitvec.bit_count()
+        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS + self.bitvec.len()
     }
 
     /// Return the number of bits that have been pruned from this bitmap.
@@ -67,7 +67,7 @@ impl<const N: usize> Prunable<N> {
 
         // Adjust bit_offset to account for pruning
         let adjusted_offset = bit_offset - self.pruned_bits();
-        self.bitvec.get_chunk_containing(adjusted_offset)
+        self.bitvec.get_chunk(adjusted_offset)
     }
 
     /// Get the value of a bit.
@@ -140,7 +140,7 @@ impl<const N: usize> Prunable<N> {
         }
 
         let chunks_to_prune = chunk_num - self.pruned_chunks;
-        self.bitvec.prune_front_chunks(chunks_to_prune);
+        self.bitvec.prune_chunks(chunks_to_prune);
         self.pruned_chunks = chunk_num;
     }
 
@@ -178,8 +178,7 @@ impl<const N: usize> Prunable<N> {
 
     /// Get the number of chunks in the bitmap
     pub fn chunks_len(&self) -> usize {
-        // Return the actual number of chunks in the underlying BitVec
-        self.bitvec.chunks_count()
+        self.bitvec.chunks_len()
     }
 
     /// Returns true if the bitmap is empty.
