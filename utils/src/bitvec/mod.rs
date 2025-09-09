@@ -15,6 +15,11 @@ use core::{
 };
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
+
+mod prunable;
+
+pub use prunable::Prunable;
+
 /// A bitmap that stores data in chunks of N bytes.
 #[derive(Clone)]
 pub struct BitVec<const N: usize> {
@@ -114,7 +119,7 @@ impl<const N: usize> BitVec<N> {
 
     /// Return the last chunk of the bitmap as a mutable slice.
     #[inline]
-    fn last_chunk_mut(&mut self) -> &mut [u8] {
+    pub fn last_chunk_mut(&mut self) -> &mut [u8] {
         self.bitmap.back_mut().unwrap()
     }
 
@@ -181,6 +186,38 @@ impl<const N: usize> BitVec<N> {
             self.next_bit -= 1;
         }
         Self::get_bit_from_chunk(self.last_chunk().0, self.next_bit)
+    }
+
+    /// Remove the first `n` chunks from the bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Panics if trying to prune more chunks than exist (excluding the last partial chunk).
+    pub fn prune_front_chunks(&mut self, n: usize) {
+        let available_chunks = if self.next_bit == 0 {
+            // Last chunk is empty, so we can't prune it
+            self.bitmap.len().saturating_sub(1)
+        } else {
+            // Last chunk has bits, so we can prune all but the last
+            self.bitmap.len().saturating_sub(1)
+        };
+
+        assert!(
+            n <= available_chunks,
+            "cannot prune {} chunks, only {} available",
+            n,
+            available_chunks
+        );
+
+        for _ in 0..n {
+            self.bitmap.pop_front();
+        }
+
+        // Ensure we always have at least one chunk
+        if self.bitmap.is_empty() {
+            self.bitmap.push_back(Self::EMPTY_CHUNK);
+            self.next_bit = 0;
+        }
     }
 
     /// Efficiently add a byte's worth of bits to the bitmap.
@@ -1599,6 +1636,61 @@ mod tests {
         for (i, &expected) in pattern.iter().enumerate() {
             assert_eq!(bv16.get(i as u64), expected);
         }
+    }
+
+    #[test]
+    fn test_prune_front_chunks() {
+        // Test basic pruning
+        let mut bv: BitVec<4> = BitVec::new();
+        bv.append_chunk_unchecked(&[1, 2, 3, 4]);
+        bv.append_chunk_unchecked(&[5, 6, 7, 8]);
+        bv.append_chunk_unchecked(&[9, 10, 11, 12]);
+
+        assert_eq!(bv.bit_count(), 96);
+        assert_eq!(bv.get_chunk_by_index(0), &[1, 2, 3, 4]);
+
+        // Prune first chunk
+        bv.prune_front_chunks(1);
+        assert_eq!(bv.bit_count(), 64);
+        assert_eq!(bv.get_chunk_by_index(0), &[5, 6, 7, 8]);
+        assert_eq!(bv.get_chunk_by_index(1), &[9, 10, 11, 12]);
+
+        // Prune another chunk
+        bv.prune_front_chunks(1);
+        assert_eq!(bv.bit_count(), 32);
+        assert_eq!(bv.get_chunk_by_index(0), &[9, 10, 11, 12]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot prune")]
+    fn test_prune_too_many_chunks() {
+        let mut bv: BitVec<4> = BitVec::new();
+        bv.append_chunk_unchecked(&[1, 2, 3, 4]);
+        bv.append_chunk_unchecked(&[5, 6, 7, 8]);
+        bv.append(true); // Add a bit to the third chunk
+
+        // Try to prune 3 chunks when only 2 are available (last chunk has data)
+        bv.prune_front_chunks(3);
+    }
+
+    #[test]
+    fn test_prune_with_partial_last_chunk() {
+        let mut bv: BitVec<4> = BitVec::new();
+        bv.append_chunk_unchecked(&[1, 2, 3, 4]);
+        bv.append_chunk_unchecked(&[5, 6, 7, 8]);
+        bv.append(true);
+        bv.append(false);
+
+        assert_eq!(bv.bit_count(), 66);
+
+        // Can prune first chunk
+        bv.prune_front_chunks(1);
+        assert_eq!(bv.bit_count(), 34);
+        assert_eq!(bv.get_chunk_by_index(0), &[5, 6, 7, 8]);
+
+        // Last partial chunk still has the appended bits
+        assert!(bv.get(32));
+        assert!(!bv.get(33));
     }
 
     #[test]
