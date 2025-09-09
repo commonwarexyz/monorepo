@@ -8,6 +8,10 @@ use crate::{
 };
 
 const NAMESPACE: &'static [u8] = b"commonware/handshake";
+const LABEL_CIPHER_L2D: &'static [u8] = b"cipher_l2d";
+const LABEL_CIPHER_D2L: &'static [u8] = b"cipher_d2l";
+const LABEL_CONFIRMATION_L2D: &'static [u8] = b"confirmation_l2d";
+const LABEL_CONFIRMATION_D2L: &'static [u8] = b"confirmation_d2l";
 
 pub struct Msg1<S> {
     time_ms: u64,
@@ -170,10 +174,10 @@ pub fn dial_end<P: PublicKey>(
         return Err(());
     }
     transcript.commit(secret.as_bytes().as_slice());
-    let recv = RecvCipher::new(transcript.noise(b"cipher_l2d"));
-    let send = SendCipher::new(transcript.noise(b"cipher_d2l"));
-    let confirmation_l2d = transcript.fork(b"confirmation_l2d").summarize();
-    let confirmation_d2l = transcript.fork(b"confirmation_d2l").summarize();
+    let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_L2D));
+    let send = SendCipher::new(transcript.noise(LABEL_CIPHER_D2L));
+    let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
+    let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
     if msg.confirmation != confirmation_l2d {
         return Err(());
     }
@@ -218,10 +222,10 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         return Err(());
     }
     transcript.commit(secret.as_bytes().as_slice());
-    let send = SendCipher::new(transcript.noise(b"cipher_l2d"));
-    let recv = RecvCipher::new(transcript.noise(b"cipher_d2l"));
-    let confirmation_l2d = transcript.fork(b"confirmation_l2d").summarize();
-    let confirmation_d2l = transcript.fork(b"confirmation_d2l").summarize();
+    let send = SendCipher::new(transcript.noise(LABEL_CIPHER_L2D));
+    let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_D2L));
+    let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
+    let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
 
     Ok((
         ListenState {
