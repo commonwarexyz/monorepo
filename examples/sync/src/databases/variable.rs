@@ -44,6 +44,7 @@ where
 {
     type Operation = Operation;
 
+    // Only returns Update and Commit operations
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
         let mut hasher = <Hasher as CryptoHasher>::new();
         let mut operations = Vec::new();
@@ -72,6 +73,7 @@ where
         operations
     }
 
+    // Expects only Update and Commit operations
     async fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
@@ -81,17 +83,11 @@ where
                 Operation::Update(key, value) => {
                     database.update(key, value).await?;
                 }
-                Operation::Delete(key) => {
-                    database.delete(key).await?;
-                }
-                Operation::Set(key, value) => {
-                    database.update(key, value).await?;
-                }
                 Operation::Commit(metadata) => {
                     database.commit(metadata).await?;
                 }
-                Operation::CommitFloor(metadata, _) => {
-                    database.commit(metadata).await?;
+                _ => {
+                    panic!("invalid operation. expected Update or Commit, got {operation:?}");
                 }
             }
         }
