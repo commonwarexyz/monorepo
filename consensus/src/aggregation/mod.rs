@@ -583,11 +583,10 @@ mod tests {
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
         // First run: let validators skip signing at skip_index and reach beyond it
-        let all_validators_clone = all_validators.clone();
-        let mut shares_vec_clone = shares_vec.clone();
-        let polynomial_clone = polynomial.clone();
-
-        let f = move |context: Context| {
+        let f = |context: Context| {
+            let all_validators_clone = all_validators.clone();
+            let mut shares_vec_clone = shares_vec.clone();
+            let polynomial_clone = polynomial.clone();
             async move {
                 let (oracle, validators, pks, mut registrations) = initialize_simulation(
                     context.with_label("simulation"),
@@ -597,8 +596,8 @@ mod tests {
                 )
                 .await;
 
-                // Store all validator public keys if not already done
-                if all_validators_clone.lock().unwrap().is_empty() {
+                // Store all validator public keys
+                {
                     let mut pks_lock = all_validators_clone.lock().unwrap();
                     *pks_lock = pks.clone();
                 }
@@ -668,53 +667,28 @@ mod tests {
                 }
 
                 // Wait for validators to reach target_index (past skip_index)
-                let completion =
-                    context
-                        .with_label("completion_watcher")
-                        .spawn(move |context| async move {
-                            loop {
-                                if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
-                                    info!(tip_index, skip_index, target_index, "reporter status");
-                                    if tip_index >= skip_index + window - 1 {
-                                        info!("Reached target index");
-                                        break;
-                                    }
-                                }
-                                context.sleep(Duration::from_millis(50)).await;
-                            }
-                        });
-
-                // Wait for completion or timeout
-                select! {
-                    _ = context.sleep(Duration::from_secs(30)) => {
-                        debug!("First run timed out - simulating unclean shutdown");
-                        (false, context)
-                    },
-                    _ = completion => {
-                        debug!("First run completed successfully");
-                        (true, context)
-                    },
+                loop {
+                    if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
+                        info!(tip_index, skip_index, target_index, "reporter status");
+                        if tip_index >= skip_index + window - 1 {
+                            info!("Reached target index");
+                            return context;
+                        }
+                    }
+                    context.sleep(Duration::from_millis(50)).await;
                 }
             }
         };
-
-        let (complete, context) = deterministic::Runner::timed(Duration::from_secs(60)).start(f);
-
-        // First run should complete with skip_index unsigned
-        assert!(complete, "First run should complete successfully");
+        let context = deterministic::Runner::timed(Duration::from_secs(60)).start(f);
         let prev_ctx = context.recover();
 
         // Second run: restart and verify the skip_index gets confirmed
-        let _all_validators_clone = all_validators.clone();
-        let mut shares_vec_clone = shares_vec.clone();
-        let polynomial_clone = polynomial.clone();
-
         let f2 = move |context: Context| {
             async move {
                 let (oracle, validators, pks, mut registrations) = initialize_simulation(
                     context.with_label("simulation"),
                     num_validators,
-                    &mut shares_vec_clone,
+                    &mut shares_vec,
                     RELIABLE_LINK,
                 )
                 .await;
@@ -728,7 +702,7 @@ mod tests {
                 let (reporter, mut reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
                     namespace,
                     num_validators,
-                    polynomial_clone.clone(),
+                    polynomial.clone(),
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());
 
@@ -738,7 +712,7 @@ mod tests {
                     let monitor = mocks::Monitor::new(111);
                     let supervisor = {
                         let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
-                        s.add_epoch(111, share.clone(), polynomial_clone.clone(), pks.to_vec());
+                        s.add_epoch(111, share.clone(), polynomial.clone(), pks.to_vec());
                         s
                     };
 
@@ -781,45 +755,23 @@ mod tests {
                 }
 
                 // Wait for skip_index to be confirmed (should happen on replay)
-                let completion =
-                    context
-                        .with_label("completion_watcher")
-                        .spawn(move |context| async move {
-                            loop {
-                                if let Some(tip_index) = reporter_mailbox.get_contiguous_tip().await
-                                {
-                                    debug!(
-                                        tip_index,
-                                        skip_index, target_index, "reporter status on restart"
-                                    );
-                                    // Ensure we still reach target and skip_index was confirmed
-                                    if tip_index >= target_index {
-                                        debug!("Verified skip_index was confirmed after restart");
-                                        break;
-                                    }
-                                }
-                                context.sleep(Duration::from_millis(50)).await;
-                            }
-                        });
-
-                // Wait for completion
-                select! {
-                    _ = context.sleep(Duration::from_secs(30)) => {
-                        panic!("Second run timed out - skip_index should have been confirmed");
-                    },
-                    _ = completion => {
-                        debug!("Second run completed - skip_index confirmed");
-                        (true, context)
-                    },
+                loop {
+                    if let Some(tip_index) = reporter_mailbox.get_contiguous_tip().await {
+                        debug!(
+                            tip_index,
+                            skip_index, target_index, "reporter status on restart"
+                        );
+                        // Ensure we still reach target and skip_index was confirmed
+                        if tip_index >= target_index {
+                            debug!("Verified skip_index was confirmed after restart");
+                            break;
+                        }
+                    }
+                    context.sleep(Duration::from_millis(50)).await;
                 }
             }
         };
-
-        let (complete, _) = deterministic::Runner::from(prev_ctx).start(f2);
-        assert!(
-            complete,
-            "Second run should complete with skip_index confirmed"
-        );
+        deterministic::Runner::from(prev_ctx).start(f2);
     }
 
     #[test_traced("INFO")]
