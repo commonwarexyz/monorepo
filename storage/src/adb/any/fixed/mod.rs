@@ -259,7 +259,7 @@ impl<
         mut bitmap: Option<&mut MerkleizedBitmap<H, N>>,
     ) -> Result<(), Error> {
         if let Some(ref bitmap) = bitmap {
-            assert_eq!(inactivity_floor_loc, bitmap.bit_count());
+            assert_eq!(inactivity_floor_loc, bitmap.len());
         }
 
         let stream = log
@@ -298,7 +298,7 @@ impl<
                     if let Some(ref mut bitmap) = bitmap {
                         // If we reach this point and a bit hasn't been added for the operation, then it's
                         // an inactive operation and we need to tag it as such in the bitmap.
-                        if bitmap.bit_count() == i {
+                        if bitmap.len() == i {
                             bitmap.append(false);
                         }
                     }
@@ -1384,7 +1384,7 @@ pub(super) mod test {
 
             // Check the bitmap state matches that of the snapshot.
             let items = db.log.size().await.unwrap();
-            assert_eq!(bitmap.bit_count(), items);
+            assert_eq!(bitmap.len(), items);
             let mut active_positions = HashSet::new();
             // This loop checks that the expected true bits are true in the bitmap.
             for pos in db.inactivity_floor_loc..items {

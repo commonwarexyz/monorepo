@@ -140,7 +140,7 @@ impl<const N: usize> BitVec<N> {
     ///
     /// Panics if the bit doesn't exist.
     #[inline]
-    pub fn get(&self, bit_offset: u64) -> bool {
+    pub fn get_bit(&self, bit_offset: u64) -> bool {
         let chunk = self.get_chunk(bit_offset);
         Self::get_bit_from_chunk(chunk, bit_offset)
     }
@@ -447,7 +447,7 @@ impl<const N: usize> PartialEq for BitVec<N> {
 
         // Compare each valid bit
         for i in 0..self.len() {
-            if self.get(i) != other.get(i) {
+            if self.get_bit(i) != other.get_bit(i) {
                 return false;
             }
         }
@@ -483,14 +483,14 @@ impl<const N: usize> fmt::Debug for BitVec<N> {
 
         // Closure for writing a bit
         let write_bit = |formatter: &mut Formatter<'_>, index: u64| -> core::fmt::Result {
-            formatter.write_char(if self.get(index) { '1' } else { '0' })
+            formatter.write_char(if self.get_bit(index) { '1' } else { '0' })
         };
 
         f.write_str("BitVec[")?;
-        let bit_count = self.len();
-        if bit_count <= MAX_DISPLAY as u64 {
+        let len = self.len();
+        if len <= MAX_DISPLAY as u64 {
             // Show all bits
-            for i in 0..bit_count {
+            for i in 0..len {
                 write_bit(f, i)?;
             }
         } else {
@@ -501,7 +501,7 @@ impl<const N: usize> fmt::Debug for BitVec<N> {
 
             f.write_str("...")?;
 
-            for i in (bit_count - HALF_DISPLAY as u64)..bit_count {
+            for i in (len - HALF_DISPLAY as u64)..len {
                 write_bit(f, i)?;
             }
         }
@@ -518,7 +518,7 @@ impl<const N: usize> Index<usize> for BitVec<N> {
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         self.assert_index(index as u64);
-        let value = self.get(index as u64);
+        let value = self.get_bit(index as u64);
         if value {
             &true
         } else {
@@ -581,10 +581,10 @@ impl<const N: usize> Read for BitVec<N> {
     type Cfg = RangeCfg;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
-        // Parse bit count
-        let bit_count = u64::read(buf)?;
-        if !range.contains(&(bit_count as usize)) {
-            return Err(CodecError::InvalidLength(bit_count as usize));
+        // Parse length in bits
+        let len = u64::read(buf)?;
+        if !range.contains(&(len as usize)) {
+            return Err(CodecError::InvalidLength(len as usize));
         }
 
         // Parse next_bit position
@@ -596,7 +596,7 @@ impl<const N: usize> Read for BitVec<N> {
         }
 
         // Parse chunks
-        let num_chunks = Self::num_chunks_at_size(bit_count).get();
+        let num_chunks = Self::num_chunks_at_size(len).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
             let mut chunk = [0u8; N];
@@ -606,17 +606,17 @@ impl<const N: usize> Read for BitVec<N> {
             bitmap.push_back(chunk);
         }
 
-        // Validate the bit_count and next_bit are consistent
-        let expected_bit_count = if bitmap.len() == 1 && next_bit == 0 {
+        // Validate the length and next_bit are consistent
+        let expected_len = if bitmap.len() == 1 && next_bit == 0 {
             0 // Empty bitvec
         } else {
             (bitmap.len() - 1) as u64 * Self::CHUNK_SIZE_BITS + next_bit
         };
 
-        if bit_count != expected_bit_count {
+        if len != expected_len {
             return Err(CodecError::Invalid(
                 "BitVec",
-                "inconsistent bit_count and next_bit",
+                "inconsistent length and next_bit",
             ));
         }
 
@@ -629,7 +629,7 @@ impl<const N: usize> Read for BitVec<N> {
 
 impl<const N: usize> EncodeSize for BitVec<N> {
     fn encode_size(&self) -> usize {
-        // Size of bit_count (u64) + next_bit (u64) + all chunks
+        // Size of length (u64) + next_bit (u64) + all chunks
         self.len().encode_size() + self.next_bit.encode_size() + (self.chunks.len() * N)
     }
 }
@@ -651,7 +651,7 @@ impl<const N: usize> core::iter::Iterator for Iterator<'_, N> {
             return None;
         }
 
-        let bit = self.vec.get(self.pos);
+        let bit = self.vec.get_bit(self.pos);
         self.pos += 1;
         Some(bit)
     }
@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(bv.len(), 1);
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 1);
-        assert!(!bv.get(0));
+        assert!(!bv.get_bit(0));
         assert_eq!(bv.count_ones(), 0);
         assert_eq!(bv.count_zeros(), 1);
 
@@ -712,7 +712,7 @@ mod tests {
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 10);
         for i in 0..10 {
-            assert!(!bv.get(i));
+            assert!(!bv.get_bit(i));
         }
         assert_eq!(bv.count_ones(), 0);
         assert_eq!(bv.count_zeros(), 10);
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(bv.len(), 1);
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 1);
-        assert!(bv.get(0));
+        assert!(bv.get_bit(0));
         assert_eq!(bv.count_ones(), 1);
         assert_eq!(bv.count_zeros(), 0);
 
@@ -739,7 +739,7 @@ mod tests {
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 10);
         for i in 0..10 {
-            assert!(bv.get(i));
+            assert!(bv.get_bit(i));
         }
         assert_eq!(bv.count_ones(), 10);
         assert_eq!(bv.count_zeros(), 0);
@@ -761,21 +761,21 @@ mod tests {
         assert!(!bv.is_empty());
 
         // Test get_bit
-        assert!(bv.get(0));
-        assert!(!bv.get(1));
-        assert!(bv.get(2));
+        assert!(bv.get_bit(0));
+        assert!(!bv.get_bit(1));
+        assert!(bv.get_bit(2));
 
         // Test set_bit
         bv.set(1, true);
-        assert!(bv.get(1));
+        assert!(bv.get_bit(1));
         bv.set(2, false);
-        assert!(!bv.get(2));
+        assert!(!bv.get_bit(2));
 
         // Test toggle
         bv.toggle(0); // true -> false
-        assert!(!bv.get(0));
+        assert!(!bv.get_bit(0));
         bv.toggle(0); // false -> true
-        assert!(bv.get(0));
+        assert!(bv.get_bit(0));
     }
 
     #[test]
@@ -843,7 +843,7 @@ mod tests {
 
         // All bits in the byte should be set
         for i in 0..8 {
-            assert!(bv.get(i));
+            assert!(bv.get_bit(i));
         }
 
         bv.append_byte_unchecked(0x00);
@@ -851,7 +851,7 @@ mod tests {
 
         // All bits in the second byte should be clear
         for i in 8..16 {
-            assert!(!bv.get(i));
+            assert!(!bv.get_bit(i));
         }
     }
 
@@ -938,11 +938,11 @@ mod tests {
         assert_eq!(bv.count_zeros(), original_ones);
 
         // Check bits
-        assert!(!bv.get(0));
-        assert!(bv.get(1));
-        assert!(!bv.get(2));
-        assert!(bv.get(3));
-        assert!(!bv.get(4));
+        assert!(!bv.get_bit(0));
+        assert!(bv.get_bit(1));
+        assert!(!bv.get_bit(2));
+        assert!(bv.get_bit(3));
+        assert!(!bv.get_bit(4));
     }
 
     #[test]
@@ -966,7 +966,7 @@ mod tests {
 
         assert_eq!(bv1.len(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get(i as u64), expected_bit);
+            assert_eq!(bv1.get_bit(i as u64), expected_bit);
         }
     }
 
@@ -991,7 +991,7 @@ mod tests {
 
         assert_eq!(bv1.len(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get(i as u64), expected_bit);
+            assert_eq!(bv1.get_bit(i as u64), expected_bit);
         }
     }
 
@@ -1016,7 +1016,7 @@ mod tests {
 
         assert_eq!(bv1.len(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get(i as u64), expected_bit);
+            assert_eq!(bv1.get_bit(i as u64), expected_bit);
         }
     }
 
@@ -1347,7 +1347,7 @@ mod tests {
 
         // Verify the decoded bitvec has the same bits
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(decoded.get(i as u64), expected);
+            assert_eq!(decoded.get_bit(i as u64), expected);
         }
 
         // Test larger bitvec across multiple chunks
@@ -1363,7 +1363,7 @@ mod tests {
         // Verify all bits match
         assert_eq!(decoded.len(), 100);
         for i in 0..100 {
-            assert_eq!(decoded.get(i), i % 7 == 0);
+            assert_eq!(decoded.get_bit(i), i % 7 == 0);
         }
     }
 
@@ -1393,9 +1393,9 @@ mod tests {
 
         // All should have the same logical content
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(decoded4.get(i as u64), expected);
-            assert_eq!(decoded8.get(i as u64), expected);
-            assert_eq!(decoded16.get(i as u64), expected);
+            assert_eq!(decoded4.get_bit(i as u64), expected);
+            assert_eq!(decoded8.get_bit(i as u64), expected);
+            assert_eq!(decoded16.get_bit(i as u64), expected);
         }
     }
 
@@ -1455,7 +1455,7 @@ mod tests {
 
         // Test invalid next_bit (too large)
         let mut buf = BytesMut::new();
-        5u64.write(&mut buf); // bit_count
+        5u64.write(&mut buf); // bits length
         100u64.write(&mut buf); // next_bit (invalid for chunk size 4 = 32 bits max)
 
         let result = BitVec::<4>::decode_cfg(&mut buf, &(..).into());
@@ -1464,11 +1464,11 @@ mod tests {
             Err(CodecError::Invalid("BitVec", "next_bit out of bounds"))
         ));
 
-        // Test inconsistent bit_count and next_bit
+        // Test inconsistent bits length and next_bit
         let mut buf = BytesMut::new();
-        10u64.write(&mut buf); // bit_count
+        10u64.write(&mut buf); // bits length
         5u64.write(&mut buf); // next_bit
-                              // This would imply 5 bits in first chunk, but bit_count says 10
+                              // This would imply 5 bits in first chunk, but bit length says 10
         [0u8; 4].write(&mut buf); // One chunk
 
         let result = BitVec::<4>::decode_cfg(&mut buf, &(..).into());
@@ -1476,7 +1476,7 @@ mod tests {
             result,
             Err(CodecError::Invalid(
                 "BitVec",
-                "inconsistent bit_count and next_bit"
+                "inconsistent bits length and next_bit"
             ))
         ));
     }
@@ -1492,7 +1492,7 @@ mod tests {
         assert_eq!(bv.count_ones(), 3);
         assert_eq!(bv.count_zeros(), 2);
         for (i, &expected) in [true, false, true, false, true].iter().enumerate() {
-            assert_eq!(bv.get(i as u64), expected);
+            assert_eq!(bv.get_bit(i as u64), expected);
         }
 
         // Test with array slice
@@ -1502,7 +1502,7 @@ mod tests {
         assert_eq!(bv.count_ones(), 2);
         assert_eq!(bv.count_zeros(), 2);
         for (i, &expected) in array.iter().enumerate() {
-            assert_eq!(bv.get(i as u64), expected);
+            assert_eq!(bv.get_bit(i as u64), expected);
         }
 
         // Test with empty slice
@@ -1516,7 +1516,7 @@ mod tests {
         let bv: BitVec<8> = large.clone().into();
         assert_eq!(bv.len(), 100);
         for (i, &expected) in large.iter().enumerate() {
-            assert_eq!(bv.get(i as u64), expected);
+            assert_eq!(bv.get_bit(i as u64), expected);
         }
     }
 
@@ -1590,7 +1590,7 @@ mod tests {
             assert_eq!(bv.count_ones(), 4);
             assert_eq!(bv.count_zeros(), 3);
             for (i, &expected) in pattern.iter().enumerate() {
-                assert_eq!(bv.get(i as u64), expected);
+                assert_eq!(bv.get_bit(i as u64), expected);
             }
         }
 
@@ -1598,14 +1598,14 @@ mod tests {
         assert_eq!(bv8.count_ones(), 4);
         assert_eq!(bv8.count_zeros(), 3);
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(bv8.get(i as u64), expected);
+            assert_eq!(bv8.get_bit(i as u64), expected);
         }
 
         assert_eq!(bv16.len(), 7);
         assert_eq!(bv16.count_ones(), 4);
         assert_eq!(bv16.count_zeros(), 3);
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(bv16.get(i as u64), expected);
+            assert_eq!(bv16.get_bit(i as u64), expected);
         }
     }
 
@@ -1660,8 +1660,8 @@ mod tests {
         assert_eq!(bv.get_chunk_by_index(0), &[5, 6, 7, 8]);
 
         // Last partial chunk still has the appended bits
-        assert!(bv.get(32));
-        assert!(!bv.get(33));
+        assert!(bv.get_bit(32));
+        assert!(!bv.get_bit(33));
     }
 
     #[test]

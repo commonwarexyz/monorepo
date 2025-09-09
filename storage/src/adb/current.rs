@@ -162,10 +162,10 @@ impl<
 
         // Ensure consistency between the bitmap and the db.
         let mut grafter = Grafting::new(&mut hasher, Self::grafting_height());
-        if status.bit_count() < inactivity_floor_loc {
+        if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
-            while status.bit_count() < inactivity_floor_loc {
+            while status.len() < inactivity_floor_loc {
                 status.append(false);
             }
 
@@ -1029,7 +1029,7 @@ pub mod test {
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = db.inactivity_floor_loc();
-            for i in start..db.status.bit_count() {
+            for i in start..db.status.len() {
                 if !db.status.get_bit(i) {
                     continue;
                 }

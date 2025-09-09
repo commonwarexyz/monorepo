@@ -1215,7 +1215,7 @@ mod tests {
             assert_eq!(bit_vec0.bits.len(), set0_peers.len() as u64);
             let tracker_idx_s0 = set0_peers.iter().position(|p| p == &tracker_pk).unwrap();
             assert!(
-                bit_vec0.bits.get(tracker_idx_s0 as u64),
+                bit_vec0.bits.get_bit(tracker_idx_s0 as u64),
                 "Tracker should know itself in set 0"
             );
 
@@ -1241,9 +1241,9 @@ mod tests {
                 _ => panic!("Expected updated BitVec for set 0"),
             };
             let peer1_idx_s0 = set0_peers.iter().position(|p| p == &peer1_pk).unwrap();
-            assert!(bit_vec0_updated.bits.get(tracker_idx_s0 as u64));
+            assert!(bit_vec0_updated.bits.get_bit(tracker_idx_s0 as u64));
             assert!(
-                bit_vec0_updated.bits.get(peer1_idx_s0 as u64),
+                bit_vec0_updated.bits.get_bit(peer1_idx_s0 as u64),
                 "Tracker should know peer1 in set 0 after Peers msg"
             );
 

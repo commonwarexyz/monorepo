@@ -16,11 +16,8 @@ pub struct Prunable<const N: usize> {
 }
 
 impl<const N: usize> Prunable<N> {
-    /// The size of a chunk in bytes.
-    pub const CHUNK_SIZE: usize = N;
-
     /// The size of a chunk in bits.
-    pub const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
+    const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
 
     /// Create a new empty prunable bitmap.
     pub fn new() -> Self {
@@ -38,13 +35,20 @@ impl<const N: usize> Prunable<N> {
         }
     }
 
-    /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
+    /// Return the number of bits in the bitmap, irrespective of any pruning.
     #[inline]
-    pub fn bit_count(&self) -> u64 {
+    pub fn len(&self) -> u64 {
         self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS + self.bitvec.len()
     }
 
+    /// Returns true if the bitmap is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Return the number of bits that have been pruned from this bitmap.
+    #[inline]
     pub fn pruned_bits(&self) -> u64 {
         self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS
     }
@@ -82,7 +86,7 @@ impl<const N: usize> Prunable<N> {
 
         // Adjust bit_offset to account for pruning
         let adjusted_offset = bit_offset - self.pruned_bits();
-        self.bitvec.get(adjusted_offset)
+        self.bitvec.get_bit(adjusted_offset)
     }
 
     /// Get the value of a bit from its chunk.
@@ -96,7 +100,7 @@ impl<const N: usize> Prunable<N> {
         self.bitvec.append(bit);
     }
 
-    /// Efficiently add a byte's worth of bits to the bitmap.
+    /// Efficiently add a byte to the bitmap.
     ///
     /// # Warning
     ///
@@ -114,7 +118,7 @@ impl<const N: usize> Prunable<N> {
         self.bitvec.append_chunk_unchecked(chunk);
     }
 
-    /// Set the value of the referenced bit.
+    /// Set the value of the given bit.
     ///
     /// # Warning
     ///
@@ -163,7 +167,7 @@ impl<const N: usize> Prunable<N> {
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
     pub fn chunk_index(&self, bit_offset: u64) -> usize {
-        assert!(bit_offset < self.bit_count(), "out of bounds: {bit_offset}");
+        assert!(bit_offset < self.len(), "out of bounds: {bit_offset}");
         let chunk_num = Self::chunk_num(bit_offset);
         assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
 
@@ -173,17 +177,12 @@ impl<const N: usize> Prunable<N> {
     /// Convert a bit offset into the number of the chunk it belongs to.
     #[inline]
     pub fn chunk_num(bit_offset: u64) -> usize {
-        (bit_offset / Self::CHUNK_SIZE_BITS) as usize
+        BitVec::<N>::chunk_index(bit_offset)
     }
 
     /// Get the number of chunks in the bitmap
     pub fn chunks_len(&self) -> usize {
         self.bitvec.chunks_len()
-    }
-
-    /// Returns true if the bitmap is empty.
-    pub fn is_empty(&self) -> bool {
-        self.bitvec.is_empty()
     }
 
     /// Get a reference to a chunk by its index in the current bitmap
@@ -210,7 +209,7 @@ mod tests {
     #[test]
     fn test_new_empty() {
         let prunable: Prunable<32> = Prunable::new();
-        assert_eq!(prunable.bit_count(), 0);
+        assert_eq!(prunable.len(), 0);
         assert_eq!(prunable.pruned_bits(), 0);
         assert_eq!(prunable.pruned_chunks(), 0);
         assert!(prunable.is_empty());
@@ -226,7 +225,7 @@ mod tests {
         prunable.append(false);
         prunable.append(true);
 
-        assert_eq!(prunable.bit_count(), 3);
+        assert_eq!(prunable.len(), 3);
         assert!(!prunable.is_empty());
         assert!(prunable.get_bit(0));
         assert!(!prunable.get_bit(1));
@@ -239,7 +238,7 @@ mod tests {
 
         // Add a byte
         prunable.append_byte_unchecked(0xFF);
-        assert_eq!(prunable.bit_count(), 8);
+        assert_eq!(prunable.len(), 8);
 
         // All bits should be set
         for i in 0..8 {
@@ -247,7 +246,7 @@ mod tests {
         }
 
         prunable.append_byte_unchecked(0x00);
-        assert_eq!(prunable.bit_count(), 16);
+        assert_eq!(prunable.len(), 16);
 
         // Next 8 bits should be clear
         for i in 8..16 {
@@ -261,7 +260,7 @@ mod tests {
         let chunk = [0xAA, 0xBB, 0xCC, 0xDD];
 
         prunable.append_chunk_unchecked(&chunk);
-        assert_eq!(prunable.bit_count(), 32); // 4 bytes * 8 bits
+        assert_eq!(prunable.len(), 32); // 4 bytes * 8 bits
 
         let retrieved_chunk = prunable.get_chunk(0);
         assert_eq!(retrieved_chunk, &chunk);
@@ -300,14 +299,14 @@ mod tests {
         prunable.append_chunk_unchecked(&chunk2);
         prunable.append_chunk_unchecked(&chunk3);
 
-        assert_eq!(prunable.bit_count(), 96); // 3 chunks * 32 bits
+        assert_eq!(prunable.len(), 96); // 3 chunks * 32 bits
         assert_eq!(prunable.pruned_chunks(), 0);
 
         // Prune to second chunk (bit 32 is start of second chunk)
         prunable.prune_to_bit(32);
         assert_eq!(prunable.pruned_chunks(), 1);
         assert_eq!(prunable.pruned_bits(), 32);
-        assert_eq!(prunable.bit_count(), 96); // Total count unchanged
+        assert_eq!(prunable.len(), 96); // Total count unchanged
 
         // Can still access non-pruned bits
         assert_eq!(prunable.get_chunk(32), &chunk2);
@@ -317,7 +316,7 @@ mod tests {
         prunable.prune_to_bit(64);
         assert_eq!(prunable.pruned_chunks(), 2);
         assert_eq!(prunable.pruned_bits(), 64);
-        assert_eq!(prunable.bit_count(), 96);
+        assert_eq!(prunable.len(), 96);
 
         // Can still access the third chunk
         assert_eq!(prunable.get_chunk(64), &chunk3);
@@ -382,12 +381,12 @@ mod tests {
         prunable.append(false);
         prunable.append(true);
 
-        assert_eq!(prunable.bit_count(), 67); // 64 + 3 bits
+        assert_eq!(prunable.len(), 67); // 64 + 3 bits
 
         // Prune to second chunk
         prunable.prune_to_bit(32);
         assert_eq!(prunable.pruned_chunks(), 1);
-        assert_eq!(prunable.bit_count(), 67);
+        assert_eq!(prunable.len(), 67);
 
         // Can still access the partial bits
         assert!(prunable.get_bit(64));
@@ -425,12 +424,12 @@ mod tests {
 
         // Prune first chunk
         prunable.prune_to_bit(32);
-        assert_eq!(prunable.bit_count(), 64);
+        assert_eq!(prunable.len(), 64);
         assert_eq!(prunable.pruned_chunks(), 1);
 
         // Add more data
         prunable.append_chunk_unchecked(&[9, 10, 11, 12]);
-        assert_eq!(prunable.bit_count(), 96); // 32 pruned + 64 active
+        assert_eq!(prunable.len(), 96); // 32 pruned + 64 active
 
         // New chunk should be accessible
         assert_eq!(prunable.get_chunk(64), &[9, 10, 11, 12]);
@@ -523,9 +522,9 @@ mod tests {
         }
 
         // All should have same bit count
-        assert_eq!(p8.bit_count(), 10);
-        assert_eq!(p16.bit_count(), 10);
-        assert_eq!(p32.bit_count(), 10);
+        assert_eq!(p8.len(), 10);
+        assert_eq!(p16.len(), 10);
+        assert_eq!(p32.len(), 10);
 
         // All should have same bit values
         for i in 0..10 {
