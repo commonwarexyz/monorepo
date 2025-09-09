@@ -671,7 +671,7 @@ mod tests {
                     if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
                         info!(tip_index, skip_index, target_index, "reporter status");
                         if tip_index >= skip_index + window - 1 {
-                            info!("Reached target index");
+                            // max we can proceed before item confirmed
                             return context;
                         }
                     }
@@ -757,13 +757,12 @@ mod tests {
                 // Wait for skip_index to be confirmed (should happen on replay)
                 loop {
                     if let Some(tip_index) = reporter_mailbox.get_contiguous_tip().await {
-                        debug!(
+                        info!(
                             tip_index,
-                            skip_index, target_index, "reporter status on restart"
+                            skip_index, target_index, "reporter status on restart",
                         );
                         // Ensure we still reach target and skip_index was confirmed
                         if tip_index >= target_index {
-                            debug!("Verified skip_index was confirmed after restart");
                             break;
                         }
                     }
