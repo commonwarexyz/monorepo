@@ -170,6 +170,11 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.intervals.next_gap(index)
     }
 
+    /// Returns the first index in the [Cache].
+    pub fn first(&self) -> Option<u64> {
+        self.intervals.iter().next().map(|(&start, _)| start)
+    }
+
     /// Get up to the next `max` missing items after `start`.
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         self.intervals.missing_items(start, max)
