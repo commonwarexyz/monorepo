@@ -261,8 +261,11 @@ impl<
                 let in_flight = self.digest_requests.len();
                 if in_flight < self.window as usize {
                     let index = unverified_indices.remove(0);
-                    debug!("requesting digest for unverified index from replay: {}", index);
-                    
+                    debug!(
+                        "requesting digest for unverified index from replay: {}",
+                        index
+                    );
+
                     // Request the digest (don't insert to pending, it's already there)
                     let mut automaton = self.automaton.clone();
                     let timer = self.metrics.digest_duration.timer();
@@ -835,6 +838,7 @@ impl<
         }
 
         // Process each index's acks
+        let mut unverified_indices = Vec::new();
         for (index, mut acks_group) in acks_by_index {
             // Check if we have our own ack (which means we've verified the digest)
             let our_share = self.validators.share(self.epoch);
@@ -874,25 +878,20 @@ impl<
                 }
                 None => {
                     self.pending.insert(index, Pending::Unverified(epoch_map));
+
+                    // Add to unverified indices (to be requested from automaton)
+                    unverified_indices.push(index);
                 }
             }
         }
 
-        // Collect unverified indices that need digest requests
-        let mut unverified_indices = Vec::new();
-        for (index, pending) in &self.pending {
-            if matches!(pending, Pending::Unverified(_)) {
-                unverified_indices.push(*index);
-            }
-        }
-
         info!(
-            self.tip, 
-            next = self.next(), 
+            self.tip,
+            next = self.next(),
             unverified = unverified_indices.len(),
             "replayed journal"
         );
-        
+
         unverified_indices
     }
 
