@@ -2,7 +2,7 @@
 name = "commonware-vrf"
 edition = "2021"
 publish = true
-version = "0.0.60"
+version = "0.0.61"
 license = "MIT OR Apache-2.0"
 description = "Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p."
 readme = "README.md"
@@ -19,6 +19,7 @@ commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+rand_core = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 clap = { workspace = true }

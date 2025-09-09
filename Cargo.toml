@@ -34,25 +34,27 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.60", path = "broadcast" }
-commonware-codec = { version = "0.0.60", path = "codec", default-features = false }
-commonware-coding = { version = "0.0.60", path = "coding" }
-commonware-collector = { version = "0.0.60", path = "collector" }
-commonware-consensus = { version = "0.0.60", path = "consensus" }
-commonware-cryptography = { version = "0.0.60", path = "cryptography" }
-commonware-deployer = { version = "0.0.60", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.60", path = "macros" }
-commonware-p2p = { version = "0.0.60", path = "p2p" }
-commonware-resolver = { version = "0.0.60", path = "resolver" }
-commonware-runtime = { version = "0.0.60", path = "runtime" }
-commonware-storage = { version = "0.0.60", path = "storage" }
-commonware-stream = { version = "0.0.60", path = "stream" }
-commonware-utils = { version = "0.0.60", path = "utils", default-features = false }
+commonware-broadcast = { version = "0.0.61", path = "broadcast" }
+commonware-codec = { version = "0.0.61", path = "codec", default-features = false }
+commonware-coding = { version = "0.0.61", path = "coding" }
+commonware-collector = { version = "0.0.61", path = "collector" }
+commonware-consensus = { version = "0.0.61", path = "consensus" }
+commonware-cryptography = { version = "0.0.61", path = "cryptography" }
+commonware-deployer = { version = "0.0.61", path = "deployer", default-features = false }
+commonware-macros = { version = "0.0.61", path = "macros" }
+commonware-p2p = { version = "0.0.61", path = "p2p" }
+commonware-resolver = { version = "0.0.61", path = "resolver" }
+commonware-runtime = { version = "0.0.61", path = "runtime" }
+commonware-storage = { version = "0.0.61", path = "storage" }
+commonware-stream = { version = "0.0.61", path = "stream" }
+commonware-utils = { version = "0.0.61", path = "utils", default-features = false }
+anyhow = { version = "1.0.99", default-features = false }
 thiserror = { version = "2.0.12", default-features = false }
 bytes = { version = "1.7.1", default-features = false }
 sha2 = { version = "0.10.8", default-features = false }
 blake3 = { version = "1.8.2", default-features = false }
 rand = { version = "0.8.5", default-features = false }
+rand_core = "0.6.4"
 rand_distr = "0.4.3"
 futures = "0.3.31"
 futures-util = "0.3.31"

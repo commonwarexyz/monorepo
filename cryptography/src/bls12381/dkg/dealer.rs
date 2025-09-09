@@ -9,7 +9,7 @@ use crate::{
     PublicKey,
 };
 use commonware_utils::quorum;
-use rand::RngCore;
+use rand_core::CryptoRngCore;
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
@@ -38,7 +38,7 @@ pub struct Dealer<P: PublicKey, V: Variant> {
 
 impl<P: PublicKey, V: Variant> Dealer<P, V> {
     /// Create a new dealer for a DKG/Resharing procedure.
-    pub fn new<R: RngCore>(
+    pub fn new<R: CryptoRngCore>(
         rng: &mut R,
         share: Option<Share>,
         mut players: Vec<P>,

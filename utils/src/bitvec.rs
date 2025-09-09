@@ -9,10 +9,13 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use core::{
     fmt::{self, Formatter, Write as _},
+    num::NonZeroUsize,
     ops::{BitAnd, BitOr, BitXor, Index},
 };
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
+
+use crate::NZUsize;
 /// A bitmap that stores data in chunks of N bytes.
 #[derive(Clone)]
 pub struct BitVec<const N: usize> {
@@ -46,18 +49,21 @@ impl<const N: usize> BitVec<N> {
         }
     }
 
-    // Create a new bitmap with the capacity to hold `size` bits without reallocating.
+    // Create a new empty bitmap with the capacity to hold `size` bits without reallocating.
     pub fn with_capacity(size: usize) -> Self {
-        let num_chunks = Self::chunks_needed(size);
+        let num_chunks = Self::chunks_needed(size).get();
+        let mut bitmap = VecDeque::with_capacity(num_chunks);
+        // Always allocate at least one chunk
+        bitmap.push_back([0u8; N]);
         Self {
-            bitmap: VecDeque::with_capacity(num_chunks),
+            bitmap,
             next_bit: 0,
         }
     }
 
     // Returns the number of chunks the BitVec will have when it contains `size` bits.
-    fn chunks_needed(size: usize) -> usize {
-        (size / Self::CHUNK_SIZE_BITS as usize) + 1
+    fn chunks_needed(size: usize) -> NonZeroUsize {
+        NZUsize!((size / Self::CHUNK_SIZE_BITS as usize) + 1)
     }
 
     // TODO optimize this
@@ -553,7 +559,7 @@ impl<const N: usize> Read for BitVec<N> {
         }
 
         // Parse chunks
-        let num_chunks = Self::chunks_needed(bit_count as usize);
+        let num_chunks = Self::chunks_needed(bit_count as usize).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
             let mut chunk = [0u8; N];
@@ -629,12 +635,13 @@ mod tests {
         let bv: BitVec<4> = BitVec::new();
         assert_eq!(bv.bit_count(), 0);
         assert!(bv.is_empty());
-        assert_eq!(bv.len(), 1); // Always has at least one chunk
+        assert_eq!(bv.len(), 0); // Empty bitvec has 0 bits
 
         // Test default()
         let bv: BitVec<8> = Default::default();
         assert_eq!(bv.bit_count(), 0);
         assert!(bv.is_empty());
+        assert_eq!(bv.len(), 0); // Empty bitvec has 0 bits
     }
 
     #[test]
@@ -1472,28 +1479,28 @@ mod tests {
     #[test]
     fn test_chunks_needed() {
         // Test with different chunk sizes
-        assert_eq!(BitVec::<1>::chunks_needed(0), 1);
-        assert_eq!(BitVec::<1>::chunks_needed(1), 1);
-        assert_eq!(BitVec::<1>::chunks_needed(8), 2);
-        assert_eq!(BitVec::<1>::chunks_needed(9), 2);
-        assert_eq!(BitVec::<1>::chunks_needed(16), 3);
-        assert_eq!(BitVec::<1>::chunks_needed(17), 3);
+        assert_eq!(BitVec::<1>::chunks_needed(0).get(), 1);
+        assert_eq!(BitVec::<1>::chunks_needed(1).get(), 1);
+        assert_eq!(BitVec::<1>::chunks_needed(8).get(), 2);
+        assert_eq!(BitVec::<1>::chunks_needed(9).get(), 2);
+        assert_eq!(BitVec::<1>::chunks_needed(16).get(), 3);
+        assert_eq!(BitVec::<1>::chunks_needed(17).get(), 3);
 
-        assert_eq!(BitVec::<3>::chunks_needed(0), 1);
-        assert_eq!(BitVec::<3>::chunks_needed(1), 1);
-        assert_eq!(BitVec::<3>::chunks_needed(23), 1);
-        assert_eq!(BitVec::<3>::chunks_needed(24), 2);
-        assert_eq!(BitVec::<3>::chunks_needed(25), 2);
-        assert_eq!(BitVec::<3>::chunks_needed(48), 3);
-        assert_eq!(BitVec::<3>::chunks_needed(49), 3);
+        assert_eq!(BitVec::<3>::chunks_needed(0).get(), 1);
+        assert_eq!(BitVec::<3>::chunks_needed(1).get(), 1);
+        assert_eq!(BitVec::<3>::chunks_needed(23).get(), 1);
+        assert_eq!(BitVec::<3>::chunks_needed(24).get(), 2);
+        assert_eq!(BitVec::<3>::chunks_needed(25).get(), 2);
+        assert_eq!(BitVec::<3>::chunks_needed(48).get(), 3);
+        assert_eq!(BitVec::<3>::chunks_needed(49).get(), 3);
 
-        assert_eq!(BitVec::<4>::chunks_needed(0), 1);
-        assert_eq!(BitVec::<4>::chunks_needed(1), 1);
-        assert_eq!(BitVec::<4>::chunks_needed(31), 1);
-        assert_eq!(BitVec::<4>::chunks_needed(32), 2);
-        assert_eq!(BitVec::<4>::chunks_needed(33), 2);
-        assert_eq!(BitVec::<4>::chunks_needed(63), 2);
-        assert_eq!(BitVec::<4>::chunks_needed(64), 3);
-        assert_eq!(BitVec::<4>::chunks_needed(65), 3);
+        assert_eq!(BitVec::<4>::chunks_needed(0).get(), 1);
+        assert_eq!(BitVec::<4>::chunks_needed(1).get(), 1);
+        assert_eq!(BitVec::<4>::chunks_needed(31).get(), 1);
+        assert_eq!(BitVec::<4>::chunks_needed(32).get(), 2);
+        assert_eq!(BitVec::<4>::chunks_needed(33).get(), 2);
+        assert_eq!(BitVec::<4>::chunks_needed(63).get(), 2);
+        assert_eq!(BitVec::<4>::chunks_needed(64).get(), 3);
+        assert_eq!(BitVec::<4>::chunks_needed(65).get(), 3);
     }
 }

@@ -9,7 +9,7 @@
 //! position, but whose digests remain required for proof generation. The digests for pinned nodes
 //! are stored in an auxiliary map, and are at most O(log2(n)) in number.
 use crate::mmr::{
-    iterator::{nodes_needing_parents, PathIterator, PeakIterator},
+    iterator::{leaf_pos_to_num, nodes_needing_parents, PathIterator, PeakIterator},
     verification::Proof,
     Builder,
     Error::{self, ElementPruned, Empty},
@@ -131,6 +131,12 @@ impl<H: CHasher> Mmr<H> {
         self.nodes.len() as u64 + self.pruned_to_pos
     }
 
+    /// Return the total number of leaves in the MMR.
+    pub fn leaves(&self) -> u64 {
+        leaf_pos_to_num(self.size()).expect("invalid mmr size")
+    }
+
+    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
     pub fn last_leaf_pos(&self) -> Option<u64> {
         if self.size() == 0 {
             return None;
@@ -702,6 +708,7 @@ mod tests {
                 "empty iterator should have no peaks"
             );
             assert_eq!(mmr.size(), 0);
+            assert_eq!(mmr.leaves(), 0);
             assert_eq!(mmr.last_leaf_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert_eq!(mmr.get_node(0), None);
@@ -729,7 +736,6 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..11 {
                 leaves.push(mmr.add(&mut hasher, &element));
-                assert_eq!(mmr.last_leaf_pos().unwrap(), *leaves.last().unwrap());
                 let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
                 assert!(peaks.len() <= mmr.size() as usize);
@@ -833,6 +839,8 @@ mod tests {
                 pool: None,
             });
             assert_eq!(mmr_copy.size(), 19);
+            assert_eq!(mmr_copy.leaves(), mmr.leaves());
+            assert_eq!(mmr_copy.last_leaf_pos(), mmr.last_leaf_pos());
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
             assert_eq!(mmr_copy.root(&mut hasher), root);
 
