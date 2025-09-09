@@ -64,12 +64,6 @@ impl Clone for Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
-    fn new() -> Self {
-        Self {
-            hasher: CoreBlake3::new(),
-        }
-    }
-
     fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "parallel"))]
         self.hasher.update(message);
