@@ -670,6 +670,7 @@ impl<const N: usize> ExactSizeIterator for Iterator<'_, N> {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
 
     #[test]
@@ -1333,8 +1334,6 @@ mod tests {
 
     #[test]
     fn test_codec_roundtrip() {
-        use commonware_codec::Encode;
-
         // Test empty bitmap
         let original: BitMap<4> = BitMap::new();
         let encoded = original.encode();
@@ -1372,8 +1371,6 @@ mod tests {
 
     #[test]
     fn test_codec_different_chunk_sizes() {
-        use commonware_codec::Encode;
-
         let pattern = [true, false, true, true, false, false, true];
 
         // Test with different chunk sizes
@@ -1404,8 +1401,6 @@ mod tests {
 
     #[test]
     fn test_codec_edge_cases() {
-        use commonware_codec::Encode;
-
         // Test bitmap with exactly one chunk filled
         let mut bv: BitMap<4> = BitMap::new();
         for i in 0..32 {
@@ -1454,8 +1449,6 @@ mod tests {
 
     #[test]
     fn test_codec_error_cases() {
-        use bytes::BytesMut;
-
         // Test invalid next_bit (too large)
         let mut buf = BytesMut::new();
         5u64.write(&mut buf); // bits length
@@ -1479,13 +1472,13 @@ mod tests {
             result,
             Err(CodecError::Invalid(
                 "BitMap",
-                "inconsistent bits length and next_bit"
+                "inconsistent length and next_bit"
             ))
         ));
     }
 
     #[test]
-    fn test_from_bool_slice() {
+    fn test_from() {
         // Test From trait with different input types
 
         // Test with Vec<bool>
@@ -1554,10 +1547,7 @@ mod tests {
         let last_32 = "10".repeat(16); // Last 32 bits: ...1010
         let expected = format!("BitMap[{first_32}...{last_32}]");
         assert_eq!(debug_str, expected);
-    }
 
-    #[test]
-    fn test_debug_edge_cases() {
         // Test single bit
         let bv: BitMap<4> = [true].as_ref().into();
         assert_eq!(format!("{bv:?}"), "BitMap[1]");
@@ -1613,8 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_front_chunks() {
-        // Test basic pruning
+    fn test_prune_chunks() {
         let mut bv: BitMap<4> = BitMap::new();
         bv.append_chunk_unchecked(&[1, 2, 3, 4]);
         bv.append_chunk_unchecked(&[5, 6, 7, 8]);
