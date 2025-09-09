@@ -54,7 +54,7 @@ impl<const N: usize> BitVec<N> {
     }
 
     // Create a new empty bitmap with the capacity to hold `size` bits without reallocating.
-    pub fn with_capacity(size: usize) -> Self {
+    pub fn with_capacity(size: u64) -> Self {
         let num_chunks = Self::chunks_needed(size).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         // Always allocate at least one chunk
@@ -67,12 +67,12 @@ impl<const N: usize> BitVec<N> {
 
     // Returns the number of chunks in a bitvec with `size` bits.
     // Recall the invariant that the last chunk always has room for at least one more bit.
-    fn chunks_needed(size: usize) -> NonZeroUsize {
-        NZUsize!((size / Self::CHUNK_SIZE_BITS as usize) + 1)
+    fn chunks_needed(size: u64) -> NonZeroUsize {
+        NZUsize!((size / Self::CHUNK_SIZE_BITS) as usize + 1)
     }
 
     /// Create a new bitmap with `size` bits, with all bits set to 0.
-    pub fn zeroes(size: usize) -> Self {
+    pub fn zeroes(size: u64) -> Self {
         let num_chunks = Self::chunks_needed(size).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
@@ -80,12 +80,12 @@ impl<const N: usize> BitVec<N> {
         }
         Self {
             bitmap,
-            next_bit: size as u64 % Self::CHUNK_SIZE_BITS,
+            next_bit: size % Self::CHUNK_SIZE_BITS,
         }
     }
 
     /// Create a new bitmap with `size` bits, with all bits set to 1.
-    pub fn ones(size: usize) -> Self {
+    pub fn ones(size: u64) -> Self {
         let num_chunks = Self::chunks_needed(size).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
@@ -93,7 +93,7 @@ impl<const N: usize> BitVec<N> {
         }
         Self {
             bitmap,
-            next_bit: size as u64 % Self::CHUNK_SIZE_BITS,
+            next_bit: size % Self::CHUNK_SIZE_BITS,
         }
     }
 
@@ -319,26 +319,26 @@ impl<const N: usize> BitVec<N> {
 
     /// Returns the number of bits set to 1.
     #[inline]
-    pub fn count_ones(&self) -> usize {
-        let mut count = 0;
+    pub fn count_ones(&self) -> u64 {
+        let mut count: u64 = 0;
         for (i, chunk) in self.bitmap.iter().enumerate() {
             if i == self.bitmap.len() - 1 {
                 // For the last chunk, only count bits up to next_bit
-                let bytes_to_count = (self.next_bit + 7) / 8; // Round up to nearest byte
-                for byte_idx in 0..bytes_to_count as usize {
-                    if byte_idx == (bytes_to_count - 1) as usize && self.next_bit % 8 != 0 {
+                let bytes_to_count = self.next_bit.div_ceil(8) as usize; // Round up to nearest byte
+                for (byte_idx, byte) in chunk.iter().enumerate().take(bytes_to_count) {
+                    if byte_idx == (bytes_to_count - 1) && self.next_bit % 8 != 0 {
                         // For the last byte, only count bits up to next_bit % 8
                         let bits_in_last_byte = self.next_bit % 8;
                         let mask = (1u8 << bits_in_last_byte) - 1;
-                        count += (chunk[byte_idx] & mask).count_ones() as usize;
+                        count += (byte & mask).count_ones() as u64;
                     } else {
-                        count += chunk[byte_idx].count_ones() as usize;
+                        count += byte.count_ones() as u64;
                     }
                 }
             } else {
                 // For all other chunks, count all bits
                 for byte in chunk {
-                    count += byte.count_ones() as usize;
+                    count += byte.count_ones() as u64;
                 }
             }
         }
@@ -347,8 +347,8 @@ impl<const N: usize> BitVec<N> {
 
     /// Returns the number of bits set to 0.
     #[inline]
-    pub fn count_zeros(&self) -> usize {
-        self.bit_count() as usize - self.count_ones()
+    pub fn count_zeros(&self) -> u64 {
+        self.bit_count() - self.count_ones()
     }
 
     /// Performs a bitwise AND with another BitVec.
@@ -589,7 +589,7 @@ impl<const N: usize> Read for BitVec<N> {
         }
 
         // Parse chunks
-        let num_chunks = Self::chunks_needed(bit_count as usize).get();
+        let num_chunks = Self::chunks_needed(bit_count).get();
         let mut bitmap = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
             let mut chunk = [0u8; N];
@@ -600,7 +600,6 @@ impl<const N: usize> Read for BitVec<N> {
         }
 
         // Validate the bit_count and next_bit are consistent
-        // The formula is: (num_chunks - 1) * CHUNK_SIZE_BITS + next_bit
         let expected_bit_count = if bitmap.len() == 1 && next_bit == 0 {
             0 // Empty bitvec
         } else {
@@ -687,20 +686,26 @@ mod tests {
         let bv: BitVec<1> = BitVec::zeroes(0);
         assert_eq!(bv.bit_count(), 0);
         assert!(bv.is_empty());
+        assert_eq!(bv.count_ones(), 0);
+        assert_eq!(bv.count_zeros(), 0);
 
         let bv: BitVec<1> = BitVec::zeroes(1);
         assert_eq!(bv.bit_count(), 1);
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 1);
-        assert_eq!(bv.get(0), false);
+        assert!(!bv.get(0));
+        assert_eq!(bv.count_ones(), 0);
+        assert_eq!(bv.count_zeros(), 1);
 
         let bv: BitVec<1> = BitVec::zeroes(10);
         assert_eq!(bv.bit_count(), 10);
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 10);
         for i in 0..10 {
-            assert_eq!(bv.get(i), false);
+            assert!(!bv.get(i));
         }
+        assert_eq!(bv.count_ones(), 0);
+        assert_eq!(bv.count_zeros(), 10);
     }
 
     #[test]
@@ -708,20 +713,26 @@ mod tests {
         let bv: BitVec<1> = BitVec::ones(0);
         assert_eq!(bv.bit_count(), 0);
         assert!(bv.is_empty());
+        assert_eq!(bv.count_ones(), 0);
+        assert_eq!(bv.count_zeros(), 0);
 
         let bv: BitVec<1> = BitVec::ones(1);
         assert_eq!(bv.bit_count(), 1);
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 1);
-        assert_eq!(bv.get(0), true);
+        assert!(bv.get(0));
+        assert_eq!(bv.count_ones(), 1);
+        assert_eq!(bv.count_zeros(), 0);
 
         let bv: BitVec<1> = BitVec::ones(10);
         assert_eq!(bv.bit_count(), 10);
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 10);
         for i in 0..10 {
-            assert_eq!(bv.get(i), true);
+            assert!(bv.get(i));
         }
+        assert_eq!(bv.count_ones(), 10);
+        assert_eq!(bv.count_zeros(), 0);
     }
 
     #[test]
@@ -740,21 +751,21 @@ mod tests {
         assert!(!bv.is_empty());
 
         // Test get_bit
-        assert_eq!(bv.get(0), true);
-        assert_eq!(bv.get(1), false);
-        assert_eq!(bv.get(2), true);
+        assert!(bv.get(0));
+        assert!(!bv.get(1));
+        assert!(bv.get(2));
 
         // Test set_bit
         bv.set(1, true);
-        assert_eq!(bv.get(1), true);
+        assert!(bv.get(1));
         bv.set(2, false);
-        assert_eq!(bv.get(2), false);
+        assert!(!bv.get(2));
 
         // Test toggle
         bv.toggle(0); // true -> false
-        assert_eq!(bv.get(0), false);
+        assert!(!bv.get(0));
         bv.toggle(0); // false -> true
-        assert_eq!(bv.get(0), true);
+        assert!(bv.get(0));
     }
 
     #[test]
@@ -784,29 +795,29 @@ mod tests {
     fn test_pop() {
         let mut bv: BitVec<3> = BitVec::new();
         bv.append(true);
-        assert_eq!(bv.pop(), true);
+        assert!(bv.pop());
         assert_eq!(bv.bit_count(), 0);
 
         bv.append(false);
-        assert_eq!(bv.pop(), false);
+        assert!(!bv.pop());
         assert_eq!(bv.bit_count(), 0);
 
         bv.append(true);
         bv.append(false);
         bv.append(true);
-        assert_eq!(bv.pop(), true);
+        assert!(bv.pop());
         assert_eq!(bv.bit_count(), 2);
-        assert_eq!(bv.pop(), false);
+        assert!(!bv.pop());
         assert_eq!(bv.bit_count(), 1);
-        assert_eq!(bv.pop(), true);
+        assert!(bv.pop());
         assert_eq!(bv.bit_count(), 0);
 
         for i in 0..100 {
-            bv.append(if i % 2 == 0 { true } else { false });
+            bv.append(i % 2 == 0);
         }
         assert_eq!(bv.bit_count(), 100);
         for i in (0..100).rev() {
-            assert_eq!(bv.pop(), if i % 2 == 0 { true } else { false });
+            assert_eq!(bv.pop(), i % 2 == 0);
         }
         assert_eq!(bv.bit_count(), 0);
         assert!(bv.is_empty());
@@ -822,7 +833,7 @@ mod tests {
 
         // All bits in the byte should be set
         for i in 0..8 {
-            assert_eq!(bv.get(i), true);
+            assert!(bv.get(i));
         }
 
         bv.append_byte_unchecked(0x00);
@@ -830,7 +841,7 @@ mod tests {
 
         // All bits in the second byte should be clear
         for i in 8..16 {
-            assert_eq!(bv.get(i), false);
+            assert!(!bv.get(i));
         }
     }
 
@@ -916,12 +927,12 @@ mod tests {
         assert_eq!(bv.count_ones(), original_zeros);
         assert_eq!(bv.count_zeros(), original_ones);
 
-        // Check specific bits
-        assert_eq!(bv.get(0), false); // was true
-        assert_eq!(bv.get(1), true); // was false
-        assert_eq!(bv.get(2), false); // was true
-        assert_eq!(bv.get(3), true); // was false
-        assert_eq!(bv.get(4), false); // was true
+        // Check bits
+        assert!(!bv.get(0));
+        assert!(bv.get(1));
+        assert!(!bv.get(2));
+        assert!(bv.get(3));
+        assert!(!bv.get(4));
     }
 
     #[test]
@@ -945,7 +956,7 @@ mod tests {
 
         assert_eq!(bv1.bit_count(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get(i as u64), expected_bit, "Mismatch at bit {}", i);
+            assert_eq!(bv1.get(i as u64), expected_bit);
         }
     }
 
@@ -970,7 +981,7 @@ mod tests {
 
         assert_eq!(bv1.bit_count(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get(i as u64), expected_bit, "Mismatch at bit {}", i);
+            assert_eq!(bv1.get(i as u64), expected_bit);
         }
     }
 
@@ -995,7 +1006,7 @@ mod tests {
 
         assert_eq!(bv1.bit_count(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get(i as u64), expected_bit, "Mismatch at bit {}", i);
+            assert_eq!(bv1.get(i as u64), expected_bit);
         }
     }
 
@@ -1299,12 +1310,12 @@ mod tests {
         assert_eq!(collected.len(), 35);
 
         // Verify the pattern
-        for i in 0..32 {
-            assert_eq!(collected[i], i % 2 == 0);
+        for (i, &bit) in collected.iter().enumerate().take(32) {
+            assert_eq!(bit, i % 2 == 0);
         }
-        assert_eq!(collected[32], true);
-        assert_eq!(collected[33], false);
-        assert_eq!(collected[34], true);
+        assert!(collected[32]);
+        assert!(!collected[33]);
+        assert!(collected[34]);
     }
 
     #[test]
@@ -1505,30 +1516,30 @@ mod tests {
 
         // Test empty bitvec
         let bv: BitVec<4> = BitVec::new();
-        let debug_str = format!("{:?}", bv);
+        let debug_str = format!("{bv:?}");
         assert_eq!(debug_str, "BitVec[]");
 
         // Test small bitvec (should show all bits)
         let bv: BitVec<4> = [true, false, true, false, true].as_ref().into();
-        let debug_str = format!("{:?}", bv);
+        let debug_str = format!("{bv:?}");
         assert_eq!(debug_str, "BitVec[10101]");
 
         // Test bitvec at the display limit (64 bits)
         let pattern: Vec<bool> = (0..64).map(|i| i % 2 == 0).collect();
         let bv: BitVec<8> = pattern.into();
-        let debug_str = format!("{:?}", bv);
+        let debug_str = format!("{bv:?}");
         let expected_pattern = "1010".repeat(16); // 64 bits alternating
-        assert_eq!(debug_str, format!("BitVec[{}]", expected_pattern));
+        assert_eq!(debug_str, format!("BitVec[{expected_pattern}]"));
 
         // Test large bitvec (should show ellipsis)
         let large_pattern: Vec<bool> = (0..100).map(|i| i % 2 == 0).collect();
         let bv: BitVec<16> = large_pattern.into();
-        let debug_str = format!("{:?}", bv);
+        let debug_str = format!("{bv:?}");
 
         // Should show first 32 bits + "..." + last 32 bits
         let first_32 = "10".repeat(16); // First 32 bits: 1010...
         let last_32 = "10".repeat(16); // Last 32 bits: ...1010
-        let expected = format!("BitVec[{}...{}]", first_32, last_32);
+        let expected = format!("BitVec[{first_32}...{last_32}]");
         assert_eq!(debug_str, expected);
     }
 
@@ -1536,20 +1547,20 @@ mod tests {
     fn test_debug_edge_cases() {
         // Test single bit
         let bv: BitVec<4> = [true].as_ref().into();
-        assert_eq!(format!("{:?}", bv), "BitVec[1]");
+        assert_eq!(format!("{bv:?}"), "BitVec[1]");
 
         let bv: BitVec<4> = [false].as_ref().into();
-        assert_eq!(format!("{:?}", bv), "BitVec[0]");
+        assert_eq!(format!("{bv:?}"), "BitVec[0]");
 
         // Test exactly at boundary (65 bits - should show ellipsis)
         let pattern: Vec<bool> = (0..65).map(|i| i == 0 || i == 64).collect(); // First and last bits are true
         let bv: BitVec<16> = pattern.into();
-        let debug_str = format!("{:?}", bv);
+        let debug_str = format!("{bv:?}");
 
         // Should show first 32 bits (100000...) + "..." + last 32 bits (...000001)
         let first_32 = "1".to_string() + &"0".repeat(31);
         let last_32 = "0".repeat(31) + "1";
-        let expected = format!("BitVec[{}...{}]", first_32, last_32);
+        let expected = format!("BitVec[{first_32}...{last_32}]");
         assert_eq!(debug_str, expected);
     }
 

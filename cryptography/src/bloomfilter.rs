@@ -38,7 +38,7 @@ impl BloomFilter {
     pub fn new(hashers: NonZeroU8, bits: NonZeroUsize) -> Self {
         Self {
             hashers: hashers.get(),
-            bits: BitVec::zeroes(bits.get()),
+            bits: BitVec::zeroes(bits.get() as u64),
         }
     }
 

@@ -23,7 +23,7 @@ impl<P: PublicKey> Set<P> {
         for (i, peer) in peers.iter().enumerate() {
             order.insert(peer.clone(), i);
         }
-        let knowledge = BitVec::zeroes(peers.len());
+        let knowledge = BitVec::zeroes(peers.len() as u64);
         Self {
             sorted: peers,
             order,
