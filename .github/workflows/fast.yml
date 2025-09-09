@@ -32,7 +32,7 @@ jobs:
             flags: ""
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Install nightly Rust toolchain
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
     - name: Run setup
@@ -64,7 +64,7 @@ jobs:
             flags: ""
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Run tests
@@ -75,7 +75,7 @@ jobs:
     timeout-minutes: 20
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Install nightly Rust toolchain
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Get Rust version
@@ -100,7 +100,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Build entire workspace
@@ -120,7 +120,7 @@ jobs:
     timeout-minutes: 10
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Add WASM target
@@ -164,7 +164,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Install miri
@@ -182,6 +182,6 @@ jobs:
     timeout-minutes: 10
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Run shellcheck
       run: find scripts -name "*.sh" -exec shellcheck -o all {} +
