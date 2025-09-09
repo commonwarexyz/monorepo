@@ -21,8 +21,8 @@ const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
 const DATA_PREFIX: u8 = 2;
 
-const CHUNK_SIZE: usize = 1;
-type UtilsBitVec = commonware_utils::BitVec<CHUNK_SIZE>;
+const BITVEC_CHUNK_SIZE: usize = 1;
+type UtilsBitVec = commonware_utils::BitVec<BITVEC_CHUNK_SIZE>;
 
 /// Configuration when deserializing messages.
 ///
@@ -117,7 +117,7 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: commonware_utils::BitVec<CHUNK_SIZE>,
+    pub bits: commonware_utils::BitVec<BITVEC_CHUNK_SIZE>,
 }
 
 impl EncodeSize for BitVec {
