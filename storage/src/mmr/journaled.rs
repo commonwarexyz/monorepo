@@ -72,9 +72,9 @@ pub struct SyncConfig<D: Digest> {
     /// Sync boundary - operations above this are rewound if present.
     pub upper_bound: u64,
 
-    /// The pinned nodes the MMR needs at the pruning boundary given by
-    /// `lower_bound`, in the order specified by [nodes_to_pin].
-    /// If `None`, the pinned nodes are expected to already be in the MMR's metadata/journal.
+    /// The pinned nodes the MMR needs at the pruning boundary given by `lower_bound`, in the order
+    /// specified by `nodes_to_pin`. If `None`, the pinned nodes are expected to already be in the
+    /// MMR's metadata/journal.
     pub pinned_nodes: Option<Vec<D>>,
 }
 

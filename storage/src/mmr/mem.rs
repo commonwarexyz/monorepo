@@ -29,7 +29,7 @@ pub struct Config<H: CHasher> {
     /// pruned.
     pub pruned_to_pos: u64,
 
-    /// The pinned nodes of the MMR, in the order expected by [nodes_to_pin].
+    /// The pinned nodes of the MMR, in the order expected by `nodes_to_pin`.
     pub pinned_nodes: Vec<H::Digest>,
 
     /// Optional thread pool to use for parallelizing batch updates.
