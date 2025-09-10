@@ -16,7 +16,6 @@ pub mod mmr;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        extern crate std;
         pub mod adb;
         pub mod archive;
         pub mod bmt;

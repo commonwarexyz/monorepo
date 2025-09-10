@@ -1,7 +1,6 @@
 //! Iterators for traversing MMRs of a given size, and functions for computing various MMR
 //! properties from their output. These are lower levels methods that are useful for implementing
 //! new MMR variants or extensions.
-
 extern crate alloc;
 
 use alloc::vec::Vec;
@@ -122,7 +121,7 @@ impl Iterator for PeakIterator {
 /// with the given peaks. This set is non-empty only if there is a height-0 (leaf) peak in the MMR.
 /// The result will contain this leaf peak plus the other MMR peaks with contiguously increasing
 /// height. Nodes in the result are ordered by decreasing height.
-pub fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
+pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     let mut peaks = Vec::new();
     let mut last_height = u32::MAX;
 
@@ -146,7 +145,7 @@ pub fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
 /// this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
-pub const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
+pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
     if leaf_pos == 0 {
         return Some(0);
     }
@@ -178,13 +177,13 @@ pub const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
 }
 
 /// Returns the position of the leaf with number `leaf_num` in an MMR.
-pub const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
+pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     // This will never underflow since 2*n >= count_ones(n).
     leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
-pub const fn pos_to_height(mut pos: u64) -> u32 {
+pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
     if pos == 0 {
         return 0;
     }
@@ -272,7 +271,7 @@ impl Iterator for PathIterator {
 /// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
 /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
 /// whose size is less than the pruning boundary.
-pub fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
+pub(crate) fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
     PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
 }
 

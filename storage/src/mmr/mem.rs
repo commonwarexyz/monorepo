@@ -184,12 +184,6 @@ impl<H: CHasher> Mmr<H> {
         Some(self.pruned_to_pos)
     }
 
-    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
-    /// be pruned, but whose digests remain required for proof generation.
-    pub fn pinned_nodes(&self) -> BTreeMap<u64, H::Digest> {
-        self.pinned_nodes.clone()
-    }
-
     /// Return a new iterator over the peaks of the MMR.
     pub fn peak_iterator(&self) -> PeakIterator {
         PeakIterator::new(self.size())
@@ -732,6 +726,13 @@ impl<H: CHasher> Mmr<H> {
             #[cfg(feature = "std")]
             pool: None,
         })
+    }
+
+    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
+    /// be pruned, but whose digests remain required for proof generation.
+    #[cfg(test)]
+    pub(super) fn pinned_nodes(&self) -> BTreeMap<u64, H::Digest> {
+        self.pinned_nodes.clone()
     }
 }
 
