@@ -107,7 +107,7 @@ fn fuzz(input: FuzzInput) {
         let mut network_handle: Option<Handle<()>> = None;
         let mut receivers: HashMap<(usize, u8), Bytes> = HashMap::new();
 
-        for op in input.operations.into_iter() {
+        for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
                 SimulatedOperation::CreateNetwork { max_size } => {
                     let config = Config {
