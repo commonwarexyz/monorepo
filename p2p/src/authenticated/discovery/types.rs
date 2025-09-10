@@ -14,8 +14,8 @@ use std::net::SocketAddr;
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
 
-/// Prefix byte used to identify a [Payload] with variant BitMap.
-const BITMAP_PREFIX: u8 = 0;
+/// Prefix byte used to identify a [Payload] with variant BitVec.
+const BIT_VEC_PREFIX: u8 = 0;
 /// Prefix byte used to identify a [Payload] with variant Peers.
 const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
@@ -65,7 +65,7 @@ impl<C: PublicKey> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::BitVec(bit_vec) => {
-                BITMAP_PREFIX.write(buf);
+                BIT_VEC_PREFIX.write(buf);
                 bit_vec.write(buf);
             }
             Payload::Peers(peers) => {
@@ -86,7 +86,7 @@ impl<C: PublicKey> Read for Payload<C> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
-            BITMAP_PREFIX => {
+            BIT_VEC_PREFIX => {
                 let bit_vec = BitVec::read_cfg(buf, &cfg.max_bit_vec)?;
                 Ok(Payload::BitVec(bit_vec))
             }
@@ -116,7 +116,7 @@ pub struct BitVec {
     /// The index that the bit vector applies to.
     pub index: u64,
 
-    /// The bitmap itself.
+    /// The bit vector itself.
     pub bits: UtilsBitMap,
 }
 
