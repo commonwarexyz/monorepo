@@ -61,11 +61,11 @@ impl<const N: usize> BitMap<N> {
     // Create a new empty bitmap with the capacity to hold `size` bits without reallocating.
     pub fn with_capacity(size: u64) -> Self {
         let num_chunks = Self::num_chunks_at_size(size).get();
-        let mut bitmap = VecDeque::with_capacity(num_chunks);
+        let mut chunks = VecDeque::with_capacity(num_chunks);
         // Invariant: chunks is never empty
-        bitmap.push_back(Self::EMPTY_CHUNK);
+        chunks.push_back(Self::EMPTY_CHUNK);
         Self {
-            chunks: bitmap,
+            chunks,
             next_bit: 0,
         }
     }
