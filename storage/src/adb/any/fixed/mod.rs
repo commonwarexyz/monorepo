@@ -12,7 +12,7 @@ use crate::{
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
-        bitmap::MerkleizedBitmap,
+        bitmap::MerkleizedBitMap,
         hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
@@ -144,7 +144,7 @@ impl<
             inactivity_floor_loc,
             &log,
             &mut snapshot,
-            None::<&mut MerkleizedBitmap<H, UNUSED_N>>,
+            None::<&mut MerkleizedBitMap<H, UNUSED_N>>,
         )
         .await?;
 
@@ -256,7 +256,7 @@ impl<
         inactivity_floor_loc: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
-        mut bitmap: Option<&mut MerkleizedBitmap<H, N>>,
+        mut bitmap: Option<&mut MerkleizedBitMap<H, N>>,
     ) -> Result<(), Error> {
         if let Some(ref bitmap) = bitmap {
             assert_eq!(inactivity_floor_loc, bitmap.len());
@@ -1346,7 +1346,7 @@ pub(super) mod test {
             // Close the db, then replay its operations with a bitmap.
             db.close().await.unwrap();
             // Initialize the bitmap based on the current db's inactivity floor.
-            let mut bitmap = MerkleizedBitmap::<_, SHA256_SIZE>::new();
+            let mut bitmap = MerkleizedBitMap::<_, SHA256_SIZE>::new();
             for _ in 0..inactivity_floor_loc {
                 bitmap.append(false);
             }
