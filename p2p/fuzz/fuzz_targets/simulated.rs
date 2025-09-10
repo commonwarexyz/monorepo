@@ -185,6 +185,7 @@ fn fuzz(input: FuzzInput) {
                                 _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
                                     // Do nothing, because there is no guarantee that the message will be delivered in this test,
                                     // For example, sender and receiver may be not linked, or linked by a poor connection.
+                                    continue;
                                 },
                             }
                         }
