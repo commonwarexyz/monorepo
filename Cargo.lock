@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p-fuzz"
-version = "0.0.62"
+version = "0.0.61"
 dependencies = [
  "arbitrary",
  "bytes",
