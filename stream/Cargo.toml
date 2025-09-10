@@ -1,12 +1,12 @@
 [package]
 name = "commonware-stream"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.61"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Exchange messages over arbitrary transport."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/stream"
 documentation = "https://docs.rs/commonware-stream"
 

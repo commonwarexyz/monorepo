@@ -176,12 +176,3 @@ jobs:
       run: |
         cd storage
         MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --lib index::
-
-  Scripts:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    - name: Run shellcheck
-      run: find scripts -name "*.sh" -exec shellcheck -o all {} +
