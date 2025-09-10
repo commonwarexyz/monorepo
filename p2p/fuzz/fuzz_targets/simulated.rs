@@ -16,7 +16,7 @@ const MAX_OPERATIONS: usize = 50;
 const MAX_PEERS: usize = 16;
 const MIN_SLEEP_DURATION: u64 = 100;
 const MAX_SLEEP_DURATION: u64 = 3000;
-const MAX_MESSAGE_SIZE: usize = 100 * 1024 * 1024;
+const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Arbitrary)]
 enum SimulatedOperation {
@@ -31,7 +31,7 @@ enum SimulatedOperation {
         peer_idx: u8,
         channel_id: u8,
         to_idx: u8,
-        message_data: Vec<u8>,
+        msg_size: u32,
     },
     ReceiveMessages,
     AddLink {
@@ -66,23 +66,30 @@ enum SimulatedOperation {
 struct FuzzInput {
     seed: u64,
     operations: Vec<SimulatedOperation>,
+    n: u8,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
         let operations = u.arbitrary()?;
-        Ok(FuzzInput { seed, operations })
+        let n = u.int_in_range(2..=MAX_PEERS as u32)? as u8;
+        Ok(FuzzInput {
+            seed,
+            operations,
+            n,
+        })
     }
 }
 
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.seed);
+    let n = input.n;
 
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         let mut peers = Vec::new();
-        for i in 0..MAX_PEERS {
+        for i in 0..n {
             let seed = rng.gen::<u64>() ^ (i as u64);
             let private_key = ed25519::PrivateKey::from_seed(seed);
             peers.push(private_key.public_key());
@@ -100,7 +107,7 @@ fn fuzz(input: FuzzInput) {
         let mut network_handle: Option<Handle<()>> = None;
         let mut receivers: HashMap<(usize, u8), Bytes> = HashMap::new();
 
-        for op in input.operations.into_iter().take(MAX_OPERATIONS) {
+        for op in input.operations.into_iter() {
             match op {
                 SimulatedOperation::CreateNetwork { max_size } => {
                     let config = Config {
@@ -140,17 +147,25 @@ fn fuzz(input: FuzzInput) {
                     peer_idx,
                     channel_id,
                     to_idx,
-                    message_data,
+                    msg_size,
                 } => {
                     let from_idx = (peer_idx as usize) % peers.len();
                     let to_idx = (to_idx as usize) % peers.len();
+                    let msg_size = msg_size.clamp(1, MAX_MESSAGE_SIZE as u32);
 
                     if let Some((ref mut sender, _)) = channels.get_mut(&(from_idx, channel_id)) {
-                        let message = Bytes::from(message_data);
-                        receivers.insert((to_idx, channel_id), message.clone());
-                        let _ = sender
-                            .send(Recipients::One(peers[to_idx].clone()), message, true)
-                            .await;
+                        // send a message if we haven't sent it before
+                        if let std::collections::hash_map::Entry::Vacant(e) =
+                            receivers.entry((to_idx, channel_id))
+                        {
+                            let mut bytes = vec![0u8; msg_size as usize];
+                            rng.fill(&mut bytes[..]);
+                            let message = Bytes::from(bytes);
+                            e.insert(message.clone());
+                            let _ = sender
+                                .send(Recipients::One(peers[to_idx].clone()), message, true)
+                                .await;
+                        }
                     }
                 }
 
