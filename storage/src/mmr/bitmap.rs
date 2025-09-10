@@ -202,11 +202,14 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.len()
     }
 
+    /// Returns true if the bitmap is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Return the number of bits that have been pruned from this bitmap.
+    #[inline]
     pub fn pruned_bits(&self) -> u64 {
         self.bitmap.pruned_bits()
     }

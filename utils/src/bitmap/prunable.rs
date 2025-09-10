@@ -190,16 +190,19 @@ impl<const N: usize> Prunable<N> {
     }
 
     /// Get the number of chunks in the bitmap
+    #[inline]
     pub fn chunks_len(&self) -> usize {
         self.bitmap.chunks_len()
     }
 
     /// Get a reference to a chunk by its index in the current bitmap
+    #[inline]
     pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
         self.bitmap.get_chunk_by_index(index)
     }
 
     /// Get the number of pruned chunks
+    #[inline]
     pub fn pruned_chunks(&self) -> usize {
         self.pruned_chunks
     }

@@ -285,11 +285,13 @@ impl<const N: usize> BitMap<N> {
     }
 
     /// Returns true if the bitmap is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Get a reference to a chunk by its index in the current bitmap
+    #[inline]
     pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
         &self.chunks[index]
     }
