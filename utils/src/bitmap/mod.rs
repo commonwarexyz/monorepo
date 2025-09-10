@@ -622,8 +622,14 @@ impl<const N: usize> Write for BitMap<N> {
         // Prefix with the number of bits
         self.len().write(buf);
 
-        // Write all chunks
-        for chunk in &self.chunks {
+        // Write chunks, omitting the last chunk if it's empty
+        let num_chunks_to_write = if self.next_bit == 0 {
+            self.chunks.len() - 1
+        } else {
+            self.chunks.len()
+        };
+
+        for chunk in self.chunks.iter().take(num_chunks_to_write) {
             for &byte in chunk {
                 byte.write(buf);
             }
@@ -638,23 +644,34 @@ impl<const N: usize> Read for BitMap<N> {
         // Parse length in bits
         let len = usize::read_cfg(buf, range)?;
 
+        // If next_bit == 0, the last chunk is empty and was omitted during serialization
+        let num_chunks_needed = Self::num_chunks_at_size(len).get();
+        let next_bit = len % Self::CHUNK_SIZE_BITS;
+        let last_chunk_omitted = next_bit == 0;
+        let num_chunks_to_read = if last_chunk_omitted {
+            num_chunks_needed - 1
+        } else {
+            num_chunks_needed
+        };
+
         // Parse chunks
-        let num_chunks = Self::num_chunks_at_size(len).get();
-        let mut bitmap = VecDeque::with_capacity(num_chunks);
-        for _ in 0..num_chunks {
+        let mut chunks = VecDeque::with_capacity(num_chunks_needed);
+        for _ in 0..num_chunks_to_read {
             let mut chunk = [0u8; N];
             for byte in &mut chunk {
                 *byte = u8::read(buf)?;
             }
-            bitmap.push_back(chunk);
+            chunks.push_back(chunk);
         }
 
-        let mut result = BitMap {
-            chunks: bitmap,
-            next_bit: len % Self::CHUNK_SIZE_BITS,
-        };
+        // Add back the omitted empty chunk if necessary
+        if last_chunk_omitted {
+            chunks.push_back(Self::EMPTY_CHUNK);
+        }
 
-        // Clear trailing bits to maintain invariant - error if any were set (invalid encoding)
+        let mut result = BitMap { chunks, next_bit };
+
+        // Verify trailing bits are zero (maintain invariant)
         if result.clear_trailing_bits() {
             return Err(CodecError::Invalid(
                 "BitMap",
@@ -668,8 +685,13 @@ impl<const N: usize> Read for BitMap<N> {
 
 impl<const N: usize> EncodeSize for BitMap<N> {
     fn encode_size(&self) -> usize {
-        // Size of length + all chunks
-        self.len().encode_size() + (self.chunks.len() * N)
+        // Size of length prefix + serialized chunks
+        let num_chunks_to_write = if self.next_bit == 0 {
+            self.chunks.len() - 1
+        } else {
+            self.chunks.len()
+        };
+        self.len().encode_size() + (num_chunks_to_write * N)
     }
 }
 
@@ -1546,6 +1568,47 @@ mod tests {
         }
         let encoded = large_bv.encode();
         assert_eq!(large_bv.encode_size(), encoded.len());
+    }
+
+    #[test]
+    fn test_codec_empty_chunk_optimization() {
+        // Test that empty last chunks are not serialized
+
+        // Case 1: Empty bitmap (omits the only empty chunk)
+        let bv_empty: BitMap<4> = BitMap::new();
+        let encoded_empty = bv_empty.encode();
+        let decoded_empty: BitMap<4> =
+            BitMap::decode_cfg(&mut encoded_empty.as_ref(), &(..).into()).unwrap();
+        assert_eq!(bv_empty, decoded_empty);
+        assert_eq!(bv_empty.len(), decoded_empty.len());
+        // Should only encode the length, no chunks
+        assert_eq!(encoded_empty.len(), bv_empty.len().encode_size());
+
+        // Case 2: Bitmap ending exactly at chunk boundary (omits empty last chunk)
+        let mut bv_exact: BitMap<4> = BitMap::new();
+        for _ in 0..32 {
+            bv_exact.push(true);
+        }
+        let encoded_exact = bv_exact.encode();
+        let decoded_exact: BitMap<4> =
+            BitMap::decode_cfg(&mut encoded_exact.as_ref(), &(..).into()).unwrap();
+        assert_eq!(bv_exact, decoded_exact);
+
+        // Case 3: Bitmap with partial last chunk (includes last chunk)
+        let mut bv_partial: BitMap<4> = BitMap::new();
+        for _ in 0..35 {
+            bv_partial.push(true);
+        }
+        let encoded_partial = bv_partial.encode();
+        let decoded_partial: BitMap<4> =
+            BitMap::decode_cfg(&mut encoded_partial.as_ref(), &(..).into()).unwrap();
+        assert_eq!(bv_partial, decoded_partial);
+        assert_eq!(bv_partial.len(), decoded_partial.len());
+
+        // Verify optimization works correctly
+        assert!(encoded_exact.len() < encoded_partial.len());
+        assert_eq!(encoded_exact.len(), bv_exact.len().encode_size() + 4); // length + 1 chunk
+        assert_eq!(encoded_partial.len(), bv_partial.len().encode_size() + 8); // length + 2 chunks
     }
 
     #[test]
