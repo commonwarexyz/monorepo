@@ -63,45 +63,47 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.seed);
-    
+
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         let private_key = ed25519::PrivateKey::from_seed(rng.gen());
         let peer2 = ed25519::PrivateKey::from_seed(rng.gen());
         let peer3 = ed25519::PrivateKey::from_seed(rng.gen());
-        
+
         let port = 20000 + (rng.gen::<u16>() % 10000);
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        
+
         let peers = vec![
-            (peer2.public_key(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port + 1)),
-            (peer3.public_key(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port + 2)),
+            (
+                peer2.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port + 1),
+            ),
+            (
+                peer3.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port + 2),
+            ),
         ];
-        
-        let config = Config::recommended(
-            private_key,
-            b"fuzz",
-            address,
-            address,
-            1024 * 1024,
-        );
-        
+
+        let config = Config::recommended(private_key, b"fuzz", address, address, 1024 * 1024);
+
         let (network, mut oracle) = Network::new(context.with_label("network"), config.clone());
-        
+
         oracle.register(0, peers.clone()).await;
-        
+
         let _network_handle = network.start();
-        
+
         let (mut channel_network, _) = Network::new(context.with_label("channels"), config);
-        
+
         let mut channels = std::collections::HashMap::new();
         let mut registered_channels = std::collections::HashSet::new();
-        
+
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
-                LookupOperation::CreateNetwork { peer_idx: _, port: _ } => {
-                }
-                
+                LookupOperation::CreateNetwork {
+                    peer_idx: _,
+                    port: _,
+                } => {}
+
                 LookupOperation::RegisterChannel { channel_id } => {
                     if !registered_channels.contains(&channel_id) {
                         let (sender, receiver) = channel_network.register(
@@ -113,7 +115,7 @@ fn fuzz(input: FuzzInput) {
                         registered_channels.insert(channel_id);
                     }
                 }
-                
+
                 LookupOperation::SendMessage {
                     channel_id,
                     message_data,
@@ -129,7 +131,7 @@ fn fuzz(input: FuzzInput) {
                         let _ = sender.send(recipients, message, priority).await;
                     }
                 }
-                
+
                 LookupOperation::ReceiveMessage { channel_id } => {
                     if let Some((_, ref mut receiver)) = channels.get_mut(&channel_id) {
                         commonware_macros::select! {
@@ -138,21 +140,18 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
                 }
-                
-                LookupOperation::StartNetwork => {
-                }
-                
-                LookupOperation::StopNetwork => {
-                }
-                
+
+                LookupOperation::StartNetwork => {}
+
+                LookupOperation::StopNetwork => {}
+
                 LookupOperation::DropChannel { channel_id } => {
                     channels.remove(&channel_id);
                     registered_channels.remove(&channel_id);
                 }
-                
-                LookupOperation::Disconnect => {
-                }
-                
+
+                LookupOperation::Disconnect => {}
+
                 LookupOperation::Sleep { ms } => {
                     let sleep_duration = (ms as u64).min(100);
                     context.sleep(Duration::from_millis(sleep_duration)).await;
