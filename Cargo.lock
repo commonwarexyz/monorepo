@@ -1311,6 +1311,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-p2p-fuzz"
+version = "0.0.61"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "futures",
+ "governor",
+ "libfuzzer-sys",
+ "rand 0.8.5",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "commonware-resolver"
 version = "0.0.60"
 dependencies = [
