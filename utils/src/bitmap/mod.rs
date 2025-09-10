@@ -22,7 +22,7 @@ pub use prunable::Prunable;
 pub const DEFAULT_CHUNK_SIZE: usize = 32;
 
 /// A bitmap that stores data in chunks of N bytes.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
@@ -296,10 +296,10 @@ impl<const N: usize> BitMap<N> {
 
         // Clear whole bytes after the last valid bit
         let last_byte_index = ((next_bit - 1) / 8) as usize;
-        for i in (last_byte_index + 1)..N {
-            if last_chunk[i] != 0 {
+        for byte in last_chunk.iter_mut().skip(last_byte_index + 1) {
+            if *byte != 0 {
                 flipped_any = true;
-                last_chunk[i] = 0;
+                *byte = 0;
             }
         }
 
@@ -482,31 +482,6 @@ impl<const N: usize> Default for BitMap<N> {
         Self::new()
     }
 }
-
-impl<const N: usize> PartialEq for BitMap<N> {
-    fn eq(&self, other: &Self) -> bool {
-        // First check if bit counts match
-        if self.len() != other.len() {
-            return false;
-        }
-
-        // If both are empty, they're equal
-        if self.is_empty() {
-            return true;
-        }
-
-        // Compare each valid bit
-        for i in 0..self.len() {
-            if self.get_bit(i) != other.get_bit(i) {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-impl<const N: usize> Eq for BitMap<N> {}
 
 impl<T: AsRef<[bool]>, const N: usize> From<T> for BitMap<N> {
     fn from(t: T) -> Self {
@@ -792,13 +767,7 @@ mod tests {
                 let byte_idx = (bit_idx / 8) as usize;
                 let bit_in_byte = bit_idx % 8;
                 let mask = 1u8 << bit_in_byte;
-                assert_eq!(
-                    last_chunk[byte_idx] & mask,
-                    0,
-                    "Invariant violated: bit {} in last chunk is set (next_bit = {})",
-                    bit_idx,
-                    next_bit
-                );
+                assert_eq!(last_chunk[byte_idx] & mask, 0);
             }
         }
 
@@ -1279,70 +1248,52 @@ mod tests {
     }
 
     #[test]
-    fn test_equality_ignores_trailing_bits() {
-        // Test that equality comparison ignores trailing bits
+    fn test_equality() {
+        // Test empty bitmaps
+        assert_eq!(BitMap::<4>::new(), BitMap::<4>::new());
+        assert_eq!(BitMap::<8>::new(), BitMap::<8>::new());
+
+        // Test non-empty bitmaps from constructors
+        let pattern = [true, false, true, true, false, false, true, false, true];
+        let bv4: BitMap<4> = pattern.as_ref().into();
+        assert_eq!(bv4, BitMap::<4>::from(pattern.as_ref()));
+        let bv8: BitMap<8> = pattern.as_ref().into();
+        assert_eq!(bv8, BitMap::<8>::from(pattern.as_ref()));
+
+        // Test non-empty bitmaps from push operations
         let mut bv1: BitMap<4> = BitMap::new();
         let mut bv2: BitMap<4> = BitMap::new();
-
-        // Add same bits to both
-        bv1.push(true);
-        bv1.push(false);
-        bv1.push(true);
-
-        bv2.push(true);
-        bv2.push(false);
-        bv2.push(true);
-
-        // They should be equal
-        assert_eq!(bv1, bv2);
-
-        // Now manually corrupt trailing bits in one of them
-        {
-            let last_chunk = bv1.chunks.back_mut().unwrap();
-            last_chunk[0] |= 0xF8; // Set bits 3-7 (invalid bits)
+        for i in 0..33 {
+            let bit = i % 3 == 0;
+            bv1.push(bit);
+            bv2.push(bit);
         }
-
-        // They should still be equal because comparison ignores trailing bits
         assert_eq!(bv1, bv2);
 
-        // But if we change a valid bit, they should be different
-        bv1.set(1, true); // Change bit 1 from false to true
+        // Test inequality: different lengths
+        bv1.push(true);
         assert_ne!(bv1, bv2);
-    }
-
-    #[test]
-    fn test_equality() {
-        // Test equality with empty bitmaps
-        let bv1: BitMap<4> = BitMap::new();
-        let bv2: BitMap<4> = BitMap::new();
+        bv1.pop(); // Restore equality
         assert_eq!(bv1, bv2);
 
-        // Test equality with different lengths
-        let mut bv3: BitMap<4> = BitMap::new();
-        bv3.push(true);
-        assert_ne!(bv1, bv3);
+        // Test inequality: different content
+        bv1.flip(15);
+        assert_ne!(bv1, bv2);
+        bv1.flip(15); // Restore equality
+        assert_eq!(bv1, bv2);
 
-        // Test equality after operations that might leave trailing bits
-        let mut bv4: BitMap<4> = [true, false, true].as_ref().into();
-        let mut bv5: BitMap<4> = [true, false, true].as_ref().into();
+        // Test equality after operations
+        let mut bv_ops1 = BitMap::<16>::ones(25);
+        let mut bv_ops2 = BitMap::<16>::ones(25);
+        bv_ops1.flip_all();
+        bv_ops2.flip_all();
+        assert_eq!(bv_ops1, bv_ops2);
 
-        bv4.set_all(true);
-        bv5.set_all(true);
-        assert_eq!(bv4, bv5);
-
-        bv4.flip_all();
-        bv5.flip_all();
-        assert_eq!(bv4, bv5);
-
-        // Test with bitwise operations
-        let bv6: BitMap<4> = [true, true, false].as_ref().into();
-
-        let mut bv8 = bv4.clone();
-        let mut bv9 = bv5.clone();
-
-        bv8.and(&bv6);
-        bv9.and(&bv6);
-        assert_eq!(bv8, bv9);
+        let mask_bits: Vec<bool> = (0..33).map(|i| i % 3 == 0).collect();
+        let mask = BitMap::<4>::from(mask_bits);
+        bv1.and(&mask);
+        bv2.and(&mask);
+        assert_eq!(bv1, bv2);
     }
 
     #[test]
