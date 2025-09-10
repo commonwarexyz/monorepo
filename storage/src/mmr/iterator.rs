@@ -12,7 +12,6 @@ use alloc::vec::Vec;
 /// ```text
 /// [(14, 3), (17, 1), (18, 0)]
 /// ```
-
 #[derive(Default)]
 pub struct PeakIterator {
     size: u64,     // number of nodes in the MMR at the point the iterator was initialized
