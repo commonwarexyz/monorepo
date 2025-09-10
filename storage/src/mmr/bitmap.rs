@@ -76,7 +76,7 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     /// The size of a chunk in bits.
-    pub const CHUNK_SIZE_BITS: usize = BitMap::<N>::CHUNK_SIZE_BITS;
+    pub const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS as u64;
 
     /// Return a new empty bitmap.
     pub fn new() -> Self {
@@ -405,7 +405,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         last_chunk_digest: &H::Digest,
     ) -> H::Digest {
         assert!(next_bit > 0);
-        assert!(next_bit < Self::CHUNK_SIZE_BITS as u64);
+        assert!(next_bit < Self::CHUNK_SIZE_BITS);
         hasher.update(mmr_root);
         hasher.update(&next_bit.to_be_bytes());
         hasher.update(last_chunk_digest);
@@ -478,11 +478,11 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         let leaf_pos = Self::leaf_pos(bit_offset as usize);
 
         let mut mmr_proof = Proof::<H::Digest> {
-            size: leaf_num_to_pos(bit_len / Self::CHUNK_SIZE_BITS as u64),
+            size: leaf_num_to_pos(bit_len / Self::CHUNK_SIZE_BITS),
             digests: proof.digests.clone(),
         };
 
-        if bit_len % Self::CHUNK_SIZE_BITS as u64 == 0 {
+        if bit_len % Self::CHUNK_SIZE_BITS == 0 {
             return mmr_proof.verify_element_inclusion(hasher, chunk, leaf_pos, root);
         }
 
@@ -504,7 +504,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
                 return false;
             }
             let last_chunk_digest = hasher.digest(chunk);
-            let next_bit = bit_len % Self::CHUNK_SIZE_BITS as u64;
+            let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
             let reconstructed_root = Self::partial_chunk_root(
                 hasher.inner(),
                 &last_digest,
@@ -524,7 +524,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             }
         };
 
-        let next_bit = bit_len % Self::CHUNK_SIZE_BITS as u64;
+        let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
             Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_digest);
 
@@ -972,7 +972,9 @@ mod tests {
 
             // prune 10 chunks at a time and make sure replay will restore the bitmap every time.
             for i in (10..=FULL_CHUNK_COUNT).step_by(10) {
-                bitmap.prune_to_bit(i * MerkleizedBitMap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS);
+                bitmap.prune_to_bit(
+                    i * MerkleizedBitMap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS as usize,
+                );
                 bitmap
                     .write_pruned(context.clone(), PARTITION)
                     .await

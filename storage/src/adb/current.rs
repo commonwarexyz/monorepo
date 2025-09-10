@@ -441,7 +441,7 @@ impl<
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64;
+        let chunk_bits = MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
         let start = start_loc / chunk_bits;
         let end = end_loc / chunk_bits;
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
@@ -493,11 +493,11 @@ impl<
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let mut verifier = GraftingVerifier::<H>::new(
             Self::grafting_height(),
-            start_loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64,
+            start_loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS,
             chunk_vec,
         );
 
-        if op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64 == 0 {
+        if op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS == 0 {
             return proof.verify_range_inclusion(&mut verifier, &elements, start_pos, root);
         }
 
@@ -518,7 +518,7 @@ impl<
             }
         };
 
-        let next_bit = op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64;
+        let next_bit = op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
         let reconstructed_root = MerkleizedBitMap::<H, N>::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
@@ -597,12 +597,12 @@ impl<
         }
 
         let pos = leaf_num_to_pos(info.loc);
-        let num = info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64;
+        let num = info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier =
             GraftingVerifier::<H>::new(Self::grafting_height(), num, vec![&info.chunk]);
         let element = Fixed::Update(info.key.clone(), info.value.clone()).encode();
 
-        if op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64 == 0 {
+        if op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS == 0 {
             return proof.verify_element_inclusion(&mut verifier, &element, pos, root);
         }
 
@@ -618,8 +618,8 @@ impl<
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of info.chunk, since these bits are not part of
         // the mmr.
-        if info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64
-            == op_count / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64
+        if info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS
+            == op_count / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS
         {
             let expected_last_chunk_digest = verifier.digest(&info.chunk);
             if last_chunk_digest != expected_last_chunk_digest {
@@ -637,7 +637,7 @@ impl<
             }
         };
 
-        let next_bit = op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64;
+        let next_bit = op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
         let reconstructed_root = MerkleizedBitMap::<H, N>::partial_chunk_root(
             hasher,
             &mmr_root,
