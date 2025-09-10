@@ -1,12 +1,12 @@
 [package]
 name = "commonware-coding"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.61"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Encode data to enable recovery from a subset of fragments."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/coding"
 documentation = "https://docs.rs/commonware-coding"
 

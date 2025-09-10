@@ -1,12 +1,12 @@
 [package]
 name = "commonware-storage"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.61"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Persist and retrieve data from an abstract store."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
 documentation = "https://docs.rs/commonware-storage"
 
