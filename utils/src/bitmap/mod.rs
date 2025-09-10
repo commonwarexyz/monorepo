@@ -294,7 +294,7 @@ impl<const N: usize> BitMap<N> {
 
     /// Get a reference to a chunk by its index in the current bitmap
     #[inline]
-    pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
+    pub(super) fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
         &self.chunks[index]
     }
 
