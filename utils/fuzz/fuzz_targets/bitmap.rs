@@ -24,7 +24,7 @@ enum FuzzInput {
     Get(Vec<bool>, usize),
     Set(Vec<bool>, u64),
     Clear(Vec<bool>, u64),
-    Toggle(Vec<bool>, u64),
+    Flip(Vec<bool>, u64),
     SetTo(Vec<bool>, u64, bool),
     SetAll(Vec<bool>, bool),
     And(Vec<bool>, Vec<bool>),
@@ -233,11 +233,11 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::Toggle(bools, index) => {
+            FuzzInput::Flip(bools, index) => {
                 let mut v = BitMap::from(&bools);
                 if index < v.len() {
                     let old_value = v.get_bit(index);
-                    v.toggle(index);
+                    v.flip(index);
                     assert_eq!(v.get_bit(index), !old_value);
                 }
             }

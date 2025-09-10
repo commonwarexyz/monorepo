@@ -304,7 +304,7 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if `index` is out of bounds.
     #[inline]
-    pub fn toggle(&mut self, index: u64) {
+    pub fn flip(&mut self, index: u64) {
         self.assert_index(index);
         let chunk_index = Self::chunk_index(index);
         let byte_offset = Self::chunk_byte_offset(index);
@@ -743,10 +743,10 @@ mod tests {
         bv.set(2, false);
         assert!(!bv.get_bit(2));
 
-        // Test toggle
-        bv.toggle(0); // true -> false
+        // Test flip
+        bv.flip(0); // true -> false
         assert!(!bv.get_bit(0));
-        bv.toggle(0); // false -> true
+        bv.flip(0); // false -> true
         assert!(bv.get_bit(0));
     }
 
@@ -1077,10 +1077,10 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Index out of bounds")]
-    fn test_toggle_out_of_bounds() {
+    fn test_flip_out_of_bounds() {
         let mut bv: BitMap<4> = BitMap::new();
         bv.push(true);
-        bv.toggle(1); // Only bit 0 exists
+        bv.flip(1); // Only bit 0 exists
     }
 
     #[test]
