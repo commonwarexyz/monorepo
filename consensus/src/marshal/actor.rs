@@ -27,7 +27,7 @@ use commonware_storage::archive::{immutable, Archive as _, Identifier};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
-    try_join, StreamExt,
+    join, try_join, StreamExt,
 };
 use governor::{clock::Clock as GClock, Quota};
 use prometheus_client::metrics::gauge::Gauge;
@@ -361,6 +361,23 @@ impl<
                         Message::Get { commitment, response } => {
                             // Check for block locally
                             let result = self.find_block(&mut buffer, commitment).await;
+                            let _ = response.send(result);
+                        }
+                        Message::GetByHeight { height, response } => {
+                            // Check for block locally
+                            let result = self.get_finalized_block(height).await;
+                            let _ = response.send(result);
+                        }
+                        Message::GetFinalization { height, response } => {
+                            // Check for finalization locally
+                            let (f, b) = join!(
+                                self.get_finalization_by_height(height),
+                                self.get_finalized_block(height),
+                            );
+                            let result = match (f, b) {
+                                (Some(f), Some(b)) => Some((f, b)),
+                                _ => None,
+                            };
                             let _ = response.send(result);
                         }
                         Message::Subscribe { round, commitment, response } => {
