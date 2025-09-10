@@ -10,7 +10,10 @@ use commonware_p2p::{
 use commonware_runtime::{deterministic, Clock, Handle, Metrics, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Duration,
+};
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_PEERS: usize = 16;
@@ -51,6 +54,7 @@ enum SimulatedOperation {
         channel_id: u8,
         latency_ms: u16,
         success_rate: u8,
+        jitter_ms: u16,
     },
     AbortNetwork,
     DropChannel {
@@ -105,7 +109,7 @@ fn fuzz(input: FuzzInput) {
         > = HashMap::new();
         let mut registered_peer_channels = std::collections::HashSet::new();
         let mut network_handle: Option<Handle<()>> = None;
-        let mut receivers: HashMap<(usize, u8), Bytes> = HashMap::new();
+        let mut expected: HashMap<(usize, u8), VecDeque<Bytes>> = HashMap::new();
 
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
@@ -123,6 +127,7 @@ fn fuzz(input: FuzzInput) {
                     network_handle = Some(handle);
                     channels.clear();
                     registered_peer_channels.clear();
+                    expected.clear();
                 }
 
                 SimulatedOperation::RegisterChannel {
@@ -154,39 +159,42 @@ fn fuzz(input: FuzzInput) {
                     let msg_size = msg_size.clamp(1, MAX_MESSAGE_SIZE as u32);
 
                     if let Some((ref mut sender, _)) = channels.get_mut(&(from_idx, channel_id)) {
-                        // send a message if we haven't sent it before
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            receivers.entry((to_idx, channel_id))
-                        {
-                            let mut bytes = vec![0u8; msg_size as usize];
-                            rng.fill(&mut bytes[..]);
-                            let message = Bytes::from(bytes);
-                            e.insert(message.clone());
-                            let _ = sender
-                                .send(Recipients::One(peers[to_idx].clone()), message, true)
-                                .await;
+                        let mut bytes = vec![0u8; msg_size as usize];
+                        rng.fill(&mut bytes[..]);
+                        let message = Bytes::from(bytes);
+
+                        // Only add expectation if send succeeds
+                        let res = sender
+                            .send(Recipients::One(peers[to_idx].clone()), message.clone(), true)
+                            .await;
+                        if res.is_ok() {
+                            expected.entry((to_idx, channel_id))
+                                .or_default()
+                                .push_back(message);
                         }
                     }
                 }
 
                 SimulatedOperation::ReceiveMessages => {
-                    let expected_messages: Vec<_> =
-                        receivers.iter().map(|(k, v)| (*k, v.clone())).collect();
-                    for ((to_idx, channel_id), expected_message) in expected_messages {
-                        if let Some((_, ref mut receiver)) = channels.get_mut(&(to_idx, channel_id))
-                        {
-                            receivers.remove(&(to_idx, channel_id));
-                            commonware_macros::select! {
-                                result = receiver.recv() => {
-                                    if let Ok((_peer, message)) = result {
-                                        assert_eq!(message, expected_message, "message mismatch");
+                    let expected_keys: Vec<_> = expected.keys().copied().collect();
+                    for (to_idx, channel_id) in expected_keys {
+                        if let Some((_, ref mut receiver)) = channels.get_mut(&(to_idx, channel_id)) {
+                            if let Some(queue) = expected.get_mut(&(to_idx, channel_id)) {
+                                commonware_macros::select! {
+                                    result = receiver.recv() => {
+                                        if let Ok((_peer, message)) = result {
+                                            if let Some(pos) = queue.iter().position(|m| m == &message) {
+                                                queue.remove(pos); // remove the matched one
+                                                if queue.is_empty() { expected.remove(&(to_idx, channel_id)); }
+                                            } else {
+                                                panic!("Message not found in expected queue");
+                                            }
+                                        }
+                                    },
+                                    _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
+                                        continue;
                                     }
-                                },
-                                _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
-                                    // Do nothing, because there is no guarantee that the message will be delivered in this test,
-                                    // For example, sender and receiver may be not linked, or linked by a poor connection.
-                                    continue;
-                                },
+                                }
                             }
                         }
                     }
@@ -233,6 +241,7 @@ fn fuzz(input: FuzzInput) {
                     channel_id,
                     latency_ms,
                     success_rate,
+                    jitter_ms,
                 } => {
                     let from_idx = (from_idx as usize) % peers.len();
                     let to_idx = (to_idx as usize) % peers.len();
@@ -266,7 +275,7 @@ fn fuzz(input: FuzzInput) {
                         if from_idx != to_idx {
                             let link = Link {
                                 latency: Duration::from_millis(latency_ms as u64),
-                                jitter: Duration::from_millis(0),
+                                jitter: Duration::from_millis(jitter_ms as u64),
                                 success_rate: (success_rate as f64) / 255.0,
                             };
                             let _ = oracle
@@ -280,24 +289,33 @@ fn fuzz(input: FuzzInput) {
                     if let Some(handle) = network_handle.take() {
                         handle.abort();
                     }
+                    oracle = None;
+                    channels.clear();
+                    registered_peer_channels.clear();
+                    expected.clear();
                 }
 
                 SimulatedOperation::DropChannel {
                     peer_idx,
                     channel_id,
                 } => {
-                    let idx = peer_idx as usize;
+                    let idx = (peer_idx as usize) % peers.len();
                     let key = (idx, channel_id);
                     channels.remove(&key);
                     registered_peer_channels.remove(&key);
+                    expected.remove(&key);
                 }
 
                 SimulatedOperation::Sleep { ms } => {
-                    let sleep_duration =
-                        (ms as u64).min(MIN_SLEEP_DURATION).max(MAX_SLEEP_DURATION);
+                    let sleep_duration = (ms as u64).clamp(MIN_SLEEP_DURATION, MAX_SLEEP_DURATION);
                     context.sleep(Duration::from_millis(sleep_duration)).await;
                 }
             }
+        }
+
+        // Final teardown
+        if let Some(handle) = network_handle.take() {
+            handle.abort();
         }
     });
 }

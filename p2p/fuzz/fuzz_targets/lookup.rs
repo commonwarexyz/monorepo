@@ -321,7 +321,7 @@ fn fuzz(input: FuzzInput) {
                     let peer_idx_u8 = peer_idx as u8;
                     let channel = *channel % MAX_CHANNELS;
                     let num_peers = (*num_peers as usize).clamp(1, peers.len());
-                    
+
                     if let Some(state) = networks.get_mut(&peer_idx_u8) {
                         let mut peer_set = HashSet::new();
                         for _ in 0..num_peers {
@@ -330,7 +330,7 @@ fn fuzz(input: FuzzInput) {
                             peer_set.insert((peer.public_key.clone(), peer.address));
                         }
                         let peer_subset: Vec<_> = peer_set.into_iter().collect();
-                        
+
                         let _ = state.oracle.register(channel as u64, peer_subset).await;
                     }
                 }
@@ -343,16 +343,16 @@ fn fuzz(input: FuzzInput) {
                     let peer_idx_u8 = peer_idx as u8;
                     let target_idx = (*target_idx as usize) % peers.len();
                     let target_idx_u8 = target_idx as u8;
-                    
+
                     if let Some(state) = networks.get_mut(&peer_idx_u8) {
                         let target_pk = peers[target_idx].public_key.clone();
                         let _ = state.oracle.block(target_pk).await;
-                        
+
                         // Remove expectations for messages from target_idx to peer_idx
                         expected_messages.retain(|(to_idx, from_idx, _ch), _queue| {
                             !(*to_idx == peer_idx_u8 && *from_idx == target_idx_u8)
                         });
-                        
+
                         // Remove from pending_by_receiver index
                         pending_by_receiver.retain(|(to_idx, _ch), senders| {
                             if *to_idx == peer_idx_u8 {
