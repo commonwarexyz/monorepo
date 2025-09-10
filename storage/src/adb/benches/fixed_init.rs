@@ -91,6 +91,7 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
             inactivity_floor_loc = db.inactivity_floor_loc(),
             "DB generated.",
         );
+        db.prune(db.inactivity_floor_loc()).await.unwrap();
         db.close().await.unwrap();
     });
 }
