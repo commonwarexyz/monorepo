@@ -48,6 +48,8 @@ pub enum Error {
     ItemTooLarge(usize),
     #[error("already pruned to section: {0}")]
     AlreadyPrunedToSection(u64),
+    #[error("section out of range: {0}")]
+    SectionOutOfRange(u64),
     #[error("usize too small")]
     UsizeTooSmall,
     #[error("offset overflow")]
@@ -56,10 +58,10 @@ pub enum Error {
     UnexpectedSize(u32, u32),
     #[error("missing blob: {0}")]
     MissingBlob(u64),
+    #[error("item out of range: {0}")]
+    ItemOutOfRange(u64),
     #[error("item pruned: {0}")]
     ItemPruned(u64),
-    #[error("invalid item: {0}")]
-    InvalidItem(u64),
     #[error("invalid rewind: {0}")]
     InvalidRewind(u64),
     #[error("compression failed")]
