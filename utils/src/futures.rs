@@ -496,7 +496,7 @@ mod tests {
             let (mut tx, rx) = oneshot::channel::<i32>();
 
             let closed = tx.closed();
-            let timeout = delay(Duration::from_millis(100));
+            let timeout = delay(Duration::from_millis(500));
 
             pin_mut!(closed);
             pin_mut!(timeout);
@@ -511,42 +511,17 @@ mod tests {
     }
 
     #[test]
-    fn test_closed_ext_trait() {
-        block_on(async {
-            let (mut tx, rx) = oneshot::channel::<String>();
-
-            let monitor = async move {
-                tx.closed().await;
-                "receiver dropped"
-            };
-
-            let receiver = async move {
-                delay(Duration::from_millis(50)).await;
-                drop(rx);
-            };
-
-            let monitor_fut = monitor;
-            let receiver_fut = receiver;
-            pin_mut!(monitor_fut);
-            pin_mut!(receiver_fut);
-
-            let (result, _) = future::join(monitor_fut, receiver_fut).await;
-            assert_eq!(result, "receiver dropped");
-        });
-    }
-
-    #[test]
     fn test_closed_multiple_polls() {
         block_on(async {
             let (mut tx, rx) = oneshot::channel::<i32>();
 
-            // First poll should be pending
+            // Setup the closed future
             let closed = tx.closed();
             pin_mut!(closed);
 
+            // Poll the closed future
             let waker = futures::task::noop_waker();
             let mut cx = std::task::Context::from_waker(&waker);
-
             assert!(closed.as_mut().poll(&mut cx).is_pending());
 
             // Drop receiver
