@@ -147,7 +147,7 @@ impl<T: Send> AbortablePool<T> {
     }
 }
 
-/// A future that resolves when a [oneshot::Sender] is closed.
+/// A future that resolves when a [oneshot::Receiver] is dropped.
 ///
 /// This future completes when the receiver end of the channel is dropped,
 /// allowing the caller to detect when the other side is no longer interested
@@ -174,9 +174,9 @@ impl<T> Future for Closed<'_, T> {
     }
 }
 
-/// Extension trait to detect when a [oneshot::Sender] is closed.
+/// Extension trait to detect when a [oneshot::Receiver] is dropped.
 pub trait ClosedExt<T> {
-    /// Returns a future that resolves when the sender is closed.
+    /// Returns a future that resolves when the receiver is dropped.
     ///
     /// # Examples
     ///
