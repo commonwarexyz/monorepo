@@ -133,7 +133,12 @@ impl<const N: usize> BitMap<N> {
     /// Panics if the bit doesn't exist.
     #[inline]
     fn get_chunk(&self, bit_offset: usize) -> &[u8; N] {
-        assert!(bit_offset < self.len(), "out of bounds: {bit_offset}");
+        assert!(
+            bit_offset < self.len(),
+            "Bit offset {} out of bounds (len: {})",
+            bit_offset,
+            self.len()
+        );
         &self.chunks[Self::chunk_index(bit_offset)]
     }
 
@@ -181,6 +186,8 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if the bitmap is empty.
     pub fn pop(&mut self) -> bool {
+        assert!(!self.is_empty(), "Cannot pop from empty bitmap");
+
         if self.next_bit == 0 {
             // Remove the last (empty) chunk
             self.chunks.pop_back();
@@ -259,6 +266,13 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if the bit doesn't exist.
     pub fn set(&mut self, bit_offset: usize, bit: bool) {
+        assert!(
+            bit_offset < self.len(),
+            "Bit offset {} out of bounds (len: {})",
+            bit_offset,
+            self.len()
+        );
+
         let chunk_index = Self::chunk_index(bit_offset);
         let chunk = &mut self.chunks[chunk_index];
 
@@ -346,6 +360,12 @@ impl<const N: usize> BitMap<N> {
     /// Get a reference to a chunk by its index in the current bitmap
     #[inline]
     pub(super) fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
+        assert!(
+            index < self.chunks.len(),
+            "Chunk index {} out of bounds (chunks: {})",
+            index,
+            self.chunks.len()
+        );
         &self.chunks[index]
     }
 
@@ -447,13 +467,24 @@ impl<const N: usize> BitMap<N> {
     /// Asserts that the index is within bounds.
     #[inline(always)]
     fn assert_index(&self, index: usize) {
-        assert!(index < self.len(), "Index out of bounds");
+        assert!(
+            index < self.len(),
+            "Index {} out of bounds (len: {})",
+            index,
+            self.len()
+        );
     }
 
     /// Asserts that the lengths of two [BitMap]s match.
     #[inline(always)]
     fn assert_eq_len(&self, other: &BitMap<N>) {
-        assert_eq!(self.len(), other.len(), "BitMap lengths don't match");
+        assert_eq!(
+            self.len(),
+            other.len(),
+            "BitMap lengths don't match: {} vs {}",
+            self.len(),
+            other.len()
+        );
     }
 
     /// Creates an iterator over the bits.
@@ -1196,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Index out of bounds")]
+    #[should_panic(expected = "Index 1 out of bounds (len: 1)")]
     fn test_flip_out_of_bounds() {
         let mut bv: BitMap<4> = BitMap::new();
         bv.push(true);
@@ -1204,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "BitMap lengths don't match")]
+    #[should_panic(expected = "BitMap lengths don't match: 2 vs 1")]
     fn test_and_length_mismatch() {
         let mut bv1: BitMap<4> = BitMap::new();
         let mut bv2: BitMap<4> = BitMap::new();
@@ -1217,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "BitMap lengths don't match")]
+    #[should_panic(expected = "BitMap lengths don't match: 1 vs 2")]
     fn test_or_length_mismatch() {
         let mut bv1: BitMap<4> = BitMap::new();
         let mut bv2: BitMap<4> = BitMap::new();
@@ -1230,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "BitMap lengths don't match")]
+    #[should_panic(expected = "BitMap lengths don't match: 3 vs 2")]
     fn test_xor_length_mismatch() {
         let mut bv1: BitMap<4> = BitMap::new();
         let mut bv2: BitMap<4> = BitMap::new();
