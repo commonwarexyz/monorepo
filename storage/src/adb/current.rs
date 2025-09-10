@@ -162,10 +162,10 @@ impl<
 
         // Ensure consistency between the bitmap and the db.
         let mut grafter = Grafting::new(&mut hasher, Self::grafting_height());
-        if status.len() < inactivity_floor_loc {
+        if (status.len() as u64) < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
-            while status.len() < inactivity_floor_loc {
+            while (status.len() as u64) < inactivity_floor_loc {
                 status.push(false);
             }
 
@@ -241,7 +241,7 @@ impl<
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let update_result = self.any.update_return_loc(key, value).await?;
         if let Some(old_loc) = update_result {
-            self.status.set_bit(old_loc, false);
+            self.status.set_bit(old_loc as usize, false);
         }
         self.status.push(true);
 
@@ -257,7 +257,7 @@ impl<
         };
 
         self.status.push(false);
-        self.status.set_bit(old_loc, false);
+        self.status.set_bit(old_loc as usize, false);
 
         Ok(())
     }
@@ -300,7 +300,7 @@ impl<
                 .move_op_if_active(op, self.any.inactivity_floor_loc)
                 .await?;
             if let Some(old_loc) = old_loc {
-                self.status.set_bit(old_loc, false);
+                self.status.set_bit(old_loc as usize, false);
                 self.status.push(true);
             }
             self.any.inactivity_floor_loc += 1;
@@ -329,7 +329,8 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
 
-        self.status.prune_to_bit(self.any.inactivity_floor_loc);
+        self.status
+            .prune_to_bit(self.any.inactivity_floor_loc as usize);
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -387,7 +388,7 @@ impl<
         Ok(MerkleizedBitMap::<H, N>::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
-            last_chunk.1,
+            last_chunk.1 as u64,
             &last_chunk_digest,
         ))
     }
@@ -440,13 +441,13 @@ impl<
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
+        let chunk_bits = MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64;
         let start = start_loc / chunk_bits;
         let end = end_loc / chunk_bits;
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
             let bit_offset = i * chunk_bits;
-            let chunk = *self.status.get_chunk(bit_offset);
+            let chunk = *self.status.get_chunk(bit_offset as usize);
             chunks.push(chunk);
         }
 
@@ -492,11 +493,11 @@ impl<
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let mut verifier = GraftingVerifier::<H>::new(
             Self::grafting_height(),
-            start_loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS,
+            start_loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64,
             chunk_vec,
         );
 
-        if op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS == 0 {
+        if op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64 == 0 {
             return proof.verify_range_inclusion(&mut verifier, &elements, start_pos, root);
         }
 
@@ -517,7 +518,7 @@ impl<
             }
         };
 
-        let next_bit = op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
+        let next_bit = op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64;
         let reconstructed_root = MerkleizedBitMap::<H, N>::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
@@ -553,7 +554,7 @@ impl<
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
-        let chunk = *self.status.get_chunk(loc);
+        let chunk = *self.status.get_chunk(loc as usize);
 
         let last_chunk = self.status.last_chunk();
         if last_chunk.1 != 0 {
@@ -587,7 +588,7 @@ impl<
 
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
-        if !MerkleizedBitMap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc) {
+        if !MerkleizedBitMap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc as usize) {
             debug!(
                 loc = info.loc,
                 "proof verification failed, operation is inactive"
@@ -596,12 +597,12 @@ impl<
         }
 
         let pos = leaf_num_to_pos(info.loc);
-        let num = info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
+        let num = info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64;
         let mut verifier =
             GraftingVerifier::<H>::new(Self::grafting_height(), num, vec![&info.chunk]);
         let element = Fixed::Update(info.key.clone(), info.value.clone()).encode();
 
-        if op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS == 0 {
+        if op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64 == 0 {
             return proof.verify_element_inclusion(&mut verifier, &element, pos, root);
         }
 
@@ -617,8 +618,8 @@ impl<
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of info.chunk, since these bits are not part of
         // the mmr.
-        if info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS
-            == op_count / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS
+        if info.loc / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64
+            == op_count / MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64
         {
             let expected_last_chunk_digest = verifier.digest(&info.chunk);
             if last_chunk_digest != expected_last_chunk_digest {
@@ -636,7 +637,7 @@ impl<
             }
         };
 
-        let next_bit = op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS;
+        let next_bit = op_count % MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as u64;
         let reconstructed_root = MerkleizedBitMap::<H, N>::partial_chunk_root(
             hasher,
             &mmr_root,
@@ -675,7 +676,7 @@ impl<
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
-        let chunk = *self.status.get_chunk(loc);
+        let chunk = *self.status.get_chunk(loc as usize);
 
         let last_chunk = self.status.last_chunk();
         if last_chunk.1 != 0 {
@@ -714,7 +715,7 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
-        self.status.prune_to_bit(target_prune_loc);
+        self.status.prune_to_bit(target_prune_loc as usize);
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -808,7 +809,7 @@ pub mod test {
 
             // Confirm all activity bits are false
             for i in 0..db.op_count() {
-                assert!(!db.status.get_bit(i));
+                assert!(!db.status.get_bit(i as usize));
             }
 
             db.destroy().await.unwrap();
@@ -903,8 +904,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
-                MerkleizedBitMap::<Sha256, 32>::leaf_pos(active_loc),
-                MerkleizedBitMap::<Sha256, 32>::leaf_pos(info.loc)
+                MerkleizedBitMap::<Sha256, 32>::leaf_pos(active_loc as usize),
+                MerkleizedBitMap::<Sha256, 32>::leaf_pos(info.loc as usize)
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
@@ -1029,8 +1030,8 @@ pub mod test {
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = db.inactivity_floor_loc();
-            for i in start..db.status.len() {
-                if !db.status.get_bit(i) {
+            for i in start..db.status.len() as u64 {
+                if !db.status.get_bit(i as usize) {
                     continue;
                 }
                 // Found an active operation! Create a proof for its active current key/value.

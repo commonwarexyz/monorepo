@@ -7,26 +7,26 @@ use commonware_codec::{
 };
 use libfuzzer_sys::fuzz_target;
 
-const MAX_SIZE: u64 = 100_000;
+const MAX_SIZE: usize = 100_000;
 const BITMAP_CHUNK_SIZE: usize = 1;
 type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     New,
-    WithCapacity(u64),
-    Zeroes(u64),
-    Ones(u64),
+    WithCapacity(usize),
+    Zeroes(usize),
+    Ones(usize),
     FromBools(Vec<bool>),
     Push(Vec<bool>, bool),
     Pop(Vec<bool>),
     Iter(Vec<bool>),
     Get(Vec<bool>, usize),
-    Set(Vec<bool>, u64),
-    Clear(Vec<bool>, u64),
-    Flip(Vec<bool>, u64),
+    Set(Vec<bool>, usize),
+    Clear(Vec<bool>, usize),
+    Flip(Vec<bool>, usize),
     FlipAll(Vec<bool>),
-    SetTo(Vec<bool>, u64, bool),
+    SetTo(Vec<bool>, usize, bool),
     SetAll(Vec<bool>, bool),
     And(Vec<bool>, Vec<bool>),
     Or(Vec<bool>, Vec<bool>),
@@ -116,13 +116,13 @@ fn check_from_array<const N: usize>(arr: [bool; N]) {
     let bv_a: BitMap = arr.into();
     let bv_b: BitMap = <BitMap as From<&[bool; N]>>::from(&arr);
     let bv_c = BitMap::from(&arr);
-    assert_eq!(bv_a.len(), N as u64);
+    assert_eq!(bv_a.len(), N);
     assert_eq!(bv_a, bv_b);
     assert_eq!(bv_a, bv_c);
 
     for (i, &b) in arr.iter().enumerate() {
-        assert_eq!(bv_a.get(i as u64), b);
-        assert_eq!(bv_b.get(i as u64), b);
+        assert_eq!(bv_a.get(i), b);
+        assert_eq!(bv_b.get(i), b);
     }
 
     let round_a: Vec<bool> = bv_a.into();
@@ -173,10 +173,10 @@ fn fuzz(input: Vec<FuzzInput>) {
 
             FuzzInput::FromBools(bools) => {
                 let v = BitMap::from(&bools);
-                assert_eq!(v.len(), bools.len() as u64);
+                assert_eq!(v.len(), bools.len());
 
                 for (i, &b) in bools.iter().enumerate() {
-                    assert_eq!(v.get(i as u64), b);
+                    assert_eq!(v.get(i), b);
                 }
             }
 
@@ -196,24 +196,24 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
                 let popped = v.pop();
                 assert_eq!(v.len(), old_len - 1);
-                assert_eq!(popped, bools[old_len as usize - 1]);
+                assert_eq!(popped, bools[old_len - 1]);
             }
 
             FuzzInput::Iter(bools) => {
                 let v = BitMap::from(&bools);
                 let i = v.iter();
-                assert_eq!(v.len(), i.len() as u64);
+                assert_eq!(v.len(), i.len());
             }
 
             FuzzInput::Get(bools, index) => {
                 let v = BitMap::from(&bools);
                 let v_len = v.len();
 
-                if index as u64 >= v_len {
+                if index >= v_len {
                     return;
                 }
 
-                let result = v.get(index as u64);
+                let result = v.get(index);
                 assert_eq!(result, bools[index]);
             }
 
@@ -313,23 +313,23 @@ fn fuzz(input: Vec<FuzzInput>) {
 
             FuzzInput::FromSliceBool(bools) => {
                 let v: BitMap = bools.as_slice().into();
-                assert_eq!(v.len(), bools.len() as u64);
+                assert_eq!(v.len(), bools.len());
                 for (i, &b) in bools.iter().enumerate() {
-                    assert_eq!(v.get(i as u64), b);
+                    assert_eq!(v.get(i), b);
                 }
             }
 
             FuzzInput::FromVecBool(bools) => {
-                let ln = bools.len() as u64;
+                let ln = bools.len();
                 let v = BitMap::from(bools);
                 assert_eq!(v.len(), ln);
             }
 
             FuzzInput::BoolInto(bools) => {
                 let v: BitMap = bools.clone().into();
-                assert_eq!(v.len(), bools.len() as u64);
+                assert_eq!(v.len(), bools.len());
                 for (i, &b) in bools.iter().enumerate() {
-                    assert_eq!(v.get(i as u64), b);
+                    assert_eq!(v.get(i), b);
                 }
             }
 
@@ -397,9 +397,9 @@ fn fuzz(input: Vec<FuzzInput>) {
 
             FuzzInput::Index(bools, index) => {
                 let v = BitMap::from(&bools);
-                if (index as u64) < v.len() {
+                if index < v.len() {
                     let indexed_value = v[index];
-                    assert_eq!(indexed_value, v.get(index as u64));
+                    assert_eq!(indexed_value, v.get(index));
                 }
             }
 
@@ -413,7 +413,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(result.len(), v1.len());
 
                 for i in 0..result.len() {
-                    let expected = bools1[i as usize] && bools2[i as usize];
+                    let expected = bools1[i] && bools2[i];
                     assert_eq!(result.get(i), expected);
                 }
             }
@@ -428,7 +428,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(result.len(), v1.len());
 
                 for i in 0..result.len() {
-                    let expected = bools1[i as usize] || bools2[i as usize];
+                    let expected = bools1[i] || bools2[i];
                     assert_eq!(result.get(i), expected);
                 }
             }
@@ -443,7 +443,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(result.len(), v1.len());
 
                 for i in 0..result.len() {
-                    let expected = bools1[i as usize] ^ bools2[i as usize];
+                    let expected = bools1[i] ^ bools2[i];
                     assert_eq!(result.get(i), expected);
                 }
             }
@@ -459,7 +459,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert!(!buf.is_empty());
 
                 let mut cursor = std::io::Cursor::new(buf);
-                let range_cfg: RangeCfg = (0..MAX_SIZE as usize).into();
+                let range_cfg: RangeCfg = (0..MAX_SIZE).into();
                 if let Ok(decoded) = BitMap::read_cfg(&mut cursor, &range_cfg) {
                     assert_eq!(decoded.len(), v.len());
                     for i in 0..decoded.len() {
@@ -473,8 +473,8 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let iter = v.iter();
 
                 let (lower, upper) = iter.size_hint();
-                assert_eq!(lower as u64, v.len());
-                assert_eq!(upper, Some(v.len() as usize));
+                assert_eq!(lower, v.len());
+                assert_eq!(upper, Some(v.len()));
 
                 let collected: Vec<bool> = iter.collect();
                 assert_eq!(collected.len(), bools.len());

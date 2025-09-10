@@ -36,7 +36,7 @@ impl BloomFilter {
     pub fn new(hashers: NonZeroU8, bits: NonZeroUsize) -> Self {
         Self {
             hashers: hashers.get(),
-            bits: BitMap::zeroes(bits.get() as u64),
+            bits: BitMap::zeroes(bits.get()),
         }
     }
 
@@ -63,9 +63,9 @@ impl BloomFilter {
 
     /// Inserts an item into the [BloomFilter].
     pub fn insert(&mut self, item: &[u8]) {
-        let indices = self.indices(item, self.bits.len() as usize);
+        let indices = self.indices(item, self.bits.len());
         for index in indices {
-            self.bits.set(index as u64, true);
+            self.bits.set(index, true);
         }
     }
 
@@ -73,9 +73,9 @@ impl BloomFilter {
     ///
     /// Returns `true` if the item is probably in the set, and `false` if it is definitely not.
     pub fn contains(&self, item: &[u8]) -> bool {
-        let indices = self.indices(item, self.bits.len() as usize);
+        let indices = self.indices(item, self.bits.len());
         for index in indices {
-            if !self.bits.get(index as u64) {
+            if !self.bits.get(index) {
                 return false;
             }
         }
