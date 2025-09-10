@@ -20,20 +20,6 @@ governor = { workspace = true }
 commonware-macros = { workspace = true }
 
 [[bin]]
-name = "discovery"
-path = "fuzz_targets/discovery.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "lookup"
-path = "fuzz_targets/lookup.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simulated"
 path = "fuzz_targets/simulated.rs"
 test = false
