@@ -219,7 +219,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     ///
     /// - Panics if there are unprocessed updates.
     pub fn prune_to_bit(&mut self, bit_offset: u64) {
-        let chunk_num = BitMap::<N>::chunk_num(bit_offset);
+        let chunk_num = BitMap::<N>::raw_chunk_index(bit_offset);
         if chunk_num < self.bitmap.pruned_chunks() {
             return;
         }
@@ -276,7 +276,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        let chunk_num = BitMap::<N>::chunk_num(bit_offset);
+        let chunk_num = BitMap::<N>::raw_chunk_index(bit_offset);
         leaf_num_to_pos(chunk_num as u64)
     }
 
@@ -306,7 +306,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.set_bit(bit_offset, bit);
 
         // If the updated chunk is already in the MMR, mark it as dirty.
-        let chunk_index = self.bitmap.chunk_index(bit_offset);
+        let chunk_index = self.bitmap.pruned_chunk_index(bit_offset);
         if chunk_index < self.authenticated_len {
             self.dirty_chunks.insert(chunk_index);
         }
