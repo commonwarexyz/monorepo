@@ -1,6 +1,6 @@
 [package]
 name = "commonware-p2p-fuzz"
-version = "0.0.61"
+version = "0.0.62"
 publish = false
 edition = "2021"
 
