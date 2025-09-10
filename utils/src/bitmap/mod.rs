@@ -30,6 +30,8 @@ pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     ///
     /// Invariant: The last chunk in the bitmap always has room for at least one more bit.
     /// This implies that !chunks.is_empty() always holds.
+    ///
+    /// Invariant: All bits in the last chunk >= `self.next_bit` are 0.
     chunks: VecDeque<[u8; N]>,
 
     /// The position within the last chunk where the next bit is to be appended.
@@ -95,10 +97,13 @@ impl<const N: usize> BitMap<N> {
         for _ in 0..num_chunks {
             chunks.push_back(Self::FULL_CHUNK);
         }
-        Self {
+        let mut result = Self {
             chunks,
             next_bit: size % Self::CHUNK_SIZE_BITS,
-        }
+        };
+        // Clear trailing bits to maintain invariant
+        result.clear_trailing_bits();
+        result
     }
 
     /// Return the number of bits currently stored in the bitmap.
@@ -157,12 +162,10 @@ impl<const N: usize> BitMap<N> {
         let chunk_byte = (self.next_bit / 8) as usize;
         let next_bit = self.next_bit;
         let last_chunk = self.last_chunk_mut();
-        // Set the bit
         if bit {
             last_chunk[chunk_byte] |= Self::chunk_byte_bitmask(next_bit);
-        } else {
-            last_chunk[chunk_byte] &= !Self::chunk_byte_bitmask(next_bit);
         }
+        // If bit is false, just advance the next_bit -- the bit is already 0
         self.next_bit += 1;
         assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
 
@@ -184,7 +187,14 @@ impl<const N: usize> BitMap<N> {
         } else {
             self.next_bit -= 1;
         }
-        Self::get_bit_from_chunk(self.last_chunk().0, self.next_bit)
+        let bit = Self::get_bit_from_chunk(self.last_chunk().0, self.next_bit);
+
+        // Clear trailing bits to maintain the invariant
+        if bit {
+            assert!(self.clear_trailing_bits());
+        }
+
+        bit
     }
 
     /// Remove the first `n` chunks from the bitmap.
@@ -266,6 +276,46 @@ impl<const N: usize> BitMap<N> {
     fn prepare_next_chunk(&mut self) {
         self.next_bit = 0;
         self.chunks.push_back([0u8; N]);
+    }
+
+    /// Clear all bits in the last chunk that are >= self.next_bit to maintain the invariant.
+    /// Returns true if any bits were flipped from 1 to 0.
+    fn clear_trailing_bits(&mut self) -> bool {
+        let next_bit = self.next_bit;
+        let mut flipped_any = false;
+
+        if next_bit == 0 {
+            // If next_bit is 0, the entire last chunk should be clear (it's empty)
+            let last_chunk = self.last_chunk_mut();
+            let was_empty = *last_chunk == Self::EMPTY_CHUNK;
+            *last_chunk = Self::EMPTY_CHUNK;
+            return !was_empty;
+        }
+
+        let last_chunk = self.last_chunk_mut();
+
+        // Clear whole bytes after the last valid bit
+        let last_byte_index = ((next_bit - 1) / 8) as usize;
+        for i in (last_byte_index + 1)..N {
+            if last_chunk[i] != 0 {
+                flipped_any = true;
+                last_chunk[i] = 0;
+            }
+        }
+
+        // Clear the trailing bits in the last partial byte
+        let bits_in_last_byte = ((next_bit - 1) % 8) + 1;
+        if bits_in_last_byte < 8 {
+            let mask = (1u8 << bits_in_last_byte) - 1;
+            let old_byte = last_chunk[last_byte_index];
+            let new_byte = old_byte & mask;
+            if old_byte != new_byte {
+                flipped_any = true;
+                last_chunk[last_byte_index] = new_byte;
+            }
+        }
+
+        flipped_any
     }
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
@@ -389,6 +439,8 @@ impl<const N: usize> BitMap<N> {
                 *byte = !*byte;
             }
         }
+        // Clear trailing bits to maintain invariant
+        let _ = self.clear_trailing_bits();
     }
 
     /// Asserts that the index is within bounds.
@@ -420,6 +472,8 @@ impl<const N: usize> BitMap<N> {
                 *a_byte = op(*a_byte, *b_byte);
             }
         }
+        // Clear trailing bits to maintain invariant
+        self.clear_trailing_bits();
     }
 }
 
@@ -591,10 +645,20 @@ impl<const N: usize> Read for BitMap<N> {
             bitmap.push_back(chunk);
         }
 
-        Ok(BitMap {
+        let mut result = BitMap {
             chunks: bitmap,
             next_bit: len % Self::CHUNK_SIZE_BITS,
-        })
+        };
+
+        // Clear trailing bits to maintain invariant - error if any were set (invalid encoding)
+        if result.clear_trailing_bits() {
+            return Err(CodecError::Invalid(
+                "BitMap",
+                "Invalid trailing bits in encoded data",
+            ));
+        }
+
+        Ok(result)
     }
 }
 
@@ -715,6 +779,93 @@ mod tests {
         }
         assert_eq!(bv.count_ones(), 10);
         assert_eq!(bv.count_zeros(), 0);
+    }
+
+    #[test]
+    fn test_invariant_trailing_bits_are_zero() {
+        // Helper function to check the invariant
+        fn check_trailing_bits_zero<const N: usize>(bitmap: &BitMap<N>) {
+            let (last_chunk, next_bit) = bitmap.last_chunk();
+
+            // Check that all bits >= next_bit in the last chunk are 0
+            for bit_idx in next_bit..(N as u64 * 8) {
+                let byte_idx = (bit_idx / 8) as usize;
+                let bit_in_byte = bit_idx % 8;
+                let mask = 1u8 << bit_in_byte;
+                assert_eq!(
+                    last_chunk[byte_idx] & mask,
+                    0,
+                    "Invariant violated: bit {} in last chunk is set (next_bit = {})",
+                    bit_idx,
+                    next_bit
+                );
+            }
+        }
+
+        // Test ones() constructor
+        let bv: BitMap<4> = BitMap::ones(15);
+        check_trailing_bits_zero(&bv);
+
+        let bv: BitMap<4> = BitMap::ones(33);
+        check_trailing_bits_zero(&bv);
+
+        // Test after push operations
+        let mut bv: BitMap<4> = BitMap::new();
+        for i in 0..37 {
+            bv.push(i % 2 == 0);
+            check_trailing_bits_zero(&bv);
+        }
+
+        // Test after pop operations
+        let mut bv: BitMap<4> = BitMap::ones(40);
+        check_trailing_bits_zero(&bv);
+        for _ in 0..15 {
+            bv.pop();
+            check_trailing_bits_zero(&bv);
+        }
+
+        // Test after flip_all
+        let mut bv: BitMap<4> = BitMap::ones(25);
+        bv.flip_all();
+        check_trailing_bits_zero(&bv);
+
+        // Test after binary operations
+        let bv1: BitMap<4> = BitMap::ones(20);
+        let bv2: BitMap<4> = BitMap::zeroes(20);
+
+        let mut bv_and = bv1.clone();
+        bv_and.and(&bv2);
+        check_trailing_bits_zero(&bv_and);
+
+        let mut bv_or = bv1.clone();
+        bv_or.or(&bv2);
+        check_trailing_bits_zero(&bv_or);
+
+        let mut bv_xor = bv1.clone();
+        bv_xor.xor(&bv2);
+        check_trailing_bits_zero(&bv_xor);
+
+        // Test after deserialization
+        let original: BitMap<4> = BitMap::ones(27);
+        let encoded = original.encode();
+        let decoded: BitMap<4> = BitMap::decode_cfg(&mut encoded.as_ref(), &(..).into()).unwrap();
+        check_trailing_bits_zero(&decoded);
+
+        // Test clear_trailing_bits return value
+        let mut bv_clean: BitMap<4> = BitMap::ones(20);
+        // Should return false since ones() already clears trailing bits
+        assert!(!bv_clean.clear_trailing_bits());
+
+        // Create a bitmap with invalid trailing bits by manually setting them
+        let mut bv_dirty: BitMap<4> = BitMap::ones(20);
+        // Manually corrupt the last chunk to have trailing bits set
+        let last_chunk = bv_dirty.last_chunk_mut();
+        last_chunk[3] |= 0xF0; // Set some high bits in the last byte
+                               // Should return true since we had invalid trailing bits
+        assert!(bv_dirty.clear_trailing_bits());
+        // After clearing, should return false
+        assert!(!bv_dirty.clear_trailing_bits());
+        check_trailing_bits_zero(&bv_dirty);
     }
 
     #[test]
@@ -1444,6 +1595,33 @@ mod tests {
         let result = BitMap::<4>::decode_cfg(&mut buf, &(..).into());
         // Should fail when trying to read missing chunks
         assert!(result.is_err());
+
+        // Test invalid trailing bits
+
+        // Create a valid bitmap and encode it
+        let original: BitMap<4> = BitMap::ones(20);
+        let mut buf = BytesMut::new();
+        original.write(&mut buf);
+
+        // Manually corrupt the encoded data by setting trailing bits
+        let corrupted_data = buf.freeze();
+        let mut corrupted_bytes = corrupted_data.to_vec();
+
+        // The last byte should have some trailing bits set to 1
+        // For 20 bits with 4-byte chunks: 20 bits = 2.5 bytes, so last byte should have 4 valid bits
+        // Set the high 4 bits of the last byte to 1 (these should be 0)
+        let last_byte_idx = corrupted_bytes.len() - 1;
+        corrupted_bytes[last_byte_idx] |= 0xF0;
+
+        // Read should fail
+        let result = BitMap::<4>::read_cfg(&mut corrupted_bytes.as_slice(), &(..).into());
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "BitMap",
+                "Invalid trailing bits in encoded data"
+            ))
+        ));
     }
 
     #[test]
