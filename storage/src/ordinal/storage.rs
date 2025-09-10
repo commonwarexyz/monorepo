@@ -6,7 +6,7 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::hex;
+use commonware_utils::{bitmap::BitMap, hex};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -15,9 +15,6 @@ use std::{
     mem::take,
 };
 use tracing::{debug, warn};
-
-const BITMAP_CHUNK_SIZE: usize = 1;
-pub type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]

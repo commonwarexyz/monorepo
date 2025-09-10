@@ -21,7 +21,7 @@ pub use prunable::Prunable;
 
 /// A bitmap that stores data in chunks of N bytes.
 #[derive(Clone)]
-pub struct BitMap<const N: usize> {
+pub struct BitMap<const N: usize = 1> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
     /// higher order bits in the bit ordering.

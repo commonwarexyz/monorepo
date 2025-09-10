@@ -7,7 +7,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{sequence::prefixed_u64::U64, Array};
+use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::BTreeMap;
@@ -18,9 +18,6 @@ const FREEZER_PREFIX: u8 = 0;
 
 /// Prefix for [Ordinal] records.
 const ORDINAL_PREFIX: u8 = 1;
-
-const BITMAP_CHUNK_SIZE: usize = 1;
-type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
 enum Record {

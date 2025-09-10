@@ -284,7 +284,7 @@ mod tests {
         deterministic::{self, Context},
         Clock, Runner,
     };
-    use commonware_utils::NZU32;
+    use commonware_utils::{bitmap::BitMap, NZU32};
     use futures::future::Either;
     use governor::Quota;
     use std::{
@@ -293,9 +293,6 @@ mod tests {
         time::Duration,
     };
     use types::PeerInfo;
-
-    const BITMAP_CHUNK_SIZE: usize = 1;
-    type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(

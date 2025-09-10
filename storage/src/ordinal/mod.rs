@@ -96,7 +96,7 @@
 mod storage;
 
 use std::num::{NonZeroU64, NonZeroUsize};
-pub use storage::{BitMap, Ordinal};
+pub use storage::Ordinal;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the [Ordinal].
@@ -133,12 +133,11 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ordinal::storage::BitMap;
     use bytes::{Buf, BufMut};
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;
 

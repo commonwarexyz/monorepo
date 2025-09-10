@@ -11,6 +11,7 @@ use commonware_codec::{
     error::Error as CodecError,
     EncodeSize, FixedSize,
 };
+use commonware_utils::bitmap::BitMap;
 use core::num::{NonZeroU8, NonZeroUsize};
 
 /// The length of a half of a [Digest].
@@ -18,9 +19,6 @@ const HALF_DIGEST_LEN: usize = 16;
 
 /// The length of a full [Digest].
 const FULL_DIGEST_LEN: usize = Digest::SIZE;
-
-const BITMAP_CHUNK_SIZE: usize = 1;
-type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///

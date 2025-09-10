@@ -1,8 +1,6 @@
 use commonware_cryptography::PublicKey;
+use commonware_utils::bitmap::BitMap;
 use std::collections::HashMap;
-
-const BITMAP_CHUNK_SIZE: usize = 1;
-type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: PublicKey> {
