@@ -676,7 +676,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
     /// generation) in this MMR when pruned to position `prune_pos`.
-    pub fn nodes_to_pin(&self, prune_pos: u64) -> BTreeMap<u64, H::Digest> {
+    pub(crate) fn nodes_to_pin(&self, prune_pos: u64) -> BTreeMap<u64, H::Digest> {
         nodes_to_pin(prune_pos)
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
@@ -684,7 +684,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Get the digests of nodes that need to be pinned (those required for proof generation) in
     /// this MMR when pruned to position `prune_pos`.
-    pub fn node_digests_to_pin(&self, start_pos: u64) -> Vec<H::Digest> {
+    pub(crate) fn node_digests_to_pin(&self, start_pos: u64) -> Vec<H::Digest> {
         nodes_to_pin(start_pos)
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
@@ -692,7 +692,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Utility used by stores that build on the mem MMR to pin extra nodes if needed. It's up to
     /// the caller to ensure that this set of pinned nodes is valid for their use case.
-    pub fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<u64, H::Digest>) {
+    pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<u64, H::Digest>) {
         for (pos, node) in pinned_nodes.into_iter() {
             self.pinned_nodes.insert(pos, node);
         }
