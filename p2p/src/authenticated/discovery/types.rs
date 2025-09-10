@@ -22,7 +22,7 @@ const PEERS_PREFIX: u8 = 1;
 const DATA_PREFIX: u8 = 2;
 
 const BITMAP_CHUNK_SIZE: usize = 1;
-type UtilsBitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
+type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
 
 /// Configuration when deserializing messages.
 ///
@@ -117,7 +117,7 @@ pub struct BitVec {
     pub index: u64,
 
     /// The bit vector itself.
-    pub bits: UtilsBitMap,
+    pub bits: BitMap,
 }
 
 impl EncodeSize for BitVec {
@@ -138,7 +138,7 @@ impl Read for BitVec {
 
     fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
         let index = UInt::read(buf)?.into();
-        let bits = UtilsBitMap::read_cfg(buf, &(..=*max_bits).into())?;
+        let bits = BitMap::read_cfg(buf, &(..=*max_bits).into())?;
         Ok(Self { index, bits })
     }
 }
@@ -245,7 +245,7 @@ mod tests {
     fn test_bit_vec_codec() {
         let original = BitVec {
             index: 1234,
-            bits: UtilsBitMap::ones(71),
+            bits: BitMap::ones(71),
         };
         let decoded = BitVec::decode_cfg(original.encode(), &71).unwrap();
         assert_eq!(original, decoded);
@@ -284,7 +284,7 @@ mod tests {
         // Test BitVec
         let original = BitVec {
             index: 1234,
-            bits: UtilsBitMap::ones(100),
+            bits: BitMap::ones(100),
         };
         let encoded: BytesMut = Payload::<secp256r1::PublicKey>::BitVec(original.clone()).encode();
         let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
