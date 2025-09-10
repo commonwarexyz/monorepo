@@ -19,9 +19,11 @@ use std::collections::VecDeque;
 mod prunable;
 pub use prunable::Prunable;
 
+pub const DEFAULT_CHUNK_SIZE: usize = 32;
+
 /// A bitmap that stores data in chunks of N bytes.
 #[derive(Clone)]
-pub struct BitMap<const N: usize = 1> {
+pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
     /// higher order bits in the bit ordering.
