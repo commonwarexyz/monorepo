@@ -4,6 +4,8 @@
 //! more-efficient memory layout than doing [`Vec<bool>`].
 
 use crate::NZUsize;
+#[cfg(not(feature = "std"))]
+use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use core::{
@@ -11,10 +13,6 @@ use core::{
     num::NonZeroUsize,
     ops::{BitAnd, BitOr, BitXor, Index},
 };
-
-#[cfg(not(feature = "std"))]
-use alloc::{collections::VecDeque, vec::Vec};
-
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
 
