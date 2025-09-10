@@ -7,6 +7,9 @@ use crate::{
     PublicKey, Signer, Verifier,
 };
 
+mod key_exchange;
+use key_exchange::{EphemeralPublicKey, SecretKey};
+
 const NAMESPACE: &'static [u8] = b"commonware/handshake";
 const LABEL_CIPHER_L2D: &'static [u8] = b"cipher_l2d";
 const LABEL_CIPHER_D2L: &'static [u8] = b"cipher_d2l";
@@ -15,13 +18,13 @@ const LABEL_CONFIRMATION_D2L: &'static [u8] = b"confirmation_d2l";
 
 pub struct Msg1<S> {
     time_ms: u64,
-    epk: x25519_dalek::PublicKey,
+    epk: EphemeralPublicKey,
     sig: S,
 }
 
 pub struct Msg2<S> {
     time_ms: u64,
-    epk: x25519_dalek::PublicKey,
+    epk: EphemeralPublicKey,
     sig: S,
     confirmation: Summary,
 }
@@ -31,7 +34,7 @@ pub struct Msg3 {
 }
 
 pub struct DialState<P> {
-    esk: x25519_dalek::EphemeralSecret,
+    esk: SecretKey,
     peer_identity: P,
     transcript: Transcript,
 }
@@ -130,13 +133,13 @@ pub fn dial_start<S: Signer, P: PublicKey>(
         my_identity,
         peer_identity,
     } = ctx;
-    let esk = x25519_dalek::EphemeralSecret::random_from_rng(rng);
-    let epk = x25519_dalek::PublicKey::from(&esk);
+    let esk = SecretKey::new(rng);
+    let epk = esk.public();
     let mut transcript = Transcript::new(NAMESPACE);
     let sig = transcript
         .commit(peer_identity.encode())
         .commit(current_time.encode())
-        .commit(epk.as_bytes().as_slice())
+        .commit(epk.encode())
         .sign(&my_identity);
     transcript.commit(my_identity.public_key().encode());
     (
@@ -164,16 +167,15 @@ pub fn dial_end<P: PublicKey>(
     } = state;
     if !transcript
         .commit(msg.time_ms.encode())
-        .commit(msg.epk.as_bytes().as_slice())
+        .commit(msg.epk.encode())
         .verify(&peer_identity, &msg.sig)
     {
         return Err(());
     }
-    let secret = esk.diffie_hellman(&msg.epk);
-    if !secret.was_contributory() {
+    let Some(secret) = esk.exchange(&msg.epk) else {
         return Err(());
-    }
-    transcript.commit(secret.as_bytes().as_slice());
+    };
+    transcript.commit(secret.as_ref());
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
@@ -205,23 +207,22 @@ pub fn listen_start<S: Signer, P: PublicKey>(
     if !transcript
         .commit(msg.time_ms.encode())
         .commit(my_identity.public_key().encode())
-        .commit(msg.epk.as_bytes().as_slice())
+        .commit(msg.epk.encode())
         .verify(&peer_identity, &msg.sig)
     {
         return Err(());
     }
-    let esk = x25519_dalek::EphemeralSecret::random_from_rng(rng);
-    let epk = x25519_dalek::PublicKey::from(&esk);
+    let esk = SecretKey::new(rng);
+    let epk = esk.public();
     let sig = transcript
         .commit(peer_identity.encode())
         .commit(current_time.encode())
-        .commit(epk.as_bytes().as_slice())
+        .commit(epk.encode())
         .sign(&my_identity);
-    let secret = esk.diffie_hellman(&msg.epk);
-    if !secret.was_contributory() {
+    let Some(secret) = esk.exchange(&msg.epk) else {
         return Err(());
-    }
-    transcript.commit(secret.as_bytes().as_slice());
+    };
+    transcript.commit(secret.as_ref());
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
