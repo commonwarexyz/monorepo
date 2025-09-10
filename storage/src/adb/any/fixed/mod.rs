@@ -290,7 +290,7 @@ impl<
                                 if let Some(old_loc) = result {
                                     bitmap.set_bit(old_loc, false);
                                 }
-                                bitmap.append(true);
+                                bitmap.push(true);
                             }
                         }
                         Operation::CommitFloor(_) => {}
@@ -299,7 +299,7 @@ impl<
                         // If we reach this point and a bit hasn't been added for the operation, then it's
                         // an inactive operation and we need to tag it as such in the bitmap.
                         if bitmap.len() == i {
-                            bitmap.append(false);
+                            bitmap.push(false);
                         }
                     }
                 }
@@ -1348,7 +1348,7 @@ pub(super) mod test {
             // Initialize the bitmap based on the current db's inactivity floor.
             let mut bitmap = MerkleizedBitMap::<_, SHA256_SIZE>::new();
             for _ in 0..inactivity_floor_loc {
-                bitmap.append(false);
+                bitmap.push(false);
             }
             bitmap.sync(&mut hasher).await.unwrap();
 

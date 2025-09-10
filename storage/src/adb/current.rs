@@ -166,7 +166,7 @@ impl<
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
             while status.len() < inactivity_floor_loc {
-                status.append(false);
+                status.push(false);
             }
 
             // Load the digests of the grafting destination nodes from `mmr` into the grafting
@@ -243,7 +243,7 @@ impl<
         if let Some(old_loc) = update_result {
             self.status.set_bit(old_loc, false);
         }
-        self.status.append(true);
+        self.status.push(true);
 
         Ok(())
     }
@@ -256,7 +256,7 @@ impl<
             return Ok(());
         };
 
-        self.status.append(false);
+        self.status.push(false);
         self.status.set_bit(old_loc, false);
 
         Ok(())
@@ -301,7 +301,7 @@ impl<
                 .await?;
             if let Some(old_loc) = old_loc {
                 self.status.set_bit(old_loc, false);
-                self.status.append(true);
+                self.status.push(true);
             }
             self.any.inactivity_floor_loc += 1;
         }
@@ -309,7 +309,7 @@ impl<
         self.any
             .apply_op(Fixed::CommitFloor(self.any.inactivity_floor_loc))
             .await?;
-        self.status.append(false);
+        self.status.push(false);
 
         Ok(())
     }

@@ -184,7 +184,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             FuzzInput::Push(bools, value) => {
                 let mut v = BitMap::from(&bools);
                 let old_len = v.len();
-                v.append(value);
+                v.push(value);
                 assert_eq!(v.len(), old_len + 1);
                 assert_eq!(v.get_bit(old_len), value);
             }

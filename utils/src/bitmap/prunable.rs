@@ -14,7 +14,7 @@ pub struct Prunable<const N: usize> {
 
 impl<const N: usize> Prunable<N> {
     /// The size of a chunk in bits.
-    const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
+    pub const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
 
     /// Create a new empty prunable bitmap.
     pub fn new() -> Self {
@@ -92,9 +92,9 @@ impl<const N: usize> Prunable<N> {
         BitMap::<N>::get_bit_from_chunk(chunk, bit_offset)
     }
 
-    /// Add a single bit to the bitmap.
-    pub fn append(&mut self, bit: bool) {
-        self.bitmap.append(bit);
+    /// Add a single bit to the end of the bitmap.
+    pub fn push(&mut self, bit: bool) {
+        self.bitmap.push(bit);
     }
 
     /// Efficiently add a byte to the bitmap.
@@ -102,8 +102,8 @@ impl<const N: usize> Prunable<N> {
     /// # Warning
     ///
     /// Assumes self.next_bit is currently byte aligned, and panics otherwise.
-    pub fn append_byte_unchecked(&mut self, byte: u8) {
-        self.bitmap.append_byte_unchecked(byte);
+    pub fn push_byte_unchecked(&mut self, byte: u8) {
+        self.bitmap.push_byte_unchecked(byte);
     }
 
     /// Efficiently add a chunk of bits to the bitmap.
@@ -111,8 +111,8 @@ impl<const N: usize> Prunable<N> {
     /// # Warning
     ///
     /// Assumes we are at a chunk boundary (that is, `self.next_bit` is 0) and panics otherwise.
-    pub fn append_chunk_unchecked(&mut self, chunk: &[u8; N]) {
-        self.bitmap.append_chunk_unchecked(chunk);
+    pub fn push_chunk_unchecked(&mut self, chunk: &[u8; N]) {
+        self.bitmap.push_chunk_unchecked(chunk);
     }
 
     /// Set the value of the given bit.
@@ -127,6 +127,15 @@ impl<const N: usize> Prunable<N> {
         // Adjust bit_offset to account for pruning
         let adjusted_offset = bit_offset - self.pruned_bits();
         self.bitmap.set(adjusted_offset, bit);
+    }
+
+    /// Remove and return the last bit from the bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bitmap is empty.
+    pub fn pop(&mut self) -> bool {
+        self.bitmap.pop()
     }
 
     /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit.
@@ -214,13 +223,13 @@ mod tests {
     }
 
     #[test]
-    fn test_append_and_get_bits() {
+    fn test_push_and_get_bits() {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add some bits
-        prunable.append(true);
-        prunable.append(false);
-        prunable.append(true);
+        prunable.push(true);
+        prunable.push(false);
+        prunable.push(true);
 
         assert_eq!(prunable.len(), 3);
         assert!(!prunable.is_empty());
@@ -230,11 +239,11 @@ mod tests {
     }
 
     #[test]
-    fn test_append_byte() {
+    fn test_push_byte() {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add a byte
-        prunable.append_byte_unchecked(0xFF);
+        prunable.push_byte_unchecked(0xFF);
         assert_eq!(prunable.len(), 8);
 
         // All bits should be set
@@ -242,7 +251,7 @@ mod tests {
             assert!(prunable.get_bit(i));
         }
 
-        prunable.append_byte_unchecked(0x00);
+        prunable.push_byte_unchecked(0x00);
         assert_eq!(prunable.len(), 16);
 
         // Next 8 bits should be clear
@@ -252,11 +261,11 @@ mod tests {
     }
 
     #[test]
-    fn test_append_chunk() {
+    fn test_push_chunk() {
         let mut prunable: Prunable<4> = Prunable::new();
         let chunk = [0xAA, 0xBB, 0xCC, 0xDD];
 
-        prunable.append_chunk_unchecked(&chunk);
+        prunable.push_chunk_unchecked(&chunk);
         assert_eq!(prunable.len(), 32); // 4 bytes * 8 bits
 
         let retrieved_chunk = prunable.get_chunk(0);
@@ -268,9 +277,9 @@ mod tests {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add some bits
-        prunable.append(false);
-        prunable.append(false);
-        prunable.append(false);
+        prunable.push(false);
+        prunable.push(false);
+        prunable.push(false);
 
         assert!(!prunable.get_bit(1));
 
@@ -292,9 +301,9 @@ mod tests {
         let chunk2 = [0x05, 0x06, 0x07, 0x08];
         let chunk3 = [0x09, 0x0A, 0x0B, 0x0C];
 
-        prunable.append_chunk_unchecked(&chunk1);
-        prunable.append_chunk_unchecked(&chunk2);
-        prunable.append_chunk_unchecked(&chunk3);
+        prunable.push_chunk_unchecked(&chunk1);
+        prunable.push_chunk_unchecked(&chunk2);
+        prunable.push_chunk_unchecked(&chunk3);
 
         assert_eq!(prunable.len(), 96); // 3 chunks * 32 bits
         assert_eq!(prunable.pruned_chunks(), 0);
@@ -325,8 +334,8 @@ mod tests {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add two chunks
-        prunable.append_chunk_unchecked(&[1, 2, 3, 4]);
-        prunable.append_chunk_unchecked(&[5, 6, 7, 8]);
+        prunable.push_chunk_unchecked(&[1, 2, 3, 4]);
+        prunable.push_chunk_unchecked(&[5, 6, 7, 8]);
 
         // Prune first chunk
         prunable.prune_to_bit(32);
@@ -341,8 +350,8 @@ mod tests {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add two chunks
-        prunable.append_chunk_unchecked(&[1, 2, 3, 4]);
-        prunable.append_chunk_unchecked(&[5, 6, 7, 8]);
+        prunable.push_chunk_unchecked(&[1, 2, 3, 4]);
+        prunable.push_chunk_unchecked(&[5, 6, 7, 8]);
 
         // Prune first chunk
         prunable.prune_to_bit(32);
@@ -357,8 +366,8 @@ mod tests {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add two chunks
-        prunable.append_chunk_unchecked(&[1, 2, 3, 4]);
-        prunable.append_chunk_unchecked(&[5, 6, 7, 8]);
+        prunable.push_chunk_unchecked(&[1, 2, 3, 4]);
+        prunable.push_chunk_unchecked(&[5, 6, 7, 8]);
 
         // Prune first chunk
         prunable.prune_to_bit(32);
@@ -372,11 +381,11 @@ mod tests {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add two full chunks and some partial bits
-        prunable.append_chunk_unchecked(&[0xFF; 4]);
-        prunable.append_chunk_unchecked(&[0xAA; 4]);
-        prunable.append(true);
-        prunable.append(false);
-        prunable.append(true);
+        prunable.push_chunk_unchecked(&[0xFF; 4]);
+        prunable.push_chunk_unchecked(&[0xAA; 4]);
+        prunable.push(true);
+        prunable.push(false);
+        prunable.push(true);
 
         assert_eq!(prunable.len(), 67); // 64 + 3 bits
 
@@ -396,8 +405,8 @@ mod tests {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add chunks
-        prunable.append_chunk_unchecked(&[1, 2, 3, 4]);
-        prunable.append_chunk_unchecked(&[5, 6, 7, 8]);
+        prunable.push_chunk_unchecked(&[1, 2, 3, 4]);
+        prunable.push_chunk_unchecked(&[5, 6, 7, 8]);
 
         // Prune to bit 32
         prunable.prune_to_bit(32);
@@ -412,12 +421,12 @@ mod tests {
     }
 
     #[test]
-    fn test_append_after_pruning() {
+    fn test_push_after_pruning() {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add initial chunks
-        prunable.append_chunk_unchecked(&[1, 2, 3, 4]);
-        prunable.append_chunk_unchecked(&[5, 6, 7, 8]);
+        prunable.push_chunk_unchecked(&[1, 2, 3, 4]);
+        prunable.push_chunk_unchecked(&[5, 6, 7, 8]);
 
         // Prune first chunk
         prunable.prune_to_bit(32);
@@ -425,7 +434,7 @@ mod tests {
         assert_eq!(prunable.pruned_chunks(), 1);
 
         // Add more data
-        prunable.append_chunk_unchecked(&[9, 10, 11, 12]);
+        prunable.push_chunk_unchecked(&[9, 10, 11, 12]);
         assert_eq!(prunable.len(), 96); // 32 pruned + 64 active
 
         // New chunk should be accessible
@@ -467,7 +476,7 @@ mod tests {
                 (i * 4 + 2) as u8,
                 (i * 4 + 3) as u8,
             ];
-            prunable.append_chunk_unchecked(&chunk);
+            prunable.push_chunk_unchecked(&chunk);
         }
 
         // Before pruning
@@ -486,10 +495,10 @@ mod tests {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add chunks
-        prunable.append_chunk_unchecked(&[1, 2, 3, 4]);
-        prunable.append_chunk_unchecked(&[5, 6, 7, 8]);
-        prunable.append(true);
-        prunable.append(false);
+        prunable.push_chunk_unchecked(&[1, 2, 3, 4]);
+        prunable.push_chunk_unchecked(&[5, 6, 7, 8]);
+        prunable.push(true);
+        prunable.push(false);
 
         let (_, next_bit) = prunable.last_chunk();
         assert_eq!(next_bit, 2);
@@ -513,9 +522,9 @@ mod tests {
 
         // Add same pattern to each
         for i in 0..10 {
-            p8.append(i % 2 == 0);
-            p16.append(i % 2 == 0);
-            p32.append(i % 2 == 0);
+            p8.push(i % 2 == 0);
+            p16.push(i % 2 == 0);
+            p32.push(i % 2 == 0);
         }
 
         // All should have same bit count
@@ -562,9 +571,9 @@ mod tests {
         let chunk2 = [0x55, 0x66, 0x77, 0x88];
         let chunk3 = [0x99, 0xAA, 0xBB, 0xCC];
 
-        prunable.append_chunk_unchecked(&chunk1);
-        prunable.append_chunk_unchecked(&chunk2);
-        prunable.append_chunk_unchecked(&chunk3);
+        prunable.push_chunk_unchecked(&chunk1);
+        prunable.push_chunk_unchecked(&chunk2);
+        prunable.push_chunk_unchecked(&chunk3);
 
         // Before pruning
         assert_eq!(prunable.get_chunk_by_index(0), &chunk1);
@@ -575,5 +584,38 @@ mod tests {
         prunable.prune_to_bit(32);
         assert_eq!(prunable.get_chunk_by_index(0), &chunk2);
         assert_eq!(prunable.get_chunk_by_index(1), &chunk3);
+    }
+
+    #[test]
+    fn test_pop() {
+        let mut prunable: Prunable<4> = Prunable::new();
+
+        prunable.push(true);
+        prunable.push(false);
+        prunable.push(true);
+        assert_eq!(prunable.len(), 3);
+
+        assert!(prunable.pop());
+        assert_eq!(prunable.len(), 2);
+
+        assert!(!prunable.pop());
+        assert_eq!(prunable.len(), 1);
+
+        assert!(prunable.pop());
+        assert_eq!(prunable.len(), 0);
+        assert!(prunable.is_empty());
+
+        for i in 0..100 {
+            prunable.push(i % 3 == 0);
+        }
+        assert_eq!(prunable.len(), 100);
+
+        for i in (0..100).rev() {
+            let expected = i % 3 == 0;
+            assert_eq!(prunable.pop(), expected);
+            assert_eq!(prunable.len(), i);
+        }
+
+        assert!(prunable.is_empty());
     }
 }
