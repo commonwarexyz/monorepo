@@ -357,7 +357,8 @@ impl<const N: usize> BitMap<N> {
         self.len() == 0
     }
 
-    /// Get a reference to a chunk by its index in the current bitmap
+    /// Get a reference to a chunk by its index in the current bitmap.
+    /// Note this is an index into the chunks, not a bit offset.
     #[inline]
     pub(super) fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
         assert!(
@@ -369,17 +370,17 @@ impl<const N: usize> BitMap<N> {
         &self.chunks[index]
     }
 
-    /// Flips the bit at `index`.
+    /// Flips the bit at `bit_offset`.
     ///
     /// # Panics
     ///
-    /// Panics if `index` is out of bounds.
+    /// Panics if `bit_offset` is out of bounds.
     #[inline]
-    pub fn flip(&mut self, index: usize) {
-        self.assert_index(index);
-        let chunk_index = Self::chunk_index(index);
-        let byte_offset = Self::chunk_byte_offset(index);
-        let mask = Self::chunk_byte_bitmask(index);
+    pub fn flip(&mut self, bit_offset: usize) {
+        self.assert_offset(bit_offset);
+        let chunk_index = Self::chunk_index(bit_offset);
+        let byte_offset = Self::chunk_byte_offset(bit_offset);
+        let mask = Self::chunk_byte_bitmask(bit_offset);
         self.chunks[chunk_index][byte_offset] ^= mask;
     }
 
@@ -452,13 +453,13 @@ impl<const N: usize> BitMap<N> {
         let _ = self.clear_trailing_bits();
     }
 
-    /// Asserts that the index is within bounds.
+    /// Asserts that the bit offset is within bounds.
     #[inline(always)]
-    fn assert_index(&self, index: usize) {
+    fn assert_offset(&self, bit_offset: usize) {
         assert!(
-            index < self.len(),
-            "Index {} out of bounds (len: {})",
-            index,
+            bit_offset < self.len(),
+            "Bit offset {} out of bounds (len: {})",
+            bit_offset,
             self.len()
         );
     }
@@ -562,7 +563,7 @@ impl<const N: usize> Index<usize> for BitMap<N> {
     /// Panics if out of bounds.
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
-        self.assert_index(index);
+        self.assert_offset(index);
         let value = self.get(index);
         if value {
             &true

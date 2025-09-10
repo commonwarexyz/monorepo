@@ -196,6 +196,7 @@ impl<const N: usize> Prunable<N> {
     }
 
     /// Get a reference to a chunk by its index in the current bitmap
+    /// Note this is an index into the chunks, not a bit offset.
     #[inline]
     pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
         self.bitmap.get_chunk_by_index(index)
