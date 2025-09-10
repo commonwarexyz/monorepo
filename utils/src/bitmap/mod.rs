@@ -383,41 +383,29 @@ impl<const N: usize> BitMap<N> {
         self.chunks[chunk_index][byte_offset] ^= mask;
     }
 
-    /// Sets all bits to 1.
+    /// Sets all bits to the specified value.
     #[inline]
-    pub fn set_all(&mut self, value: bool) {
-        let value = if value { u8::MAX } else { 0 };
+    pub fn set_all(&mut self, bit: bool) {
+        let value = if bit { u8::MAX } else { 0 };
         for chunk in &mut self.chunks {
             chunk.fill(value);
+        }
+        // Clear trailing bits to maintain invariant when setting to true
+        if value != 0 {
+            self.clear_trailing_bits();
         }
     }
 
     /// Returns the number of bits set to 1.
     #[inline]
     pub fn count_ones(&self) -> usize {
-        let mut count: usize = 0;
-        for (i, chunk) in self.chunks.iter().enumerate() {
-            if i == self.chunks.len() - 1 {
-                // For the last chunk, only count bits up to next_bit
-                let bytes_to_count = self.next_bit.div_ceil(8); // Round up to nearest byte
-                for (byte_idx, byte) in chunk.iter().enumerate().take(bytes_to_count) {
-                    if byte_idx == (bytes_to_count - 1) && self.next_bit % 8 != 0 {
-                        // For the last byte, only count bits up to next_bit % 8
-                        let bits_in_last_byte = self.next_bit % 8;
-                        let mask = (1u8 << bits_in_last_byte) - 1;
-                        count += (byte & mask).count_ones() as usize;
-                    } else {
-                        count += byte.count_ones() as usize;
-                    }
-                }
-            } else {
-                // For all other chunks, count all bits
-                for byte in chunk {
-                    count += byte.count_ones() as usize;
-                }
-            }
-        }
-        count
+        // Thanks to the invariant that trailing bits are always 0,
+        // we can simply count all set bits in all chunks
+        self.chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .map(|byte| byte.count_ones() as usize)
+            .sum()
     }
 
     /// Returns the number of bits set to 0.
