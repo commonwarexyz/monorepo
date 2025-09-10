@@ -1,8 +1,6 @@
 //! Iterators for traversing MMRs of a given size, and functions for computing various MMR
 //! properties from their output. These are lower levels methods that are useful for implementing
 //! new MMR variants or extensions.
-extern crate alloc;
-
 use alloc::vec::Vec;
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,

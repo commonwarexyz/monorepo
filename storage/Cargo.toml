@@ -20,7 +20,7 @@ bytes = { workspace = true, default-features = false }
 cfg-if = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true, optional = true }
-crc32fast = { version = "1.4.2", default-features = false }
+crc32fast = { version = "1.4.2", optional = true }
 prometheus-client = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
