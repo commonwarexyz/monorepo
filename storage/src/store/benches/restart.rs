@@ -80,6 +80,7 @@ fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
             }
         }
         db.commit(Some(metadata)).await.unwrap();
+        db.prune(db.inactivity_floor_loc()).await.unwrap();
         db.close().await.unwrap();
     });
 }
