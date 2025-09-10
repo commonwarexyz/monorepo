@@ -312,19 +312,12 @@ impl<const N: usize> BitMap<N> {
         self.chunks[chunk_index][byte_offset] ^= mask;
     }
 
-    /// Sets all bits to 0.
-    #[inline]
-    pub fn clear_all(&mut self) {
-        for chunk in &mut self.chunks {
-            chunk.fill(0u8);
-        }
-    }
-
     /// Sets all bits to 1.
     #[inline]
-    pub fn set_all(&mut self) {
+    pub fn set_all(&mut self, value: bool) {
+        let value = if value { u8::MAX } else { 0 };
         for chunk in &mut self.chunks {
-            chunk.fill(u8::MAX);
+            chunk.fill(value);
         }
     }
 
@@ -865,10 +858,10 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_set_all() {
-        let mut bv: BitMap<4> = BitMap::new();
+    fn test_set_all() {
+        let mut bv: BitMap<1> = BitMap::new();
 
-        // Add some bits - fill to byte boundary first
+        // Add some bits
         bv.push(true);
         bv.push(false);
         bv.push(true);
@@ -877,23 +870,24 @@ mod tests {
         bv.push(false);
         bv.push(true);
         bv.push(false);
-        // Now we're byte-aligned, can use append_byte_unchecked
-        bv.push_byte_unchecked(0xAB);
+        bv.push(true);
+        bv.push(false);
 
-        assert_eq!(bv.len(), 16);
-        assert!(bv.count_ones() > 0);
+        assert_eq!(bv.len(), 10);
+        assert_eq!(bv.count_ones(), 5);
+        assert_eq!(bv.count_zeros(), 5);
 
-        // Test clear_all
-        bv.clear_all();
-        assert_eq!(bv.len(), 16); // Length shouldn't change
-        assert_eq!(bv.count_ones(), 0);
-        assert_eq!(bv.count_zeros(), 16);
-
-        // Test set_all
-        bv.set_all();
-        assert_eq!(bv.len(), 16); // Length shouldn't change
-        assert_eq!(bv.count_ones(), 16);
+        // Test set_all(true)
+        bv.set_all(true);
+        assert_eq!(bv.len(), 10);
+        assert_eq!(bv.count_ones(), 10);
         assert_eq!(bv.count_zeros(), 0);
+
+        // Test set_all(false)
+        bv.set_all(false);
+        assert_eq!(bv.len(), 10);
+        assert_eq!(bv.count_ones(), 0);
+        assert_eq!(bv.count_zeros(), 10);
     }
 
     #[test]
@@ -1163,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn test_equality_edge_cases() {
+    fn test_equality() {
         // Test equality with empty bitmaps
         let bv1: BitMap<4> = BitMap::new();
         let bv2: BitMap<4> = BitMap::new();
@@ -1178,9 +1172,8 @@ mod tests {
         let mut bv4: BitMap<4> = [true, false, true].as_ref().into();
         let mut bv5: BitMap<4> = [true, false, true].as_ref().into();
 
-        // Perform operations that would previously require clearing trailing bits
-        bv4.set_all();
-        bv5.set_all();
+        bv4.set_all(true);
+        bv5.set_all(true);
         assert_eq!(bv4, bv5);
 
         bv4.invert();

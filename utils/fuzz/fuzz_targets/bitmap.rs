@@ -26,8 +26,7 @@ enum FuzzInput {
     Clear(Vec<bool>, u64),
     Toggle(Vec<bool>, u64),
     SetTo(Vec<bool>, u64, bool),
-    ClearAll(Vec<bool>),
-    SetAll(Vec<bool>),
+    SetAll(Vec<bool>, bool),
     And(Vec<bool>, Vec<bool>),
     Or(Vec<bool>, Vec<bool>),
     Xor(Vec<bool>, Vec<bool>),
@@ -251,18 +250,11 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::ClearAll(bools) => {
+            FuzzInput::SetAll(bools, value) => {
                 let mut v = BitMap::from(&bools);
-                v.clear_all();
-                assert_eq!(v.count_ones(), 0);
-                assert_eq!(v.count_zeros(), v.len());
-            }
-
-            FuzzInput::SetAll(bools) => {
-                let mut v = BitMap::from(&bools);
-                v.set_all();
-                assert_eq!(v.count_zeros(), 0);
-                assert_eq!(v.count_ones(), v.len());
+                v.set_all(value);
+                assert_eq!(v.count_zeros(), if value { 0 } else { v.len() });
+                assert_eq!(v.count_ones(), if value { v.len() } else { 0 });
             }
 
             FuzzInput::And(bools1, bools2) => {
