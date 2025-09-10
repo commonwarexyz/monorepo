@@ -143,14 +143,15 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if the bit doesn't exist.
     #[inline]
-    pub fn get_bit(&self, bit_offset: u64) -> bool {
+    pub fn get(&self, bit_offset: u64) -> bool {
         let chunk = self.get_chunk(bit_offset);
-        Self::get_bit_from_chunk(chunk, bit_offset)
+        Self::get_from_chunk(chunk, bit_offset)
     }
 
     /// Get the value at the given global `bit_offset` from the `chunk`.
+    /// Note `bit_offset` is an offset within the entire bitmap, not just the chunk.
     #[inline]
-    fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
+    fn get_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
         let byte_offset = Self::chunk_byte_offset(bit_offset);
         let byte = chunk[byte_offset];
         let mask = Self::chunk_byte_bitmask(bit_offset);
@@ -187,7 +188,7 @@ impl<const N: usize> BitMap<N> {
         } else {
             self.next_bit -= 1;
         }
-        let bit = Self::get_bit_from_chunk(self.last_chunk().0, self.next_bit);
+        let bit = Self::get_from_chunk(self.last_chunk().0, self.next_bit);
 
         // Clear trailing bits to maintain the invariant
         if bit {
@@ -508,7 +509,7 @@ impl<const N: usize> fmt::Debug for BitMap<N> {
 
         // Closure for writing a bit
         let write_bit = |formatter: &mut Formatter<'_>, index: u64| -> core::fmt::Result {
-            formatter.write_char(if self.get_bit(index) { '1' } else { '0' })
+            formatter.write_char(if self.get(index) { '1' } else { '0' })
         };
 
         f.write_str("BitMap[")?;
@@ -543,7 +544,7 @@ impl<const N: usize> Index<usize> for BitMap<N> {
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         self.assert_index(index as u64);
-        let value = self.get_bit(index as u64);
+        let value = self.get(index as u64);
         if value {
             &true
         } else {
@@ -661,7 +662,7 @@ impl<const N: usize> core::iter::Iterator for Iterator<'_, N> {
             return None;
         }
 
-        let bit = self.bitmap.get_bit(self.pos);
+        let bit = self.bitmap.get(self.pos);
         self.pos += 1;
         Some(bit)
     }
@@ -714,7 +715,7 @@ mod tests {
         assert_eq!(bv.len(), 1);
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 1);
-        assert!(!bv.get_bit(0));
+        assert!(!bv.get(0));
         assert_eq!(bv.count_ones(), 0);
         assert_eq!(bv.count_zeros(), 1);
 
@@ -723,7 +724,7 @@ mod tests {
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 10);
         for i in 0..10 {
-            assert!(!bv.get_bit(i));
+            assert!(!bv.get(i));
         }
         assert_eq!(bv.count_ones(), 0);
         assert_eq!(bv.count_zeros(), 10);
@@ -741,7 +742,7 @@ mod tests {
         assert_eq!(bv.len(), 1);
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 1);
-        assert!(bv.get_bit(0));
+        assert!(bv.get(0));
         assert_eq!(bv.count_ones(), 1);
         assert_eq!(bv.count_zeros(), 0);
 
@@ -750,7 +751,7 @@ mod tests {
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 10);
         for i in 0..10 {
-            assert!(bv.get_bit(i));
+            assert!(bv.get(i));
         }
         assert_eq!(bv.count_ones(), 10);
         assert_eq!(bv.count_zeros(), 0);
@@ -852,22 +853,21 @@ mod tests {
         assert_eq!(bv.len(), 3);
         assert!(!bv.is_empty());
 
-        // Test get_bit
-        assert!(bv.get_bit(0));
-        assert!(!bv.get_bit(1));
-        assert!(bv.get_bit(2));
+        // Test get
+        assert!(bv.get(0));
+        assert!(!bv.get(1));
+        assert!(bv.get(2));
 
-        // Test set_bit
         bv.set(1, true);
-        assert!(bv.get_bit(1));
+        assert!(bv.get(1));
         bv.set(2, false);
-        assert!(!bv.get_bit(2));
+        assert!(!bv.get(2));
 
         // Test flip
         bv.flip(0); // true -> false
-        assert!(!bv.get_bit(0));
+        assert!(!bv.get(0));
         bv.flip(0); // false -> true
-        assert!(bv.get_bit(0));
+        assert!(bv.get(0));
     }
 
     #[test]
@@ -935,7 +935,7 @@ mod tests {
 
         // All bits in the byte should be set
         for i in 0..8 {
-            assert!(bv.get_bit(i));
+            assert!(bv.get(i));
         }
 
         bv.push_byte_unchecked(0x00);
@@ -943,7 +943,7 @@ mod tests {
 
         // All bits in the second byte should be clear
         for i in 8..16 {
-            assert!(!bv.get_bit(i));
+            assert!(!bv.get(i));
         }
     }
 
@@ -1034,11 +1034,11 @@ mod tests {
         assert_eq!(bv.count_zeros(), original_ones);
 
         // Check bits
-        assert!(!bv.get_bit(0));
-        assert!(bv.get_bit(1));
-        assert!(!bv.get_bit(2));
-        assert!(bv.get_bit(3));
-        assert!(!bv.get_bit(4));
+        assert!(!bv.get(0));
+        assert!(bv.get(1));
+        assert!(!bv.get(2));
+        assert!(bv.get(3));
+        assert!(!bv.get(4));
     }
 
     #[test]
@@ -1062,7 +1062,7 @@ mod tests {
 
         assert_eq!(bv1.len(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get_bit(i as u64), expected_bit);
+            assert_eq!(bv1.get(i as u64), expected_bit);
         }
     }
 
@@ -1087,7 +1087,7 @@ mod tests {
 
         assert_eq!(bv1.len(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get_bit(i as u64), expected_bit);
+            assert_eq!(bv1.get(i as u64), expected_bit);
         }
     }
 
@@ -1112,7 +1112,7 @@ mod tests {
 
         assert_eq!(bv1.len(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get_bit(i as u64), expected_bit);
+            assert_eq!(bv1.get(i as u64), expected_bit);
         }
     }
 
@@ -1422,7 +1422,7 @@ mod tests {
 
         // Verify the decoded bitmap has the same bits
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(decoded.get_bit(i as u64), expected);
+            assert_eq!(decoded.get(i as u64), expected);
         }
 
         // Test larger bitmap across multiple chunks
@@ -1438,7 +1438,7 @@ mod tests {
         // Verify all bits match
         assert_eq!(decoded.len(), 100);
         for i in 0..100 {
-            assert_eq!(decoded.get_bit(i), i % 7 == 0);
+            assert_eq!(decoded.get(i), i % 7 == 0);
         }
     }
 
@@ -1466,9 +1466,9 @@ mod tests {
 
         // All should have the same logical content
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(decoded4.get_bit(i as u64), expected);
-            assert_eq!(decoded8.get_bit(i as u64), expected);
-            assert_eq!(decoded16.get_bit(i as u64), expected);
+            assert_eq!(decoded4.get(i as u64), expected);
+            assert_eq!(decoded8.get(i as u64), expected);
+            assert_eq!(decoded16.get(i as u64), expected);
         }
     }
 
@@ -1634,7 +1634,7 @@ mod tests {
         assert_eq!(bv.count_ones(), 3);
         assert_eq!(bv.count_zeros(), 2);
         for (i, &expected) in [true, false, true, false, true].iter().enumerate() {
-            assert_eq!(bv.get_bit(i as u64), expected);
+            assert_eq!(bv.get(i as u64), expected);
         }
 
         // Test with array slice
@@ -1644,7 +1644,7 @@ mod tests {
         assert_eq!(bv.count_ones(), 2);
         assert_eq!(bv.count_zeros(), 2);
         for (i, &expected) in array.iter().enumerate() {
-            assert_eq!(bv.get_bit(i as u64), expected);
+            assert_eq!(bv.get(i as u64), expected);
         }
 
         // Test with empty slice
@@ -1658,7 +1658,7 @@ mod tests {
         let bv: BitMap<8> = large.clone().into();
         assert_eq!(bv.len(), 100);
         for (i, &expected) in large.iter().enumerate() {
-            assert_eq!(bv.get_bit(i as u64), expected);
+            assert_eq!(bv.get(i as u64), expected);
         }
     }
 
@@ -1729,7 +1729,7 @@ mod tests {
             assert_eq!(bv.count_ones(), 4);
             assert_eq!(bv.count_zeros(), 3);
             for (i, &expected) in pattern.iter().enumerate() {
-                assert_eq!(bv.get_bit(i as u64), expected);
+                assert_eq!(bv.get(i as u64), expected);
             }
         }
 
@@ -1737,14 +1737,14 @@ mod tests {
         assert_eq!(bv8.count_ones(), 4);
         assert_eq!(bv8.count_zeros(), 3);
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(bv8.get_bit(i as u64), expected);
+            assert_eq!(bv8.get(i as u64), expected);
         }
 
         assert_eq!(bv16.len(), 7);
         assert_eq!(bv16.count_ones(), 4);
         assert_eq!(bv16.count_zeros(), 3);
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(bv16.get_bit(i as u64), expected);
+            assert_eq!(bv16.get(i as u64), expected);
         }
     }
 
@@ -1798,8 +1798,8 @@ mod tests {
         assert_eq!(bv.get_chunk_by_index(0), &[5, 6, 7, 8]);
 
         // Last partial chunk still has the appended bits
-        assert!(bv.get_bit(32));
-        assert!(!bv.get_bit(33));
+        assert!(bv.get(32));
+        assert!(!bv.get(33));
     }
 
     #[test]

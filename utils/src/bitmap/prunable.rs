@@ -83,13 +83,13 @@ impl<const N: usize> Prunable<N> {
 
         // Adjust bit_offset to account for pruning
         let adjusted_offset = bit_offset - self.pruned_bits();
-        self.bitmap.get_bit(adjusted_offset)
+        self.bitmap.get(adjusted_offset)
     }
 
     /// Get the value of a bit from its chunk.
     #[inline]
     pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
-        BitMap::<N>::get_bit_from_chunk(chunk, bit_offset)
+        BitMap::<N>::get_from_chunk(chunk, bit_offset)
     }
 
     /// Add a single bit to the end of the bitmap.

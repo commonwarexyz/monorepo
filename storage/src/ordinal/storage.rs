@@ -170,7 +170,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                     let bits = bits.get(section).unwrap();
                     if let Some(bits) = bits {
                         let bit_index = offset as usize / Record::<V>::SIZE;
-                        if !bits.get_bit(bit_index as u64) {
+                        if !bits.get(bit_index as u64) {
                             offset += Record::<V>::SIZE as u64;
                             continue;
                         }

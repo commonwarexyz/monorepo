@@ -75,7 +75,7 @@ impl BloomFilter {
     pub fn contains(&self, item: &[u8]) -> bool {
         let indices = self.indices(item, self.bits.len() as usize);
         for index in indices {
-            if !self.bits.get_bit(index as u64) {
+            if !self.bits.get(index as u64) {
                 return false;
             }
         }
