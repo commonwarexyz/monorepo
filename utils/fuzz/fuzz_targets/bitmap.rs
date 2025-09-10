@@ -25,12 +25,12 @@ enum FuzzInput {
     Set(Vec<bool>, u64),
     Clear(Vec<bool>, u64),
     Flip(Vec<bool>, u64),
+    FlipAll(Vec<bool>),
     SetTo(Vec<bool>, u64, bool),
     SetAll(Vec<bool>, bool),
     And(Vec<bool>, Vec<bool>),
     Or(Vec<bool>, Vec<bool>),
     Xor(Vec<bool>, Vec<bool>),
-    Invert(Vec<bool>),
     Default,
     FromSliceBool(Vec<bool>),
     FromVecBool(Vec<bool>),
@@ -293,12 +293,14 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(v1.len(), old_len);
             }
 
-            FuzzInput::Invert(bools) => {
+            FuzzInput::FlipAll(bools) => {
                 let mut v = BitMap::from(&bools);
                 let old_ones = v.count_ones();
                 let old_zeros = v.count_zeros();
-                v.invert();
+                let old_len = v.len();
+                v.flip_all();
 
+                assert_eq!(v.len(), old_len);
                 assert_eq!(v.count_ones(), old_zeros);
                 assert_eq!(v.count_zeros(), old_ones);
             }

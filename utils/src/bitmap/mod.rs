@@ -383,7 +383,7 @@ impl<const N: usize> BitMap<N> {
     }
 
     /// Flips all bits (1s become 0s and vice versa).
-    pub fn invert(&mut self) {
+    pub fn flip_all(&mut self) {
         for chunk in &mut self.chunks {
             for byte in chunk {
                 *byte = !*byte;
@@ -891,10 +891,9 @@ mod tests {
     }
 
     #[test]
-    fn test_invert() {
+    fn test_flip_all() {
         let mut bv: BitMap<4> = BitMap::new();
 
-        // Test with specific pattern
         bv.push(true);
         bv.push(false);
         bv.push(true);
@@ -903,10 +902,14 @@ mod tests {
 
         let original_ones = bv.count_ones();
         let original_zeros = bv.count_zeros();
+        let original_len = bv.len();
 
-        bv.invert();
+        bv.flip_all();
 
-        // After invert, ones and zeros should be swapped
+        // Length should not change
+        assert_eq!(bv.len(), original_len);
+
+        // Ones and zeros should be swapped
         assert_eq!(bv.count_ones(), original_zeros);
         assert_eq!(bv.count_zeros(), original_ones);
 
@@ -1066,11 +1069,11 @@ mod tests {
         assert_eq!(bv_or.len(), 35);
         assert_eq!(bv_xor.len(), 35);
 
-        // Test invert with partial chunk
+        // Test flip_all with partial chunk
         let mut bv_inv = bv1.clone();
         let original_ones = bv_inv.count_ones();
         let original_zeros = bv_inv.count_zeros();
-        bv_inv.invert();
+        bv_inv.flip_all();
         assert_eq!(bv_inv.count_ones(), original_zeros);
         assert_eq!(bv_inv.count_zeros(), original_ones);
     }
@@ -1176,8 +1179,8 @@ mod tests {
         bv5.set_all(true);
         assert_eq!(bv4, bv5);
 
-        bv4.invert();
-        bv5.invert();
+        bv4.flip_all();
+        bv5.flip_all();
         assert_eq!(bv4, bv5);
 
         // Test with bitwise operations
