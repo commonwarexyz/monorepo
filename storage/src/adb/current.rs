@@ -669,7 +669,7 @@ impl<
 
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = verification::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
