@@ -16,6 +16,8 @@ impl<const N: usize> Prunable<N> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: usize = BitMap::<N>::CHUNK_SIZE_BITS;
 
+    /* Constructors */
+
     /// Create a new empty prunable bitmap.
     pub fn new() -> Self {
         Self {
@@ -32,28 +34,53 @@ impl<const N: usize> Prunable<N> {
         }
     }
 
+    /* Length */
+
     /// Return the number of bits in the bitmap, irrespective of any pruning.
     #[inline]
     pub fn len(&self) -> usize {
         self.pruned_chunks * Self::CHUNK_SIZE_BITS + self.bitmap.len()
     }
 
-    /// Returns true if the bitmap is empty.
+    /// Return true if the bitmap is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Return the number of bits that have been pruned from this bitmap.
+    /// Return the number of chunks in the bitmap.
+    #[inline]
+    pub fn chunks_len(&self) -> usize {
+        self.bitmap.chunks_len()
+    }
+
+    /// Return the number of pruned chunks.
+    #[inline]
+    pub fn pruned_chunks(&self) -> usize {
+        self.pruned_chunks
+    }
+
+    /// Return the number of pruned bits.
     #[inline]
     pub fn pruned_bits(&self) -> usize {
         self.pruned_chunks * Self::CHUNK_SIZE_BITS
     }
 
-    /// Return the last chunk of the bitmap and its size in bits.
+    /* Getters */
+
+    /// Get the value of a bit.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
-    pub fn last_chunk(&self) -> (&[u8; N], usize) {
-        self.bitmap.last_chunk()
+    pub fn get_bit(&self, bit_offset: usize) -> bool {
+        let chunk_num = Self::raw_chunk_index(bit_offset);
+        assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
+
+        // Adjust bit_offset to account for pruning
+        let adjusted_offset = bit_offset - self.pruned_bits();
+        self.bitmap.get(adjusted_offset)
     }
 
     /// Returns the bitmap chunk containing the specified bit.
@@ -71,30 +98,46 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.get_chunk(adjusted_offset)
     }
 
-    /// Get the value of a bit.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the bit doesn't exist or has been pruned.
-    #[inline]
-    pub fn get_bit(&self, bit_offset: usize) -> bool {
-        let chunk_num = Self::raw_chunk_index(bit_offset);
-        assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
-
-        // Adjust bit_offset to account for pruning
-        let adjusted_offset = bit_offset - self.pruned_bits();
-        self.bitmap.get(adjusted_offset)
-    }
-
     /// Get the value of a bit from its chunk.
     #[inline]
     pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: usize) -> bool {
         BitMap::<N>::get_from_chunk(chunk, bit_offset)
     }
 
+    /// Return the last chunk of the bitmap and its size in bits.
+    #[inline]
+    pub fn last_chunk(&self) -> (&[u8; N], usize) {
+        self.bitmap.last_chunk()
+    }
+
+    /* Setters */
+
+    /// Set the value of the given bit.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bit doesn't exist or has been pruned.
+    pub fn set_bit(&mut self, bit_offset: usize, bit: bool) {
+        let chunk_num = Self::raw_chunk_index(bit_offset);
+        assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
+
+        // Adjust bit_offset to account for pruning
+        let adjusted_offset = bit_offset - self.pruned_bits();
+        self.bitmap.set(adjusted_offset, bit);
+    }
+
     /// Add a single bit to the end of the bitmap.
     pub fn push(&mut self, bit: bool) {
         self.bitmap.push(bit);
+    }
+
+    /// Remove and return the last bit from the bitmap.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the bitmap is empty.
+    pub fn pop(&mut self) -> bool {
+        self.bitmap.pop()
     }
 
     /// Efficiently add a byte to the bitmap.
@@ -115,28 +158,7 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.push_chunk_unchecked(chunk);
     }
 
-    /// Set the value of the given bit.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the bit doesn't exist or has been pruned.
-    pub fn set_bit(&mut self, bit_offset: usize, bit: bool) {
-        let chunk_num = Self::raw_chunk_index(bit_offset);
-        assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
-
-        // Adjust bit_offset to account for pruning
-        let adjusted_offset = bit_offset - self.pruned_bits();
-        self.bitmap.set(adjusted_offset, bit);
-    }
-
-    /// Remove and return the last bit from the bitmap.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the bitmap is empty.
-    pub fn pop(&mut self) -> bool {
-        self.bitmap.pop()
-    }
+    /* Pruning */
 
     /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit.
     ///
@@ -153,6 +175,8 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.prune_chunks(chunks_to_prune);
         self.pruned_chunks = chunk_num;
     }
+
+    /* Indexing Helpers */
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
     #[inline]
@@ -189,23 +213,11 @@ impl<const N: usize> Prunable<N> {
         BitMap::<N>::chunk_index(bit_offset)
     }
 
-    /// Get the number of chunks in the bitmap
-    #[inline]
-    pub fn chunks_len(&self) -> usize {
-        self.bitmap.chunks_len()
-    }
-
     /// Get a reference to a chunk by its index in the current bitmap
     /// Note this is an index into the chunks, not a bit offset.
     #[inline]
     pub fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
         self.bitmap.get_chunk_by_index(index)
-    }
-
-    /// Get the number of pruned chunks
-    #[inline]
-    pub fn pruned_chunks(&self) -> usize {
-        self.pruned_chunks
     }
 }
 
