@@ -10,15 +10,13 @@ Blockchains don't yet offer this same "temporal privacy" (the ability to hide in
 
 What if a user could produce a binding commitment to a specific moment in the future? Reveled at a given time, whether they are ready or not? Meet [Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189).
 
-Consider an onchain game. Players need to commit moves simultaneously, yet blockchains process transactions sequentially. The last player to move always wins. Game over?
+TLE lets you encrypt data to a future moment in time. The ciphertext can only be decrypted when that moment arrives—not before, not by choice, but automatically when the target time is reached.
 
-Developers have worked around this with commit-reveal schemes for years. Users hash their moves, submit the hash, wait for everyone else, then reveal. But here's the fundamental problem: the binding property of commitments only guarantees users can't change their move—it doesn't force them to reveal it.
+Here's how it works: You encrypt your data to a specific block height using the expected properties of that future block. When the network finalizes that block, its unique properties (like a VRF output) become the decryption key. Anyone can take your ciphertext and the block's public output to recover the plaintext. The decryption isn't optional—once the block exists, the data is decryptable.
 
-A malicious player can spam commitments and selectively reveal only the winning ones. A disconnected player leaves the game in limbo. Even honest players become attack vectors—forget your secret, lose your connection, or simply change your mind, and the entire game grinds to a halt. You can add deposits and penalties, but you're just patching symptoms, not solving the root cause.
+The cryptographic construction ensures two critical properties. First, no one can decrypt before the target block is finalized, not even the encryptor. Second, everyone can decrypt after the target block is finalized, using only public information from the chain. The network's progression through time becomes the decryption mechanism itself.
 
-The commitment is binding but not forcing. The revelation requires interaction. The game depends on every player's continued participation. These aren't implementation details—they're fundamental limitations of the primitive itself.
-
-What if time itself could be the Revealer?
+In practice, this means you submit an encrypted move targeting block 1000. When block 1000 is finalized with its VRF output, that output directly enables decryption. No interaction required. No secrets to store. No ability to withhold revelation. Time passes, the block arrives, and your move is revealed.
 
 ## Enter Battleware
 
