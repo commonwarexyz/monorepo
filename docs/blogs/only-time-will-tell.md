@@ -14,11 +14,7 @@ Enter [Practical Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). T
 
 It turns out we already have such a signature generation mechanism in the [Commonware Library](https://github.com/commonwarexyz/monorepo): [threshold-simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html)'s VRF. At each view (every ~200ms on a global network), validators produce a threshold signature over the view number (a message that can be known ahead of time by anyone looking for a timelock encryption target).
 
-Take rock-paper-scissors. Both players encrypt their moves to the same future time, say 60 seconds away. Neither can see the other's choice (the moves are encrypted and can be shared publicly). When that time arrives and validators sign some message over the payload chosen as the encryption target, their threshold signature becomes the decryption key. No further coordination needed. If it sounds like magic, that's because it is.
-
-TLE, a standalone cryptographic primitive, however, lacks the ability to enforce commitments to encrypted data. Nothing in the TLE scheme prevents a user from sharing different encrypted data to different people or encrypting updated data if they change their mind.
-
-Embedded into a blockchain, TLE commitments become "Binding Timelock Encryption" (BTLE). Submit an encrypted move before the end of a contest, and you can't back out or change your mind (your move is stored in state and can't be changed). Anyone possessing the VRF output associated with the end of the contest can decrypt the committed ciphertext.
+TLE, a standalone cryptographic primitive, however, lacks the ability to enforce commitments to encrypted data. Nothing in the TLE scheme prevents a user from sharing different encrypted data to different people or encrypting updated data if they change their mind. Embedded into a blockchain, TLE commitments become "Binding Timelock Encryption" (BTLE). Submit an encrypted move before the end of a contest, and you can't back out or change your mind (your move is stored in state and can't be changed). Anyone possessing the VRF output associated with the end of the contest can decrypt the committed ciphertext.
 
 With BTLE, blockchains can finally offer temporal privacy. Good things (or fair contests onchain), as your parents said, come to those that wait (for timelock decryption).
 
