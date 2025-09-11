@@ -18,6 +18,8 @@ The cryptographic construction ensures two critical properties. First, no one ca
 
 In practice, this means you submit an encrypted move targeting block 1000. When block 1000 is finalized with its VRF output, that output directly enables decryption. No interaction required. No secrets to store. No ability to withhold revelation. Time passes, the block arrives, and your move is revealed.
 
+With TLE, blockchains finally offer temporal privacy—your data remains hidden while you wait for the target block. Good things, as your parents said, come to those that wait.
+
 _Difference from commit-reveal? The commiter isn't tasked with revealing._
 
 ## Enter Battleware
