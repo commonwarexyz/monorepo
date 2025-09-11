@@ -511,7 +511,7 @@ where
                                 "given section {section} did not match expected section {expected} from location {loc}");
 
                         if self.log_size > locations_size {
-                            warn!(section, offset, "operation was missing from location map");
+                            debug!(section, offset, "operation was missing from location map");
                             self.locations.append(offset).await?;
                             locations_size += 1;
                         }
