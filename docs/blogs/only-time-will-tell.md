@@ -1,4 +1,5 @@
 # Only Time Will Tell
+
 As your parents noted when you were growing up, good things come to those that wait. It turns out that recent advances in cryptography, however, have proven your parents right.
 
 When competing head-to-head, publicly revealing your play to an opponent (before they've gone) offers them an advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for ads. Left with few (if any) alternatives, applications reliant on some sort of contest often operate as a trusted facilitator. Google doesn't tell Amazon what Walmart is bidding to appear first in the search results for golf balls.
