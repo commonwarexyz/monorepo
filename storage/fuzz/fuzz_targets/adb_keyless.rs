@@ -238,7 +238,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::SimulateFailure {
                     sync_log,
-                    sync_locations,g
+                    sync_locations,
                     sync_mmr,
                 } => {
                     db.simulate_failure(*sync_log, *sync_locations, *sync_mmr)
