@@ -2,25 +2,25 @@
 
 As your parents insisted when you were growing up, good things come to those that wait. It turns out recent advances in cryptography have proven them right.
 
-When competing head-to-head, publicly revealing your move to an opponent (before they've done the same) offers an obvious advantage. This applies the same to a game of rock-paper-scissors as it does an keyword auction on your search result. If I know you are playing rock, I'll play paper. Applications incorporating games or contests thus blind submissions until some time period has elapsed to ensure fairness.
+When competing head-to-head, revealing your move before your opponent gives them an obvious advantage. If I know you're playing rock, I'll play paper. Whether it's rock-paper-scissors or a keyword auction for search results, competitive applications need to hide submissions until everyone has committed. That's why they typically run on centralized infrastructure where moves can be blinded until resolution.
 
-Blockchains, unlike the centralized infrastructure typically used for building such applications, don't yet offer this same "temporal privacy". Transactions submitted onchain are public the moment they hit the mempool. To see the value of this information leakage, look no further than the meteoric rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions.
+Blockchains don't yet offer this "temporal privacy". Transactions are public the moment they hit the mempool. Look no further than the meteoric rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions to see the value of this information leakage.
 
-What if blockchains could be used for fair games and contests?
+What if blockchains could run fair competitions?
 
 ## The Missing Primitive: Binding Timelock Encryption (BTLE)
 
-Enter [Practical Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE enables some party to encrypt data to a specific time in the future, specifically when a threshold signature is generated over some known message (like a threshold signature over a view number in [threshold-simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html)). When this threshold signature is generated (let's call it the "VRF output"), anyone can decrypt the ciphertexts encrypted for that known message (the specific point in time selected ahead of time).
+Enter [Practical Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE lets you encrypt data to a future moment—specifically, when validators generate a threshold signature over a known message (like a view number in [threshold-simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html)). Once that signature exists, anyone can use it as a decryption key to reveal the encrypted data. Simply put, if you know the static public key of some threshold set and you know a message it will sign at some point, you can encrypt data that can be decrypted when a signature is generated over that message.
 
-Let's talk rock-paper-scissors again. Let's have two players encrypt their moves for the same point in the future (60 seconds from now). Prior to then, neither player knows what move the other player selected (their move is encrypted and is safe to share with anyone). Once that point in the future is reached (and the holders of the threshold secret generate a threshold signature corresponding to that point in the future), both players can decrypt their moves simultaneously using the corresponding VRF output (no collaboration with the other required). If it sounds like magic, that's because it is.
+Take rock-paper-scissors. Both players encrypt their moves to the same future time, say 60 seconds away. Neither can see the other's choice (the moves are encrypted and can be shared publicly). When that time arrives and validators sign some message over the payload chosen as the encryption target, their threshold signature becomes the decryption key. No further coordination needed. If it sounds like magic, that's because it is.
 
 TLE, a standalone cryptographic primitive, however, lacks the ability to enforce commitments to encrypted data. Nothing in the TLE scheme prevents a user from sharing different encrypted data to different people or encrypting updated data if they change their mind.
 
-Embedded into a blockchain, TLE commitments become "Binding Timelock Encryption" (BTLE). Submit an encrypted move before the end of a contest, and you can't back out or change your mind (your move is stored in state and can't be changed). Anyone possessing the VRF output associated with the end of the contest can decrypt the ciphertext and reveal the commitments.
+This is where blockchains come in. When TLE is embedded onchain, it becomes "Binding Timelock Encryption" (BTLE). Your encrypted move gets written to state and can't be changed. You're committed. When the target block arrives, anyone with the VRF output can decrypt your move onchain.
 
-Unlike commit-reveal schemes, TLE removes the "free option" any participant has to hide their reveal (if, say, revealing a commitment isn't in their favor). Consider an auction with 3 people bidding. Player 1 commits to 10, Player 2 commits to 20, Player 3 commits to 30. Player 3 waits for Player 1 and Player 2 to reveal their bids, and then determines not to reveal because 30 overvalued the item.
+This eliminates the "free option" problem of commit-reveal schemes. In a sealed-bid auction where Player 1 bids 10, Player 2 bids 20, and Player 3 bids 30, Player 3 can't wait to see others reveal then refuse to show their overpriced bid. With BTLE, all bids decrypt automatically when the auction ends. No selective disclosure. No strategic withholding.
 
-With BTLE, blockchains can finally offer temporal privacy. Good things (or fair contests onchain), as your parents said, come to those that wait.
+With BTLE, blockchains can finally offer temporal privacy. Good things, as your parents said, come to those that wait.
 
 ## BATTLEWARE: Proving BTLE is Practical
 
