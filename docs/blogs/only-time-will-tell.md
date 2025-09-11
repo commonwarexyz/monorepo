@@ -14,9 +14,9 @@ Enter [Practical Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). T
 
 Let's talk rock-paper-scissors again. Let's have two players encrypt their moves for the same point in the future (60 seconds from now). Prior to then, neither player knows what move the other player selected (their move is encrypted and is safe to share with anyone). Once that point in the future is reached (and the holders of the threshold secret generate a threshold signature corresponding to that point in the future), both players can decrypt their moves simultaneously using the corresponding VRF output (no collaboration with the other required). If it sounds like magic, that's because it is.
 
-TLE, a standalone cryptographic primitive, lacks the ability to enforce commitments to encrypted data. Nothing prevents a user from sharing different encrypted data to different people or encrypting updated data if they change their mind. What we really need is "Binding Timelock Encryption" (BTLE).
+TLE, a standalone cryptographic primitive, however, lacks the ability to enforce commitments to encrypted data. Nothing in the TLE scheme prevents a user from sharing different encrypted data to different people or encrypting updated data if they change their mind.
 
-Embedded into a blockchain, TLE commitments become binding (BTLE). Submit an encrypted ciphertext before the end of a contest, and you can't back out or change your mind. Anyone possessing the VRF output associated with the end of the contest can decrypt the ciphertext and reveal the commitments (no interaction required).
+Embedded into a blockchain, TLE commitments become "Binding Timelock Encryption" (BTLE). Submit an encrypted move before the end of a contest, and you can't back out or change your mind (your move is stored in state and can't be changed). Anyone possessing the VRF output associated with the end of the contest can decrypt the ciphertext and reveal the commitments.
 
 Unlike commit-reveal schemes, TLE removes the "free option" any participant has to hide their reveal (if, say, revealing a commitment isn't in their favor). Consider an auction with 3 people bidding. Player 1 commits to 10, Player 2 commits to 20, Player 3 commits to 30. Player 3 waits for Player 1 and Player 2 to reveal their bids, and then determines not to reveal because 30 overvalued the item.
 
