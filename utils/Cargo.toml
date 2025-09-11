@@ -11,7 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/utils"
 documentation = "https://docs.rs/commonware-utils"
 
 [dependencies]
-commonware-codec = { workspace = true }
+commonware-codec = { workspace = true, default-features = false }
 bytes = { workspace = true }
 futures = { workspace = true, optional = true  }
 rand = { workspace = true }

@@ -13,10 +13,9 @@ use crate::{
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
-        hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
-        verification::Proof,
+        Proof, StandardHasher as Standard,
     },
     store::operation::Fixed as Operation,
     translator::Translator,
@@ -723,7 +722,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::verify_proof,
-        mmr::{hasher::Standard, mem::Mmr as MemMmr},
+        mmr::{mem::Mmr as MemMmr, StandardHasher as Standard},
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};

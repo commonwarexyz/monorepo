@@ -1362,10 +1362,12 @@ name = "commonware-storage"
 version = "0.0.62"
 dependencies = [
  "bytes",
+ "cfg-if",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
+ "commonware-storage",
  "commonware-utils",
  "crc32fast",
  "criterion",

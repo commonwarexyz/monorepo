@@ -4,8 +4,8 @@ use commonware_runtime::{
     tokio::Config,
 };
 use commonware_storage::mmr::{
-    hasher::Standard,
     mem::{Config as MemConfig, Mmr},
+    StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -62,7 +62,7 @@ fn bench_update(c: &mut Criterion) {
                             let mut elements = Vec::with_capacity(leaves as usize);
                             let mut sampler = StdRng::seed_from_u64(0);
                             let mut leaf_positions = Vec::with_capacity(leaves as usize);
-                            let mut h = Standard::new();
+                            let mut h = StandardHasher::new();
 
                             // Append random elements to MMR
                             for _ in 0..leaves {
