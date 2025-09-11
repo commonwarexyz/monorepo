@@ -1,4 +1,4 @@
-use commonware_codec::{EncodeSize, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use rand_core::CryptoRngCore;
 
 pub struct SharedSecret {
@@ -25,6 +25,20 @@ impl EncodeSize for EphemeralPublicKey {
     fn encode_size(&self) -> usize {
         // There's not a good constant anywhere in the x25519_dalek crate for this.
         32
+    }
+}
+
+impl Read for EphemeralPublicKey {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let bytes: [u8; 32] = ReadExt::read(buf)?;
+        Ok(Self {
+            inner: bytes.into(),
+        })
     }
 }
 
