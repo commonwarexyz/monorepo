@@ -8,11 +8,21 @@ Blockchains, unlike the centralized infrastructure that traditionally provides t
 
 What if blockchains could run fair games and contests?
 
-## The Missing Primitive: Timelock Encryption
+## The Missing Primitive: Binding Timelock Encryption (BTLE)
 
-Enter [(Practical) Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE enables anyone to encrypt some data to a specific time in the future, typically the view or height when some VRF output is revealed. When available, anyone can use this VRF output decrypt the (binded) ciphertext.
+Enter [(Practical) Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE enables anyone to encrypt some data to a specific time in the future, typically the view or height when some VRF output is revealed. When published, any observer can use this VRF output to decrypt the ciphertext provided by the user.
 
-Unlike commit-reveal schemes, TLE removes the "free option" a committer has to hide their reveal (if reveals already made available are not in their favor). Consider an auction with 3 people bidding. Player 1 commits to 10, Player 2 commits to 20, Player 3 commits to 30. Player 3 waits for Player 1 and Player 2 to reveal their bids, and then determines not to reveal because 30 overvalued the item.
+Unlike commit-reveal schemes, TLE removes the "free option" any participant has to hide their reveal (if, say, revealing a commitment isn't in their favor). Consider an auction with 3 people bidding. Player 1 commits to 10, Player 2 commits to 20, Player 3 commits to 30. Player 3 waits for Player 1 and Player 2 to reveal their bids, and then determines not to reveal because 30 overvalued the item.
+
+TLE, a standalone cryptographic primitive, lacks the ability to enforce commitments to encrypted data. Nothing prevents a user from sharing different encrypted data to different people or encrypting updated data if they change their mind. What we really need is "Binding Timelock Encryption".
+
+Embedded into a blockchain, TLE (now BTLE) becomes an invaluable primitive for building fair applications onchain. It just so happens that [threshold-simplex](TODO) emits a VRF output during each view.
+
+Paired with blockchains offer a new twist to TLE: the ability to enforce commitments to encrypted data (something we refer to as "Binding Timelock Encryption").
+
+
+TLE becomes much more practical when embedded into a blockchain that can enforce commitments to encrypted data (something we refer to as "Binding Timelock Encryption").
+
 
 TLE lets multiple players encrypt their moves to the same future block height, creating a synchronization point where all moves are revealed together. No player can see another's move before committing their own. No player can change their move after seeing others. The competition becomes fair.
 
