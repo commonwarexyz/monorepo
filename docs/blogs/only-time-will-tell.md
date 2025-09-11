@@ -44,7 +44,7 @@ To make decryption performant enough for BATTLEWARE, we perform parallel decrypt
 
 The entire implementation is [open source](https://github.com/commonwarexyz/battleware) under both an MIT and Apache-2 license. The code is still a bit rough around the edges, but we were able to reach 77% test coverage (on ~11.2k lines of code). Consider it your opportunity to become a contributor.
 
-## Securing Access
+## Securing Player Access
 
 Instead of trusting our API to provide access to game state, we opted to build a pipeline to provide authenticated access for visitors (like we did with [alto](https://alto.commonware.xyz)). The only difference here being that visitors to BATTLEWARE need to verify state and events against consensus outputs (rather than just consensus outputs directly).
 
