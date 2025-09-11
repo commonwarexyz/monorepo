@@ -1,126 +1,72 @@
 # Only Time Will Tell
 As your parents noted when you were growing up, good things come to those that wait. It turns out that recent advances in cryptography, however, have proven your parents right.
 
-When competing head-to-head, publicly revealing your play to an opponent (before they’ve gone) offers them an advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for ads. Left with few (if any) alternatives, applications reliant on some sort of contest often operate as a trusted facilitator. Google doesn’t tell Amazon what Walmart is bidding to appear first in the search results for golf balls.
+When competing head-to-head, publicly revealing your play to an opponent (before they've gone) offers them an advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for ads. Left with few (if any) alternatives, applications reliant on some sort of contest often operate as a trusted facilitator. Google doesn't tell Amazon what Walmart is bidding to appear first in the search results for golf balls.
 
-Blockchains
+Until now, blockchains couldn't offer this same temporal privacy. Every transaction is public the moment it hits the mempool. Every bid visible. Every move exposed. We had transparency, but we lost something fundamental: the ability to commit now and reveal later, trustlessly.
 
-## Free Write
+## The Missing Primitive
 
+Consider any competitive game. Players need to commit moves simultaneously, yet blockchains process transactions sequentially. The last player to move always wins. This isn't a bug in the game design—it's a limitation of the infrastructure.
 
-As your parents noted when you were growing up, many things can only be known after waiting (patiently) for time to pass.
+Developers have worked around this with commit-reveal schemes for years. Users hash their moves, submit the hash, wait for everyone else, then reveal. It works, but it's clunky. Users need to remember secrets. They need to come back online. If they forget or disappear, the game stalls.
 
-Consider a round of rock-paper-scissors where players commit to moves in some order  the opponent can trivially select a move that wins.
+What if time itself could be the revealer?
 
-Most applications that offer a sort of pvp dynamic serve as a blinder that ensures no participant has an advantage (and all players trust the application to be honest). Think bidding for ads on Google.
+## Enter Battleware
 
+Over the last few months, we've made substantial progress building out the Commonware Library. After alto blew us away with its wicked fast blocktimes, we wanted to build something that showcased capability rather than capacity. Something that demonstrated what becomes possible when you can mold the stack to your application, not the other way around.
 
-It turns out blockchains can now offer the same wisdom
+Battleware is that demonstration: a fully onchain fighting game where time itself decrypts your moves.
 
+When you play Battleware, you encrypt your moves to a future block height. Not to a secret. Not to a committee. To a moment in time that hasn't happened yet. When that block arrives, the network's embedded VRF generates the decryption key. Your move is revealed, scaled by randomness, and executed—all without you having to come back online.
 
-It turns out they may have been on to something.
+No trusted coordinator. No remembering secrets. No stalled games from players who disappear. Just submit your move and let time handle the rest.
 
+## How It Works
 
+Everything starts when you submit your first transaction: `Instruction::Generate()`. The block that includes your transaction uses its VRF output to randomly generate your character—appearance, name, powers, everything. Not predetermined. Not manipulable. Born from the entropy of consensus itself.
 
-In the 90s, it turns out folks wanted to offer the same wisdom: https://cypherpunks.venona.com/date/1993/02/msg00129.html
+After matchmaking pairs you with an opponent (again using the VRF to prevent gaming the system), you enter battle. Fifteen rounds of combat, unless someone gets KO'd first. Each round, you encrypt your move to expire at a specific view in the future. When that view passes, anyone can submit a settle transaction that decrypts both players' moves and resolves the round.
 
+Miss your window? The game defaults you to no action and continues. Your opponent can't stall you out. The battle always progresses.
 
-Blockchains, until the release of
+The real magic happens in the block finalization. Unlike traditional commit-reveal schemes where users must return to reveal their secrets, Battleware's timelock encryption means the network itself becomes the revealer. The VRF output from finalizing each block serves as the decryption key for any moves targeted at that height.
 
+## Under the Hood
 
-As your parents told you when you grew up,
+Battleware combines nearly every primitive in the Commonware Library—plus a few new ones we built along the way. Running across 50 validators distributed in 10 regions globally, it delivers the responsiveness you'd expect from a game, not a blockchain.
 
+The architecture breaks from traditional blockchain patterns in several key ways:
 
+**No gas fees or faucets.** Network entrypoints rate-limit inclusion instead of charging fees. Just start playing—no token balance required. In the future, imagine monthly subscriptions that give you a certain amount of daily throughput. In an era of blockchain abundance, many applications don't need users fighting over block space.
 
-You need temporal privacy. You just don’t know it yet.
+**Trust-minimized frontend.** When you interact with Battleware, you only trust the validators. Every piece of state served to your browser comes authenticated with storage proofs and wrapped in threshold signatures. The backend can't lie to you about the game state even if it wanted to.
 
+**Integrated indexing.** No more spinning up separate infrastructure to watch the chain. Validators push authenticated data directly to the backend, which processes anything with a valid threshold signature. This is trickier than it sounds—we can't generate signatures over roots until after execution completes because we need the VRF output from that block.
 
+**Concurrent decryption.** To keep the game responsive, we decrypt moves in parallel during execution. When serving state, we generate multi-proofs on the fly—think of them as concatenated single proofs that efficiently represent collections of items across sparse ranges. Switch views and the stream dynamically adjusts from filtered to firehose mode.
 
-Blockchains enforce binding commitments.
+To ensure there are always opponents available, we run bots that move randomly. Consider them tutorial mode for learning the game.
 
-At Commonware, we believe that the best onchain experiences will develop a sustained edge through specialization. Why forego the flexibility of general-purpose execution?
+The entire implementation—all 11.2k lines of it—is [open source](https://github.com/commonwarexyz/battleware). The code is still rough around the edges, but we've got 77% test coverage and consider it an excellent opportunity to become a Commonware contributor.
 
-When committing to private data, folks commonly use a commit-reveal scheme. At some elapsed time, participants reveal their commitment (or choose not to). What if instead you could have time be the revealer?
+## Beyond the Game
 
+Battleware isn't really about the game. It's about what the game represents.
 
-The key to any good joke is timing. Turns out the same can be said about blockchains.
+A few years ago, Moxie Marlinspike wrote about his first impressions of web3. He observed that users won't run their own servers, so we need to "design systems that can distribute trust without having to distribute infrastructure." With Battleware, we're getting close. Users interact with a fully decentralized application through their browser, trusting only the validators, with no need to run any infrastructure themselves.
 
-Collaborating with others in a distributed system often requires committing to some value in secret and revealing your knowledge.
+More importantly, Battleware demonstrates what becomes possible when you treat blockchain primitives as components to be assembled, not layers to be stacked. When you can embed a VRF directly into consensus, timelock encryption becomes practical. When you can customize execution, you can decrypt in parallel. When you control the networking layer, you can implement rate limiting instead of fees.
 
-I like to play video games.
+This is the promise of specialization. Not another general-purpose chain trying to be everything to everyone, but focused applications that do exactly what they need to do, exceptionally well.
 
-Goal: stateful example showcasing how to use commonware (no choice to not decrypt)
-A Blockchain That Doesn’t Feel Like One (UNLIMITED ERA?)
-Don’t recap, talk about now
+## What's Next
 
-Over the last few months, we’ve made substantial progress on building out the Commonware Library and recently hit the milestone of having enough to actually create an interactive chain.
+Battleware is just the beginning. It showcases binding timelock encryption and embedded randomness, but there's so much more to explore. State sync. Reconfiguration. New cryptographic schemes. Different consensus mechanisms.
 
-We were blown away by the reaction to alto, our consensus benchmarking harness with wicked fast blocktimes.
+At Commonware, we believe the best onchain experiences will emerge from developers who refuse to accept the limitations of today's frameworks. Who see blockchain components not as fixed infrastructure but as malleable primitives. Who understand that in distributed systems, as in life, timing is everything.
 
-Preparing for the unlimited era of crypto (tx fees enforced by network entrypoints that have a prepurchased capacity). I love micropayments but users want an unlimited option (and rate limited).
+Want to try it yourself? Head to [battleware.xyz](https://battleware.xyz) and generate your fighter. No wallet needed. No fees required. Just pure onchain combat where only time will tell who wins.
 
-What to make? Instead of another TPS edification, we decided to do something to show capability rather than capacity (which at this point should more or less be table stakes for any new application).
-
-This all started with some way to make Timelock Encryption into a useful demo (something I’ve felt for a few years is an exceptionally underutilized primitive, largely because it works best with an embedded VRF). Turns out we have one!
-
-Next, the consideration was what to do with it? We had ideas that worked with value at stake (second price auctions) or required long time horizons (time capsule reveal) but none seemed like the right fit for a demo. I wanted something fast and fun and a contest. Enter Battleware.
-
-
-
-Battleware required the combination of the vast majority of our primitives (and even some new ones). It took a little over a month and is all open-sourced here. The code is still rough around the edges (~11.2k LOC) but consider it an opportunity to become a commonware contributor! Still 77% test coverage.
-
-https://github.com/commonwarexyz/battleware
-https://deepwiki.com/commonwarexyz/battleware
-
-Like alto, 50 validators globally distributed. 10 regions (us-west-1, us-east-1, eu-west-1, ap-northeast-1, eu-north-1, ap-south-1, sa-east-1, eu-central-1, ap-northeast-2, ap-southeast-2)
-
-Unlike other networks/demos, there is no fee balance you need to setup or faucet to visit. Instead the network entrypoints throttle inclusion (just like they would if you had a monthly plan with a game). For now, we rate limit. In the future, think monthly plans that permit some amount of load per day or week. In an era of blockchain abundance, there are many applications that don’t need to fight for inclusion.
-
-It all starts when you first submit a transaction: Instruction::Generate(). When the transaction is processed, it generates a random character using the VRF output emitted from notarizing the block in which your transaction is included. This includes things like your look, name, and even powers.
-
-General decryption by generating an arbitrary message (like a block being finalized in a given view)
-
-
-
-
-Next, you enter matchmaking. After so many views (or when full), the lobby will pair all players again using the VRF to deter anyone from auto-matching with another account they control.
-
-
-
-Then, battle. There are 15 rounds of fighting (unless someone is KO’d before then). When battling, you encrypt your move to the round expiry view and when that view passes can submit a settle transaction that decrypts each player’s move (or defaults to no move if not present or invalid). The move is then scaled again by the VRF to ensure your attacks aren’t too sure of a thing.
-
-
-Unlike a traditional commit-reveal scheme, anyone can reveal the contents of the encrypted data as long as they have the seed it was encrypted to.
-
-When a battle is complete, an ELO score update is computed as a function of your expected damage given (in a ratio of your ELO score to your opponent’s). The top 10 are features on the homepage.
-
-The real magic, however, is what is happening behind the scenes to make this all possible. When you interact with battleware, you only trust the validators (any data served to your browser is both authenticated via storage and wrapped with a threshold signature).
-
-Integrated (reliable) indexing means gone are the days of spinning up some sort of polling infrastructure. Nodes push valid data and the backend processes it (wherever it came from) if it is wrapped with a valid threshold signature. This is particularly challenging because we can’t actually generate a signature over any root until after execution (because we only know the VRF after verify).
-
-
-
-All state served entails exoware generating a proof on-the-fly and wrapping it again with a threshold signature around the root the proof was generated from. To ensure execution is fast enough, we concurrently process decryptions. To save bandwidth, we compute a filtered stream for each listener comprised of dynamically generated multi-proofs (thing of it like concatenated single proofs to represent a collection of items over a sparse range). When switching to the explore, switches back to the firehose.
-
-
-
-To ensure there are always games to play, we run bots behind the scenes. Think of it like a tutorial to learn the game, they move randomly.
-
-In our second blog post, we discuss the topic of “Seeds” and “Views” and how it is feasible to construct an application that doesn’t rely on the safety/correctness guarantees of infrastructure.
-
-A few years ago, Moxie Marlinspike wrote about his first impressions of web3. Moxie examined how close we were to a web as rich as web3 but decentralized. “We should accept the premise that people will not run their own servers by designing systems that can distribute trust without having to distribute infrastructure.” We’re getting close now.
-
-“Embedded application/game”
-
-Plan
-- Moxie web3 blog: https://moxie.org/2022/01/07/web3-first-impressions.html
-    - “We should accept the premise that people will not run their own servers by designing systems that can distribute trust without having to distribute infrastructure.”
-- VRF + Binding Timelock Encryption (How to “Make a Move” in a game?)
-    - character generation/battle move strength is chosen by VRF
-    - image: user targets some seed in the future and encodes, submits seed to settle, VRF determines move strength in block hwere in cluded
-- Stream to Browser with multi-proofs/state proofs with threshold signatures via exoware
-    - Chain Construction (Aggregation) → generate threshold signature over execution results (can’t be computed during verify because need VRF output of said block to compute results)
-- custom execution to pre-decrypt settlement ciphertext to increase throughput
-- fees enforced through network gateways rather than onchain
-    - each builder decides what they are willing to pack in their block and as long as under resource usage, its ok
-- Next: state sync + reconfiguration
+*The code is at [github.com/commonwarexyz/battleware](https://github.com/commonwarexyz/battleware). PRs welcome—let's build the future of specialized blockchains together.*
