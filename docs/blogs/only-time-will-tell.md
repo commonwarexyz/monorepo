@@ -2,9 +2,20 @@
 
 As your parents insisted when you were growing up, good things come to those that wait. It turns out recent advances in cryptography have proven them right.
 
-When competing head-to-head, publicly revealing your move to an opponent (before they've done the same) offers an obvious advantage. This applies the same to a game of rock-paper-scissors as it does an ad placement auction for search results. Applications running games or contests, consequently, often operate as a trusted facilitator that blinds submissions until some time period has elapsed.
+When competing head-to-head, publicly revealing your move to an opponent (before they've done the same) offers an obvious advantage. This applies the same to a game of rock-paper-scissors as it does an keyword auction on your search result. Applications running games or contests blind submissions until some time period has elapsed to ensure fairness.
 
-Blockchains don't yet offer this same "temporal privacy" (the ability to hide information until a specific moment when all participants' actions are revealed simultaneously). Every transaction is public the moment it hits the mempool. The meteoric rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions conveys everything you need to know about the value of this information leakage.
+Blockchains, lacking some trusted arbiter to run a fair contest, have thus far offered a
+
+Traditionally protected by centralized infrastructure, content participants on blockchain applications
+
+blockchain applications with a need to run fair contests have thus far settled for in the hopes that it isn't "that bad".
+
+, consequently, often operate as a trusted facilitator that blinds submissions until some time period has elapsed.
+
+Blockchains don't yet offer this same "temporal privacy" (the ability to hide information until a specific moment when all participants' actions are revealed simultaneously). That is until the release of
+
+
+Every transaction is public the moment it hits the mempool. The meteoric rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions conveys everything you need to know about the value of this information leakage.
 
 ## The Missing Primitive: Timelock Encryption
 
