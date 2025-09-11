@@ -16,11 +16,9 @@ Take rock-paper-scissors. Both players encrypt their moves to the same future ti
 
 TLE, a standalone cryptographic primitive, however, lacks the ability to enforce commitments to encrypted data. Nothing in the TLE scheme prevents a user from sharing different encrypted data to different people or encrypting updated data if they change their mind.
 
-This is where blockchains come in. When TLE is embedded onchain, it becomes "Binding Timelock Encryption" (BTLE). Your encrypted move gets written to state and can't be changed. You're committed. When the target block arrives, anyone with the VRF output can decrypt your move onchain.
+Embedded into a blockchain, TLE commitments become "Binding Timelock Encryption" (BTLE). Submit an encrypted move before the end of a contest, and you can't back out or change your mind (your move is stored in state and can't be changed). Anyone possessing the VRF output associated with the end of the contest can decrypt the committed ciphertext.
 
-This eliminates the "free option" problem of commit-reveal schemes. In a sealed-bid auction where Player 1 bids 10, Player 2 bids 20, and Player 3 bids 30, Player 3 can't wait to see others reveal then refuse to show their overpriced bid. With BTLE, all bids decrypt automatically when the auction ends. No selective disclosure. No strategic withholding.
-
-With BTLE, blockchains can finally offer temporal privacy. Good things, as your parents said, come to those that wait.
+With BTLE, blockchains can finally offer temporal privacy. Good things (or fair contests onchain), as your parents said, come to those that wait (for timelock decryption).
 
 ## BATTLEWARE: Proving BTLE is Practical
 
