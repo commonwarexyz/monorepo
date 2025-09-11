@@ -8,15 +8,15 @@ Blockchains don't yet offer this same "temporal privacy" (the ability to hide in
 
 ## The Missing Primitive: Timelock Encryption
 
-What if a user could produce a binding commitment to a specific moment in the future? Reveled at a given time, whether they are ready or not? Meet [Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189).
+Running a fair competition onchain requires simultaneous move submission—all players commit before any player's strategy is revealed. But blockchains process transactions sequentially, and every action is immediately visible. Without temporal privacy, competitions devolve into reaction games where the last player holds all the cards.
 
-TLE lets you encrypt data to a future moment in time. The ciphertext can only be decrypted when that moment arrives—not before, not by choice, but automatically when the target time is reached.
+Enter [Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE lets multiple players encrypt their moves to the same future block height, creating a synchronization point where all moves are revealed together. No player can see another's move before committing their own. No player can change their move after seeing others. The competition becomes fair.
 
 Here's how it works: You encrypt your data to a specific block height using the expected properties of that future block. When the network finalizes that block, its unique properties (like a VRF output) become the decryption key. Anyone can take your ciphertext and the block's public output to recover the plaintext. The decryption isn't optional—once the block exists, the data is decryptable.
 
-The cryptographic construction ensures two critical properties. First, no one can decrypt before the target block is finalized, not even the encryptor. Second, everyone can decrypt after the target block is finalized, using only public information from the chain. The network's progression through time becomes the decryption mechanism itself.
+The cryptographic construction ensures two critical properties for competitions. First, no one can decrypt before the target block is finalized, preserving the secrecy of all moves until the reveal moment. Second, everyone can decrypt after the target block is finalized, ensuring all moves are revealed simultaneously using only public information from the chain.
 
-In practice, this means you submit an encrypted move targeting block 1000. When block 1000 is finalized with its VRF output, that output directly enables decryption. No interaction required. No secrets to store. No ability to withhold revelation. Time passes, the block arrives, and your move is revealed.
+In a game, this means both players submit encrypted moves targeting block 1000. Neither can see the other's move. Neither can wait to counter-play. When block 1000 arrives, both moves decrypt simultaneously using the block's VRF output. The competition resolves fairly, with neither player having an information advantage.
 
 With TLE, blockchains finally offer temporal privacy—your data remains hidden while you wait for the target block. Good things, as your parents said, come to those that wait.
 
