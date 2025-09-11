@@ -309,12 +309,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     continue;
                 }
 
-                if current_loc < self.inactivity_floor_loc {
-                    // Don't include operations before the inactivity floor.
-                    current_loc += 1;
-                    continue;
-                }
-
                 if after_last_commit.is_none() {
                     after_last_commit = Some((current_loc, offset));
                 }
