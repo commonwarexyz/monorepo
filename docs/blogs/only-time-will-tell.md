@@ -1,4 +1,4 @@
-# Only Time Will Tell
+# Binding Timelock Encryption: Only Time Will Tell
 
 As your parents insisted when you were growing up, good things come to those that wait. It turns out recent advances in cryptography have proven them right.
 
