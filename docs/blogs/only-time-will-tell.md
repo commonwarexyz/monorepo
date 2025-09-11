@@ -22,7 +22,7 @@ Unlike commit-reveal schemes, TLE removes the "free option" any participant has 
 
 With BTLE, blockchains can finally offer temporal privacy. Good things (or fair contests onchain), as your parents said, come to those that wait.
 
-## Enter Battleware
+## Battleware: Proving BTLE is Practical
 
 We wanted to make TLE tangible—something you could experience, not just read about in papers. So we built Battleware: a fighting game where temporal privacy isn't a feature, it's the foundation.
 
