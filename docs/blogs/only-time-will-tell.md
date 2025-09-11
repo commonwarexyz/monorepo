@@ -35,11 +35,12 @@ With a creature generated, you can enter the arena for matchmaking. Again using 
 <TODO: add matchmaking screenshot>
 _Figure 3: Players submit match requests onchain and after a configurable amount of time has passed or the arena is full, players are paired and battles started._
 
-Once in a battle, you have 15 rounds to defeat your opponent. During each round, both players submit encrypted moves to the view at which the battle will be resolved. Once the view is reached, either player can submit the VRF output to the chain to decrypt both players' moves and resolve the round. If a player has won, the battle resolves and each player's ELO score is updated. If not, the battle continues to the next round.
+Once in a battle, you have 15 rounds to defeat your opponent. During each round, both players submit moves encrypted to the view at which the current round will resolve (50 views after matching or the end of the previous round). Once that view is reached, either player can submit the VRF output to decrypt both players' moves and resolve the round. If a player has won, the battle resolves and each player's ELO score is updated. If not, the battle continues to the next round.
 
 <TODO: add move submission>
+_Figure 4: Any player can submit a settle transaction with the VRF output from the end of the round._
 
-To make things performant enough, we perform parallel decryption of moves during execution using a custom-built execution environment.
+To make decryption performant enough for BATTLEWARE, we perform parallel decryption of moves during execution using a BATTLEWARE-specific execution environment.
 
 The entire implementation—all 11.2k lines of it—is [open source](https://github.com/commonwarexyz/battleware). The code is still rough around the edges, but we've got 77% test coverage and consider it an excellent opportunity to become a Commonware contributor.
 
