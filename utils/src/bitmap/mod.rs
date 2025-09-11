@@ -351,16 +351,14 @@ impl<const N: usize> BitMap<N> {
     fn clear_trailing_bits(&mut self) -> bool {
         let next_bit = self.next_bit;
         let mut flipped_any = false;
+        let last_chunk = self.last_chunk_mut();
 
         if next_bit == 0 {
             // If next_bit is 0, the entire last chunk should be clear (it's empty)
-            let last_chunk = self.last_chunk_mut();
             let was_empty = *last_chunk == Self::EMPTY_CHUNK;
             *last_chunk = Self::EMPTY_CHUNK;
             return !was_empty;
         }
-
-        let last_chunk = self.last_chunk_mut();
 
         // Clear whole bytes after the last valid bit
         let last_byte_index = (next_bit - 1) / 8;
