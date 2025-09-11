@@ -42,7 +42,7 @@ _Figure 4: Any player can submit a settle transaction with the VRF output from t
 
 To make decryption performant enough for BATTLEWARE, we perform parallel decryption of moves during execution using a BATTLEWARE-specific execution environment.
 
-The entire implementation—all 11.2k lines of it—is [open source](https://github.com/commonwarexyz/battleware). The code is still rough around the edges, but we've got 77% test coverage and consider it an excellent opportunity to become a Commonware contributor.
+The entire implementation is [open source](https://github.com/commonwarexyz/battleware) under both an MIT and Apache-2 license. The code is still a bit rough around the edges, but we were able to reach 77% test coverage (on ~11.2k lines of code). Consider it your opportunity to become a contributor.
 
 ## Securing Access
 
