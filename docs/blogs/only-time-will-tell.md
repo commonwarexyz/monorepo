@@ -10,7 +10,11 @@ Until now, blockchains couldn't offer this same temporal privacy. Every transact
 
 Consider any competitive game. Players need to commit moves simultaneously, yet blockchains process transactions sequentially. The last player to move always wins. This isn't a bug in the game design—it's a limitation of the infrastructure.
 
-Developers have worked around this with commit-reveal schemes for years. Users hash their moves, submit the hash, wait for everyone else, then reveal. It works, but it's clunky. Users need to remember secrets. They need to come back online. If they forget or disappear, the game stalls.
+Developers have worked around this with commit-reveal schemes for years. Users hash their moves, submit the hash, wait for everyone else, then reveal. But here's the fundamental problem: the binding property of commitments only guarantees users can't change their move—it doesn't force them to reveal it.
+
+A malicious player can spam commitments and selectively reveal only the winning ones. A disconnected player leaves the game in limbo. Even honest players become attack vectors—forget your secret, lose your connection, or simply change your mind, and the entire game grinds to a halt. You can add deposits and penalties, but you're just patching symptoms, not solving the root cause.
+
+The commitment is binding but not forcing. The revelation requires interaction. The game depends on every player's continued participation. These aren't implementation details—they're fundamental limitations of the primitive itself.
 
 What if time itself could be the revealer?
 
@@ -21,6 +25,8 @@ Over the last few months, we've made substantial progress building out the Commo
 Battleware is that demonstration: a fully onchain fighting game where time itself decrypts your moves.
 
 When you play Battleware, you encrypt your moves to a future block height. Not to a secret. Not to a committee. To a moment in time that hasn't happened yet. When that block arrives, the network's embedded VRF generates the decryption key. Your move is revealed, scaled by randomness, and executed—all without you having to come back online.
+
+This changes everything. Timelock encryption provides forced revelation—once encrypted to a future time, the data will be revealed when that time arrives, no matter what. Anyone can trigger the decryption using the VRF output from the target block. The player who submitted it can't prevent it. They can't selectively withhold it. They can't even be offline to stop it.
 
 No trusted coordinator. No remembering secrets. No stalled games from players who disappear. Just submit your move and let time handle the rest.
 
