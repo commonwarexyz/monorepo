@@ -1,6 +1,8 @@
 use commonware_cryptography::PublicKey;
-use commonware_utils::bitmap::BitMap;
 use std::collections::HashMap;
+
+// Use chunk size of 1 to reduce encoded size.
+type BitMap = commonware_utils::bitmap::BitMap<1>;
 
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: PublicKey> {
