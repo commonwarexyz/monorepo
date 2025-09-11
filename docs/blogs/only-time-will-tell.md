@@ -2,7 +2,7 @@
 
 As your parents noted when you were growing up, good things come to those that wait. It turns out that recent advances in cryptography, however, have proven your parents right.
 
-When competing head-to-head, publicly revealing your play to an opponent (before they've gone) offers them an advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for ads. Left with few (if any) alternatives, applications reliant on some sort of contest often operate as a trusted facilitator. Google doesn't tell Amazon what Walmart is bidding to appear first in the search results for golf balls.
+When competing head-to-head, publicly revealing your play to an opponent (before they've gone) offers them an advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for ads. Left with few (if any) alternatives, applications involving some sort of contest often operate as a trusted facilitator. Google runs an auction so Amazon doesn't learn what Walmart is bidding to appear first in the search results for golf balls.
 
 Until now, blockchains couldn't offer this same temporal privacy. Every transaction is public the moment it hits the mempool. Every bid visible. Every move exposed. We had transparency, but we lost something fundamental: the ability to commit now and reveal later, trustlessly.
 
