@@ -6,9 +6,9 @@ When competing head-to-head, publicly revealing your play to an opponent (before
 
 Blockchains don't yet offer this same "temporal privacy" (the ability to hide information until a specific moment when all participants' actions are revealed simultaneously). Every transaction is public the moment it hits the mempool. The rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions conveys everything you need to know about the value of this information leakage.
 
-## The Missing Primitive
+## The Missing Primitive: Threshold Encryption
 
-Consider any competitive game. Players need to commit moves simultaneously, yet blockchains process transactions sequentially. The last player to move always wins. This isn't a bug in the game design, it's a limitation of the underlying infrastructure.
+Consider an onchain game. Players need to commit moves simultaneously, yet blockchains process transactions sequentially. The last player to move always wins. Game over?
 
 Developers have worked around this with commit-reveal schemes for years. Users hash their moves, submit the hash, wait for everyone else, then reveal. But here's the fundamental problem: the binding property of commitments only guarantees users can't change their move—it doesn't force them to reveal it.
 
