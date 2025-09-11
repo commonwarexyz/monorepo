@@ -20,25 +20,7 @@ Embedded into a blockchain, TLE commitments become binding (BTLE). Submit an enc
 
 Unlike commit-reveal schemes, TLE removes the "free option" any participant has to hide their reveal (if, say, revealing a commitment isn't in their favor). Consider an auction with 3 people bidding. Player 1 commits to 10, Player 2 commits to 20, Player 3 commits to 30. Player 3 waits for Player 1 and Player 2 to reveal their bids, and then determines not to reveal because 30 overvalued the item.
 
-
-
-Paired with blockchains offer a new twist to TLE: the ability to enforce commitments to encrypted data (something we refer to as "Binding Timelock Encryption").
-
-
-TLE becomes much more practical when embedded into a blockchain that can enforce commitments to encrypted data (something we refer to as "Binding Timelock Encryption").
-
-
-TLE lets multiple players encrypt their moves to the same future block height, creating a synchronization point where all moves are revealed together. No player can see another's move before committing their own. No player can change their move after seeing others. The competition becomes fair.
-
-Here's how it works: You encrypt your data to a specific block height using the expected properties of that future block. When the network finalizes that block, its unique properties (like a VRF output) become the decryption key. Anyone can take your ciphertext and the block's public output to recover the plaintext. The decryption isn't optional—once the block exists, the data is decryptable.
-
-The cryptographic construction ensures two critical properties for competitions. First, no one can decrypt before the target block is finalized, preserving the secrecy of all moves until the reveal moment. Second, everyone can decrypt after the target block is finalized, ensuring all moves are revealed simultaneously using only public information from the chain.
-
-In a game, this means both players submit encrypted moves targeting block 1000. Neither can see the other's move. Neither can wait to counter-play. When block 1000 arrives, both moves decrypt simultaneously using the block's VRF output. The competition resolves fairly, with neither player having an information advantage.
-
-With TLE, blockchains finally offer temporal privacy—your data remains hidden while you wait for the target block. Good things, as your parents said, come to those that wait.
-
-_Difference from commit-reveal? The commiter can refuse to reveal their move (the "free option") and its more efficient (one-step rather than two-step). While a commitment could be "junk", they would've had to make that decision a priori. The simple case to consider is an auction that is resolving to a price much lower than they bid, they could just not reveal to avoid paying the price they locked._
+With BTLE, blockchains can finally offer temporal privacy. (Binded) encrypted data remains hidden from all until the target point in time is reached. Good things, as your parents said, come to those that wait.
 
 ## Enter Battleware
 
