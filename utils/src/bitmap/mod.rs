@@ -309,8 +309,8 @@ impl<const N: usize> BitMap<N> {
     ///
     /// # Warning
     ///
-    /// Assumes self.next_bit is currently byte aligned, and panics otherwise.
-    fn push_byte_unchecked(&mut self, byte: u8) {
+    /// Panics if self.next_bit is not byte aligned.
+    fn push_byte(&mut self, byte: u8) {
         assert!(
             self.next_bit.is_multiple_of(8),
             "cannot add byte when not byte aligned"
@@ -330,8 +330,8 @@ impl<const N: usize> BitMap<N> {
     ///
     /// # Warning
     ///
-    /// Panics if we're not at a chunk boundary.
-    pub(super) fn push_chunk_unchecked(&mut self, chunk: &[u8; N]) {
+    /// Panics if self.next_bit is not chunk aligned.
+    pub(super) fn push_chunk(&mut self, chunk: &[u8; N]) {
         assert_eq!(self.next_bit, 0, "cannot add chunk when not chunk aligned");
         self.last_chunk_mut().copy_from_slice(chunk.as_ref());
         self.prepare_next_chunk();
@@ -944,8 +944,8 @@ mod tests {
         let mut bv: BitMap<4> = BitMap::new();
         let test_chunk = [0xAB, 0xCD, 0xEF, 0x12];
 
-        // Test push_chunk_unchecked
-        bv.push_chunk_unchecked(&test_chunk);
+        // Test push_chunk
+        bv.push_chunk(&test_chunk);
         assert_eq!(bv.len(), 32); // 4 bytes * 8 bits
 
         // Test get_chunk
@@ -998,8 +998,8 @@ mod tests {
     fn test_byte_operations() {
         let mut bv: BitMap<4> = BitMap::new();
 
-        // Test push_byte_unchecked
-        bv.push_byte_unchecked(0xFF);
+        // Test push_byte
+        bv.push_byte(0xFF);
         assert_eq!(bv.len(), 8);
 
         // All bits in the byte should be set
@@ -1007,7 +1007,7 @@ mod tests {
             assert!(bv.get(i));
         }
 
-        bv.push_byte_unchecked(0x00);
+        bv.push_byte(0x00);
         assert_eq!(bv.len(), 16);
 
         // All bits in the second byte should be clear
@@ -1037,9 +1037,9 @@ mod tests {
 
         // Test with full bytes
         let mut bv2: BitMap<4> = BitMap::new();
-        bv2.push_byte_unchecked(0xFF); // 8 ones
-        bv2.push_byte_unchecked(0x00); // 8 zeros
-        bv2.push_byte_unchecked(0xAA); // 4 ones, 4 zeros (10101010)
+        bv2.push_byte(0xFF); // 8 ones
+        bv2.push_byte(0x00); // 8 zeros
+        bv2.push_byte(0xAA); // 4 ones, 4 zeros (10101010)
 
         assert_eq!(bv2.count_ones(), 12);
         assert_eq!(bv2.count_zeros(), 12);
@@ -1194,10 +1194,10 @@ mod tests {
         let chunk1 = [0xAA, 0xBB, 0xCC, 0xDD]; // 10101010 10111011 11001100 11011101
         let chunk2 = [0x55, 0x66, 0x77, 0x88]; // 01010101 01100110 01110111 10001000
 
-        bv1.push_chunk_unchecked(&chunk1);
-        bv1.push_chunk_unchecked(&chunk1);
-        bv2.push_chunk_unchecked(&chunk2);
-        bv2.push_chunk_unchecked(&chunk2);
+        bv1.push_chunk(&chunk1);
+        bv1.push_chunk(&chunk1);
+        bv2.push_chunk(&chunk2);
+        bv2.push_chunk(&chunk2);
 
         assert_eq!(bv1.len(), 64);
         assert_eq!(bv2.len(), 64);
@@ -1377,9 +1377,9 @@ mod tests {
         let chunk16 = [0xAA; 16];
         let chunk32 = [0x55; 32];
 
-        bv8.push_chunk_unchecked(&chunk8);
-        bv16.push_chunk_unchecked(&chunk16);
-        bv32.push_chunk_unchecked(&chunk32);
+        bv8.push_chunk(&chunk8);
+        bv16.push_chunk(&chunk16);
+        bv32.push_chunk(&chunk32);
 
         // Test basic operations work with different sizes
         bv8.push(true);
@@ -1861,9 +1861,9 @@ mod tests {
     #[test]
     fn test_prune_chunks() {
         let mut bv: BitMap<4> = BitMap::new();
-        bv.push_chunk_unchecked(&[1, 2, 3, 4]);
-        bv.push_chunk_unchecked(&[5, 6, 7, 8]);
-        bv.push_chunk_unchecked(&[9, 10, 11, 12]);
+        bv.push_chunk(&[1, 2, 3, 4]);
+        bv.push_chunk(&[5, 6, 7, 8]);
+        bv.push_chunk(&[9, 10, 11, 12]);
 
         assert_eq!(bv.len(), 96);
         assert_eq!(bv.get_chunk_by_index(0), &[1, 2, 3, 4]);
@@ -1884,8 +1884,8 @@ mod tests {
     #[should_panic(expected = "cannot prune")]
     fn test_prune_too_many_chunks() {
         let mut bv: BitMap<4> = BitMap::new();
-        bv.push_chunk_unchecked(&[1, 2, 3, 4]);
-        bv.push_chunk_unchecked(&[5, 6, 7, 8]);
+        bv.push_chunk(&[1, 2, 3, 4]);
+        bv.push_chunk(&[5, 6, 7, 8]);
         bv.push(true);
 
         // Try to prune 4 chunks when only 3 are available
@@ -1895,8 +1895,8 @@ mod tests {
     #[test]
     fn test_prune_with_partial_last_chunk() {
         let mut bv: BitMap<4> = BitMap::new();
-        bv.push_chunk_unchecked(&[1, 2, 3, 4]);
-        bv.push_chunk_unchecked(&[5, 6, 7, 8]);
+        bv.push_chunk(&[1, 2, 3, 4]);
+        bv.push_chunk(&[5, 6, 7, 8]);
         bv.push(true);
         bv.push(false);
 

@@ -256,17 +256,6 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.get_chunk(bit_offset)
     }
 
-    /// Efficiently add a chunk of bits to the bitmap.
-    ///
-    /// # Warning
-    ///
-    /// - The update will not impact the root until `sync` is called.
-    ///
-    /// - Assumes we are at a chunk boundary (that is, `self.next_bit` is 0) and panics otherwise.
-    pub fn push_chunk_unchecked(&mut self, chunk: &[u8; N]) {
-        self.bitmap.push_chunk_unchecked(chunk);
-    }
-
     /// Add a single bit to the end of the bitmap.
     ///
     /// # Warning
@@ -565,8 +554,19 @@ mod tests {
         /// - The update will not impact the root until `sync` is called.
         ///
         /// - Assumes self.next_bit is currently byte aligned, and panics otherwise.
-        fn push_byte_unchecked(&mut self, byte: u8) {
-            self.bitmap.push_byte_unchecked(byte);
+        fn push_byte(&mut self, byte: u8) {
+            self.bitmap.push_byte(byte);
+        }
+
+        /// Efficiently add a chunk of bits to the bitmap.
+        ///
+        /// # Warning
+        ///
+        /// - The update will not impact the root until `sync` is called.
+        ///
+        /// - Panics if self.next_bit is not chunk aligned.
+        pub fn push_chunk(&mut self, chunk: &[u8; N]) {
+            self.bitmap.push_chunk(chunk);
         }
     }
 
@@ -678,7 +678,7 @@ mod tests {
 
             // Add each bit one at a time after the first chunk.
             let mut bitmap = MerkleizedBitMap::<_, SHA256_SIZE>::new();
-            bitmap.push_chunk_unchecked(&test_chunk);
+            bitmap.push_chunk(&test_chunk);
             for b in test_chunk {
                 for j in 0..8 {
                     let mask = 1 << j;
@@ -694,21 +694,21 @@ mod tests {
             assert_eq!(root, inner_root);
 
             {
-                // Repeat the above MMR build only using push_chunk_unchecked instead, and make
+                // Repeat the above MMR build only using push_chunk instead, and make
                 // sure root digests match.
                 let mut bitmap = MerkleizedBitMap::<_, SHA256_SIZE>::default();
-                bitmap.push_chunk_unchecked(&test_chunk);
-                bitmap.push_chunk_unchecked(&test_chunk);
+                bitmap.push_chunk(&test_chunk);
+                bitmap.push_chunk(&test_chunk);
                 bitmap.sync(&mut hasher).await.unwrap();
                 let same_root = bitmap.root(&mut hasher).await.unwrap();
                 assert_eq!(root, same_root);
             }
             {
-                // Repeat build again using push_byte_unchecked this time.
+                // Repeat build again using push_byte this time.
                 let mut bitmap = MerkleizedBitMap::<_, SHA256_SIZE>::default();
-                bitmap.push_chunk_unchecked(&test_chunk);
+                bitmap.push_chunk(&test_chunk);
                 for b in test_chunk {
-                    bitmap.push_byte_unchecked(b);
+                    bitmap.push_byte(b);
                 }
                 bitmap.sync(&mut hasher).await.unwrap();
                 let same_root = bitmap.root(&mut hasher).await.unwrap();
@@ -723,9 +723,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut bitmap = MerkleizedBitMap::<Sha256, SHA256_SIZE>::new();
-            bitmap.push_chunk_unchecked(&test_chunk(b"test"));
+            bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push(true);
-            bitmap.push_chunk_unchecked(&test_chunk(b"panic"));
+            bitmap.push_chunk(&test_chunk(b"panic"));
         });
     }
 
@@ -735,9 +735,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut bitmap = MerkleizedBitMap::<Sha256, SHA256_SIZE>::new();
-            bitmap.push_chunk_unchecked(&test_chunk(b"test"));
+            bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push(true);
-            bitmap.push_byte_unchecked(0x01);
+            bitmap.push_byte(0x01);
         });
     }
 
@@ -747,7 +747,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut bitmap = MerkleizedBitMap::<Sha256, SHA256_SIZE>::new();
-            bitmap.push_chunk_unchecked(&test_chunk(b"test"));
+            bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.get_bit(256);
         });
     }
@@ -758,8 +758,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut bitmap = MerkleizedBitMap::<Sha256, SHA256_SIZE>::new();
-            bitmap.push_chunk_unchecked(&test_chunk(b"test"));
-            bitmap.push_chunk_unchecked(&test_chunk(b"test2"));
+            bitmap.push_chunk(&test_chunk(b"test"));
+            bitmap.push_chunk(&test_chunk(b"test2"));
             let mut hasher = Standard::new();
             bitmap.sync(&mut hasher).await.unwrap();
 
@@ -775,8 +775,8 @@ mod tests {
             // Build a starting test MMR with two chunks worth of bits.
             let mut bitmap = MerkleizedBitMap::<Sha256, SHA256_SIZE>::default();
             let mut hasher = Standard::new();
-            bitmap.push_chunk_unchecked(&test_chunk(b"test"));
-            bitmap.push_chunk_unchecked(&test_chunk(b"test2"));
+            bitmap.push_chunk(&test_chunk(b"test"));
+            bitmap.push_chunk(&test_chunk(b"test2"));
             bitmap.sync(&mut hasher).await.unwrap();
 
             let root = bitmap.root(&mut hasher).await.unwrap();
@@ -820,12 +820,12 @@ mod tests {
             // Build a test MMR with a few chunks worth of bits.
             let mut bitmap = MerkleizedBitMap::<Sha256, SHA256_SIZE>::default();
             let mut hasher = Standard::new();
-            bitmap.push_chunk_unchecked(&test_chunk(b"test"));
-            bitmap.push_chunk_unchecked(&test_chunk(b"test2"));
-            bitmap.push_chunk_unchecked(&test_chunk(b"test3"));
-            bitmap.push_chunk_unchecked(&test_chunk(b"test4"));
+            bitmap.push_chunk(&test_chunk(b"test"));
+            bitmap.push_chunk(&test_chunk(b"test2"));
+            bitmap.push_chunk(&test_chunk(b"test3"));
+            bitmap.push_chunk(&test_chunk(b"test4"));
             // Add a few extra bits to exercise not being on a chunk or byte boundary.
-            bitmap.push_byte_unchecked(0xF1);
+            bitmap.push_byte(0xF1);
             bitmap.push(true);
             bitmap.push(false);
             bitmap.push(true);
@@ -887,10 +887,10 @@ mod tests {
             let mut hasher = Standard::new();
             let mut bitmap = MerkleizedBitMap::<Sha256, N>::new();
             for i in 0u32..10 {
-                bitmap.push_chunk_unchecked(&test_chunk(format!("test{i}").as_bytes()));
+                bitmap.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
             }
             // Add a few extra bits to exercise not being on a chunk or byte boundary.
-            bitmap.push_byte_unchecked(0xA6);
+            bitmap.push_byte(0xA6);
             bitmap.push(true);
             bitmap.push(false);
             bitmap.push(true);
@@ -957,13 +957,13 @@ mod tests {
             // Add a non-trivial amount of data.
             let mut hasher = Standard::new();
             for i in 0..FULL_CHUNK_COUNT {
-                bitmap.push_chunk_unchecked(&test_chunk(format!("test{i}").as_bytes()));
+                bitmap.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
             }
             bitmap.sync(&mut hasher).await.unwrap();
             let chunk_aligned_root = bitmap.root(&mut hasher).await.unwrap();
 
             // Add a few extra bits beyond the last chunk boundary.
-            bitmap.push_byte_unchecked(0xA6);
+            bitmap.push_byte(0xA6);
             bitmap.push(true);
             bitmap.push(false);
             bitmap.push(true);
@@ -990,7 +990,7 @@ mod tests {
 
                 // Replay missing chunks.
                 for j in i..FULL_CHUNK_COUNT {
-                    bitmap.push_chunk_unchecked(&test_chunk(format!("test{j}").as_bytes()));
+                    bitmap.push_chunk(&test_chunk(format!("test{j}").as_bytes()));
                 }
                 assert_eq!(bitmap.bitmap.pruned_chunks(), i);
                 assert_eq!(bitmap.len(), FULL_CHUNK_COUNT * 256);
@@ -998,7 +998,7 @@ mod tests {
                 assert_eq!(bitmap.root(&mut hasher).await.unwrap(), chunk_aligned_root);
 
                 // Replay missing partial chunk.
-                bitmap.push_byte_unchecked(0xA6);
+                bitmap.push_byte(0xA6);
                 bitmap.push(true);
                 bitmap.push(false);
                 bitmap.push(true);
