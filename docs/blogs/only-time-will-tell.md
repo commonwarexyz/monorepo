@@ -24,7 +24,7 @@ With BTLE, blockchains can finally offer temporal privacy. Good things (or fair 
 
 ## BATTLEWARE: Proving BTLE is Practical
 
-To demonstrate just how useful BTLE is, we built [BATTLEWARE](https://battleware.xyz). BATTLEWARE is an onchain game where players battle each other for bragging rights on a global leaderboard.
+To demonstrate just how useful BTLE is, we built [BATTLEWARE](https://battleware.xyz). BATTLEWARE is an onchain game where players battle each other for bragging rights on a global leaderboard. In a nutshell, players are randomly matched with some opponent and, over the course of 15 rounds, submit encrypted moves to the same future consensus view. Once the view is reached, either player can submit the VRF output that can be used to decrypt their moves and either end the battle (if one player won) or continue to the next round (if the battle is still ongoing).
 
 We wanted to make TLE tangible—something you could experience, not just read about in papers. So we built Battleware: a fighting game where temporal privacy isn't a feature, it's the foundation.
 
