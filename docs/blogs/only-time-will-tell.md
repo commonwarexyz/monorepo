@@ -40,17 +40,22 @@ Once in a battle, you have 15 rounds to defeat your opponent. During each round,
 
 <TODO: add move submission>
 
-In a nutshell, players are randomly matched with some opponent and, over the course of 15 rounds, submit encrypted moves to the same future consensus view. Once the view is reached, either player can submit the VRF output that can be used to decrypt their moves and either end the battle (if one player won) or continue to the next round (if the battle is still ongoing).
+To make things performant enough, we perform parallel decryption of moves during execution using a custom-built execution environment.
 
-We wanted to make TLE tangible—something you could experience, not just read about in papers. So we built Battleware: a fighting game where temporal privacy isn't a feature, it's the foundation.
+## Securing Access
 
-Think Street Fighter, but onchain. Two players face off in turn-based combat. Each round, both players select their moves—attack, defend, special ability—and encrypt them to the same future block. Neither knows what the other chose. When that block arrives, both moves decrypt simultaneously and resolve against each other. Punch beats grab. Grab beats block. Block beats punch.
+Instead of trusting some API to provide access to state, we leverage threshold signatures and MMRs to provide authenticated access to the frontend. What does this mean?
 
-The beauty is in the simplicity. Players just pick their move and submit. No waiting for opponents to reveal. No games abandoned because someone rage quit. No advantage for moving last. The blockchain becomes a perfect referee—impartial, unstoppable, and always on time.
+After each block is executed, we apply state changes and events to MMRs. We then using consensus::aggregation to generate a threshold signature over the roots of each.
 
-But Battleware goes further. Each move's effectiveness gets scaled by the VRF output from the revealing block, adding controlled randomness to combat. Your character itself—appearance, stats, abilities—is generated from the VRF of your first transaction's block. Even matchmaking uses VRF to prevent players from manipulating who they face. Every element that needs fairness gets it through cryptography, not trust.
+<TODO: add MMR screenshot>
 
-This isn't a tech demo pretending to be a game. It's a real game that happens to demonstrate what becomes possible when you build temporal privacy directly into consensus. No coordinator server. No session management. No player availability requirements. Just pure competitive gameplay where only time will tell who wins.
+Once a threshold signature is generated, nodes then push these state and events to Exoware. On-the-fly, Exoware generates Multi-Proofs over the events that matter to a particular websocket subscriber.
+
+<TODO: Add multi-proof screenshot>
+
+Updates are then sent to your frontend where you both verify the threshold signature attesting to some root was signed by a quorum of nodes and that there exists a valid proof of your events in the root.
+
 
 ## How It Works
 
