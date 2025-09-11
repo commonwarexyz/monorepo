@@ -26,9 +26,19 @@ With BTLE, blockchains can finally offer temporal privacy. Good things (or fair 
 
 To demonstrate just how useful BTLE is, we built [BATTLEWARE](https://battleware.xyz). BATTLEWARE is an onchain game where players duel each other for bragging rights on a global leaderboard. If you've played Pokémon, you'll feel right at home.
 
-<TODO: add battleware game screenshot here>
+<TODO: add battleware game screenshot>
 
+It all starts when you submit your first transaction to generate your "creature". The same VRF used to power BTLE decryption is also used to randomly generate your creature's appearance, name, and moves.
 
+<TODO: add creature generation screenshot>
+
+Once generated, you enter the arena for matchmaking. Again using the same VRF, we randomly pair you with some other player (making it a bit more difficult to bias your matches to certain opponents).
+
+<TODO: add matchmaking screenshot>
+
+Once in a battle, you have 15 rounds to defeat your opponent. During each round, both players submit encrypted moves to the view at which the battle will be resolved. Once the view is reached, either player can submit the VRF output to the chain to decrypt both players' moves and resolve the round. If a player has won, the battle resolves and each player's ELO score is updated. If not, the battle continues to the next round.
+
+<TODO: add move submission>
 
 In a nutshell, players are randomly matched with some opponent and, over the course of 15 rounds, submit encrypted moves to the same future consensus view. Once the view is reached, either player can submit the VRF output that can be used to decrypt their moves and either end the battle (if one player won) or continue to the next round (if the battle is still ongoing).
 
