@@ -16,11 +16,11 @@ A malicious player can spam commitments and selectively reveal only the winning 
 
 The commitment is binding but not forcing. The revelation requires interaction. The game depends on every player's continued participation. These aren't implementation details—they're fundamental limitations of the primitive itself.
 
-What if time itself could be the revealer?
+What if time itself could be the Revealer?
 
 ## Enter Battleware
 
-Over the last few months, we've made substantial progress building out the Commonware Library. After alto blew us away with its wicked fast blocktimes, we wanted to build something that showcased capability rather than capacity. Something that demonstrated what becomes possible when you can mold the stack to your application, not the other way around.
+Over the last few months, we've made substantial progress building out the Commonware Library. We wanted to build something that showcased capability rather than capacity. Something that demonstrated what becomes possible when you can mold the stack to your application, not the other way around.
 
 Battleware is that demonstration: a fully onchain fighting game where time itself decrypts your moves.
 
