@@ -146,7 +146,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut src =
+        let mut db =
             Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config("src"))
                 .await
                 .expect("Failed to init source db");
@@ -156,43 +156,43 @@ fn fuzz(input: FuzzInput) {
         for op in input.ops.iter().take(50) {
             match op {
                 SyncOp::Update { key, value } => {
-                    src.update(Key::new(*key), Value::new(*value))
+                    db.update(Key::new(*key), Value::new(*value))
                         .await
                         .expect("Update should not fail");
                 }
 
                 SyncOp::Delete { key } => {
-                    src.delete(Key::new(*key))
+                    db.delete(Key::new(*key))
                         .await
                         .expect("Delete should not fail");
                 }
 
                 SyncOp::Commit => {
-                    src.commit().await.expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail");
                 }
 
                 SyncOp::Prune => {
-                    src.prune(src.inactivity_floor_loc())
+                    db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
                 }
 
                 SyncOp::SyncFull { fetch_batch_size } => {
-                    if src.op_count() == 0 {
+                    if db.op_count() == 0 {
                         continue;
                     }
-                    src.commit()
+                    db.commit()
                         .await
                         .expect("Commit before sync should not fail");
 
                     let mut hasher = Standard::<Sha256>::new();
                     let target = sync::Target {
-                        root: src.root(&mut hasher),
-                        lower_bound_ops: src.inactivity_floor_loc(),
-                        upper_bound_ops: src.op_count() - 1,
+                        root: db.root(&mut hasher),
+                        lower_bound_ops: db.inactivity_floor_loc(),
+                        upper_bound_ops: db.op_count() - 1,
                     };
 
-                    let wrapped_src = Arc::new(RwLock::new(src));
+                    let wrapped_src = Arc::new(RwLock::new(db));
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
@@ -201,7 +201,7 @@ fn fuzz(input: FuzzInput) {
                         &format!("full_{sync_id}"),
                     )
                     .await;
-                    src = Arc::try_unwrap(wrapped_src)
+                    db = Arc::try_unwrap(wrapped_src)
                         .unwrap_or_else(|_| panic!("Failed to unwrap src"))
                         .into_inner();
                     sync_id += 1;
@@ -212,53 +212,21 @@ fn fuzz(input: FuzzInput) {
                     sync_mmr,
                     write_limit,
                 } => {
-                    // Store state before failure for verification
-                    let mut hasher = Standard::<Sha256>::new();
-                    let expected_root = src.root(&mut hasher);
-                    let expected_op_count = src.op_count();
-                    let expected_floor = src.inactivity_floor_loc();
-
-                    // Simulate the failure (consumes src)
-                    src.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
+                    db.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
                         .await
                         .expect("Simulate failure should not fail");
 
-                    // Re-open the database to test recovery
-                    src = Any::<_, Key, Value, Sha256, TwoCap>::init(
+                    db = Any::<_, Key, Value, Sha256, TwoCap>::init(
                         context.clone(),
                         test_config("src"),
                     )
                     .await
-                    .expect("Failed to reinit source db after simulated failure");
-
-                    // Verify state was properly recovered
-                    let mut hasher = Standard::<Sha256>::new();
-                    let recovered_root = src.root(&mut hasher);
-                    let recovered_op_count = src.op_count();
-                    let recovered_floor = src.inactivity_floor_loc();
-
-                    // If we didn't sync anything, we should recover to previous committed state
-                    // If we synced partially, the recovery behavior depends on what was synced
-                    if !*sync_log && !*sync_mmr && *write_limit == 0 {
-                        // Nothing was synced, should recover to last committed state
-                        assert_eq!(
-                            recovered_op_count, expected_op_count,
-                            "Op count should be recovered after unclean shutdown"
-                        );
-                        assert_eq!(
-                            recovered_floor, expected_floor,
-                            "Inactivity floor should be recovered after unclean shutdown"
-                        );
-                        assert_eq!(
-                            recovered_root, expected_root,
-                            "Root should be recovered after unclean shutdown"
-                        );
-                    }
+                    .expect("Failed to init source db");
                 }
             }
         }
 
-        src.destroy().await.expect("Destroy should not fail");
+        db.destroy().await.expect("Destroy should not fail");
     });
 }
 

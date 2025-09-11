@@ -93,7 +93,7 @@ bench = false
 
 [[bin]]
 name = "adb_sync"
-path = "fuzz_targets/adb_sync.rs"
+path = "fuzz_targets/adb_any_fixed_sync.rs"
 test = false
 doc = false
 bench = false
