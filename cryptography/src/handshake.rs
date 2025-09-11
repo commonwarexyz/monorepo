@@ -1,4 +1,4 @@
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
 use rand_core::CryptoRngCore;
 
 use crate::{
@@ -24,6 +24,35 @@ pub struct Msg1<S> {
     sig: S,
 }
 
+impl<S: EncodeSize> EncodeSize for Msg1<S> {
+    fn encode_size(&self) -> usize {
+        self.time_ms.encode_size() + self.epk.encode_size() + self.sig.encode_size()
+    }
+}
+
+impl<S: Write> Write for Msg1<S> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.time_ms.write(buf);
+        self.epk.write(buf);
+        self.sig.write(buf);
+    }
+}
+
+impl<S: Read> Read for Msg1<S> {
+    type Cfg = S::Cfg;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            time_ms: ReadExt::read(buf)?,
+            epk: ReadExt::read(buf)?,
+            sig: Read::read_cfg(buf, cfg)?,
+        })
+    }
+}
+
 pub struct Msg2<S> {
     time_ms: u64,
     epk: EphemeralPublicKey,
@@ -31,8 +60,67 @@ pub struct Msg2<S> {
     confirmation: Summary,
 }
 
+impl<S: EncodeSize> EncodeSize for Msg2<S> {
+    fn encode_size(&self) -> usize {
+        self.time_ms.encode_size()
+            + self.epk.encode_size()
+            + self.sig.encode_size()
+            + self.confirmation.encode_size()
+    }
+}
+
+impl<S: Write> Write for Msg2<S> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.time_ms.write(buf);
+        self.epk.write(buf);
+        self.sig.write(buf);
+        self.confirmation.write(buf);
+    }
+}
+
+impl<S: Read> Read for Msg2<S> {
+    type Cfg = S::Cfg;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            time_ms: ReadExt::read(buf)?,
+            epk: ReadExt::read(buf)?,
+            sig: Read::read_cfg(buf, cfg)?,
+            confirmation: ReadExt::read(buf)?,
+        })
+    }
+}
+
 pub struct Msg3 {
     confirmation: Summary,
+}
+
+impl EncodeSize for Msg3 {
+    fn encode_size(&self) -> usize {
+        self.confirmation.encode_size()
+    }
+}
+
+impl Write for Msg3 {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.confirmation.write(buf);
+    }
+}
+
+impl Read for Msg3 {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            confirmation: ReadExt::read(buf)?,
+        })
+    }
 }
 
 pub struct DialState<P> {
