@@ -28,7 +28,7 @@ _Figure 1: A battle between two trainers on BATTLEWARE. The opponent (DEVOTE RIT
 It all starts when you submit a transaction to generate your "creature". The same signature generation mechanism used to power BTLE decryption doubles as the VRF used to randomly generate your creature's appearance, name, and moves.
 
 <TODO: add creature generation screenshot>
-_Figure 2: A creature's traits are derived from the hash of your address, nonce, and a seed by the embedded VRF._
+_Figure 2: A creature's traits are derived from the hash of your address, nonce, and a seed by the embedded VRF. The output of a VRF is only known after a block has been notarized (or nullified), so a player can't compute the outcome of the generation prior to their transaction's inclusion in a canonical block._
 
 With a creature generated, you can enter the arena for matchmaking. Again using the same VRF, we randomly pair you with some other player (making it a bit more difficult to play yourself to boost your ELO).
 
