@@ -373,8 +373,15 @@ impl<
         // The digest contains all information from the base mmr, and all information from the peak
         // tree except for the partial chunk, if any.  If we are at a chunk boundary, then this is
         // all the information we need.
+
+        // Handle empty bitmap
+        if self.status.is_empty() {
+            return Ok(mmr_root);
+        }
+
         let last_chunk = self.status.last_chunk();
-        if last_chunk.1 == 0 {
+        if last_chunk.1 == MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as usize {
+            // Last chunk is complete, no partial chunk to add
             return Ok(mmr_root);
         }
 
@@ -452,7 +459,8 @@ impl<
         }
 
         let last_chunk = self.status.last_chunk();
-        if last_chunk.1 == 0 {
+        if last_chunk.1 == MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as usize {
+            // Last chunk is complete, no partial chunk to add
             return Ok((proof, ops, chunks));
         }
 
@@ -557,7 +565,8 @@ impl<
         let chunk = *self.status.get_chunk(loc as usize);
 
         let last_chunk = self.status.last_chunk();
-        if last_chunk.1 != 0 {
+        if last_chunk.1 != MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as usize {
+            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk.0);
             proof.digests.push(hasher.finalize());
         }
@@ -679,7 +688,7 @@ impl<
         let chunk = *self.status.get_chunk(loc as usize);
 
         let last_chunk = self.status.last_chunk();
-        if last_chunk.1 != 0 {
+        if last_chunk.1 != MerkleizedBitMap::<H, N>::CHUNK_SIZE_BITS as usize {
             hasher.update(last_chunk.0);
             proof.digests.push(hasher.finalize());
         }

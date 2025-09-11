@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(prunable.pruned_bits(), 0);
         assert_eq!(prunable.pruned_chunks(), 0);
         assert!(prunable.is_empty());
-        assert_eq!(prunable.chunks_len(), 1); // Always has at least one chunk
+        assert_eq!(prunable.chunks_len(), 0); // No chunks when empty
     }
 
     #[test]

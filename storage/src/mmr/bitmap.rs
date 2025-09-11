@@ -232,7 +232,16 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.prune_to_bit(bit_offset);
 
         // Update authenticated length
-        self.authenticated_len = self.bitmap.chunks_len() - 1;
+        if self.bitmap.chunks_len() == 0 {
+            self.authenticated_len = 0;
+        } else {
+            let (_, next_bit) = self.bitmap.last_chunk();
+            self.authenticated_len = if next_bit == Self::CHUNK_SIZE_BITS as usize {
+                self.bitmap.chunks_len() // Include complete last chunk
+            } else {
+                self.bitmap.chunks_len() - 1 // Exclude partial last chunk
+            };
+        }
 
         // Update MMR
         let mmr_pos = leaf_num_to_pos(chunk_num as u64);
@@ -306,7 +315,23 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
     /// Whether there are any updates that are not yet reflected in this bitmap's root.
     pub fn is_dirty(&self) -> bool {
-        !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.chunks_len() - 1
+        if !self.dirty_chunks.is_empty() {
+            return true;
+        }
+
+        if self.bitmap.chunks_len() == 0 {
+            return false;
+        }
+
+        // Check if there are complete chunks that haven't been authenticated yet
+        let (_, next_bit) = self.bitmap.last_chunk();
+        let complete_chunks = if next_bit == Self::CHUNK_SIZE_BITS as usize {
+            self.bitmap.chunks_len()
+        } else {
+            self.bitmap.chunks_len() - 1
+        };
+
+        self.authenticated_len < complete_chunks
     }
 
     /// The chunks (identified by their number) that have been modified or added since the last `sync`.
@@ -316,7 +341,19 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             .iter()
             .map(|&chunk_index| (chunk_index + self.bitmap.pruned_chunks()) as u64)
             .collect();
-        for i in self.authenticated_len..self.bitmap.chunks_len() - 1 {
+
+        if self.bitmap.chunks_len() == 0 {
+            return chunks;
+        }
+
+        // Include complete chunks that haven't been authenticated yet
+        let (_, next_bit) = self.bitmap.last_chunk();
+        let complete_chunks = if next_bit == Self::CHUNK_SIZE_BITS as usize {
+            self.bitmap.chunks_len()
+        } else {
+            self.bitmap.chunks_len() - 1
+        };
+        for i in self.authenticated_len..complete_chunks {
             chunks.push((i + self.bitmap.pruned_chunks()) as u64);
         }
 
@@ -325,15 +362,24 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
     /// Process all updates not yet reflected in the bitmap's root.
     pub async fn sync(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
-        // Add newly pushed chunks to the MMR (other than the very last).
+        // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
-        assert!(self.bitmap.chunks_len() > 0);
-        let end = self.bitmap.chunks_len() - 1;
-        for i in start..end {
-            self.mmr
-                .add_batched(hasher, self.bitmap.get_chunk_by_index(i));
+        if self.bitmap.chunks_len() > 0 {
+            // If the last chunk is complete, include it. Otherwise, exclude it.
+            let (_, next_bit) = self.bitmap.last_chunk();
+            let end = if next_bit == Self::CHUNK_SIZE_BITS as usize {
+                self.bitmap.chunks_len()
+            } else {
+                self.bitmap.chunks_len() - 1
+            };
+            for i in start..end {
+                self.mmr
+                    .add_batched(hasher, self.bitmap.get_chunk_by_index(i));
+            }
+            self.authenticated_len = end;
+        } else {
+            self.authenticated_len = 0;
         }
-        self.authenticated_len = end;
 
         // Inform the MMR of modified chunks.
         let updates = self
@@ -370,8 +416,15 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             "cannot compute root with unprocessed updates",
         );
         let mmr_root = self.mmr.root(hasher);
+
+        // Handle empty bitmap
+        if self.bitmap.chunks_len() == 0 {
+            return Ok(mmr_root);
+        }
+
         let (last_chunk, next_bit) = self.bitmap.last_chunk();
-        if next_bit == 0 {
+        if next_bit == Self::CHUNK_SIZE_BITS as usize {
+            // Last chunk is complete, no partial chunk to add
             return Ok(mmr_root);
         }
 
@@ -437,8 +490,8 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
         let mut proof = Proof::<H::Digest>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
         proof.size = self.len() as u64;
-        if next_bit == 0 {
-            // Bitmap is chunk aligned.
+        if next_bit == Self::CHUNK_SIZE_BITS as usize {
+            // Bitmap is chunk aligned (last chunk is complete).
             return Ok((proof, *chunk));
         }
 
@@ -611,8 +664,6 @@ mod tests {
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             bitmap.prune_to_bit(0);
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
-            assert_eq!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
-            assert_eq!(bitmap.last_chunk().1, 0);
 
             // Add a single bit
             let mut hasher = Standard::new();
@@ -656,10 +707,8 @@ mod tests {
             bitmap.prune_to_bit(256);
             assert_eq!(bitmap.len(), 256);
             assert_eq!(bitmap.bitmap.pruned_chunks(), 1);
+            assert_eq!(bitmap.bitmap.pruned_bits(), 256);
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
-            // Last chunk should be empty again
-            assert_eq!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
-            assert_eq!(bitmap.last_chunk().1, 0);
 
             // Pruning to an earlier point should be a no-op.
             bitmap.prune_to_bit(10);
