@@ -19,16 +19,64 @@ use std::sync::Arc;
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 enum SyncOp {
     // Basic ops to build source state
-    Update { key: [u8; 32], value: [u8; 32] },
-    Delete { key: [u8; 32] },
+    Update {
+        key: [u8; 32],
+        value: [u8; 32],
+    },
+    Delete {
+        key: [u8; 32],
+    },
     Commit,
     Prune,
 
     // Sync scenarios
-    SyncFull { fetch_batch_size: u64 },
+    SyncFull {
+        fetch_batch_size: u64,
+    },
+
+    // Failure simulation
+    SimulateFailure {
+        sync_log: bool,
+        sync_mmr: bool,
+        write_limit: u8,
+    },
+}
+
+impl<'a> Arbitrary<'a> for SyncOp {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let choice: u8 = u.arbitrary()?;
+        match choice % 7 {
+            0 => {
+                let key = u.arbitrary()?;
+                let value = u.arbitrary()?;
+                Ok(SyncOp::Update { key, value })
+            }
+            1 => {
+                let key = u.arbitrary()?;
+                Ok(SyncOp::Delete { key })
+            }
+            2 => Ok(SyncOp::Commit),
+            3 => Ok(SyncOp::Prune),
+            4 => {
+                let fetch_batch_size = u.arbitrary()?;
+                Ok(SyncOp::SyncFull { fetch_batch_size })
+            }
+            5 | 6 => {
+                let sync_log: bool = u.arbitrary()?;
+                let sync_mmr: bool = u.arbitrary()?;
+                let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
+                Ok(SyncOp::SimulateFailure {
+                    sync_log,
+                    sync_mmr,
+                    write_limit,
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Arbitrary, Debug)]
@@ -157,6 +205,55 @@ fn fuzz(input: FuzzInput) {
                         .unwrap_or_else(|_| panic!("Failed to unwrap src"))
                         .into_inner();
                     sync_id += 1;
+                }
+
+                SyncOp::SimulateFailure {
+                    sync_log,
+                    sync_mmr,
+                    write_limit,
+                } => {
+                    // Store state before failure for verification
+                    let mut hasher = Standard::<Sha256>::new();
+                    let expected_root = src.root(&mut hasher);
+                    let expected_op_count = src.op_count();
+                    let expected_floor = src.inactivity_floor_loc();
+
+                    // Simulate the failure
+                    src.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
+                        .await
+                        .expect("Simulate failure should not fail");
+
+                    // Re-open the database to test recovery
+                    src = Any::<_, Key, Value, Sha256, TwoCap>::init(
+                        context.clone(),
+                        test_config("src"),
+                    )
+                    .await
+                    .expect("Failed to reinit source db after simulated failure");
+
+                    // Verify state was properly recovered
+                    let mut hasher = Standard::<Sha256>::new();
+                    let recovered_root = src.root(&mut hasher);
+                    let recovered_op_count = src.op_count();
+                    let recovered_floor = src.inactivity_floor_loc();
+
+                    // If we didn't sync anything, we should recover to previous committed state
+                    // If we synced partially, the recovery behavior depends on what was synced
+                    if !*sync_log && !*sync_mmr && *write_limit == 0 {
+                        // Nothing was synced, should recover to last committed state
+                        assert_eq!(
+                            recovered_op_count, expected_op_count,
+                            "Op count should be recovered after unclean shutdown"
+                        );
+                        assert_eq!(
+                            recovered_floor, expected_floor,
+                            "Inactivity floor should be recovered after unclean shutdown"
+                        );
+                        assert_eq!(
+                            recovered_root, expected_root,
+                            "Root should be recovered after unclean shutdown"
+                        );
+                    }
                 }
             }
         }

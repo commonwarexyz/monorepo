@@ -735,7 +735,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     /// Sync elements to disk until `write_limit` elements have been written, then abort to simulate
     /// a partial write for testing failure scenarios.
     pub async fn simulate_partial_sync(

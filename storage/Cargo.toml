@@ -90,3 +90,6 @@ path = "src/rmap/benches/bench.rs"
 name="store"
 harness = false
 path = "src/store/benches/bench.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
