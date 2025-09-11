@@ -10,7 +10,9 @@ What if blockchains could run fair competitions?
 
 ## The Missing Primitive: Binding Timelock Encryption (BTLE)
 
-Enter [Practical Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE lets you encrypt data to a future moment—specifically, when validators generate a threshold signature over a known message (like a view number in [threshold-simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html)). Once that signature exists, anyone can use it as a decryption key to reveal the encrypted data. Simply put, if you know the static public key of some threshold set and you know a message it will sign at some point, you can encrypt data that can be decrypted when a signature is generated over that message.
+Enter [Practical Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE lets you encrypt data to a future moment (specifically, when validators generate a threshold signature over a known message). Once that signature exists, anyone can use it as a decryption key to reveal the encrypted data. Simply put, if you know the static public key of some threshold set and you know a message it will sign at some point, you can encrypt data that can be decrypted when a signature is generated over that message.
+
+It turns out we already have such a signature generation mechanism in the [Commonware Library](https://github.com/commonwarexyz/monorepo): [threshold-simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html)'s VRF. At each view (every ~200ms on a global network), validators produce a threshold signature over the view number (a message that can be known ahead of time by anyone looking for a timelock encryption target).
 
 Take rock-paper-scissors. Both players encrypt their moves to the same future time, say 60 seconds away. Neither can see the other's choice (the moves are encrypted and can be shared publicly). When that time arrives and validators sign some message over the payload chosen as the encryption target, their threshold signature becomes the decryption key. No further coordination needed. If it sounds like magic, that's because it is.
 
@@ -27,7 +29,7 @@ To demonstrate how useful Binding Timelock Encryption is, we built [BATTLEWARE](
 <TODO: add battleware game screenshot>
 _Figure 1: A battle between two trainers on BATTLEWARE. The opponent (DEVOTE RITUAL) has locked their move for this round but we can't see it yet._
 
-It all starts when you submit your first transaction to generate your "creature". The same VRF used to power BTLE decryption is also used to randomly generate your creature's appearance, name, and moves.
+It all starts when you submit a transaction to generate your "creature". The same VRF used to power BTLE decryption is also used to randomly generate your creature's appearance, name, and moves.
 
 <TODO: add creature generation screenshot>
 
