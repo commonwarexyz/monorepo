@@ -66,6 +66,8 @@ The entire implementation—all 11.2k lines of it—is [open source](https://git
 
 Battleware isn't really about the game. It's about what the game represents.
 
+TODO: this isn't really about the topic of this article anymore?
+
 A few years ago, Moxie Marlinspike wrote about his first impressions of web3. He observed that users won't run their own servers, so we need to "design systems that can distribute trust without having to distribute infrastructure." With Battleware, we're getting close. Users interact with a fully decentralized application through their browser, trusting only the validators, with no need to run any infrastructure themselves.
 
 More importantly, Battleware demonstrates what becomes possible when you treat blockchain primitives as components to be assembled, not layers to be stacked. When you can embed a VRF directly into consensus, timelock encryption becomes practical. When you can customize execution, you can decrypt in parallel. When you control the networking layer, you can implement rate limiting instead of fees.
