@@ -1238,7 +1238,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Index 1 out of bounds (len: 1)")]
+    #[should_panic(expected = "Bit offset 1 out of bounds (len: 1)")]
     fn test_flip_out_of_bounds() {
         let mut bv: BitMap<4> = BitMap::new();
         bv.push(true);
