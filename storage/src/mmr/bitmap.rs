@@ -491,7 +491,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         let mut proof = Proof::<H::Digest>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
         proof.size = self.len() as u64;
         if next_bit == Self::CHUNK_SIZE_BITS as usize {
-            // Bitmap is chunk aligned (last chunk is complete).
+            // Bitmap is chunk aligned.
             return Ok((proof, *chunk));
         }
 

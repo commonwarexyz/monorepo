@@ -361,7 +361,7 @@ impl<const N: usize> BitMap<N> {
         let last_chunk = self.chunks.back_mut().unwrap();
 
         if next_bit == Self::CHUNK_SIZE_BITS {
-            // All bits in the last chunk are valid, nothing to clear
+            // Chunk is fill -- there are no trailing bits to clear.
             return false;
         }
 
