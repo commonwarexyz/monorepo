@@ -1,6 +1,6 @@
 # Only Time Will Tell
 
-As your parents noted when you were growing up, good things come to those that wait. It turns out that recent advances in cryptography, however, have proven them right.
+As your parents insisted when you were growing up, good things come to those that wait. It turns out that recent advances in cryptography, however, have proven them right.
 
 When competing head-to-head, publicly revealing your play to an opponent (before they've gone) offers an obvious advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for ads. Consequently, applications involving some sort of contest often operate as a trusted facilitator. Google runs its ad auction so Amazon doesn't learn what Walmart is bidding.
 
