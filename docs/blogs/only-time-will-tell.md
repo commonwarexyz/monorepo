@@ -10,7 +10,7 @@ What if blockchains could be used for fair games and contests?
 
 ## The Missing Primitive: Binding Timelock Encryption (BTLE)
 
-Enter [Practical Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE enables anyone to encrypt some data to a specific time in the future, typically a known index when some VRF output is revealed. When published, any observer can use this VRF output to decrypt the ciphertext provided by the user.
+Enter [Practical Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE enables some party to encrypt data to a specific time in the future, specifically when a threshold signature is generated over some known message (like a threshold signature over a view number in [threshold-simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html)). When this threshold signature is generated (let's call it the "VRF output"), anyone can decrypt the ciphertexts encrypted for that known message (the specific point in time selected ahead of time).
 
 Think rock-paper-scissors, again. Two players can encrypt their moves for the same point in the future. Prior to that point, neither player knows what the other player chose (so sharing their move at any time prior to decryption offers no advantage). Once that point is reached, both players can decrypt their moves simultaneously using the corresponding VRF output (no collaboration with the other required).
 
