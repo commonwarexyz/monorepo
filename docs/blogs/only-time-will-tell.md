@@ -6,9 +6,9 @@ When competing head-to-head, publicly revealing your play to an opponent (before
 
 Blockchains don't yet offer this same "temporal privacy" (the ability to hide information until a specific moment when all participants' actions are revealed simultaneously). Every transaction is public the moment it hits the mempool. The meteoric rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions conveys everything you need to know about the value of this information leakage.
 
-## The Missing Primitive: Threshold Encryption
+## The Missing Primitive: Timelock Encryption
 
-What if a user could produce a binding commitment to a specific moment in the future? Reveled at a given time, whether they are ready or not?
+What if a user could produce a binding commitment to a specific moment in the future? Reveled at a given time, whether they are ready or not? Meet [Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189).
 
 Consider an onchain game. Players need to commit moves simultaneously, yet blockchains process transactions sequentially. The last player to move always wins. Game over?
 
