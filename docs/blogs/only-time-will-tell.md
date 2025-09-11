@@ -20,12 +20,12 @@ With BTLE, blockchains can finally offer temporal privacy. Good things (or fair 
 
 ## BATTLEWARE: Proving BTLE is Practical
 
-To demonstrate how useful Binding Timelock Encryption is, we built [BATTLEWARE](https://battleware.xyz). BATTLEWARE is an onchain game where players duel each other to climb a global leaderboard (sorted by ELO score). If you've played Pokémon, you'll feel right at home.
+To demonstrate how to use Binding Timelock Encryption, we built [BATTLEWARE](https://battleware.xyz). BATTLEWARE is an onchain game where players duel each other to climb a global leaderboard (sorted by ELO score). If you've played Pokémon, you'll feel right at home.
 
 <TODO: add battleware game screenshot>
 _Figure 1: A battle between two trainers on BATTLEWARE. The opponent (DEVOTE RITUAL) has locked their move for this round but we can't see it yet._
 
-It all starts when you submit a transaction to generate your "creature". The same VRF used to power BTLE decryption is also used to randomly generate your creature's appearance, name, and moves.
+It all starts when you submit a transaction to generate your "creature". The same signature generation mechanism used to power BTLE decryption doubles as the VRF used to randomly generate your creature's appearance, name, and moves.
 
 <TODO: add creature generation screenshot>
 
