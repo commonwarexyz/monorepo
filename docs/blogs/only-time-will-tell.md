@@ -2,15 +2,15 @@
 
 As your parents insisted when you were growing up, good things come to those that wait. It turns out recent advances in cryptography have proven them right.
 
-When competing head-to-head, publicly revealing your move to an opponent (before they've done the same) offers an obvious advantage. This applies the same to a game of rock-paper-scissors as it does an keyword auction on your search result. If I know you are playing rock, I'll play paper. Applications running games or contests blind submissions until some time period has elapsed to ensure fairness.
+When competing head-to-head, publicly revealing your move to an opponent (before they've done the same) offers an obvious advantage. This applies the same to a game of rock-paper-scissors as it does an keyword auction on your search result. If I know you are playing rock, I'll play paper. Applications incorporating games or contests thus blind submissions until some time period has elapsed to ensure fairness.
 
-Blockchains, unlike the centralized infrastructure that traditionally provides this blinding to participants, don't yet offer this same "temporal privacy". Transactions submitted to onchain auctions are public the moment they hit the mempool. To see the value of this information leakage, look no further than the meteoric rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions.
+Blockchains, unlike the centralized infrastructure typically used for building such applications, don't yet offer this same "temporal privacy". Transactions submitted onchain are public the moment they hit the mempool. To see the value of this information leakage, look no further than the meteoric rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions.
 
-What if blockchains could run fair games and contests?
+What if blockchains could be used for fair games and contests?
 
 ## The Missing Primitive: Binding Timelock Encryption (BTLE)
 
-Enter [(Practical) Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE enables anyone to encrypt some data to a specific time in the future, typically a known index when some VRF output is revealed. When published, any observer can use this VRF output to decrypt the ciphertext provided by the user.
+Enter [Practical Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE enables anyone to encrypt some data to a specific time in the future, typically a known index when some VRF output is revealed. When published, any observer can use this VRF output to decrypt the ciphertext provided by the user.
 
 Think rock-paper-scissors, again. Two players can encrypt their moves for the same point in the future. Prior to that point, neither player knows what the other player chose (so sharing their move at any time prior to decryption offers no advantage). Once that point is reached, both players can decrypt their moves simultaneously using the corresponding VRF output (no collaboration with the other required).
 
