@@ -2,7 +2,7 @@
 
 As your parents insisted when you were growing up, good things come to those that wait. It turns out recent advances in cryptography have proven them right.
 
-When competing head-to-head, publicly revealing your move to an opponent (before they've done the same) offers an obvious advantage. This applies the same to a game of rock-paper-scissors as it does an keyword auction on your search result. Applications running games or contests blind submissions until some time period has elapsed to ensure fairness.
+When competing head-to-head, publicly revealing your move to an opponent (before they've done the same) offers an obvious advantage. This applies the same to a game of rock-paper-scissors as it does an keyword auction on your search result. If I know you are playing rock, I'll play paper. Applications running games or contests blind submissions until some time period has elapsed to ensure fairness.
 
 Blockchains, unlike the centralized infrastructure that traditionally provides this blinding to participants, don't yet offer this same "temporal privacy". Transactions submitted to onchain auctions are public the moment they hit the mempool. To see the value of this information leakage, look no further than the meteoric rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions.
 
