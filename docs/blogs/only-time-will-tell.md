@@ -10,9 +10,11 @@ What if blockchains could run fair games and contests?
 
 ## The Missing Primitive: Timelock Encryption
 
-Running a fair competition onchain requires simultaneous move submission—all players commit before any player's strategy is revealed. But blockchains process transactions sequentially, and every action is immediately visible. Without temporal privacy, competitions devolve into reaction games where the last player holds all the cards.
+Enter [(Practical) Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE enables anyone to encrypt some data to a specific time in the future, typically the view or height when some VRF output is revealed. When available, anyone can use this VRF output decrypt the (binded) ciphertext.
 
-Enter [Timelock Encryption (TLE)](https://eprint.iacr.org/2023/189). TLE lets multiple players encrypt their moves to the same future block height, creating a synchronization point where all moves are revealed together. No player can see another's move before committing their own. No player can change their move after seeing others. The competition becomes fair.
+Unlike commit-reveal schemes, TLE removes the "free option" a committer has to hide their reveal (if reveals already made available are not in their favor). Consider an auction with 3 people bidding. Player 1 commits to 10, Player 2 commits to 20, Player 3 commits to 30. Player 3 waits for Player 1 and Player 2 to reveal their bids, and then determines not to reveal because 30 overvalued the item.
+
+TLE lets multiple players encrypt their moves to the same future block height, creating a synchronization point where all moves are revealed together. No player can see another's move before committing their own. No player can change their move after seeing others. The competition becomes fair.
 
 Here's how it works: You encrypt your data to a specific block height using the expected properties of that future block. When the network finalizes that block, its unique properties (like a VRF output) become the decryption key. Anyone can take your ciphertext and the block's public output to recover the plaintext. The decryption isn't optional—once the block exists, the data is decryptable.
 
