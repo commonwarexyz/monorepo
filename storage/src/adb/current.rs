@@ -17,7 +17,7 @@ use crate::{
         },
         hasher::Hasher,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        proof, verification, Proof, StandardHasher as Standard,
+        verification, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -511,7 +511,7 @@ impl<
         let last_chunk_digest = proof.digests.pop().unwrap();
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof::reconstruct_root(&proof, &mut verifier, &elements, start_pos) {
+        let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_pos) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -629,7 +629,7 @@ impl<
         }
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof::reconstruct_root(&proof, &mut verifier, &[element], pos) {
+        let mmr_root = match proof.reconstruct_root(&mut verifier, &[element], pos) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");

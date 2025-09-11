@@ -39,8 +39,7 @@ impl<D: Digest> ProofStore<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let digests = proof::verify_range_inclusion_and_extract_digests(
-            proof,
+        let digests = proof.verify_range_inclusion_and_extract_digests(
             hasher,
             elements,
             start_element_pos,
@@ -51,7 +50,7 @@ impl<D: Digest> ProofStore<D> {
     }
 
     /// Create a new [ProofStore] from the result of calling
-    /// [proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
+    /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
     pub fn new_from_digests(size: u64, digests: Vec<(u64, D)>) -> Self {
         Self {
