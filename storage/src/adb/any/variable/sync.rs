@@ -10,7 +10,7 @@ use crate::{
     index::Index,
     journal::{
         fixed,
-        variable::{Config as VConfig, Journal as VJournal},
+        variable::{Config as VConfig, Journal as VJournal, ITEM_ALIGNMENT},
         Error,
     },
     metadata::Metadata,
@@ -389,7 +389,9 @@ where
     }
 
     async fn close(self) -> Result<(), Self::Error> {
-        self.inner.close().await
+        self.inner.close().await?;
+        self.metadata.close().await?;
+        Ok(())
     }
 }
 
@@ -455,8 +457,6 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
     compressed: bool,
     items_count: u32,
 ) -> Result<u64, Error> {
-    use crate::journal::variable::ITEM_ALIGNMENT;
-
     if items_count == 0 {
         return Ok(0);
     }

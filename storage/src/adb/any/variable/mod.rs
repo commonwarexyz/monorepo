@@ -292,12 +292,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             while let Some(result) = stream.next().await {
                 let (section, offset, _, op) = result.map_err(Error::Journal)?;
 
+                // In commit(), we write the oldest retained location to metadata before actually
+                // pruning the log and MMR. If there is data in the log before the first section
+                // given by the oldest retained location, we must have written the oldest retained
+                // location to metadata but not actually pruned the log.
+                // In this case, skip data before the oldest retained location.
                 if section < expected_first_section {
-                    // There is data in the log before the first section given by the oldest
-                    // retained location given in metadata. In commit(), we write the oldest
-                    // retained location to metadata before actually pruning the log and MMR.
-                    // We must have written the oldest retained location to metadata but not
-                    // actually pruned the log. Skip data before the oldest retained location.
                     if !warned_about_first_section {
                         warn!(
                             current_loc,
@@ -320,7 +320,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 }
 
                 if current_loc >= mmr_leaves {
-                    warn!(
+                    debug!(
                         section,
                         offset, "operation was missing from MMR/location map"
                     );
@@ -936,7 +936,7 @@ pub(super) mod test {
 
     fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
         Config {
-            mmr_journal_partition: format!("journal_{suffix}"),
+            mmr_journal_partition: format!("mmr_journal_{suffix}"),
             mmr_metadata_partition: format!("mmr_metadata_{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
