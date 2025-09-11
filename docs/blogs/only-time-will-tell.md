@@ -20,19 +20,19 @@ In a game, this means both players submit encrypted moves targeting block 1000. 
 
 With TLE, blockchains finally offer temporal privacy—your data remains hidden while you wait for the target block. Good things, as your parents said, come to those that wait.
 
-_Difference from commit-reveal? The commiter isn't tasked with revealing._
+_Difference from commit-reveal? The commiter isn't tasked with revealing and its more efficient (one-step rather than two-step)._
 
 ## Enter Battleware
 
-Over the last few months, we've made substantial progress building out the Commonware Library. We wanted to build something that showcased capability rather than capacity. Something that demonstrated what becomes possible when you can mold the stack to your application, not the other way around.
+We wanted to make TLE tangible—something you could experience, not just read about in papers. So we built Battleware: a fighting game where temporal privacy isn't a feature, it's the foundation.
 
-Battleware is that demonstration: a fully onchain fighting game where time itself decrypts your moves.
+Think Street Fighter, but onchain. Two players face off in turn-based combat. Each round, both players select their moves—attack, defend, special ability—and encrypt them to the same future block. Neither knows what the other chose. When that block arrives, both moves decrypt simultaneously and resolve against each other. Punch beats grab. Grab beats block. Block beats punch.
 
-When you play Battleware, you encrypt your moves to a future block height. Not to a secret. Not to a committee. To a moment in time that hasn't happened yet. When that block arrives, the network's embedded VRF generates the decryption key. Your move is revealed, scaled by randomness, and executed—all without you having to come back online.
+The beauty is in the simplicity. Players just pick their move and submit. No waiting for opponents to reveal. No games abandoned because someone rage quit. No advantage for moving last. The blockchain becomes a perfect referee—impartial, unstoppable, and always on time.
 
-This changes everything. Timelock encryption provides forced revelation—once encrypted to a future time, the data will be revealed when that time arrives, no matter what. Anyone can trigger the decryption using the VRF output from the target block. The player who submitted it can't prevent it. They can't selectively withhold it. They can't even be offline to stop it.
+But Battleware goes further. Each move's effectiveness gets scaled by the VRF output from the revealing block, adding controlled randomness to combat. Your character itself—appearance, stats, abilities—is generated from the VRF of your first transaction's block. Even matchmaking uses VRF to prevent players from manipulating who they face. Every element that needs fairness gets it through cryptography, not trust.
 
-No trusted coordinator. No remembering secrets. No stalled games from players who disappear. Just submit your move and let time handle the rest.
+This isn't a tech demo pretending to be a game. It's a real game that happens to demonstrate what becomes possible when you build temporal privacy directly into consensus. No coordinator server. No session management. No player availability requirements. Just pure competitive gameplay where only time will tell who wins.
 
 ## How It Works
 
