@@ -48,9 +48,10 @@ The entire implementation is [open source](https://github.com/commonwarexyz/batt
 
 Instead of trusting our API to provide access to game state, we opted to build a pipeline to provide authenticated access for visitors (like we did with [alto](https://alto.commonware.xyz)). The only difference here being that visitors to BATTLEWARE need to verify state and events against consensus outputs (rather than just consensus outputs directly).
 
-After each block is executed, we apply state changes and events to MMRs. We then using consensus::aggregation to generate a threshold signature over the roots of each.
+To accomplish this, we inject state changes and execution events into our [ADBs](https://docs.rs/commonware-storage/latest/commonware_storage/adb/index.html). We then use [consensus::aggregation](https://docs.rs/commonware-consensus/latest/commonware_consensus/aggregation/index.html) to generate a threshold signature over the computed roots of each ADB. Because execution relies on the output of a VRF not available during verification, we cannot just use the threshold signature emitted by threshold-simplex (unfortunately).
 
 <TODO: add MMR screenshot>
+_Figure 5: After execution, the State ADB and Events ADB is updated and once wrapped by a threshold signature are pushed to Exoware._
 
 Once a threshold signature is generated, nodes then push these state and events to Exoware. On-the-fly, Exoware generates Multi-Proofs over the events that matter to a particular websocket subscriber.
 
