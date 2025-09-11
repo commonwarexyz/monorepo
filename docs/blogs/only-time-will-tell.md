@@ -20,7 +20,7 @@ In a game, this means both players submit encrypted moves targeting block 1000. 
 
 With TLE, blockchains finally offer temporal privacy—your data remains hidden while you wait for the target block. Good things, as your parents said, come to those that wait.
 
-_Difference from commit-reveal? The commiter isn't tasked with revealing and its more efficient (one-step rather than two-step)._
+_Difference from commit-reveal? The commiter can refuse to reveal their move and its more efficient (one-step rather than two-step)._
 
 ## Enter Battleware
 
