@@ -2,9 +2,9 @@
 
 As your parents noted when you were growing up, good things come to those that wait. It turns out that recent advances in cryptography, however, have proven them right.
 
-When competing head-to-head, publicly revealing your play to an opponent (before they've gone) offers an obvious advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for ads. Left with few (if any) alternatives, applications involving some sort of contest often operate as a trusted facilitator. Google runs an auction so Amazon doesn't learn what Walmart is bidding to appear first in the search results for golf balls.
+When competing head-to-head, publicly revealing your play to an opponent (before they've gone) offers an obvious advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for ads. Consequently, applications involving some sort of contest often operate as a trusted facilitator. Google runs the ad auction so Amazon doesn't learn what Walmart is bidding.
 
-Blockchains don't offer this same "temporal privacy". Every transaction is public the moment it hits the mempool. Every bid visible. Every move exposed. This pervasive transparency has spawned an entire industry of MEV bots that monitor mempools, frontrun trades, sandwich transactions, and extract billions in value by exploiting the visibility of pending actions. The transparency that makes blockchains auditable also enables pervasive value extraction.
+Blockchains don't yet offer this same "temporal privacy". Every transaction is public the moment it hits the mempool. Every bid visible. Every move exposed. This pervasive transparency has spawned an entire industry of MEV bots that monitor mempools, frontrun trades, sandwich transactions, and extract billions in value by exploiting the visibility of pending actions. The transparency that makes blockchains auditable also enables pervasive value extraction.
 
 ## The Missing Primitive
 
