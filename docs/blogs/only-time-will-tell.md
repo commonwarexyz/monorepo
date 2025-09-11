@@ -20,7 +20,7 @@ Embedded into a blockchain, TLE commitments become binding (BTLE). Submit an enc
 
 Unlike commit-reveal schemes, TLE removes the "free option" any participant has to hide their reveal (if, say, revealing a commitment isn't in their favor). Consider an auction with 3 people bidding. Player 1 commits to 10, Player 2 commits to 20, Player 3 commits to 30. Player 3 waits for Player 1 and Player 2 to reveal their bids, and then determines not to reveal because 30 overvalued the item.
 
-With BTLE, blockchains can finally offer temporal privacy. (Binded) encrypted data remains hidden from all until the target point in time is reached. Good things, as your parents said, come to those that wait.
+With BTLE, blockchains can finally offer temporal privacy. Good things (or fair contests onchain), as your parents said, come to those that wait.
 
 ## Enter Battleware
 
