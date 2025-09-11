@@ -53,9 +53,10 @@ To accomplish this, we inject state changes and execution events into our [ADBs]
 <TODO: add MMR screenshot>
 _Figure 5: After execution, the State ADB and Events ADB is updated and once wrapped by a threshold signature are pushed to Exoware._
 
-Once a threshold signature is generated, nodes then push these state and events to Exoware. On-the-fly, Exoware generates Multi-Proofs over the events that matter to a particular websocket subscriber.
+Once a threshold signature is generated, validators then push these computed artifacts to [Exoware](https://exoware.xyz/). On-the-fly, Exoware generates Multi-Proofs over the events that each websocket subscriber is interested in to save bandwidth (the events for your account or the battle you're in).
 
 <TODO: Add multi-proof screenshot>
+_Figure 6: Instead of sending a full proof and all events for each block, Exoware dynamically generates Multi-Proofs over only the events that matter to the subscriber._
 
 Updates are then sent to your frontend where you both verify the threshold signature attesting to some root was signed by a quorum of nodes and that there exists a valid proof of your events in the root.
 
