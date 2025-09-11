@@ -41,6 +41,8 @@ pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
 }
 
 impl<const N: usize> BitMap<N> {
+    const _CHUNK_SIZE_NON_ZERO_ASSERT: () = assert!(N > 0, "chunk size must be > 0");
+
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: usize = N * 8;
 
@@ -52,7 +54,8 @@ impl<const N: usize> BitMap<N> {
 
     /// Create a new empty bitmap.
     pub fn new() -> Self {
-        // Invariant: chunks is never empty
+        #[allow(path_statements)]
+        Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent N == 0
         let bitmap = VecDeque::from([Self::EMPTY_CHUNK]);
         Self {
             chunks: bitmap,
@@ -62,6 +65,8 @@ impl<const N: usize> BitMap<N> {
 
     // Create a new empty bitmap with the capacity to hold `size` bits without reallocating.
     pub fn with_capacity(size: usize) -> Self {
+        #[allow(path_statements)]
+        Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent N == 0
         let num_chunks = Self::num_chunks_at_size(size).get();
         let mut chunks = VecDeque::with_capacity(num_chunks);
         // Invariant: chunks is never empty
@@ -79,6 +84,8 @@ impl<const N: usize> BitMap<N> {
 
     /// Create a new bitmap with `size` bits, with all bits set to 0.
     pub fn zeroes(size: usize) -> Self {
+        #[allow(path_statements)]
+        Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent N == 0
         let num_chunks = Self::num_chunks_at_size(size).get();
         let mut chunks = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
@@ -92,6 +99,8 @@ impl<const N: usize> BitMap<N> {
 
     /// Create a new bitmap with `size` bits, with all bits set to 1.
     pub fn ones(size: usize) -> Self {
+        #[allow(path_statements)]
+        Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent N == 0
         let num_chunks = Self::num_chunks_at_size(size).get();
         let mut chunks = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
