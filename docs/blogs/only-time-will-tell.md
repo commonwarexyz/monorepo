@@ -8,7 +8,7 @@ Blockchains don't offer this same "temporal privacy". Every transaction is publi
 
 ## The Missing Primitive
 
-Consider any competitive game. Players need to commit moves simultaneously, yet blockchains process transactions sequentially. The last player to move always wins. This isn't a bug in the game design—it's a limitation of the infrastructure.
+Consider any competitive game. Players need to commit moves simultaneously, yet blockchains process transactions sequentially. The last player to move always wins. This isn't a bug in the game design, it's a limitation of the underlying infrastructure.
 
 Developers have worked around this with commit-reveal schemes for years. Users hash their moves, submit the hash, wait for everyone else, then reveal. But here's the fundamental problem: the binding property of commitments only guarantees users can't change their move—it doesn't force them to reveal it.
 
