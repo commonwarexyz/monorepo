@@ -28,10 +28,12 @@ _Figure 1: A battle between two trainers on BATTLEWARE. The opponent (DEVOTE RIT
 It all starts when you submit a transaction to generate your "creature". The same signature generation mechanism used to power BTLE decryption doubles as the VRF used to randomly generate your creature's appearance, name, and moves.
 
 <TODO: add creature generation screenshot>
+_Figure 2: A creature's traits are derived from the hash of your address, nonce, and a seed by the embedded VRF._
 
-Once generated, you enter the arena for matchmaking. Again using the same VRF, we randomly pair you with some other player (making it a bit more difficult to bias your matches to certain opponents).
+With a creature generated, you can enter the arena for matchmaking. Again using the same VRF, we randomly pair you with some other player (making it a bit more difficult to play yourself to boost your ELO).
 
 <TODO: add matchmaking screenshot>
+_Figure 3: Players submit match requests onchain and after a configurable amount of time has passed or the arena is full, players are paired and battles started._
 
 Once in a battle, you have 15 rounds to defeat your opponent. During each round, both players submit encrypted moves to the view at which the battle will be resolved. Once the view is reached, either player can submit the VRF output to the chain to decrypt both players' moves and resolve the round. If a player has won, the battle resolves and each player's ELO score is updated. If not, the battle continues to the next round.
 
