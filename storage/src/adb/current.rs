@@ -12,7 +12,9 @@ use crate::{
     index::Index,
     mmr::{
         bitmap::Bitmap,
-        grafting::{Hasher as GraftingHasher, Storage as GStorage, Verifier as GraftingVerifier},
+        grafting::{
+            Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
+        },
         hasher::Hasher,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         proof, verification, Proof, StandardHasher as Standard,
@@ -366,7 +368,7 @@ impl<
         );
         let ops = &self.any.mmr;
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, ops, height);
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, ops, height);
         let mmr_root = grafted_mmr.root(hasher).await?;
 
         // The digest contains all information from the base mmr, and all information from the peak
@@ -426,8 +428,7 @@ impl<
 
         // Generate the proof from the grafted MMR.
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, mmr, height);
-
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
         let mut proof = verification::range_proof(&grafted_mmr, start_pos, end_pos).await?;
 
         // Collect the operations necessary to verify the proof.
@@ -551,7 +552,7 @@ impl<
         };
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = verification::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);

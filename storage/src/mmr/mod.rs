@@ -72,6 +72,7 @@ pub mod iterator;
 pub mod mem;
 pub mod proof;
 pub mod stability;
+
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         pub mod bitmap;
