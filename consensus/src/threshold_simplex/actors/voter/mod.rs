@@ -94,6 +94,7 @@ mod tests {
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
@@ -409,6 +410,7 @@ mod tests {
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
+                    ignore_blocks: true,
                 },
             );
             network.start();
