@@ -19,8 +19,10 @@ use std::sync::Arc;
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 
+const MAX_OPERATIONS: usize = 50;
+
 #[derive(Debug)]
-enum SyncOp {
+enum Operation {
     // Basic ops to build source state
     Update {
         key: [u8; 32],
@@ -45,30 +47,30 @@ enum SyncOp {
     },
 }
 
-impl<'a> Arbitrary<'a> for SyncOp {
+impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
         match choice % 7 {
             0 => {
                 let key = u.arbitrary()?;
                 let value = u.arbitrary()?;
-                Ok(SyncOp::Update { key, value })
+                Ok(Operation::Update { key, value })
             }
             1 => {
                 let key = u.arbitrary()?;
-                Ok(SyncOp::Delete { key })
+                Ok(Operation::Delete { key })
             }
-            2 => Ok(SyncOp::Commit),
-            3 => Ok(SyncOp::Prune),
+            2 => Ok(Operation::Commit),
+            3 => Ok(Operation::Prune),
             4 => {
                 let fetch_batch_size = u.arbitrary()?;
-                Ok(SyncOp::SyncFull { fetch_batch_size })
+                Ok(Operation::SyncFull { fetch_batch_size })
             }
             5 | 6 => {
                 let sync_log: bool = u.arbitrary()?;
                 let sync_mmr: bool = u.arbitrary()?;
                 let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
-                Ok(SyncOp::SimulateFailure {
+                Ok(Operation::SimulateFailure {
                     sync_log,
                     sync_mmr,
                     write_limit,
@@ -81,7 +83,7 @@ impl<'a> Arbitrary<'a> for SyncOp {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    ops: Vec<SyncOp>,
+    ops: Vec<Operation>,
 }
 
 const PAGE_SIZE: usize = 128;
@@ -146,38 +148,40 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db =
-            Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config("src"))
-                .await
-                .expect("Failed to init source db");
+        let mut db = Any::<_, Key, Value, Sha256, TwoCap>::init(
+            context.clone(),
+            test_config("adb_any_fixed_fuzz_test"),
+        )
+        .await
+        .expect("Failed to init source db");
 
         let mut sync_id = 0;
 
-        for op in input.ops.iter().take(50) {
+        for op in input.ops.iter().take(MAX_OPERATIONS) {
             match op {
-                SyncOp::Update { key, value } => {
+                Operation::Update { key, value } => {
                     db.update(Key::new(*key), Value::new(*value))
                         .await
                         .expect("Update should not fail");
                 }
 
-                SyncOp::Delete { key } => {
+                Operation::Delete { key } => {
                     db.delete(Key::new(*key))
                         .await
                         .expect("Delete should not fail");
                 }
 
-                SyncOp::Commit => {
+                Operation::Commit => {
                     db.commit().await.expect("Commit should not fail");
                 }
 
-                SyncOp::Prune => {
+                Operation::Prune => {
                     db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
                 }
 
-                SyncOp::SyncFull { fetch_batch_size } => {
+                Operation::SyncFull { fetch_batch_size } => {
                     if db.op_count() == 0 {
                         continue;
                     }
@@ -207,7 +211,7 @@ fn fuzz(input: FuzzInput) {
                     sync_id += 1;
                 }
 
-                SyncOp::SimulateFailure {
+                Operation::SimulateFailure {
                     sync_log,
                     sync_mmr,
                     write_limit,

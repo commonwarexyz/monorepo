@@ -11,10 +11,12 @@ use commonware_storage::{
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 
+const MAX_OPERATIONS: usize = 50;
+
 type Key = FixedBytes<32>;
 
 #[derive(Debug)]
-enum SyncOp {
+enum Operation {
     Update {
         key: [u8; 32],
         value_bytes: Vec<u8>,
@@ -63,7 +65,7 @@ enum SyncOp {
     },
 }
 
-impl<'a> Arbitrary<'a> for SyncOp {
+impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
         match choice % 18 {
@@ -72,11 +74,11 @@ impl<'a> Arbitrary<'a> for SyncOp {
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = ((value_len as usize) % 10000) + 1;
                 let value_bytes = u.bytes(actual_len)?.to_vec();
-                Ok(SyncOp::Update { key, value_bytes })
+                Ok(Operation::Update { key, value_bytes })
             }
             1 => {
                 let key = u.arbitrary()?;
-                Ok(SyncOp::Delete { key })
+                Ok(Operation::Delete { key })
             }
             2 => {
                 let has_metadata: bool = u.arbitrary()?;
@@ -87,31 +89,31 @@ impl<'a> Arbitrary<'a> for SyncOp {
                 } else {
                     None
                 };
-                Ok(SyncOp::Commit { metadata_bytes })
+                Ok(Operation::Commit { metadata_bytes })
             }
-            3 => Ok(SyncOp::Prune),
+            3 => Ok(Operation::Prune),
             4 => {
                 let key = u.arbitrary()?;
-                Ok(SyncOp::Get { key })
+                Ok(Operation::Get { key })
             }
             5 => {
                 let loc_offset = u.arbitrary()?;
-                Ok(SyncOp::GetLoc { loc_offset })
+                Ok(Operation::GetLoc { loc_offset })
             }
             6 => {
                 let key = u.arbitrary()?;
-                Ok(SyncOp::GetKeyLoc { key })
+                Ok(Operation::GetKeyLoc { key })
             }
-            7 => Ok(SyncOp::GetMetadata),
+            7 => Ok(Operation::GetMetadata),
             8 => {
                 let key = u.arbitrary()?;
                 let loc_offset = u.arbitrary()?;
-                Ok(SyncOp::GetFromLoc { key, loc_offset })
+                Ok(Operation::GetFromLoc { key, loc_offset })
             }
             9 => {
                 let start_offset = u.arbitrary()?;
                 let max_ops = u.arbitrary()?;
-                Ok(SyncOp::Proof {
+                Ok(Operation::Proof {
                     start_offset,
                     max_ops,
                 })
@@ -120,23 +122,23 @@ impl<'a> Arbitrary<'a> for SyncOp {
                 let size_offset = u.arbitrary()?;
                 let start_offset = u.arbitrary()?;
                 let max_ops = u.arbitrary()?;
-                Ok(SyncOp::HistoricalProof {
+                Ok(Operation::HistoricalProof {
                     size_offset,
                     start_offset,
                     max_ops,
                 })
             }
-            11 => Ok(SyncOp::Sync),
-            12 => Ok(SyncOp::OldestRetainedLoc),
-            13 => Ok(SyncOp::InactivityFloorLoc),
-            14 => Ok(SyncOp::OpCount),
-            15 => Ok(SyncOp::Root),
+            11 => Ok(Operation::Sync),
+            12 => Ok(Operation::OldestRetainedLoc),
+            13 => Ok(Operation::InactivityFloorLoc),
+            14 => Ok(Operation::OpCount),
+            15 => Ok(Operation::Root),
             16 | 17 => {
                 let sync_log: bool = u.arbitrary()?;
                 let sync_locations: bool = u.arbitrary()?;
                 let sync_mmr: bool = u.arbitrary()?;
                 let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
-                Ok(SyncOp::SimulateFailure {
+                Ok(Operation::SimulateFailure {
                     sync_log,
                     sync_locations,
                     sync_mmr,
@@ -150,7 +152,7 @@ impl<'a> Arbitrary<'a> for SyncOp {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    ops: Vec<SyncOp>,
+    ops: Vec<Operation>,
 }
 
 const PAGE_SIZE: usize = 128;
@@ -178,47 +180,49 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db =
-            Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), test_config("src"))
-                .await
-                .expect("Failed to init source db");
+        let mut db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
+            context.clone(),
+            test_config("adb_any_variable_fuzz_test"),
+        )
+        .await
+        .expect("Failed to init source db");
 
         let mut has_uncommitted = false;
 
-        for op in input.ops.iter().take(100) {
+        for op in input.ops.iter().take(MAX_OPERATIONS) {
             match op {
-                SyncOp::Update { key, value_bytes } => {
+                Operation::Update { key, value_bytes } => {
                     db.update(Key::new(*key), value_bytes.clone())
                         .await
                         .expect("Update should not fail");
                     has_uncommitted = true;
                 }
 
-                SyncOp::Delete { key } => {
+                Operation::Delete { key } => {
                     db.delete(Key::new(*key))
                         .await
                         .expect("Delete should not fail");
                     has_uncommitted = true;
                 }
 
-                SyncOp::Commit { metadata_bytes } => {
+                Operation::Commit { metadata_bytes } => {
                     db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
                     has_uncommitted = false;
                 }
 
-                SyncOp::Prune => {
+                Operation::Prune => {
                     db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
                 }
 
-                SyncOp::Get { key } => {
+                Operation::Get { key } => {
                     let _ = db.get(&Key::new(*key)).await;
                 }
 
-                SyncOp::GetLoc { loc_offset } => {
+                Operation::GetLoc { loc_offset } => {
                     let op_count = db.op_count();
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count;
@@ -226,19 +230,19 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                SyncOp::GetKeyLoc { key } => {
+                Operation::GetKeyLoc { key } => {
                     let _ = db.get_key_loc(&Key::new(*key)).await;
                 }
 
-                SyncOp::GetMetadata => {
+                Operation::GetMetadata => {
                     let _ = db.get_metadata().await;
                 }
 
-                SyncOp::GetFromLoc { key, loc_offset: _ } => {
+                Operation::GetFromLoc { key, loc_offset: _ } => {
                     let _ = db.get(&Key::new(*key)).await;
                 }
 
-                SyncOp::Proof {
+                Operation::Proof {
                     start_offset,
                     max_ops,
                 } => {
@@ -250,7 +254,7 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                SyncOp::HistoricalProof {
+                Operation::HistoricalProof {
                     size_offset,
                     start_offset,
                     max_ops,
@@ -264,30 +268,30 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                SyncOp::Sync => {
+                Operation::Sync => {
                     db.sync().await.expect("Sync should not fail");
                 }
 
-                SyncOp::OldestRetainedLoc => {
+                Operation::OldestRetainedLoc => {
                     let _ = db.oldest_retained_loc();
                 }
 
-                SyncOp::InactivityFloorLoc => {
+                Operation::InactivityFloorLoc => {
                     let _ = db.inactivity_floor_loc();
                 }
 
-                SyncOp::OpCount => {
+                Operation::OpCount => {
                     let _ = db.op_count();
                 }
 
-                SyncOp::Root => {
+                Operation::Root => {
                     if !has_uncommitted {
                         let mut hasher = Standard::<Sha256>::new();
                         let _ = db.root(&mut hasher);
                     }
                 }
 
-                SyncOp::SimulateFailure {
+                Operation::SimulateFailure {
                     sync_log,
                     sync_locations,
                     sync_mmr,
