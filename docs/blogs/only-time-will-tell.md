@@ -62,6 +62,6 @@ These updates are processed by your browser where you both verify the threshold 
 
 ## Wrapping Things Up
 
-At Commonware, [we believe that the best onchain experiences will develop a sustained edge through specialization](TODO). Whether it be a battle game, a trading application, a social network, or something only you know how to build, building a blockchain around a product provides differentiated capability that can't be bolted on to existing blockchains.
+At Commonware, [we believe that the best onchain experiences will develop a sustained edge through specialization](https://commonware.xyz/blogs/introducing-commonware.html). Whether it be a battle game, a trading application, a social network, or something only you know how to build, building a blockchain around a product provides differentiated capability that can't be bolted on to existing blockchains.
 
 We will (finally) have capacity to onboard our next Commonware design partner on October 1st. If you want to collaborate on a blockchain application that doesn't feel like one, reach out now (our next slot opens in 2026).
