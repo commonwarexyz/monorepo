@@ -106,6 +106,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "adb_keyless"
+path = "fuzz_targets/adb_keyless.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "store_operations"
+path = "fuzz_targets/store_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ordinal_operations"
 path = "fuzz_targets/ordinal_operations.rs"
 test = false
