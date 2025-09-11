@@ -58,7 +58,7 @@ Once a threshold signature is generated, validators then push these computed art
 <TODO: Add multi-proof screenshot>
 _Figure 6: Instead of sending a full proof and all events for each block, Exoware dynamically generates Multi-Proofs over only the events that matter to the subscriber._
 
-Updates are then sent to your frontend where you both verify the threshold signature attesting to some root was signed by a quorum of nodes and that there exists a valid proof of your events in the root.
+These updates are processed by your browser where you both verify the threshold signature attesting to some set of roots was valid and that there exists a valid proof of your events in the provided root.
 
 ## Wrapping Things Up
 
