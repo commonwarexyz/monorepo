@@ -46,7 +46,7 @@ The entire implementation is [open source](https://github.com/commonwarexyz/batt
 
 ## Securing Access
 
-Instead of trusting some API to provide access to state, we leverage threshold signatures and MMRs to provide authenticated access to the frontend. What does this mean?
+Instead of trusting our API to provide access to game state, we opted to build a pipeline to provide authenticated access for visitors (like we did with [alto](https://alto.commonware.xyz)). The only difference here being that visitors to BATTLEWARE need to verify state and events against consensus outputs (rather than just consensus outputs directly).
 
 After each block is executed, we apply state changes and events to MMRs. We then using consensus::aggregation to generate a threshold signature over the roots of each.
 
