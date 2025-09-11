@@ -218,7 +218,7 @@ fn fuzz(input: FuzzInput) {
                     let expected_op_count = src.op_count();
                     let expected_floor = src.inactivity_floor_loc();
 
-                    // Simulate the failure
+                    // Simulate the failure (consumes src)
                     src.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
                         .await
                         .expect("Simulate failure should not fail");

@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
 documentation = "https://docs.rs/commonware-storage"
 
+[features]
+fuzzing = []
+
 [dependencies]
 commonware-codec = {workspace = true}
 commonware-cryptography = {workspace = true}
@@ -90,6 +93,3 @@ path = "src/rmap/benches/bench.rs"
 name="store"
 harness = false
 path = "src/store/benches/bench.rs"
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
