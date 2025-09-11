@@ -823,20 +823,22 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // * All log operations always have corresponding MMR & location entries,
         let section_with_target = target_prune_loc / self.log_items_per_section;
         let new_oldest_retained_loc = section_with_target * self.log_items_per_section;
-        if new_oldest_retained_loc > self.oldest_retained_loc {
+        if new_oldest_retained_loc <= self.oldest_retained_loc {
             // Only update the persisted oldest retained location if it has changed.
             // This if statement handles the case where state sync finishes with the
             // oldest_retained_loc in the middle of the first populated section, and then
             // we call prune for an item in the first section. Without this check, we would
             // set the oldest_retained_loc to the first item in the first section, even though
             // the actual oldest retained location is in the middle of the first section.
-            write_oldest_retained_loc(&mut self.metadata, new_oldest_retained_loc);
-            self.metadata.sync().await?;
-            self.oldest_retained_loc = new_oldest_retained_loc;
+            return Ok(());
         }
+
+        write_oldest_retained_loc(&mut self.metadata, new_oldest_retained_loc);
+        self.metadata.sync().await?;
         if !self.log.prune(section_with_target).await? {
             return Ok(());
         }
+        self.oldest_retained_loc = new_oldest_retained_loc;
 
         debug!(
             log_size = self.log_size,
