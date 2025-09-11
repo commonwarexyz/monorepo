@@ -18,6 +18,8 @@ The cryptographic construction ensures two critical properties. First, no one ca
 
 In practice, this means you submit an encrypted move targeting block 1000. When block 1000 is finalized with its VRF output, that output directly enables decryption. No interaction required. No secrets to store. No ability to withhold revelation. Time passes, the block arrives, and your move is revealed.
 
+_Difference from commit-reveal? The commiter isn't tasked with revealing._
+
 ## Enter Battleware
 
 Over the last few months, we've made substantial progress building out the Commonware Library. We wanted to build something that showcased capability rather than capacity. Something that demonstrated what becomes possible when you can mold the stack to your application, not the other way around.
