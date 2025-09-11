@@ -1,0 +1,322 @@
+#![no_main]
+
+use arbitrary::Arbitrary;
+use commonware_cryptography::Sha256;
+use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_storage::{
+    adb::any::variable::{Any, Config},
+    mmr::hasher::Standard,
+    translator::TwoCap,
+};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use libfuzzer_sys::fuzz_target;
+
+type Key = FixedBytes<32>;
+
+#[derive(Debug)]
+enum SyncOp {
+    Update {
+        key: [u8; 32],
+        value_bytes: Vec<u8>,
+    },
+    Delete {
+        key: [u8; 32],
+    },
+    Commit {
+        metadata_bytes: Option<Vec<u8>>,
+    },
+    Prune,
+    Get {
+        key: [u8; 32],
+    },
+    GetLoc {
+        loc_offset: u32,
+    },
+    GetKeyLoc {
+        key: [u8; 32],
+    },
+    GetMetadata,
+    GetFromLoc {
+        key: [u8; 32],
+        #[allow(dead_code)]
+        loc_offset: u32,
+    },
+    Proof {
+        start_offset: u32,
+        max_ops: u8,
+    },
+    HistoricalProof {
+        size_offset: u32,
+        start_offset: u32,
+        max_ops: u8,
+    },
+    Sync,
+    OldestRetainedLoc,
+    InactivityFloorLoc,
+    OpCount,
+    Root,
+    SimulateFailure {
+        sync_log: bool,
+        sync_locations: bool,
+        sync_mmr: bool,
+        write_limit: u8,
+    },
+}
+
+impl<'a> Arbitrary<'a> for SyncOp {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let choice: u8 = u.arbitrary()?;
+        match choice % 18 {
+            0 => {
+                let key = u.arbitrary()?;
+                let value_len: u16 = u.arbitrary()?;
+                let actual_len = ((value_len as usize) % 10000) + 1;
+                let value_bytes = u.bytes(actual_len)?.to_vec();
+                Ok(SyncOp::Update { key, value_bytes })
+            }
+            1 => {
+                let key = u.arbitrary()?;
+                Ok(SyncOp::Delete { key })
+            }
+            2 => {
+                let has_metadata: bool = u.arbitrary()?;
+                let metadata_bytes = if has_metadata {
+                    let metadata_len: u16 = u.arbitrary()?;
+                    let actual_len = ((metadata_len as usize) % 1000) + 1;
+                    Some(u.bytes(actual_len)?.to_vec())
+                } else {
+                    None
+                };
+                Ok(SyncOp::Commit { metadata_bytes })
+            }
+            3 => Ok(SyncOp::Prune),
+            4 => {
+                let key = u.arbitrary()?;
+                Ok(SyncOp::Get { key })
+            }
+            5 => {
+                let loc_offset = u.arbitrary()?;
+                Ok(SyncOp::GetLoc { loc_offset })
+            }
+            6 => {
+                let key = u.arbitrary()?;
+                Ok(SyncOp::GetKeyLoc { key })
+            }
+            7 => Ok(SyncOp::GetMetadata),
+            8 => {
+                let key = u.arbitrary()?;
+                let loc_offset = u.arbitrary()?;
+                Ok(SyncOp::GetFromLoc { key, loc_offset })
+            }
+            9 => {
+                let start_offset = u.arbitrary()?;
+                let max_ops = u.arbitrary()?;
+                Ok(SyncOp::Proof {
+                    start_offset,
+                    max_ops,
+                })
+            }
+            10 => {
+                let size_offset = u.arbitrary()?;
+                let start_offset = u.arbitrary()?;
+                let max_ops = u.arbitrary()?;
+                Ok(SyncOp::HistoricalProof {
+                    size_offset,
+                    start_offset,
+                    max_ops,
+                })
+            }
+            11 => Ok(SyncOp::Sync),
+            12 => Ok(SyncOp::OldestRetainedLoc),
+            13 => Ok(SyncOp::InactivityFloorLoc),
+            14 => Ok(SyncOp::OpCount),
+            15 => Ok(SyncOp::Root),
+            16 | 17 => {
+                let sync_log: bool = u.arbitrary()?;
+                let sync_locations: bool = u.arbitrary()?;
+                let sync_mmr: bool = u.arbitrary()?;
+                let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
+                Ok(SyncOp::SimulateFailure {
+                    sync_log,
+                    sync_locations,
+                    sync_mmr,
+                    write_limit,
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Arbitrary, Debug)]
+struct FuzzInput {
+    ops: Vec<SyncOp>,
+}
+
+const PAGE_SIZE: usize = 128;
+
+fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
+    Config {
+        mmr_journal_partition: format!("{test_name}_mmr"),
+        mmr_metadata_partition: format!("{test_name}_meta"),
+        mmr_items_per_blob: NZU64!(3),
+        mmr_write_buffer: NZUsize!(1024),
+        log_journal_partition: format!("{test_name}_log"),
+        log_items_per_section: NZU64!(3),
+        log_write_buffer: NZUsize!(1024),
+        log_compression: None,
+        log_codec_config: ((0..=100000).into(), ()),
+        locations_journal_partition: format!("{test_name}_locations"),
+        locations_items_per_blob: NZU64!(3),
+        translator: TwoCap,
+        thread_pool: None,
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(1)),
+    }
+}
+
+fn fuzz(input: FuzzInput) {
+    let runner = deterministic::Runner::default();
+
+    runner.start(|context| async move {
+        let mut db =
+            Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), test_config("src"))
+                .await
+                .expect("Failed to init source db");
+
+        let mut has_uncommitted = false;
+
+        for op in input.ops.iter().take(100) {
+            match op {
+                SyncOp::Update { key, value_bytes } => {
+                    db.update(Key::new(*key), value_bytes.clone())
+                        .await
+                        .expect("Update should not fail");
+                    has_uncommitted = true;
+                }
+
+                SyncOp::Delete { key } => {
+                    db.delete(Key::new(*key))
+                        .await
+                        .expect("Delete should not fail");
+                    has_uncommitted = true;
+                }
+
+                SyncOp::Commit { metadata_bytes } => {
+                    db.commit(metadata_bytes.clone())
+                        .await
+                        .expect("Commit should not fail");
+                    has_uncommitted = false;
+                }
+
+                SyncOp::Prune => {
+                    db.prune(db.inactivity_floor_loc())
+                        .await
+                        .expect("Prune should not fail");
+                }
+
+                SyncOp::Get { key } => {
+                    let _ = db.get(&Key::new(*key)).await;
+                }
+
+                SyncOp::GetLoc { loc_offset } => {
+                    let op_count = db.op_count();
+                    if op_count > 0 {
+                        let loc = (*loc_offset as u64) % op_count;
+                        let _ = db.get_loc(loc).await;
+                    }
+                }
+
+                SyncOp::GetKeyLoc { key } => {
+                    let _ = db.get_key_loc(&Key::new(*key)).await;
+                }
+
+                SyncOp::GetMetadata => {
+                    let _ = db.get_metadata().await;
+                }
+
+                SyncOp::GetFromLoc { key, loc_offset: _ } => {
+                    let _ = db.get(&Key::new(*key)).await;
+                }
+
+                SyncOp::Proof {
+                    start_offset,
+                    max_ops,
+                } => {
+                    let op_count = db.op_count();
+                    if op_count > 0 && !has_uncommitted {
+                        let start_loc = (*start_offset as u64) % op_count;
+                        let max_ops_value = ((*max_ops as u64) % 100) + 1;
+                        let _ = db.proof(start_loc, max_ops_value).await;
+                    }
+                }
+
+                SyncOp::HistoricalProof {
+                    size_offset,
+                    start_offset,
+                    max_ops,
+                } => {
+                    let op_count = db.op_count();
+                    if op_count > 0 && !has_uncommitted {
+                        let size = ((*size_offset as u64) % op_count) + 1;
+                        let start_loc = (*start_offset as u64) % size;
+                        let max_ops_value = ((*max_ops as u64) % 100) + 1;
+                        let _ = db.historical_proof(size, start_loc, max_ops_value).await;
+                    }
+                }
+
+                SyncOp::Sync => {
+                    db.sync().await.expect("Sync should not fail");
+                }
+
+                SyncOp::OldestRetainedLoc => {
+                    let _ = db.oldest_retained_loc();
+                }
+
+                SyncOp::InactivityFloorLoc => {
+                    let _ = db.inactivity_floor_loc();
+                }
+
+                SyncOp::OpCount => {
+                    let _ = db.op_count();
+                }
+
+                SyncOp::Root => {
+                    if !has_uncommitted {
+                        let mut hasher = Standard::<Sha256>::new();
+                        let _ = db.root(&mut hasher);
+                    }
+                }
+
+                SyncOp::SimulateFailure {
+                    sync_log,
+                    sync_locations,
+                    sync_mmr,
+                    write_limit,
+                } => {
+                    db.simulate_failure(
+                        *sync_log,
+                        *sync_locations,
+                        *sync_mmr,
+                        *write_limit as usize,
+                    )
+                    .await
+                    .expect("Simulate failure should not fail");
+
+                    db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
+                        context.clone(),
+                        test_config("src"),
+                    )
+                    .await
+                    .expect("Failed to init source db");
+                    has_uncommitted = false;
+                }
+            }
+        }
+
+        db.destroy().await.expect("Destroy should not fail");
+    });
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
+});
