@@ -1,8 +1,8 @@
 # Only Time Will Tell
 
-As your parents insisted when you were growing up, good things come to those that wait. It turns out that recent advances in cryptography, however, have proven them right.
+As your parents insisted when you were growing up, good things come to those that wait. It turns out recent advances in cryptography have proven them right.
 
-When competing head-to-head, publicly revealing your play to an opponent (before they've gone) offers an obvious advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for ads. Consequently, applications involving some sort of contest often operate as a trusted facilitator. Google runs its ad auction so Amazon doesn't learn what Walmart is bidding.
+When competing head-to-head, publicly revealing your move to an opponent (before they've done the same) offers an obvious advantage. This applies the same to a battle of rock-paper-scissors as it does an auction for search result ads. Consequently, applications involving some sort of contest often operate as a trusted facilitator that hides moves from all other participants until said contest is resolved.
 
 Blockchains don't yet offer this same "temporal privacy" (the ability to hide information until a specific moment when all participants' actions are revealed simultaneously). Every transaction is public the moment it hits the mempool. The meteoric rise of MEV bots that monitor mempools, frontrun trades, and sandwich transactions conveys everything you need to know about the value of this information leakage.
 
