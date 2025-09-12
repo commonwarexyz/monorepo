@@ -1,6 +1,6 @@
 //! # Acknowledgements
 //!
-//! This code is inspired by [tokio-uring](https://github.com/tokio-rs/tokio-uring>) at commit 7761222.
+//! This code is inspired by [tokio-uring](https://github.com/tokio-rs/tokio-uring) at commit 7761222.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -11,6 +11,7 @@ use core::ops::Index;
 /// A buffer whose memory is stable as long as its not reallocated.
 pub enum StableBuf {
     Vec(Vec<u8>),
+    #[cfg(feature = "std")]
     BytesMut(bytes::BytesMut),
 }
 
@@ -26,6 +27,7 @@ impl From<Vec<u8>> for StableBuf {
     }
 }
 
+#[cfg(feature = "std")]
 impl From<bytes::BytesMut> for StableBuf {
     fn from(b: bytes::BytesMut) -> Self {
         StableBuf::BytesMut(b)
@@ -36,6 +38,7 @@ impl From<StableBuf> for Bytes {
     fn from(buf: StableBuf) -> Self {
         match buf {
             StableBuf::Vec(v) => Bytes::from(v),
+            #[cfg(feature = "std")]
             StableBuf::BytesMut(b) => b.freeze(),
         }
     }
@@ -45,6 +48,7 @@ impl From<StableBuf> for Vec<u8> {
     fn from(buf: StableBuf) -> Self {
         match buf {
             StableBuf::Vec(v) => v,
+            #[cfg(feature = "std")]
             StableBuf::BytesMut(b) => b.to_vec(),
         }
     }
@@ -56,6 +60,7 @@ impl Index<usize> for StableBuf {
     fn index(&self, index: usize) -> &Self::Output {
         match self {
             StableBuf::Vec(v) => &v[index],
+            #[cfg(feature = "std")]
             StableBuf::BytesMut(b) => &b[index],
         }
     }
@@ -66,7 +71,8 @@ impl StableBuf {
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         match self {
             StableBuf::Vec(v) => v.as_mut_ptr(),
-            StableBuf::BytesMut(b) => b.as_mut_ptr(),
+            #[cfg(feature = "std")]
+            StableBuf::BytesMut(b) => b.as_mut_slice().as_mut_ptr(),
         }
     }
 
@@ -74,6 +80,7 @@ impl StableBuf {
     pub fn len(&self) -> usize {
         match self {
             StableBuf::Vec(v) => v.len(),
+            #[cfg(feature = "std")]
             StableBuf::BytesMut(b) => b.len(),
         }
     }
@@ -82,6 +89,7 @@ impl StableBuf {
     pub fn is_empty(&self) -> bool {
         match self {
             StableBuf::Vec(v) => v.is_empty(),
+            #[cfg(feature = "std")]
             StableBuf::BytesMut(b) => b.is_empty(),
         }
     }
@@ -90,6 +98,7 @@ impl StableBuf {
     /// `src` must not overlap with this buffer.
     /// Panics if `src` exceeds this buffer's length.
     pub fn put_slice(&mut self, src: &[u8]) {
+        assert!(src.len() <= self.len(), "source slice too long");
         let dst = self.as_mut_ptr();
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
@@ -100,6 +109,7 @@ impl StableBuf {
     pub fn truncate(&mut self, len: usize) {
         match self {
             StableBuf::Vec(v) => v.truncate(len),
+            #[cfg(feature = "std")]
             StableBuf::BytesMut(b) => b.truncate(len),
         }
     }
@@ -109,6 +119,7 @@ impl AsRef<[u8]> for StableBuf {
     fn as_ref(&self) -> &[u8] {
         match self {
             StableBuf::Vec(v) => v.as_ref(),
+            #[cfg(feature = "std")]
             StableBuf::BytesMut(b) => b.as_ref(),
         }
     }
@@ -118,6 +129,7 @@ impl AsMut<[u8]> for StableBuf {
     fn as_mut(&mut self) -> &mut [u8] {
         match self {
             StableBuf::Vec(v) => v.as_mut(),
+            #[cfg(feature = "std")]
             StableBuf::BytesMut(b) => b.as_mut(),
         }
     }
