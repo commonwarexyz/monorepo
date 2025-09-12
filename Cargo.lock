@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast-fuzz"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "arbitrary",
  "bytes",
