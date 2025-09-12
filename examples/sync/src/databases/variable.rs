@@ -5,7 +5,7 @@ use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
     adb::{self, any::variable},
-    mmr::{hasher::Standard, verification::Proof},
+    mmr::{hasher::Standard, Proof},
     store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};

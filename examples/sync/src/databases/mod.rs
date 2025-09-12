@@ -4,7 +4,7 @@ use crate::Key;
 use commonware_codec::{Encode, Read};
 use commonware_storage::{
     adb,
-    mmr::{hasher::Standard, verification::Proof},
+    mmr::{Proof, StandardHasher as Standard},
 };
 use std::{future::Future, num::NonZeroU64};
 

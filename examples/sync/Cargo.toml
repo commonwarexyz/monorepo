@@ -19,7 +19,7 @@ name = "client"
 path = "src/bin/client.rs"
 
 [dependencies]
-commonware-storage = { workspace = true }
+commonware-storage = { workspace = true, features = ["std"] }
 commonware-runtime = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-utils = { workspace = true }

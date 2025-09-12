@@ -25,7 +25,7 @@ futures = { workspace = true }
 commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
-commonware-storage = { workspace = true }
+commonware-storage = { workspace = true, features = ["std"] }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
 rand = { workspace = true }

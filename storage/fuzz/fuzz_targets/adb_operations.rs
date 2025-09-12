@@ -8,7 +8,7 @@ use commonware_storage::{
         any::fixed::{Any, Config},
         verify_proof,
     },
-    mmr::hasher::Standard,
+    mmr::StandardHasher as Standard,
     translator::EightCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};

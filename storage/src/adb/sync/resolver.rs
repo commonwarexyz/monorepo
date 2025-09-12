@@ -4,7 +4,7 @@ use crate::{
         any::{fixed::Any, variable::Any as VarAny},
         immutable::Immutable,
     },
-    mmr::verification::Proof,
+    mmr::Proof,
     store::operation::{Fixed, Variable},
     translator::Translator,
 };
