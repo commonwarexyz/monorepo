@@ -331,7 +331,7 @@ impl crate::Runner for Runner {
         };
 
         // Pin root task to the heap
-        let executor = context.exec();
+        let executor = context.executor();
         let mut root = Box::pin(f(context));
 
         // Register the root task
@@ -738,13 +738,13 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     pub fn recover(self) -> Self {
         // Ensure we are finished
-        if !*self.exec().finished.lock().unwrap() {
+        if !*self.executor().finished.lock().unwrap() {
             panic!("execution is not finished");
         }
 
         // Ensure runtime has not already been recovered
         {
-            let exec = self.exec();
+            let exec = self.executor();
             let mut recovered = exec.recovered.lock().unwrap();
             if *recovered {
                 panic!("runtime has already been recovered");
@@ -764,12 +764,12 @@ impl Context {
 
         let executor = Arc::new(Executor {
             // Copied from the current runtime
-            cycle: self.exec().cycle,
-            deadline: self.exec().deadline,
+            cycle: self.executor().cycle,
+            deadline: self.executor().deadline,
             auditor: auditor.clone(),
-            rng: Mutex::new(self.exec().rng.lock().unwrap().clone()),
-            time: Mutex::new(*self.exec().time.lock().unwrap()),
-            partitions: Mutex::new(self.exec().partitions.lock().unwrap().clone()),
+            rng: Mutex::new(self.executor().rng.lock().unwrap().clone()),
+            time: Mutex::new(*self.executor().time.lock().unwrap()),
+            partitions: Mutex::new(self.executor().partitions.lock().unwrap().clone()),
 
             // New state for the new runtime
             registry: Mutex::new(registry),
@@ -798,7 +798,7 @@ impl Context {
     }
 
     // Upgrade executor Weak reference; panic if unavailable
-    fn exec(&self) -> Arc<Executor> {
+    fn executor(&self) -> Arc<Executor> {
         self.executor
             .upgrade()
             .expect("executor dropped while context still in use")
@@ -847,7 +847,7 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
-        let executor = self.exec();
+        let executor = self.executor();
 
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
@@ -875,7 +875,7 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
-        let executor = self.exec();
+        let executor = self.executor();
 
         move |f: F| {
             // Give spawned task its own empty children list
@@ -920,7 +920,7 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Initialize the blocking task
-        let executor = self.exec();
+        let executor = self.executor();
         let (f, handle) = Handle::init_blocking(|| f(self.detached()), gauge, false);
 
         // Spawn the task
@@ -942,7 +942,7 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
-        let executor = self.exec();
+        let executor = self.executor();
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, gauge, false);
 
@@ -958,7 +958,7 @@ impl crate::Spawner for Context {
             hasher.update(value.to_be_bytes());
         });
         let stop_resolved = {
-            let exec = self.exec();
+            let exec = self.executor();
             let mut shutdown = exec.shutdown.lock().unwrap();
             shutdown.stop(value)
         };
@@ -981,7 +981,7 @@ impl crate::Spawner for Context {
 
     fn stopped(&self) -> Signal {
         self.auditor.event(b"stopped", |_| {});
-        self.exec().shutdown.lock().unwrap().stopped()
+        self.executor().shutdown.lock().unwrap().stopped()
     }
 }
 
@@ -1035,7 +1035,7 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        self.exec()
+        self.executor()
             .registry
             .lock()
             .unwrap()
@@ -1045,7 +1045,7 @@ impl crate::Metrics for Context {
     fn encode(&self) -> String {
         self.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
-        encode(&mut buffer, &self.exec().registry.lock().unwrap()).expect("encoding failed");
+        encode(&mut buffer, &self.executor().registry.lock().unwrap()).expect("encoding failed");
         buffer
     }
 }
@@ -1110,7 +1110,7 @@ impl Future for Sleeper {
 
 impl Clock for Context {
     fn current(&self) -> SystemTime {
-        *self.exec().time.lock().unwrap()
+        *self.executor().time.lock().unwrap()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
@@ -1161,28 +1161,28 @@ impl RngCore for Context {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        self.exec().rng.lock().unwrap().next_u32()
+        self.executor().rng.lock().unwrap().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        self.exec().rng.lock().unwrap().next_u64()
+        self.executor().rng.lock().unwrap().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
-        self.exec().rng.lock().unwrap().fill_bytes(dest)
+        self.executor().rng.lock().unwrap().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        self.exec().rng.lock().unwrap().try_fill_bytes(dest)
+        self.executor().rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
 
