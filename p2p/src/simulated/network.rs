@@ -620,10 +620,6 @@ struct Peer<P: PublicKey> {
     // Bandwidth schedules for egress and ingress
     egress: bandwidth::Schedule,
     ingress: bandwidth::Schedule,
-
-    // Handles to spawned tasks so we can abort them when the peer is dropped
-    router_handle: Handle<()>,
-    listener_handle: Handle<()>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -648,7 +644,7 @@ impl<P: PublicKey> Peer<P> {
         let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
 
         // Spawn router
-        let router_handle = context.with_label("router").spawn(|_| async move {
+        context.with_label("router").spawn(|_| async move {
             // Map of channels to mailboxes (senders to particular channels)
             let mut mailboxes = HashMap::new();
 
@@ -705,7 +701,7 @@ impl<P: PublicKey> Peer<P> {
         });
 
         // Spawn a task that accepts new connections and spawns a task for each connection
-        let listener_handle = context.with_label("listener").spawn({
+        context.with_label("listener").spawn({
             let inbox_sender = inbox_sender.clone();
             move |context| async move {
                 // Initialize listener
@@ -756,8 +752,6 @@ impl<P: PublicKey> Peer<P> {
             control: control_sender,
             egress: bandwidth::Schedule::new(egress_bps),
             ingress: bandwidth::Schedule::new(ingress_bps),
-            router_handle,
-            listener_handle,
         }
     }
 
@@ -785,13 +779,6 @@ impl<P: PublicKey> Peer<P> {
     }
 }
 
-impl<P: PublicKey> Drop for Peer<P> {
-    fn drop(&mut self) {
-        self.router_handle.abort();
-        self.listener_handle.abort();
-    }
-}
-
 // A unidirectional link between two peers.
 // Messages can be sent over the link with a given latency, jitter, and success rate.
 struct Link {
@@ -799,8 +786,6 @@ struct Link {
     success_rate: f64,
     // Messages with their receive time for ordered delivery
     inbox: mpsc::UnboundedSender<(Channel, Bytes, SystemTime)>,
-    // Handle to the spawned task so we can abort it when the link is dropped
-    handle: Handle<()>,
 }
 
 impl Link {
@@ -818,7 +803,7 @@ impl Link {
         let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes, SystemTime)>();
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
-        let handle = context
+        context
             .clone()
             .with_label("link")
             .spawn(move |context| async move {
@@ -852,7 +837,6 @@ impl Link {
             sampler,
             success_rate,
             inbox,
-            handle,
         }
     }
 
@@ -867,12 +851,6 @@ impl Link {
             .unbounded_send((channel, message, receive_complete_at))
             .map_err(|_| Error::NetworkClosed)?;
         Ok(())
-    }
-}
-
-impl Drop for Link {
-    fn drop(&mut self) {
-        self.handle.abort();
     }
 }
 
