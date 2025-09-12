@@ -1915,6 +1915,15 @@ impl<
                         Ok(verified) => {
                             if !verified {
                                 debug!(view = context.view, "proposal failed verification");
+                                 // Block the leader who proposed this invalid block
+                                if let Some(round) = self.views.get(&context.view) {
+                                    if let Some((leader, _)) = &round.leader {
+                                        if leader != &self.crypto.public_key() {
+                                            warn!(?leader, view = context.view, "blocking invalid block proposer");
+                                            self.blocker.block(leader.clone()).await;
+                                        }
+                                    }
+                                }
                                 continue;
                             }
                         },
