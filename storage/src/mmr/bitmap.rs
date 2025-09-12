@@ -312,13 +312,14 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
     /// The chunks (identified by their number) that have been modified or added since the last `sync`.
     pub fn dirty_chunks(&self) -> Vec<u64> {
+        let pruned_chunks = self.bitmap.pruned_chunks();
         let mut chunks: Vec<u64> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| (chunk_index + self.bitmap.pruned_chunks()) as u64)
+            .map(|&chunk_index| (chunk_index + pruned_chunks) as u64)
             .collect();
         for i in self.authenticated_len..self.bitmap.chunks_len() - 1 {
-            chunks.push((i + self.bitmap.pruned_chunks()) as u64);
+            chunks.push((i + pruned_chunks) as u64);
         }
 
         chunks
