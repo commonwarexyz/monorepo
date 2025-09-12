@@ -218,10 +218,8 @@ impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
         match self.sender.try_send(Message::Release { metadata }) {
             Ok(()) => true,
             Err(e) if e.is_full() => false,
-            // If the receiver has been dropped (e.g., during shutdown), treat as released.
             Err(e) if e.is_disconnected() => true,
-            // Any other error (shouldn’t happen with mpsc), treat conservatively as not released.
-            Err(_e) => false,
+            Err(_) => false,
         }
     }
 
@@ -229,7 +227,6 @@ impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
     ///
     /// This method will block if the mailbox is full.
     pub async fn release(&mut self, metadata: Metadata<C>) {
-        // If the receiver has been dropped (e.g., during shutdown), ignore the error.
         let _ = self.sender.send(Message::Release { metadata }).await;
     }
 }
