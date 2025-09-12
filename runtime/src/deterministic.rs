@@ -1047,9 +1047,6 @@ impl crate::Metrics for Context {
                 .lock()
                 .unwrap()
                 .register(prefixed_name, help, metric)
-        } else {
-            // Executor gone; skip metric registration gracefully
-            // no-op
         }
     }
 
@@ -1058,8 +1055,6 @@ impl crate::Metrics for Context {
         let mut buffer = String::new();
         if let Some(exec) = self.executor.upgrade() {
             encode(&mut buffer, &exec.registry.lock().unwrap()).expect("encoding failed");
-        } else {
-            // no-op
         }
         buffer
     }
