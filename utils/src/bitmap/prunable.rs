@@ -48,7 +48,7 @@ impl<const N: usize> Prunable<N> {
         self.len() == 0
     }
 
-    /// Return the number of chunks in the bitmap.
+    /// Return the number of unpruned chunks in the bitmap.
     #[inline]
     pub fn chunks_len(&self) -> usize {
         self.bitmap.chunks_len()
@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(prunable.pruned_bits(), 0);
         assert_eq!(prunable.pruned_chunks(), 0);
         assert!(prunable.is_empty());
-        assert_eq!(prunable.chunks_len(), 1); // Always has at least one chunk
+        assert_eq!(prunable.chunks_len(), 0); // No chunks when empty
     }
 
     #[test]
@@ -247,7 +247,7 @@ mod tests {
         assert_eq!(prunable.len(), 16);
         assert_eq!(prunable.pruned_bits(), 16);
         assert_eq!(prunable.pruned_chunks(), 1);
-        assert_eq!(prunable.chunks_len(), 1); // Always has at least one chunk
+        assert_eq!(prunable.chunks_len(), 0);
     }
 
     #[test]
