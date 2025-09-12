@@ -3,7 +3,7 @@ use crate::{
     types::{Epoch, Round, View},
     Block,
 };
-use commonware_codec::{Codec, RangeCfg};
+use commonware_codec::Codec;
 use commonware_cryptography::bls12381::primitives::variant::Variant;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
@@ -15,6 +15,7 @@ use commonware_utils::sequence::FixedBytes;
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
+    cmp::max,
     collections::BTreeMap,
     num::{NonZero, NonZeroUsize},
     time::Instant,
@@ -75,8 +76,9 @@ pub(crate) struct Manager<
     /// Codec configuration for block type
     codec_config: B::Cfg,
 
-    /// Metadata store for recording which epochs are cached (i.e. may have data)
-    metadata: Metadata<R, FixedBytes<1>, Vec<Epoch>>,
+    /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
+    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
+    metadata: Metadata<R, FixedBytes<1>, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
     caches: BTreeMap<Epoch, Cache<R, B, V>>,
@@ -90,15 +92,11 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             context.with_label("metadata"),
             metadata::Config {
                 partition: format!("{}-metadata", cfg.partition_prefix),
-                codec_config: (RangeCfg::from(..), ()),
+                codec_config: ((), ()),
             },
         )
         .await
         .expect("failed to initialize metadata");
-
-        // Load metadata
-        let cached_epochs: Vec<Epoch> =
-            metadata.get(&CACHED_EPOCHS_KEY).cloned().unwrap_or(vec![0]);
 
         // Restore cache from metadata
         let mut cache = Self {
@@ -108,24 +106,26 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             metadata,
             caches: BTreeMap::new(),
         };
-        for epoch in cached_epochs {
+        let (floor, ceiling) = cache.get_metadata();
+        for epoch in floor..=ceiling {
             cache.init_epoch(epoch).await;
         }
 
         cache
     }
 
-    /// Persist the currently-open cache epochs to metadata.
-    ///
-    /// Optionally, add a key to the set of cached epochs if it's about to be initialized.
-    async fn persist_epochs(&mut self, add_key: Option<Epoch>) {
-        let mut keys = self.caches.keys().copied().collect::<Vec<_>>();
-        if let Some(key) = add_key {
-            keys.push(key);
-        }
-        keys.sort();
+    /// Retrieve the epoch range that may have data.
+    fn get_metadata(&self) -> (Epoch, Epoch) {
         self.metadata
-            .put_sync(CACHED_EPOCHS_KEY, keys)
+            .get(&CACHED_EPOCHS_KEY)
+            .cloned()
+            .unwrap_or((0, 0))
+    }
+
+    /// Set the epoch range that may have data.
+    async fn set_metadata(&mut self, floor: Epoch, ceiling: Epoch) {
+        self.metadata
+            .put_sync(CACHED_EPOCHS_KEY, (floor, ceiling))
             .await
             .expect("failed to write metadata");
     }
@@ -140,18 +140,16 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             return self.caches.get_mut(&epoch);
         }
 
-        // If the epoch is less than the minimum cached epoch, then it has already been pruned
-        let min_epoch = self
-            .caches
-            .first_key_value()
-            .map(|(epoch, _)| *epoch)
-            .unwrap_or(0);
-        if epoch < min_epoch {
+        // If the epoch is less than the epoch floor, then it has already been pruned
+        let (floor, ceiling) = self.get_metadata();
+        if epoch < floor {
             return None;
         }
 
         // Update the metadata (metadata-first is safe; init is idempotent)
-        self.persist_epochs(Some(epoch)).await;
+        if epoch > ceiling {
+            self.set_metadata(floor, epoch).await;
+        }
 
         // Initialize and return the epoch
         self.init_epoch(epoch).await;
@@ -336,11 +334,12 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     /// Prune the caches below the given round.
     pub(crate) async fn prune(&mut self, round: Round) {
         // Remove and close prunable archives from older epochs
+        let new_floor = round.epoch();
         let old_epochs: Vec<Epoch> = self
             .caches
             .keys()
             .copied()
-            .filter(|epoch| *epoch < round.epoch())
+            .filter(|epoch| *epoch < new_floor)
             .collect();
         for epoch in old_epochs.iter() {
             let Cache::<R, B, V> {
@@ -356,8 +355,10 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         }
 
         // Update metadata if necessary
-        if !old_epochs.is_empty() {
-            self.persist_epochs(None).await;
+        let (floor, ceiling) = self.get_metadata();
+        if new_floor > floor {
+            let new_ceiling = max(ceiling, new_floor);
+            self.set_metadata(new_floor, new_ceiling).await;
         }
 
         // Prune archives for the given epoch
