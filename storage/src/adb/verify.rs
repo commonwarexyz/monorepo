@@ -1,7 +1,6 @@
 use crate::mmr::{
-    hasher::Standard,
-    iterator::leaf_num_to_pos,
-    verification::{Proof, ProofStore},
+    iterator::leaf_num_to_pos, proof, verification, verification::ProofStore, Error, Proof,
+    StandardHasher as Standard,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
@@ -29,7 +28,7 @@ pub fn extract_pinned_nodes<D: Digest>(
     proof: &Proof<D>,
     start_loc: u64,
     operations_len: u64,
-) -> Result<Vec<D>, crate::mmr::Error> {
+) -> Result<Vec<D>, Error> {
     let start_pos_mmr = leaf_num_to_pos(start_loc);
     let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
     proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr)
@@ -43,7 +42,7 @@ pub fn verify_proof_and_extract_digests<Op, H, D>(
     start_loc: u64,
     operations: &[Op],
     target_root: &D,
-) -> Result<Vec<(u64, D)>, crate::mmr::Error>
+) -> Result<Vec<(u64, D)>, Error>
 where
     Op: Encode,
     H: Hasher<Digest = D>,
@@ -59,7 +58,7 @@ pub fn digests_required_for_proof<D: Digest>(size: u64, start_loc: u64, end_loc:
     let size = leaf_num_to_pos(size);
     let start_pos = leaf_num_to_pos(start_loc);
     let end_pos = leaf_num_to_pos(end_loc);
-    Proof::<D>::nodes_required_for_range_proof(size, start_pos, end_pos)
+    proof::nodes_required_for_range_proof(size, start_pos, end_pos)
 }
 
 /// Create a [Proof] from a size and a list of digests.
@@ -77,7 +76,7 @@ pub fn create_proof_store<Op, H, D>(
     start_loc: u64,
     operations: &[Op],
     root: &D,
-) -> Result<ProofStore<D>, crate::mmr::Error>
+) -> Result<ProofStore<D>, Error>
 where
     Op: Encode,
     H: Hasher<Digest = D>,
@@ -107,12 +106,12 @@ pub fn create_proof_store_from_digests<D: Digest>(
 pub async fn create_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
     locations: &[u64],
-) -> Result<Proof<D>, crate::mmr::Error> {
+) -> Result<Proof<D>, Error> {
     // Convert locations to MMR positions
     let positions: Vec<u64> = locations.iter().map(|&loc| leaf_num_to_pos(loc)).collect();
 
     // Generate the proof
-    Proof::multi_proof(proof_store, &positions).await
+    verification::multi_proof(proof_store, &positions).await
 }
 
 /// Verify a Multi-Proof for operations at specific locations.
@@ -140,7 +139,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::mem::Mmr;
+    use crate::mmr::{iterator::nodes_to_pin, mem::Mmr};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
@@ -171,7 +170,7 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Generate proof for all operations
-            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+            let proof = mmr.range_proof(positions[0], positions[2]).unwrap();
 
             // Verify the proof
             assert!(verify_proof(
@@ -226,7 +225,7 @@ mod tests {
                 positions.push(pos);
             }
             let root = mmr.root(&mut hasher);
-            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+            let proof = mmr.range_proof(positions[0], positions[2]).unwrap();
 
             // Verify with correct start location
             assert!(verify_proof(
@@ -267,7 +266,6 @@ mod tests {
             let end_loc = start_loc + operations_len - 1;
             let proof = mmr
                 .range_proof(positions[start_loc as usize], positions[end_loc as usize])
-                .await
                 .unwrap();
 
             // Extract pinned nodes
@@ -278,7 +276,7 @@ mod tests {
 
             // Verify the extracted nodes match what we expect from the proof
             let start_pos = leaf_num_to_pos(start_loc);
-            let expected_pinned: Vec<u64> = Proof::<Digest>::nodes_to_pin(start_pos).collect();
+            let expected_pinned: Vec<u64> = nodes_to_pin(start_pos).collect();
             assert_eq!(nodes.len(), expected_pinned.len());
         });
     }
@@ -299,7 +297,7 @@ mod tests {
                 positions.push(pos);
             }
             let root = mmr.root(&mut hasher);
-            let proof = mmr.range_proof(positions[1], positions[3]).await.unwrap();
+            let proof = mmr.range_proof(positions[1], positions[3]).unwrap();
 
             // Verify and extract digests for subset of operations
             let result = verify_proof_and_extract_digests(
@@ -390,7 +388,7 @@ mod tests {
                 positions.push(pos);
             }
             let root = mmr.root(&mut hasher);
-            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+            let proof = mmr.range_proof(positions[0], positions[2]).unwrap();
 
             // Create proof store
             let result = create_proof_store(
@@ -404,7 +402,7 @@ mod tests {
             let proof_store = result.unwrap();
 
             // Verify we can generate sub-proofs from the store
-            let sub_proof = Proof::<Digest>::range_proof(&proof_store, positions[0], positions[1])
+            let sub_proof = verification::range_proof(&proof_store, positions[0], positions[1])
                 .await
                 .unwrap();
 
@@ -434,7 +432,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let proof = mmr.range_proof(positions[0], positions[1]).await.unwrap();
+            let proof = mmr.range_proof(positions[0], positions[1]).unwrap();
 
             // Should fail with invalid root
             let wrong_root = test_digest(99);
@@ -458,7 +456,7 @@ mod tests {
                 positions.push(pos);
             }
             let root = mmr.root(&mut hasher);
-            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+            let proof = mmr.range_proof(positions[0], positions[2]).unwrap();
 
             // First verify and extract digests
             let digests =
@@ -469,7 +467,7 @@ mod tests {
             let proof_store = create_proof_store_from_digests(&proof, digests);
 
             // Verify we can use the proof store
-            let sub_proof = Proof::<Digest>::range_proof(&proof_store, positions[0], positions[1])
+            let sub_proof = verification::range_proof(&proof_store, positions[0], positions[1])
                 .await
                 .unwrap();
 
@@ -502,7 +500,7 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Create proof for full range
-            let proof = mmr.range_proof(positions[0], positions[19]).await.unwrap();
+            let proof = mmr.range_proof(positions[0], positions[19]).unwrap();
 
             // Create proof store
             let proof_store =
@@ -549,7 +547,9 @@ mod tests {
 
             // Generate multi-proof directly from MMR
             let target_positions = vec![positions[1], positions[4], positions[7]];
-            let multi_proof = Proof::multi_proof(&mmr, &target_positions).await.unwrap();
+            let multi_proof = verification::multi_proof(&mmr, &target_positions)
+                .await
+                .unwrap();
 
             // Verify with correct operations
             let selected_ops = vec![(1, operations[1]), (4, operations[4]), (7, operations[7])];
@@ -589,7 +589,7 @@ mod tests {
             // Test with empty MMR (which is the correct case for empty proof)
             let empty_mmr = Mmr::new();
             let empty_root = empty_mmr.root(&mut hasher);
-            let empty_proof = Proof::multi_proof(&empty_mmr, &[]).await.unwrap();
+            let empty_proof = verification::multi_proof(&empty_mmr, &[]).await.unwrap();
             assert!(empty_proof.verify_multi_inclusion(
                 &mut hasher,
                 &[] as &[(&[u8], u64)],
@@ -602,7 +602,7 @@ mod tests {
                 let data = vec![i];
                 mmr.add(&mut hasher, &data);
             }
-            let multi_proof = Proof::multi_proof(&mmr, &[]).await.unwrap();
+            let multi_proof = verification::multi_proof(&mmr, &[]).await.unwrap();
 
             // Empty multi-proof should have the right size but no digests
             assert_eq!(multi_proof.size, mmr.size());
@@ -636,7 +636,7 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Create proof store for all elements
-            let proof = mmr.range_proof(positions[0], positions[2]).await.unwrap();
+            let proof = mmr.range_proof(positions[0], positions[2]).unwrap();
             let proof_store =
                 create_proof_store(&mut hasher, &proof, 0, &operations, &root).unwrap();
 

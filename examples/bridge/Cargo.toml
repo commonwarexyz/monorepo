@@ -18,7 +18,7 @@ commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 commonware-consensus = { workspace = true }
-commonware-storage = { workspace = true }
+commonware-storage = { workspace = true, features = ["std"] }
 commonware-stream = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }

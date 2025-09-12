@@ -1,5 +1,8 @@
 //! Iterators for traversing MMRs of a given size, and functions for computing various MMR
-//! properties from their output.
+//! properties from their output. These are lower levels methods that are useful for implementing
+//! new MMR variants or extensions.
+
+use alloc::vec::Vec;
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
 /// in decreasing order of height.
@@ -116,7 +119,7 @@ impl Iterator for PeakIterator {
 /// with the given peaks. This set is non-empty only if there is a height-0 (leaf) peak in the MMR.
 /// The result will contain this leaf peak plus the other MMR peaks with contiguously increasing
 /// height. Nodes in the result are ordered by decreasing height.
-pub fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
+pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     let mut peaks = Vec::new();
     let mut last_height = u32::MAX;
 
@@ -140,7 +143,7 @@ pub fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
 /// this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
-pub const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
+pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
     if leaf_pos == 0 {
         return Some(0);
     }
@@ -172,13 +175,13 @@ pub const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
 }
 
 /// Returns the position of the leaf with number `leaf_num` in an MMR.
-pub const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
+pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     // This will never underflow since 2*n >= count_ones(n).
     leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
-pub const fn pos_to_height(mut pos: u64) -> u32 {
+pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
     if pos == 0 {
         return 0;
     }
@@ -254,39 +257,50 @@ impl Iterator for PathIterator {
     }
 }
 
+/// Return the list of pruned (pos < `start_pos`) node positions that are still required for
+/// proving any retained node.
+///
+/// This set consists of every pruned node that is either (1) a peak, or (2) has no descendent
+/// in the retained section, but its immediate parent does. (A node meeting condition (2) can be
+/// shown to always be the left-child of its parent.)
+///
+/// This set of nodes does not change with the MMR's size, only the pruning boundary. For a
+/// given pruning boundary that happens to be a valid MMR size, one can prove that this set is
+/// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
+/// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
+/// whose size is less than the pruning boundary.
+pub(crate) fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
+    PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mmr::{hasher::Standard, mem::Mmr};
-    use commonware_cryptography::{Hasher, Sha256};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_cryptography::Sha256;
 
     #[test]
     fn test_leaf_num_calculation() {
-        let digest = Sha256::hash(b"testing");
+        // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
+        // its number and back again.
+        let mut mmr: Mmr<Sha256> = Mmr::new();
+        let mut hasher = Standard::<Sha256>::new();
+        let mut num_to_pos = Vec::new();
+        let digest = [1u8; 32];
+        for _ in 0u64..1000 {
+            num_to_pos.push(mmr.add(&mut hasher, &digest));
+        }
 
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
-            // its number and back again.
-            let mut mmr: Mmr<Sha256> = Mmr::new();
-            let mut hasher = Standard::new();
-            let mut num_to_pos = Vec::new();
-            for _ in 0u64..1000 {
-                num_to_pos.push(mmr.add(&mut hasher, &digest));
+        let mut last_leaf_pos = 0;
+        for (leaf_num_expected, leaf_pos) in num_to_pos.iter().enumerate() {
+            let leaf_num_got = leaf_pos_to_num(*leaf_pos).unwrap();
+            assert_eq!(leaf_num_got, leaf_num_expected as u64);
+            let leaf_pos_got = leaf_num_to_pos(leaf_num_got);
+            assert_eq!(leaf_pos_got, *leaf_pos);
+            for i in last_leaf_pos + 1..*leaf_pos {
+                assert!(leaf_pos_to_num(i).is_none());
             }
-
-            let mut last_leaf_pos = 0;
-            for (leaf_num_expected, leaf_pos) in num_to_pos.iter().enumerate() {
-                let leaf_num_got = leaf_pos_to_num(*leaf_pos).unwrap();
-                assert_eq!(leaf_num_got, leaf_num_expected as u64);
-                let leaf_pos_got = leaf_num_to_pos(leaf_num_got);
-                assert_eq!(leaf_pos_got, *leaf_pos);
-                for i in last_leaf_pos + 1..*leaf_pos {
-                    assert!(leaf_pos_to_num(i).is_none());
-                }
-                last_leaf_pos = *leaf_pos;
-            }
-        });
+            last_leaf_pos = *leaf_pos;
+        }
     }
 }
