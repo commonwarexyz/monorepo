@@ -738,7 +738,7 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     pub fn recover(self) -> Self {
         // Ensure we are finished
-        if !self.exec().finished.lock().unwrap().clone() {
+        if !*self.exec().finished.lock().unwrap() {
             panic!("execution is not finished");
         }
 
@@ -1207,11 +1207,9 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, utils::run_tasks, Blob, Metrics, Runner as _, Spawner, Storage};
+    use crate::{deterministic, utils::run_tasks, Blob, Runner as _, Storage};
     use commonware_macros::test_traced;
-    use futures::{channel::mpsc, task::noop_waker};
-    use futures::{SinkExt, StreamExt};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
