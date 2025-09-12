@@ -235,14 +235,23 @@ pub struct Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
-        // First, clear sleeping tasks to drop any wakers that might hold task references
+        // Force shutdown in a specific order to break all circular references
+        
+        // Step 1: Clear sleeping tasks to drop any wakers
         self.sleeping.lock().unwrap().clear();
-
-        // Then shutdown all tasks to break circular references
+        
+        // Step 2: Mark executor as finished to prevent new tasks
+        *self.finished.lock().unwrap() = true;
+        
+        // Step 3: Shutdown all tasks to break circular references
         self.tasks.shutdown();
-
-        // Finally clear all partitions
+        
+        // Step 4: Clear all partitions
         self.partitions.lock().unwrap().clear();
+        
+        // Note: If this Drop is not being called, it means there are still
+        // Arc<Executor> references being held somewhere, likely by contexts
+        // captured in futures or wakers stored in channels.
     }
 }
 
@@ -354,6 +363,15 @@ impl crate::Runner for Runner {
             // Run more frequently (every 10 iterations) to prevent memory buildup
             if iter % 10 == 0 {
                 executor.tasks.cleanup_completed();
+            }
+            
+            // Also compact the sleeping tasks heap periodically
+            // BinaryHeap doesn't expose capacity, so we periodically rebuild it
+            // to ensure it doesn't hold onto excessive memory
+            if iter % 100 == 0 {
+                let mut sleeping = executor.sleeping.lock().unwrap();
+                let items: Vec<_> = sleeping.drain().collect();
+                *sleeping = BinaryHeap::from(items);
             }
 
             // Run all snapshotted tasks
@@ -625,7 +643,7 @@ impl Tasks {
     fn cleanup_completed(&self) {
         let mut queue = self.queue.lock().unwrap();
 
-        // Filter out completed tasks
+        // Filter out completed tasks and drop their futures immediately
         queue.retain(|task| {
             match &task.operation {
                 Operation::Root => true, // Keep root task
@@ -643,39 +661,56 @@ impl Tasks {
         });
         drop(queue);
 
-        // Also clean up dead weak references from all_tasks to prevent unbounded growth
+        // Clean up all_tasks more aggressively
         let mut all_tasks = self.all_tasks.lock().unwrap();
+        
+        // First, drop futures for any completed tasks
+        for weak_task in all_tasks.iter() {
+            if let Some(task) = weak_task.upgrade() {
+                if let Operation::Work { completed, future } = &task.operation {
+                    if *completed.lock().unwrap() {
+                        *future.lock().unwrap() = None;
+                    }
+                }
+            }
+        }
+        
+        // Then remove all weak references that can't be upgraded
+        // This includes completed tasks and tasks that have been dropped
         all_tasks.retain(|weak_task| weak_task.strong_count() > 0);
+        
+        // Shrink the vector to free unused capacity
+        all_tasks.shrink_to_fit();
     }
 
     /// Forcibly shutdown all tasks and clear the queue.
     /// This is called when the executor is dropped to prevent memory leaks.
     fn shutdown(&self) {
-        // Step 1: Mark all tasks as completed and drop their futures
-        // This prevents any task from being re-enqueued and breaks circular references
+        // Step 1: Clear the queue first to drop Arc<Task> references
+        // This is important because tasks in the queue hold strong references
+        self.queue.lock().unwrap().clear();
+        
+        // Step 2: Now mark all tasks as completed and drop their futures
+        // We do this after clearing the queue to avoid any re-enqueueing
         {
             let all_tasks = self.all_tasks.lock().unwrap();
             for weak_task in all_tasks.iter() {
                 if let Some(task) = weak_task.upgrade() {
+                    // This means there's still a strong reference somewhere
+                    // Force-drop the future to break circular references
                     if let Operation::Work { future, completed } = &task.operation {
-                        // Mark as completed first to prevent re-enqueueing
                         *completed.lock().unwrap() = true;
-                        // Then drop the future to release captured resources
                         *future.lock().unwrap() = None;
                     }
-                    // Explicitly drop the strong reference we just created
-                    drop(task);
                 }
             }
         }
-
-        // Step 2: Clear the queue to drop any remaining Arc<Task> references
-        self.queue.lock().unwrap().clear();
-
+        
         // Step 3: Clear all tracked weak references
+        // This frees the memory used by the weak reference vector
         self.all_tasks.lock().unwrap().clear();
-
-        // Step 4: Reset state
+        
+        // Step 4: Reset all state to initial values
         *self.counter.lock().unwrap() = 0;
         *self.root_registered.lock().unwrap() = false;
     }
