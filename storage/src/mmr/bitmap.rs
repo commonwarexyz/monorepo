@@ -329,8 +329,9 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     pub async fn sync(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
         // Add newly pushed chunks to the MMR (other than the very last).
         let start = self.authenticated_len;
-        assert!(self.bitmap.chunks_len() > 0);
-        let end = self.bitmap.chunks_len() - 1;
+        let num_chunks = self.bitmap.chunks_len();
+        assert!(num_chunks > 0);
+        let end = num_chunks - 1;
         for i in start..end {
             self.mmr
                 .add_batched(hasher, self.bitmap.get_chunk_by_index(i));
