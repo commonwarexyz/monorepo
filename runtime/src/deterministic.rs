@@ -1848,7 +1848,6 @@ mod tests {
     fn test_runtime_shutdown_behavior() {
         // This test demonstrates what happens when we try to forcibly shutdown
 
-        use futures::channel::mpsc;
         use std::sync::Arc;
 
         static CLEANUP_DROPS: AtomicUsize = AtomicUsize::new(0);
@@ -1976,7 +1975,6 @@ mod tests {
     fn test_waker_keeps_completed_tasks_alive() {
         // This test shows that wakers can keep completed tasks in memory
 
-        use futures::task::ArcWake;
         use std::sync::Arc;
 
         let executor = deterministic::Runner::default();
