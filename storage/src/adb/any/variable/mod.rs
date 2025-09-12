@@ -835,9 +835,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         write_oldest_retained_loc(&mut self.metadata, new_oldest_retained_loc);
         self.metadata.sync().await?;
-        if !self.log.prune(section_with_target).await? {
-            return Ok(());
-        }
+        assert!(self.log.prune(section_with_target).await?);
         self.oldest_retained_loc = new_oldest_retained_loc;
 
         debug!(
