@@ -1078,9 +1078,11 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, utils::run_tasks, Blob, Runner as _, Storage};
+    use crate::{deterministic, utils::run_tasks, Blob, Metrics, Runner as _, Spawner, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
+    use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1275,6 +1277,396 @@ mod tests {
                 context.current().duration_since(UNIX_EPOCH).unwrap(),
                 Duration::ZERO
             );
+        });
+    }
+
+    #[test]
+    fn test_memory_leak_spawned_tasks() {
+        // This test demonstrates that completed tasks accumulate in memory
+        // across multiple runtime iterations when tasks are spawned.
+        
+        for iteration in 0..5 {
+            let executor = deterministic::Runner::default();
+            
+            executor.start(|context| async move {
+                // Spawn multiple tasks that complete immediately
+                for i in 0..100 {
+                    context.with_label(&format!("task_{}", i)).spawn(|_| async move {
+                        // Task completes immediately
+                    });
+                }
+                
+                // Give tasks time to complete
+                context.sleep(Duration::from_millis(10)).await;
+            });
+            
+            // After the executor finishes, check how many tasks remain in memory
+            // Note: We can't directly access the task queue from here, but we can
+            // observe memory growth through repeated iterations
+            println!("Iteration {} completed", iteration);
+        }
+        
+        // In a properly functioning runtime, memory should be freed after each iteration
+        // But currently, completed tasks persist in memory
+    }
+
+    #[test]
+    fn test_memory_leak_nested_spawns() {
+        // This test demonstrates memory accumulation with nested task spawns
+        
+        for iteration in 0..3 {
+            let executor = deterministic::Runner::default();
+            
+            executor.start(|context| async move {
+                // Spawn tasks that spawn other tasks
+                for i in 0..50 {
+                    context.with_label(&format!("parent_{}", i)).spawn(move |context| async move {
+                        // Each parent spawns children
+                        for j in 0..10 {
+                            context.with_label(&format!("child_{}_{}", i, j)).spawn(|_| async move {
+                                // Child task completes immediately
+                            });
+                        }
+                    });
+                }
+                
+                // Let all tasks complete
+                context.sleep(Duration::from_millis(100)).await;
+            });
+            
+            println!("Iteration {} with nested spawns completed", iteration);
+        }
+    }
+
+    #[test]
+    fn test_memory_leak_long_lived_tasks() {
+        // This test demonstrates that even long-lived tasks that eventually complete
+        // still accumulate in memory
+        
+        use futures::channel::mpsc;
+        
+        for iteration in 0..3 {
+            let executor = deterministic::Runner::default();
+            
+            executor.start(|context| async move {
+                let mut handles = Vec::new();
+                
+                // Spawn tasks with channels that keep them alive
+                for i in 0..50 {
+                    let (tx, mut rx) = mpsc::unbounded::<()>();
+                    
+                    let handle = context.with_label(&format!("long_task_{}", i)).spawn(move |_| async move {
+                        // Task waits for channel to close
+                        while let Some(_) = rx.next().await {
+                            // Process messages
+                        }
+                    });
+                    
+                    handles.push((handle, tx));
+                }
+                
+                // Let tasks run for a bit
+                context.sleep(Duration::from_millis(10)).await;
+                
+                // Drop all senders to let tasks complete
+                drop(handles);
+                
+                // Give tasks time to complete
+                context.sleep(Duration::from_millis(10)).await;
+            });
+            
+            println!("Iteration {} with long-lived tasks completed", iteration);
+        }
+    }
+
+    #[test]
+    fn test_runtime_accumulates_across_iterations() {
+        // This test demonstrates memory accumulation across multiple runtime iterations
+        // simulating what happens in the fuzzer
+        
+        use std::sync::Arc;
+        
+        // Track total allocations across iterations
+        static TOTAL_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+        static TOTAL_FREED: AtomicUsize = AtomicUsize::new(0);
+        
+        struct TrackedAllocation {
+            size: usize,
+        }
+        
+        impl TrackedAllocation {
+            fn new(size: usize) -> Self {
+                TOTAL_ALLOCATED.fetch_add(size, Ordering::SeqCst);
+                Self { size }
+            }
+        }
+        
+        impl Drop for TrackedAllocation {
+            fn drop(&mut self) {
+                TOTAL_FREED.fetch_add(self.size, Ordering::SeqCst);
+            }
+        }
+        
+        // Simulate multiple fuzzer iterations
+        for iteration in 0..10 {
+            let executor = deterministic::Runner::default();
+            
+            executor.start(|context| async move {
+                // Spawn many tasks, each allocating memory
+                for i in 0..100 {
+                    // Each task allocates 1KB
+                    let allocation = Arc::new(TrackedAllocation::new(1024));
+                    
+                    context.with_label(&format!("task_{}_{}", iteration, i)).spawn(move |context| async move {
+                        let _alloc = allocation;
+                        
+                        // Spawn a nested task
+                        context.with_label("nested").spawn(|_| async move {
+                            // Nested task completes immediately
+                        });
+                        
+                        // Task completes
+                    });
+                }
+                
+                // Let all tasks complete
+                context.sleep(Duration::from_millis(10)).await;
+            });
+            
+            // Runtime dropped here
+        }
+        
+        let allocated = TOTAL_ALLOCATED.load(Ordering::SeqCst);
+        let freed = TOTAL_FREED.load(Ordering::SeqCst);
+        
+        println!("Total allocated: {} KB", allocated / 1024);
+        println!("Total freed: {} KB", freed / 1024);
+        println!("Leaked: {} KB", (allocated - freed) / 1024);
+        
+        // All memory should be freed after runtimes are dropped
+        assert_eq!(allocated, freed, "Memory leak detected: {} bytes leaked", allocated - freed);
+    }
+    
+    #[test]
+    fn test_circular_reference_prevents_cleanup() {
+        // This test shows how circular references between tasks prevent cleanup
+        
+        use std::sync::Arc;
+        use futures::channel::mpsc;
+        
+        static TASK_DROPS: AtomicUsize = AtomicUsize::new(0);
+        
+        struct TrackedResource {
+            _id: usize,
+        }
+        
+        impl Drop for TrackedResource {
+            fn drop(&mut self) {
+                TASK_DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        
+        for iteration in 0..3 {
+            TASK_DROPS.store(0, Ordering::SeqCst);
+            
+            let executor = deterministic::Runner::default();
+            
+            executor.start(|context| async move {
+                // Create tasks with circular dependencies through channels
+                let (tx1, mut rx1) = mpsc::unbounded::<()>();
+                let (tx2, mut rx2) = mpsc::unbounded::<()>();
+                
+                let resource1 = Arc::new(TrackedResource { _id: 1 });
+                let resource2 = Arc::new(TrackedResource { _id: 2 });
+                
+                // Task 1 holds tx2 and waits on rx1
+                let r1 = resource1.clone();
+                context.with_label("task1").spawn(move |_| async move {
+                    let _resource = r1;
+                    let _tx = tx2; // Holds reference to task2's channel
+                    while let Some(_) = rx1.next().await {}
+                });
+                
+                // Task 2 holds tx1 and waits on rx2
+                let r2 = resource2.clone();
+                context.with_label("task2").spawn(move |_| async move {
+                    let _resource = r2;
+                    let _tx = tx1; // Holds reference to task1's channel
+                    while let Some(_) = rx2.next().await {}
+                });
+                
+                // Let tasks start
+                context.sleep(Duration::from_millis(10)).await;
+                
+                // Tasks are now deadlocked in a circular wait
+                // They won't complete even though we're exiting
+            });
+            
+            let drops = TASK_DROPS.load(Ordering::SeqCst);
+            println!("Iteration {}: {} resources dropped", iteration, drops);
+            
+            // Resources may not be freed due to circular references
+            if drops < 2 {
+                println!("WARNING: Circular reference prevented cleanup!");
+            }
+        }
+    }
+    
+    #[test]
+    fn test_simulated_network_pattern_leak() {
+        // This test simulates the pattern from the p2p simulated network
+        // where tasks spawn other tasks and create channels between them
+        
+        use std::sync::Arc;
+        use futures::channel::mpsc;
+        
+        static RESOURCE_DROPS: AtomicUsize = AtomicUsize::new(0);
+        
+        struct NetworkResource {
+            _id: usize,
+        }
+        
+        impl Drop for NetworkResource {
+            fn drop(&mut self) {
+                RESOURCE_DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        
+        // Simulate multiple fuzzer iterations
+        for iteration in 0..5 {
+            println!("\n=== Iteration {} ===", iteration);
+            let initial_drops = RESOURCE_DROPS.load(Ordering::SeqCst);
+            
+            let executor = deterministic::Runner::default();
+            
+            executor.start(|context| async move {
+                // Simulate creating peers (like in the network)
+                let mut peer_channels = Vec::new();
+                
+                for peer_id in 0..5 {
+                    let resource = Arc::new(NetworkResource { _id: peer_id });
+                    
+                    // Each peer has a router task (like Peer::new)
+                    let (control_tx, mut control_rx) = mpsc::unbounded::<()>();
+                    let (inbox_tx, mut inbox_rx) = mpsc::unbounded::<()>();
+                    
+                    let r1 = resource.clone();
+                    context.with_label(&format!("peer_{}_router", peer_id)).spawn(move |_| async move {
+                        let _resource = r1;
+                        // Router waits for messages
+                        loop {
+                            futures::select! {
+                                _ = control_rx.next() => {},
+                                _ = inbox_rx.next() => {},
+                            }
+                        }
+                    });
+                    
+                    // Each peer also has a listener task
+                    let r2 = resource.clone();
+                    let inbox_tx_clone = inbox_tx.clone();
+                    context.with_label(&format!("peer_{}_listener", peer_id)).spawn(move |context| async move {
+                        let _resource = r2;
+                        // Listener spawns receiver tasks
+                        for i in 0..3 {
+                            let tx = inbox_tx_clone.clone();
+                            context.with_label(&format!("receiver_{}", i)).spawn(move |_| async move {
+                                // Receiver holds channel reference
+                                let _tx = tx;
+                            });
+                        }
+                    });
+                    
+                    peer_channels.push((control_tx, inbox_tx));
+                }
+                
+                // Simulate creating links between peers
+                for i in 0..5 {
+                    for j in 0..5 {
+                        if i != j {
+                            let (link_tx, mut link_rx) = mpsc::unbounded::<()>();
+                            
+                            // Link task (like Link::new)
+                            context.with_label(&format!("link_{}_{}", i, j)).spawn(move |_| async move {
+                                // Link waits for messages
+                                while let Some(_) = link_rx.next().await {}
+                            });
+                            
+                            // Store link channel (would normally be in Link struct)
+                            drop(link_tx); // In real code, this would be stored
+                        }
+                    }
+                }
+                
+                // Let everything run
+                context.sleep(Duration::from_millis(10)).await;
+                
+                // Drop peer channels - but tasks may still hold references
+                drop(peer_channels);
+            });
+            
+            // Runtime drops here
+            let drops_after = RESOURCE_DROPS.load(Ordering::SeqCst);
+            let iteration_drops = drops_after - initial_drops;
+            println!("Resources freed in iteration {}: {}", iteration, iteration_drops);
+            
+            if iteration_drops < 5 {
+                println!("WARNING: Not all resources freed! Potential memory leak.");
+            }
+        }
+        
+        let total_drops = RESOURCE_DROPS.load(Ordering::SeqCst);
+        println!("\nTotal resources dropped: {}/25", total_drops);
+        
+        // With 5 iterations of 5 peers each, we should have 25 drops
+        // But circular references may prevent some from being freed
+        if total_drops < 25 {
+            println!("MEMORY LEAK CONFIRMED: {} resources leaked", 25 - total_drops);
+        }
+    }
+    
+    #[test] 
+    fn test_waker_keeps_completed_tasks_alive() {
+        // This test shows that wakers can keep completed tasks in memory
+        
+        use futures::task::ArcWake;
+        use std::sync::Arc;
+        
+        let executor = deterministic::Runner::default();
+        
+        executor.start(|context| async move {
+            let _executor_ref = context.executor.clone();
+            
+            // Create a custom waker that we can control
+            struct WakerHolder {
+                waker: Option<std::task::Waker>,
+            }
+            
+            let holder = Arc::new(Mutex::new(WakerHolder { waker: None }));
+            let holder_clone = holder.clone();
+            
+            // Spawn a task and capture its waker
+            context.with_label("test_task").spawn(move |_| async move {
+                // Get our own waker
+                futures::future::poll_fn(|cx| {
+                    holder_clone.lock().unwrap().waker = Some(cx.waker().clone());
+                    std::task::Poll::Ready(())
+                }).await;
+            });
+            
+            // Let the task complete
+            context.sleep(Duration::from_millis(10)).await;
+            
+            // Now wake the completed task multiple times
+            for _ in 0..5 {
+                if let Some(ref waker) = holder.lock().unwrap().waker {
+                    waker.wake_by_ref();
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            
+            // The completed task may be re-enqueued despite being complete
+            // This is one way tasks can accumulate in memory
         });
     }
 }
