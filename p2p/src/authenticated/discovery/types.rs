@@ -21,7 +21,7 @@ const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
 const DATA_PREFIX: u8 = 2;
 
-// Use chunk size of 1 to reduce encoded size.
+// Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
 
 /// Configuration when deserializing messages.

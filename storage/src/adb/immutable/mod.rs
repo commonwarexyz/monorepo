@@ -6,10 +6,9 @@ use crate::{
     index::Index,
     journal::{fixed, variable},
     mmr::{
-        hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
-        verification::Proof,
+        Proof, StandardHasher as Standard,
     },
     store::operation::Variable,
     translator::Translator,

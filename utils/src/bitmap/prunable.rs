@@ -232,13 +232,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_empty() {
+    fn test_new() {
         let prunable: Prunable<32> = Prunable::new();
         assert_eq!(prunable.len(), 0);
         assert_eq!(prunable.pruned_bits(), 0);
         assert_eq!(prunable.pruned_chunks(), 0);
         assert!(prunable.is_empty());
         assert_eq!(prunable.chunks_len(), 0); // No chunks when empty
+    }
+
+    #[test]
+    fn test_new_with_pruned_chunks() {
+        let prunable: Prunable<2> = Prunable::new_with_pruned_chunks(1);
+        assert_eq!(prunable.len(), 16);
+        assert_eq!(prunable.pruned_bits(), 16);
+        assert_eq!(prunable.pruned_chunks(), 1);
+        assert_eq!(prunable.chunks_len(), 1); // Always has at least one chunk
     }
 
     #[test]

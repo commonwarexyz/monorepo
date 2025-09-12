@@ -13,12 +13,13 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        iterator::leaf_num_to_pos,
-        mem::{Config as MemConfig, Mmr},
-        verification::Proof,
-        Error,
+        hasher::Hasher,
+        iterator::{leaf_num_to_pos, nodes_to_pin},
+        mem::{Config, Mmr},
+        storage::Storage,
+        verification, Error,
         Error::*,
-        Hasher,
+        Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -38,7 +39,7 @@ use tracing::{debug, error, warn};
 /// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
 /// limited to (u32::MAX * N * 8).
 pub struct MerkleizedBitMap<H: CHasher, const N: usize> {
-    /// The core bitmap functionality
+    /// The underlying bitmap.
     bitmap: BitMap<N>,
 
     /// The length of the bitmap range that is currently included in the `mmr`.
@@ -132,7 +133,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         let mmr_size = leaf_num_to_pos(pruned_chunks as u64);
 
         let mut pinned_nodes = Vec::new();
-        for (index, pos) in Proof::<H::Digest>::nodes_to_pin(mmr_size).enumerate() {
+        for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(size = mmr_size, pos, "missing pinned node");
                 return Err(MissingNode(pos));
@@ -150,7 +151,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
         metadata.close().await?;
 
-        let mmr = Mmr::init(MemConfig {
+        let mmr = Mmr::init(Config {
             nodes: Vec::new(),
             pruned_to_pos: mmr_size,
             pinned_nodes,
@@ -187,7 +188,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
         // Write the pinned nodes.
         let mmr_size = leaf_num_to_pos(self.bitmap.pruned_chunks() as u64);
-        for (i, digest) in Proof::<H::Digest>::nodes_to_pin(mmr_size).enumerate() {
+        for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
             metadata.put(key, digest.to_vec());
@@ -232,14 +233,15 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.prune_to_bit(bit_offset);
 
         // Update authenticated length
-        if self.bitmap.chunks_len() == 0 {
+        let chunks_len = self.bitmap.chunks_len();
+        if chunks_len == 0 {
             self.authenticated_len = 0;
         } else {
             let (_, next_bit) = self.bitmap.last_chunk();
             self.authenticated_len = if next_bit == Self::CHUNK_SIZE_BITS as usize {
-                self.bitmap.chunks_len() // Include complete last chunk
+                chunks_len // Include complete last chunk
             } else {
-                self.bitmap.chunks_len() - 1 // Exclude partial last chunk
+                chunks_len - 1 // Exclude partial last chunk
             };
         }
 
@@ -319,16 +321,17 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             return true;
         }
 
-        if self.bitmap.chunks_len() == 0 {
+        let chunks_len = self.bitmap.chunks_len();
+        if chunks_len == 0 {
             return false;
         }
 
         // Check if there are complete chunks that haven't been authenticated yet
         let (_, next_bit) = self.bitmap.last_chunk();
         let complete_chunks = if next_bit == Self::CHUNK_SIZE_BITS as usize {
-            self.bitmap.chunks_len()
+            chunks_len
         } else {
-            self.bitmap.chunks_len() - 1
+            chunks_len - 1
         };
 
         self.authenticated_len < complete_chunks
@@ -336,25 +339,26 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
     /// The chunks (identified by their number) that have been modified or added since the last `sync`.
     pub fn dirty_chunks(&self) -> Vec<u64> {
+        let pruned_chunks = self.bitmap.pruned_chunks();
         let mut chunks: Vec<u64> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| (chunk_index + self.bitmap.pruned_chunks()) as u64)
+            .map(|&chunk_index| (chunk_index + pruned_chunks) as u64)
             .collect();
-
-        if self.bitmap.chunks_len() == 0 {
+        let chunks_len = self.bitmap.chunks_len();
+        if chunks_len == 0 {
             return chunks;
         }
 
         // Include complete chunks that haven't been authenticated yet
         let (_, next_bit) = self.bitmap.last_chunk();
         let complete_chunks = if next_bit == Self::CHUNK_SIZE_BITS as usize {
-            self.bitmap.chunks_len()
+            chunks_len
         } else {
-            self.bitmap.chunks_len() - 1
+            chunks_len - 1
         };
         for i in self.authenticated_len..complete_chunks {
-            chunks.push((i + self.bitmap.pruned_chunks()) as u64);
+            chunks.push((i + pruned_chunks) as u64);
         }
 
         chunks
@@ -364,13 +368,14 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     pub async fn sync(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
-        if self.bitmap.chunks_len() > 0 {
+        let chunks_len = self.bitmap.chunks_len();
+        if chunks_len > 0 {
             // If the last chunk is complete, include it. Otherwise, exclude it.
             let (_, next_bit) = self.bitmap.last_chunk();
             let end = if next_bit == Self::CHUNK_SIZE_BITS as usize {
-                self.bitmap.chunks_len()
+                chunks_len
             } else {
-                self.bitmap.chunks_len() - 1
+                chunks_len - 1
             };
             for i in start..end {
                 self.mmr
@@ -488,7 +493,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             ));
         }
 
-        let mut proof = Proof::<H::Digest>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+        let mut proof = verification::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
         proof.size = self.len() as u64;
         if next_bit == Self::CHUNK_SIZE_BITS as usize {
             // Bitmap is chunk aligned.
@@ -584,14 +589,25 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         };
         let metadata =
             Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
+
         metadata.destroy().await.map_err(MetadataError)
+    }
+}
+
+impl<H: CHasher, const N: usize> Storage<H::Digest> for MerkleizedBitMap<H, N> {
+    fn size(&self) -> u64 {
+        self.size()
+    }
+
+    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
+        Ok(self.get_node(position))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::hasher::Standard;
+    use crate::mmr::StandardHasher;
     use commonware_codec::FixedSize;
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
@@ -637,7 +653,7 @@ mod tests {
     fn test_bitmap_verify_empty_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             let proof = Proof {
                 size: 100,
                 digests: Vec::new(),
@@ -666,7 +682,7 @@ mod tests {
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
 
             // Add a single bit
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             let root = bitmap.root(&mut hasher).await.unwrap();
             bitmap.push(true);
             bitmap.sync(&mut hasher).await.unwrap();
@@ -723,7 +739,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let test_chunk = test_chunk(b"test");
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
 
             // Add each bit one at a time after the first chunk.
             let mut bitmap = MerkleizedBitMap::<_, SHA256_SIZE>::new();
@@ -809,7 +825,7 @@ mod tests {
             let mut bitmap = MerkleizedBitMap::<Sha256, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             bitmap.sync(&mut hasher).await.unwrap();
 
             bitmap.prune_to_bit(256);
@@ -823,7 +839,7 @@ mod tests {
         executor.start(|_| async move {
             // Build a starting test MMR with two chunks worth of bits.
             let mut bitmap = MerkleizedBitMap::<Sha256, SHA256_SIZE>::default();
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             bitmap.sync(&mut hasher).await.unwrap();
@@ -868,7 +884,7 @@ mod tests {
         executor.start(|_| async move {
             // Build a test MMR with a few chunks worth of bits.
             let mut bitmap = MerkleizedBitMap::<Sha256, SHA256_SIZE>::default();
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             bitmap.push_chunk(&test_chunk(b"test3"));
@@ -933,7 +949,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Build a bitmap with 10 chunks worth of bits.
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             let mut bitmap = MerkleizedBitMap::<Sha256, N>::new();
             for i in 0u32..10 {
                 bitmap.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
@@ -1004,7 +1020,7 @@ mod tests {
             assert_eq!(bitmap.len(), 0);
 
             // Add a non-trivial amount of data.
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             for i in 0..FULL_CHUNK_COUNT {
                 bitmap.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
             }

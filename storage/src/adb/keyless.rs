@@ -16,10 +16,9 @@ use crate::{
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{
-        hasher::Standard,
         iterator::leaf_num_to_pos,
         journaled::{Config as MmrConfig, Mmr},
-        verification::Proof,
+        Proof, StandardHasher as Standard,
     },
     store::operation::Keyless as Operation,
 };
@@ -693,10 +692,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        adb::verify_proof,
-        mmr::{hasher::Standard, mem::Mmr as MemMmr},
-    };
+    use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};

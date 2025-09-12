@@ -8,8 +8,9 @@ use commonware_codec::{
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 100_000;
-const BITMAP_CHUNK_SIZE: usize = 1;
-type BitMap = commonware_utils::bitmap::BitMap<BITMAP_CHUNK_SIZE>;
+
+// Alias to avoid having to specify the chunk size in every test case.
+type BitMap = commonware_utils::bitmap::BitMap;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
