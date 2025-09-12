@@ -957,10 +957,12 @@ impl crate::Spawner for Context {
         self.auditor.event(b"stop", |hasher| {
             hasher.update(value.to_be_bytes());
         });
-        let stop_resolved = {
-            let exec = self.executor();
+        // If executor is already dropped, consider stop complete
+        let stop_resolved = if let Some(exec) = self.executor.upgrade() {
             let mut shutdown = exec.shutdown.lock().unwrap();
             shutdown.stop(value)
+        } else {
+            return Ok(());
         };
 
         // Wait for all tasks to complete or the timeout to fire
@@ -981,7 +983,12 @@ impl crate::Spawner for Context {
 
     fn stopped(&self) -> Signal {
         self.auditor.event(b"stopped", |_| {});
-        self.executor().shutdown.lock().unwrap().stopped()
+        if let Some(exec) = self.executor.upgrade() {
+            exec.shutdown.lock().unwrap().stopped()
+        } else {
+            // Executor already gone; treat as already stopped
+            Signal::Closed(0)
+        }
     }
 }
 
@@ -1035,17 +1042,25 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        self.executor()
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric)
+        if let Some(exec) = self.executor.upgrade() {
+            exec.registry
+                .lock()
+                .unwrap()
+                .register(prefixed_name, help, metric)
+        } else {
+            // Executor gone; skip metric registration gracefully
+            // no-op
+        }
     }
 
     fn encode(&self) -> String {
         self.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
-        encode(&mut buffer, &self.executor().registry.lock().unwrap()).expect("encoding failed");
+        if let Some(exec) = self.executor.upgrade() {
+            encode(&mut buffer, &exec.registry.lock().unwrap()).expect("encoding failed");
+        } else {
+            // no-op
+        }
         buffer
     }
 }
@@ -1110,7 +1125,11 @@ impl Future for Sleeper {
 
 impl Clock for Context {
     fn current(&self) -> SystemTime {
-        *self.executor().time.lock().unwrap()
+        if let Some(exec) = self.executor.upgrade() {
+            *exec.time.lock().unwrap()
+        } else {
+            UNIX_EPOCH
+        }
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
@@ -1161,28 +1180,49 @@ impl RngCore for Context {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        self.executor().rng.lock().unwrap().next_u32()
+        if let Some(exec) = self.executor.upgrade() {
+            exec.rng.lock().unwrap().next_u32()
+        } else {
+            0
+        }
     }
 
     fn next_u64(&mut self) -> u64 {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        self.executor().rng.lock().unwrap().next_u64()
+        if let Some(exec) = self.executor.upgrade() {
+            exec.rng.lock().unwrap().next_u64()
+        } else {
+            0
+        }
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
-        self.executor().rng.lock().unwrap().fill_bytes(dest)
+        if let Some(exec) = self.executor.upgrade() {
+            exec.rng.lock().unwrap().fill_bytes(dest)
+        } else {
+            for b in dest.iter_mut() {
+                *b = 0;
+            }
+        }
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        self.executor().rng.lock().unwrap().try_fill_bytes(dest)
+        if let Some(exec) = self.executor.upgrade() {
+            exec.rng.lock().unwrap().try_fill_bytes(dest)
+        } else {
+            for b in dest.iter_mut() {
+                *b = 0;
+            }
+            Ok(())
+        }
     }
 }
 
