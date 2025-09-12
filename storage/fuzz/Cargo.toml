@@ -20,6 +20,7 @@ commonware-utils = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
 futures = { workspace = true }
+rand = { workspace = true }
 
 [[bin]]
 name = "adb_operations"
@@ -122,6 +123,20 @@ bench = false
 [[bin]]
 name = "ordinal_operations"
 path = "fuzz_targets/ordinal_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "translator_operations"
+path = "fuzz_targets/translator_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_operations"
+path = "fuzz_targets/cache_operations.rs"
 test = false
 doc = false
 bench = false
