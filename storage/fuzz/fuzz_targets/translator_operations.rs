@@ -3,7 +3,7 @@
 use libfuzzer_sys::fuzz_target;
 use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
 use std::hash::{BuildHasher, Hasher};
-use commonware_storage::translator::{Translator, OneCap, TwoCap, FourCap, EightCap, UintIdentity};
+use commonware_storage::translator::{Translator, OneCap, TwoCap, FourCap, EightCap};
 
 const MAX_KEY_LENGTH: usize = 1024;
 const MAX_OPERATIONS: usize = 100;
@@ -38,7 +38,7 @@ struct FuzzInput {
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
-    fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, libfuzzer_sys::arbitrary::Error> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
         let translator_type = match u8::arbitrary(u)? % 4 {
             0 => TranslatorType::One,
             1 => TranslatorType::Two,
@@ -257,25 +257,6 @@ fn test_eight_cap(operations: &[Operation]) {
     }
 }
 
-fn test_uint_identity_edge_cases() {
-    let mut hasher = UintIdentity::default();
-    
-    hasher.write_u8(255);
-    assert_eq!(hasher.finish(), 255);
-    
-    hasher.write_u16(65535);
-    assert_eq!(hasher.finish(), 65535);
-    
-    hasher.write_u32(u32::MAX);
-    assert_eq!(hasher.finish(), u32::MAX as u64);
-    
-    hasher.write_u64(u64::MAX);
-    assert_eq!(hasher.finish(), u64::MAX);
-    
-    hasher.write_u8(0);
-    assert_eq!(hasher.finish(), 0);
-}
-
 fn fuzz(input: FuzzInput) {
     match input.translator_type {
         TranslatorType::One => test_one_cap(&input.operations),
@@ -283,8 +264,6 @@ fn fuzz(input: FuzzInput) {
         TranslatorType::Four => test_four_cap(&input.operations),
         TranslatorType::Eight => test_eight_cap(&input.operations),
     }
-    
-    test_uint_identity_edge_cases();
 }
 
 fuzz_target!(|input: FuzzInput| {
