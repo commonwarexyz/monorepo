@@ -1104,6 +1104,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-collector-fuzz"
+version = "0.0.62"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-collector",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-runtime",
+ "futures",
+ "libfuzzer-sys",
+ "rand 0.8.5",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "commonware-consensus"
 version = "0.0.62"
 dependencies = [
