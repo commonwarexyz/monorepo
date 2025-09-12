@@ -12,10 +12,12 @@ use crate::{
     index::Index,
     mmr::{
         bitmap::Bitmap,
-        hasher::{Grafting, GraftingVerifier, Hasher, Standard},
+        grafting::{
+            Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
+        },
+        hasher::Hasher,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        storage::Grafting as GStorage,
-        verification::Proof,
+        verification, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -161,7 +163,7 @@ impl<
             Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
 
         // Ensure consistency between the bitmap and the db.
-        let mut grafter = Grafting::new(&mut hasher, Self::grafting_height());
+        let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
         if status.bit_count() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
@@ -323,7 +325,7 @@ impl<
         //  (2) prune the bitmap to the updated inactivity floor and write its state to disk.
         self.commit_ops().await?; // (1)
 
-        let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
+        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
         grafter
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
@@ -366,7 +368,7 @@ impl<
         );
         let ops = &self.any.mmr;
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, ops, height);
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, ops, height);
         let mmr_root = grafted_mmr.root(hasher).await?;
 
         // The digest contains all information from the base mmr, and all information from the peak
@@ -426,8 +428,8 @@ impl<
 
         // Generate the proof from the grafted MMR.
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, mmr, height);
-        let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, start_pos, end_pos).await?;
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
+        let mut proof = verification::range_proof(&grafted_mmr, start_pos, end_pos).await?;
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
@@ -550,9 +552,9 @@ impl<
         };
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();
@@ -667,9 +669,9 @@ impl<
 
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();
@@ -703,7 +705,7 @@ impl<
         // Only successfully complete operations (1) and (2) of the commit process.
         self.commit_ops().await?; // (1)
 
-        let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
+        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
         grafter
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;

@@ -1,79 +1,20 @@
-use crate::mmr::{
-    hasher::{Hasher, Standard},
-    journaled::Mmr as JournaledMmr,
-    mem::Mmr as MemMmr,
-    Builder,
-};
+use crate::mmr::{hasher::Hasher, mem::Mmr};
 use commonware_cryptography::{Hasher as CHasher, Sha256};
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::hex;
 
-/// Build the MMR corresponding to the stability test `ROOTS` and confirm the
-/// roots match that from the builder's root computation
-pub async fn build_and_check_test_roots_mmr(mmr: &mut impl Builder<Sha256>) {
-    let mut hasher: Standard<Sha256> = Standard::new();
+/// Build an MMR for testing with 199 elements whose root should always equal
+/// `ROOTS[199]` if the MMR is built with the StandardHasher.
+pub fn build_test_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256>) {
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
-        let root = mmr.root(&mut hasher);
-        let expected_root = ROOTS[i as usize];
-        assert_eq!(hex(&root), expected_root, "at: {i}");
-        mmr.add(&mut hasher, &element).await.unwrap();
+        mmr.add_batched(hasher, &element);
     }
-    assert_eq!(
-        hex(&mmr.root(&mut hasher)),
-        ROOTS[199],
-        "Root after 200 elements"
-    );
+    mmr.sync(hasher);
 }
 
-/// Build an MMR for testing with 199 elements.
-pub async fn build_test_mmr<H: CHasher>(hasher: &mut impl Hasher<H>, mmr: &mut impl Builder<H>) {
-    for i in 0u64..199 {
-        hasher.inner().update(&i.to_be_bytes());
-        let element = hasher.inner().finalize();
-        mmr.add(hasher, &element).await.unwrap();
-    }
-}
-
-pub async fn build_batched_and_check_test_roots(mem_mmr: &mut MemMmr<Sha256>) {
-    let mut hasher: Standard<Sha256> = Standard::new();
-    for i in 0u64..199 {
-        hasher.inner().update(&i.to_be_bytes());
-        let element = hasher.inner().finalize();
-        mem_mmr.add_batched(&mut hasher, &element);
-    }
-    mem_mmr.sync(&mut hasher);
-    assert_eq!(
-        hex(&mem_mmr.root(&mut hasher)),
-        ROOTS[199],
-        "Root after 200 elements"
-    );
-}
-
-pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
-    journaled_mmr: &mut JournaledMmr<E, Sha256>,
-) {
-    let mut hasher: Standard<Sha256> = Standard::new();
-    for i in 0u64..199 {
-        hasher.inner().update(&i.to_be_bytes());
-        let element = hasher.inner().finalize();
-        journaled_mmr
-            .add_batched(&mut hasher, &element)
-            .await
-            .unwrap();
-    }
-    journaled_mmr.sync(&mut hasher).await.unwrap();
-    assert_eq!(
-        hex(&journaled_mmr.root(&mut hasher)),
-        ROOTS[199],
-        "Root after 200 elements"
-    );
-}
-
-/// Roots for all MMRs with 0..200 elements for testing stability in
-/// `mem::tests::test_mem_mmr_root_stability` and for use elsewhere.
-pub(crate) const ROOTS: [&str; 200] = [
+/// Sha256 roots for all MMRs with 0..200 elements for testing stability of root computation across
+/// different MMR implementations.
+pub const ROOTS: [&str; 200] = [
     "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
     "7676407563b96f8f78658b5b6fd523b190634cf5435393a66d62986a35cdd838",
     "ea9fecf8f1137ea087d15b8877a06e64029a2d2e7d8b8c2220213c8c590ad52a",

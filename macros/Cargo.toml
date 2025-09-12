@@ -1,12 +1,12 @@
 [package]
 name = "commonware-macros"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.60"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Augment the development of primitives with procedural macros."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros"
 documentation = "https://docs.rs/commonware-macros"
 

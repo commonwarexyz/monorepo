@@ -104,6 +104,7 @@ fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64, threa
             inactivity_floor_loc = db.inactivity_floor_loc(),
             "DB generated.",
         );
+        db.prune(db.inactivity_floor_loc()).await.unwrap();
         db.close().await.unwrap();
     });
 }

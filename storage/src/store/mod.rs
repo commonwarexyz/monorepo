@@ -403,7 +403,7 @@ where
         last_commit -= 1;
         let section = last_commit / self.log_items_per_section;
         let offset = self.locations.read(last_commit).await?;
-        let Some(Operation::CommitFloor(metadata, _)) = self.log.get(section, offset).await? else {
+        let Operation::CommitFloor(metadata, _) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
@@ -657,11 +657,7 @@ where
         let offset = self.locations.read(loc).await?;
 
         // Get the operation from the log at the specified section and offset.
-        let Some(op) = self.log.get(section, offset).await? else {
-            panic!("invalid location {loc}");
-        };
-
-        Ok(op)
+        self.log.get(section, offset).await.map_err(Error::Journal)
     }
 
     /// Updates the snapshot with the new operation location for the given key.

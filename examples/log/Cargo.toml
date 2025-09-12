@@ -1,12 +1,12 @@
 [package]
 name = "commonware-log"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.60"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Commit to a secret log and agree to its hash."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/log"
 documentation = "https://docs.rs/commonware-log"
 
@@ -17,7 +17,7 @@ commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 commonware-consensus = { workspace = true }
-commonware-storage = { workspace = true }
+commonware-storage = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
