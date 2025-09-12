@@ -146,7 +146,7 @@ where
         };
 
         // Build the database from the log
-        let mut db = db.build_snapshot_from_log().await?;
+        let mut db = db.build_snapshot_from_log(true).await?;
 
         // Persist the state
         db.sync().await?;

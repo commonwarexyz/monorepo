@@ -248,7 +248,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             hasher,
         };
 
-        db.build_snapshot_from_log().await
+        db.build_snapshot_from_log(false).await
     }
 
     /// Builds the database's snapshot by replaying the log from inception, while also:
@@ -257,11 +257,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///   - removing any elements from the MMR & location map that don't remain in the log after
     ///     trimming.
     ///
+    /// If `state_sync` is true, this method has been called as part of state sync, and will
+    /// print debug! messages about operations that are missing from the MMR rather than warn!
+    /// messages. This parameter only affects the verbosity of these logs.
+    ///
     /// # Post-condition
     ///
     /// The number of operations in the log, locations, and the number of leaves in the MMR are
     /// equal.
-    async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
+    async fn build_snapshot_from_log(mut self, state_sync: bool) -> Result<Self, Error> {
         // Align the mmr with the location map. Any elements we remove here that are still in the
         // log will be re-added later.
         let mut mmr_leaves = align_mmr_and_locations(&mut self.mmr, &mut self.locations).await?;
@@ -307,10 +311,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 }
 
                 if current_loc >= mmr_leaves {
-                    debug!(
-                        section,
-                        offset, "operation was missing from MMR/location map"
-                    );
+                    if state_sync {
+                        debug!(
+                            section,
+                            offset, "operation was missing from MMR/location map"
+                        );
+                    } else {
+                        warn!(
+                            section,
+                            offset, "operation was missing from MMR/location map"
+                        );
+                    }
                     self.mmr.add(&mut self.hasher, &op.encode()).await?;
                     self.locations.append(offset).await?;
                     mmr_leaves += 1;
