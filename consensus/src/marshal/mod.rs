@@ -125,7 +125,7 @@ mod tests {
     const NUM_VALIDATORS: u32 = 4;
     const QUORUM: u32 = 3;
     const NUM_BLOCKS: u64 = 160;
-    const BLOCKS_PER_EPOCH: u64 = 50;
+    const BLOCKS_PER_EPOCH: u64 = 25;
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),

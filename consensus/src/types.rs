@@ -2,15 +2,15 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use std::fmt::Display;
 
-/// View is a monotonically increasing counter that represents the current slot of a single
-/// consensus engine (i.e. within a single epoch).
-pub type View = u64;
-
 /// Epoch is the type used to represent a distinct set of validators.
 ///
 /// Represents a contiguous sequence of views in which the set of validators is constant.
 /// When the set of participants changes, the epoch increments.
 pub type Epoch = u64;
+
+/// View is a monotonically increasing counter that represents the current slot of a single
+/// consensus engine (i.e. within a single epoch).
+pub type View = u64;
 
 /// Round is a tuple of ([Epoch], [View]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

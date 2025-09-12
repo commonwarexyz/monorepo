@@ -39,7 +39,7 @@ pub struct Config<
     /// engine before blocking.
     pub mailbox_size: usize,
 
-    /// Epoch for the consensus engine.
+    /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
 
     /// Prefix for all signed messages to prevent replay attacks.
