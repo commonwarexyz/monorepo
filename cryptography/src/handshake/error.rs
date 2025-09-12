@@ -1,3 +1,5 @@
+use core::ops::Range;
+
 use thiserror::Error;
 
 /// Errors relating to the handshake, or to encryption.
@@ -30,4 +32,7 @@ pub enum Error {
     /// This can happen if the message was corrupted, for some reason.
     #[error("decryption failed")]
     DecryptionFailed,
+    /// The timestamp is not in the allowable bounds
+    #[error("timestamp {0} not in {1:?}")]
+    InvalidTimestamp(u64, Range<u64>),
 }

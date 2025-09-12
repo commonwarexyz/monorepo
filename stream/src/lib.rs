@@ -19,7 +19,7 @@ use commonware_cryptography::{
 use commonware_runtime::{Clock, Sink, Stream};
 use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRngCore;
-use std::{future::Future, time::Duration};
+use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
 use crate::utils::codec::{recv_frame, send_frame};
@@ -54,7 +54,7 @@ impl From<HandshakeError> for Error {
 /// Synchronize this configuration across all peers.
 /// Mismatched configurations may cause dropped connections or parsing errors.
 #[derive(Clone)]
-pub struct Config<S: Signer> {
+pub struct Config<S> {
     /// The private key used for signing messages.
     ///
     /// This proves our own identity to other peers.
@@ -72,9 +72,16 @@ pub struct Config<S: Signer> {
 
     /// Maximum age of handshake messages before rejection.
     pub max_handshake_age: Duration,
+}
 
-    /// Maximum time allowed for completing the handshake.
-    pub handshake_timeout: Duration,
+impl<S> Config<S> {
+    pub fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
+        let current_time = ctx.current();
+        let current_time_ms = current_time.epoch_millis();
+        let ok_timestamps = (current_time - self.max_handshake_age).epoch_millis()
+            ..(current_time + self.synchrony_bound).epoch_millis();
+        (current_time_ms, ok_timestamps)
+    }
 }
 
 /// Allows consumers to stop handshakes early if the peer is invalid.
@@ -103,10 +110,10 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     )
     .await?;
 
-    let current_time = ctx.current().epoch_millis();
+    let (current_time, ok_timestamps) = config.time_information(&ctx);
     let (state, msg1) = dial_start(
         &mut ctx,
-        Context::new(current_time, config.signing_key, peer),
+        Context::new(current_time, ok_timestamps, config.signing_key, peer),
     );
     send_frame(&mut sink, &msg1.encode(), config.max_message_size).await?;
 
@@ -146,10 +153,15 @@ pub async fn listen<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     let msg1_bytes = recv_frame(&mut stream, config.max_message_size).await?;
     let msg1 = Msg1::<S::Signature>::decode(msg1_bytes)?;
 
-    let current_time = ctx.current().epoch_millis();
+    let (current_time, ok_timestamps) = config.time_information(&ctx);
     let (state, msg2) = listen_start(
         &mut ctx,
-        Context::new(current_time, config.signing_key, peer.clone()),
+        Context::new(
+            current_time,
+            ok_timestamps,
+            config.signing_key,
+            peer.clone(),
+        ),
         msg1,
     )?;
     send_frame(&mut sink, &msg2.encode(), config.max_message_size).await?;
