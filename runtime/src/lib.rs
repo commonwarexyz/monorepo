@@ -460,7 +460,7 @@ mod tests {
         panic::{catch_unwind, AssertUnwindSafe},
         str::FromStr,
         sync::{
-            atomic::{AtomicU32, AtomicUsize, Ordering},
+            atomic::{AtomicU32, Ordering},
             Arc, Mutex,
         },
     };
@@ -1541,64 +1541,54 @@ mod tests {
     fn test_circular_reference_prevents_cleanup<R: Runner>(runner: R) {
         runner.start(|_| async move {
             // Setup tracked resource
-            static TASK_DROPS: AtomicUsize = AtomicUsize::new(0);
-            struct Dropper {}
-            impl Drop for Dropper {
-                fn drop(&mut self) {
-                    TASK_DROPS.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-
-            // Run runtime
+            let dropper = Arc::new(());
             let executor = deterministic::Runner::default();
-            executor.start(|context| async move {
-                // Create tasks with circular dependencies through channels
-                let (mut setup_tx, mut setup_rx) = mpsc::unbounded::<()>();
-                let (mut tx1, mut rx1) = mpsc::unbounded::<()>();
-                let (mut tx2, mut rx2) = mpsc::unbounded::<()>();
+            executor.start({
+                let dropper = dropper.clone();
+                move |context| async move {
+                    // Create tasks with circular dependencies through channels
+                    let (mut setup_tx, mut setup_rx) = mpsc::unbounded::<()>();
+                    let (mut tx1, mut rx1) = mpsc::unbounded::<()>();
+                    let (mut tx2, mut rx2) = mpsc::unbounded::<()>();
 
-                // Task 1 holds tx2 and waits on rx1
-                context.with_label("task1").spawn({
-                    let mut setup_tx = setup_tx.clone();
-                    move |_| async move {
-                        // Setup resource
-                        let resource = Arc::new(Dropper {});
+                    // Task 1 holds tx2 and waits on rx1
+                    context.with_label("task1").spawn({
+                        let mut setup_tx = setup_tx.clone();
+                        let dropper = dropper.clone();
+                        move |_| async move {
+                            // Setup deadlock and mark ready
+                            tx2.send(()).await.unwrap();
+                            rx1.next().await.unwrap();
+                            setup_tx.send(()).await.unwrap();
 
+                            // Wait forever
+                            while rx1.next().await.is_some() {}
+                            drop(tx2);
+                            drop(dropper);
+                        }
+                    });
+
+                    // Task 2 holds tx1 and waits on rx2
+                    context.with_label("task2").spawn(move |_| async move {
                         // Setup deadlock and mark ready
-                        tx2.send(()).await.unwrap();
-                        rx1.next().await.unwrap();
+                        tx1.send(()).await.unwrap();
+                        rx2.next().await.unwrap();
                         setup_tx.send(()).await.unwrap();
 
                         // Wait forever
-                        while rx1.next().await.is_some() {}
-                        drop(tx2);
-                        drop(resource);
-                    }
-                });
+                        while rx2.next().await.is_some() {}
+                        drop(tx1);
+                        drop(dropper);
+                    });
 
-                // Task 2 holds tx1 and waits on rx2
-                context.with_label("task2").spawn(move |_| async move {
-                    // Setup resource
-                    let resource = Arc::new(Dropper {});
-
-                    // Setup deadlock and mark ready
-                    tx1.send(()).await.unwrap();
-                    rx2.next().await.unwrap();
-                    setup_tx.send(()).await.unwrap();
-
-                    // Wait forever
-                    while rx2.next().await.is_some() {}
-                    drop(tx1);
-                    drop(resource);
-                });
-
-                // Wait for tasks to start
-                setup_rx.next().await.unwrap();
-                setup_rx.next().await.unwrap();
+                    // Wait for tasks to start
+                    setup_rx.next().await.unwrap();
+                    setup_rx.next().await.unwrap();
+                }
             });
 
             // After runtime drop, both tasks should be cleaned up
-            assert_eq!(TASK_DROPS.load(Ordering::SeqCst), 2);
+            Arc::try_unwrap(dropper).expect("references remaining");
         });
     }
 
