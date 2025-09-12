@@ -150,11 +150,10 @@ fn fuzz(input: FuzzInput) {
                 Operation::Get { index } => {
                     if let Some(ref cache) = cache_opt {
                         let result = cache.get(index).await.expect("Get should not error");
-                        
-                        let should_exist = pruned_min.is_none_or(|min| {
-                            let section = (index / input.config.items_per_blob) * input.config.items_per_blob;
-                            section >= min
-                        }) && expected_data.contains_key(&index);
+
+                        let section = (index / input.config.items_per_blob) * input.config.items_per_blob;
+                        let passes_prune = pruned_min.is_none_or(|min| section >= min);
+                        let should_exist = passes_prune && expected_data.contains_key(&index);
                         
                         if should_exist {
                             assert_eq!(result, expected_data.get(&index).cloned());
@@ -166,11 +165,10 @@ fn fuzz(input: FuzzInput) {
                 Operation::Has { index } => {
                     if let Some(ref cache) = cache_opt {
                         let has = cache.has(index);
-                        
-                        let should_exist = pruned_min.is_none_or(|min| {
-                            let section = (index / input.config.items_per_blob) * input.config.items_per_blob;
-                            section >= min
-                        }) && expected_data.contains_key(&index);
+
+                        let section = (index / input.config.items_per_blob) * input.config.items_per_blob;
+                        let passes_prune = pruned_min.is_none_or(|min| section >= min);
+                        let should_exist = passes_prune && expected_data.contains_key(&index);
                         
                         assert_eq!(has, should_exist);
                     }
@@ -216,10 +214,10 @@ fn fuzz(input: FuzzInput) {
                 Operation::Prune { min } => {
                     if let Some(ref mut cache) = cache_opt {
                         cache.prune(min).await.expect("Prune should not error");
-                        
+
                         let section_min = (min / input.config.items_per_blob) * input.config.items_per_blob;
                         pruned_min = Some(pruned_min.map_or(section_min, |old| old.max(section_min)));
-                        
+
                         expected_data.retain(|&k, _| {
                             let section = (k / input.config.items_per_blob) * input.config.items_per_blob;
                             section >= pruned_min.unwrap()
@@ -237,13 +235,7 @@ fn fuzz(input: FuzzInput) {
                             .await
                             .expect("Failed to reinitialize cache");
                         
-                        // After reinit, the cache is fresh and doesn't know about previous prunes
-                        // Reset pruned_min since the new cache instance doesn't have this state
                         pruned_min = None;
-                        
-                        // The cache will reload any data that was persisted to disk
-                        // Our expected_data already tracks what should be there
-                        
                         cache_opt = Some(cache);
                     }
                 },
