@@ -1,9 +1,11 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
+use commonware_storage::translator::{EightCap, FourCap, OneCap, Translator, TwoCap};
+use libfuzzer_sys::{
+    arbitrary::{Arbitrary, Unstructured},
+    fuzz_target,
+};
 use std::hash::{BuildHasher, Hasher};
-use commonware_storage::translator::{Translator, OneCap, TwoCap, FourCap, EightCap};
 
 const MAX_KEY_LENGTH: usize = 1024;
 const MAX_OPERATIONS: usize = 100;
@@ -45,10 +47,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             2 => TranslatorType::Four,
             _ => TranslatorType::Eight,
         };
-        
+
         let num_operations = (u8::arbitrary(u)? as usize) % MAX_OPERATIONS + 1;
         let mut operations = Vec::with_capacity(num_operations);
-        
+
         for _ in 0..num_operations {
             let op = match u8::arbitrary(u)? % 3 {
                 0 => {
@@ -58,7 +60,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
                         *byte = u8::arbitrary(u)?;
                     }
                     Operation::Transform { key }
-                },
+                }
                 1 => Operation::BuildHasher,
                 _ => {
                     let value_type = match u8::arbitrary(u)? % 4 {
@@ -68,11 +70,11 @@ impl<'a> Arbitrary<'a> for FuzzInput {
                         _ => ValueType::U64(u64::arbitrary(u)?),
                     };
                     Operation::HashValue { value_type }
-                },
+                }
             };
             operations.push(op);
         }
-        
+
         Ok(FuzzInput {
             translator_type,
             operations,
@@ -82,177 +84,177 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 fn test_one_cap(operations: &[Operation]) {
     let translator = OneCap;
-    
+
     for op in operations {
         match op {
             Operation::Transform { key } => {
                 let result = translator.transform(key);
                 let bytes = result.to_le_bytes();
-                
+
                 if key.is_empty() {
                     assert_eq!(bytes[0], 0);
                 } else {
                     assert_eq!(bytes[0], key[0]);
                 }
-                
+
                 let expected = if key.is_empty() { 0 } else { key[0] };
                 assert_eq!(result, expected);
-            },
+            }
             Operation::BuildHasher => {
                 let hasher = translator.build_hasher();
                 let _ = hasher;
-            },
+            }
             Operation::HashValue { value_type } => {
                 let mut hasher = translator.build_hasher();
                 match value_type {
                     ValueType::U8(v) => {
                         hasher.write_u8(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U16(v) => {
                         hasher.write_u16(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U32(v) => {
                         hasher.write_u32(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U64(v) => {
                         hasher.write_u64(*v);
                         assert_eq!(hasher.finish(), *v);
-                    },
+                    }
                 }
-            },
+            }
         }
     }
 }
 
 fn test_two_cap(operations: &[Operation]) {
     let translator = TwoCap;
-    
+
     for op in operations {
         match op {
             Operation::Transform { key } => {
                 let result = translator.transform(key);
                 let bytes = result.to_le_bytes();
-                
+
                 match key.len() {
                     0 => assert_eq!(bytes, [0, 0]),
                     1 => assert_eq!(bytes, [key[0], 0]),
                     _ => assert_eq!(bytes, [key[0], key[1]]),
                 }
-            },
+            }
             Operation::BuildHasher => {
                 let hasher = translator.build_hasher();
                 let _ = hasher;
-            },
+            }
             Operation::HashValue { value_type } => {
                 let mut hasher = translator.build_hasher();
                 match value_type {
                     ValueType::U8(v) => {
                         hasher.write_u8(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U16(v) => {
                         hasher.write_u16(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U32(v) => {
                         hasher.write_u32(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U64(v) => {
                         hasher.write_u64(*v);
                         assert_eq!(hasher.finish(), *v);
-                    },
+                    }
                 }
-            },
+            }
         }
     }
 }
 
 fn test_four_cap(operations: &[Operation]) {
     let translator = FourCap;
-    
+
     for op in operations {
         match op {
             Operation::Transform { key } => {
                 let result = translator.transform(key);
                 let bytes = result.to_le_bytes();
-                
+
                 let mut expected = [0u8; 4];
                 let len = key.len().min(4);
                 expected[..len].copy_from_slice(&key[..len]);
                 assert_eq!(bytes, expected);
-            },
+            }
             Operation::BuildHasher => {
                 let hasher = translator.build_hasher();
                 let _ = hasher;
-            },
+            }
             Operation::HashValue { value_type } => {
                 let mut hasher = translator.build_hasher();
                 match value_type {
                     ValueType::U8(v) => {
                         hasher.write_u8(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U16(v) => {
                         hasher.write_u16(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U32(v) => {
                         hasher.write_u32(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U64(v) => {
                         hasher.write_u64(*v);
                         assert_eq!(hasher.finish(), *v);
-                    },
+                    }
                 }
-            },
+            }
         }
     }
 }
 
 fn test_eight_cap(operations: &[Operation]) {
     let translator = EightCap;
-    
+
     for op in operations {
         match op {
             Operation::Transform { key } => {
                 let result = translator.transform(key);
                 let bytes = result.to_le_bytes();
-                
+
                 let mut expected = [0u8; 8];
                 let len = key.len().min(8);
                 expected[..len].copy_from_slice(&key[..len]);
                 assert_eq!(bytes, expected);
-            },
+            }
             Operation::BuildHasher => {
                 let hasher = translator.build_hasher();
                 let _ = hasher;
-            },
+            }
             Operation::HashValue { value_type } => {
                 let mut hasher = translator.build_hasher();
                 match value_type {
                     ValueType::U8(v) => {
                         hasher.write_u8(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U16(v) => {
                         hasher.write_u16(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U32(v) => {
                         hasher.write_u32(*v);
                         assert_eq!(hasher.finish(), *v as u64);
-                    },
+                    }
                     ValueType::U64(v) => {
                         hasher.write_u64(*v);
                         assert_eq!(hasher.finish(), *v);
-                    },
+                    }
                 }
-            },
+            }
         }
     }
 }

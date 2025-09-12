@@ -165,14 +165,15 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
                 }
+
                 Operation::Get { index } => {
                     if let Some(ref cache) = cache_opt {
                         let result = cache.get(index).await.expect("Get should not error");
 
                         let section =
                             (index / input.config.items_per_blob) * input.config.items_per_blob;
-                        let passes_prune = pruned_min.is_none_or(|min| section >= min);
-                        let should_exist = passes_prune && expected_data.contains_key(&index);
+                        let not_pruned = pruned_min.is_none_or(|min| section >= min);
+                        let should_exist = not_pruned && expected_data.contains_key(&index);
 
                         if should_exist {
                             assert_eq!(result, expected_data.get(&index).cloned());
@@ -181,18 +182,20 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
                 }
+
                 Operation::Has { index } => {
                     if let Some(ref cache) = cache_opt {
                         let has = cache.has(index);
 
                         let section =
                             (index / input.config.items_per_blob) * input.config.items_per_blob;
-                        let passes_prune = pruned_min.is_none_or(|min| section >= min);
-                        let should_exist = passes_prune && expected_data.contains_key(&index);
+                        let not_pruned = pruned_min.is_none_or(|min| section >= min);
+                        let should_exist = not_pruned && expected_data.contains_key(&index);
 
                         assert_eq!(has, should_exist);
                     }
                 }
+
                 Operation::First => {
                     if let Some(ref cache) = cache_opt {
                         let first = cache.first();
@@ -212,11 +215,19 @@ fn fuzz(input: FuzzInput) {
                         assert_eq!(first, expected_first);
                     }
                 }
+
                 Operation::NextGap { from } => {
                     if let Some(ref cache) = cache_opt {
-                        let _ = cache.next_gap(from);
+                        let (current_end, start_next) = cache.next_gap(from);
+                        if let Some(current_end) = current_end {
+                            assert!(expected_data.contains_key(&current_end));
+                        }
+                        if let Some(start_next) = start_next {
+                            assert!(expected_data.contains_key(&start_next));
+                        }
                     }
                 }
+
                 Operation::MissingItems { from, limit } => {
                     if let Some(ref cache) = cache_opt {
                         let missing = cache.missing_items(from, limit);
@@ -227,11 +238,13 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
                 }
+
                 Operation::Sync => {
                     if let Some(ref mut cache) = cache_opt {
                         cache.sync().await.expect("Sync should not error");
                     }
                 }
+
                 Operation::Prune { min } => {
                     if let Some(ref mut cache) = cache_opt {
                         cache.prune(min).await.expect("Prune should not error");
@@ -248,11 +261,13 @@ fn fuzz(input: FuzzInput) {
                         });
                     }
                 }
+
                 Operation::Close => {
                     if let Some(cache) = cache_opt.take() {
                         cache.close().await.expect("Close should not error");
                     }
                 }
+
                 Operation::Reinit => {
                     if cache_opt.is_none() {
                         let cache = Cache::<_, u32>::init(context.clone(), cfg.clone())
