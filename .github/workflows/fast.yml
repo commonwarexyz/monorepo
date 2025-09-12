@@ -158,6 +158,8 @@ jobs:
       run: cargo build -p commonware-utils --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_utils.rlib
     - name: Build cryptography
       run: cargo build -p commonware-cryptography --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_cryptography.rlib
+    - name: Build storage
+      run: cargo build -p commonware-storage --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_storage.rlib
 
   Unsafe:
     runs-on: ubuntu-latest
@@ -176,12 +178,3 @@ jobs:
       run: |
         cd storage
         MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --lib index::
-
-  Scripts:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    - name: Run shellcheck
-      run: find scripts -name "*.sh" -exec shellcheck -o all {} +

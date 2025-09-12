@@ -8,7 +8,7 @@ use commonware_codec::{Encode, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::{adb::sync, mmr::hasher};
+use commonware_storage::{adb::sync, mmr::StandardHasher};
 use commonware_sync::{
     any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
 };
@@ -146,7 +146,7 @@ where
         };
 
         let database: any::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root(&mut hasher::Standard::new());
+        let got_root = database.root(&mut StandardHasher::new());
         info!(
             sync_iteration = iteration,
             root = %got_root,
@@ -204,7 +204,7 @@ where
             };
 
         let database: immutable::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root(&mut hasher::Standard::new());
+        let got_root = database.root(&mut StandardHasher::new());
         info!(
             sync_iteration = iteration,
             root = %got_root,

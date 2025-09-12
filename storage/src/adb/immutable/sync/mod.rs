@@ -6,7 +6,7 @@ use crate::{
         sync::{self, Journal as _},
     },
     journal::variable,
-    mmr::{self, hasher::Standard},
+    mmr::{self, StandardHasher as Standard},
     store::operation::Variable,
     translator::Translator,
 };
@@ -73,7 +73,7 @@ where
     T: Translator,
 {
     type Data = Variable<K, V>;
-    type Proof = mmr::verification::Proof<H::Digest>;
+    type Proof = mmr::Proof<H::Digest>;
     type PinnedNodes = Vec<H::Digest>;
     type Journal = journal::Journal<E, K, V>;
     type Hasher = H;
@@ -272,7 +272,7 @@ mod tests {
                 Engine, Journal, Target,
             },
         },
-        mmr::hasher::Standard,
+        mmr::StandardHasher as Standard,
         store::operation::Variable,
         translator::TwoCap,
     };

@@ -4,8 +4,8 @@ use crate::{
     journal::fixed,
     mmr::{
         self,
-        hasher::{self, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        StandardHasher,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -28,7 +28,7 @@ where
 {
     type Context = E;
     type Data = Fixed<K, V>;
-    type Proof = mmr::verification::Proof<H::Digest>;
+    type Proof = mmr::Proof<H::Digest>;
     type PinnedNodes = Vec<H::Digest>;
     type Journal = fixed::Journal<E, Fixed<K, V>>;
     type Hasher = H;
@@ -94,7 +94,7 @@ where
         };
 
         // Apply the missing operations from the log to the MMR.
-        let mut hasher = Standard::<H>::new();
+        let mut hasher = StandardHasher::<H>::new();
         let log_size = log.size().await?;
         for i in mmr_ops..log_size {
             let op = log.read(i).await?;
@@ -126,14 +126,14 @@ where
             inactivity_floor_loc: lower_bound,
             snapshot,
             uncommitted_ops: 0,
-            hasher: hasher::Standard::<H>::new(),
+            hasher: StandardHasher::<H>::new(),
         };
         db.sync().await?;
         Ok(db)
     }
 
     fn root(&self) -> Self::Digest {
-        any::fixed::Any::root(self, &mut hasher::Standard::<H>::new())
+        any::fixed::Any::root(self, &mut StandardHasher::<H>::new())
     }
 
     async fn resize_journal(
@@ -166,7 +166,7 @@ where
         start_loc: u64,
         root: Self::Digest,
     ) -> bool {
-        let mut hasher = Standard::<H>::new();
+        let mut hasher = StandardHasher::<H>::new();
         adb::verify_proof(&mut hasher, proof, start_loc, data, &root)
     }
 
@@ -346,7 +346,7 @@ mod tests {
             },
         },
         journal::{self, fixed},
-        mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
+        mmr::iterator::nodes_to_pin,
         store::operation::Fixed,
         translator::TwoCap,
     };
@@ -374,8 +374,8 @@ mod tests {
     const PAGE_SIZE: usize = 99;
     const PAGE_CACHE_SIZE: usize = 3;
 
-    fn test_hasher() -> Standard<Sha256> {
-        Standard::<Sha256>::new()
+    fn test_hasher() -> StandardHasher<Sha256> {
+        StandardHasher::<Sha256>::new()
     }
 
     fn test_digest(value: u64) -> Digest {
@@ -572,7 +572,6 @@ mod tests {
             };
 
             let result: Result<AnyTest, _> = sync::sync(config).await;
-            println!("{:?}", result.as_ref().err());
             assert!(matches!(
                 result,
                 Err(sync::Error::InvalidTarget {
@@ -1457,14 +1456,14 @@ mod tests {
             let upper_bound_ops = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes_pos = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
+            let pinned_nodes_pos = nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
             let pinned_nodes =
                 join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
                 .iter()
                 .map(|node| node.as_ref().unwrap().unwrap())
                 .collect::<Vec<_>>();
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let target_hash = source_db.root(&mut hasher);
 
             // Create log with operations
@@ -1579,7 +1578,7 @@ mod tests {
                 }
                 log.sync().await.unwrap();
 
-                let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound))
+                let pinned_nodes = nodes_to_pin(leaf_num_to_pos(lower_bound))
                     .map(|pos| source_db.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
                 let pinned_nodes = pinned_nodes
@@ -1660,10 +1659,9 @@ mod tests {
 
             // Get pinned nodes before closing the database
             let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
-            let pinned_nodes =
-                Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(sync_db_original_size))
-                    .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
-                    .collect::<Vec<_>>();
+            let pinned_nodes = nodes_to_pin(leaf_num_to_pos(sync_db_original_size))
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                .collect::<Vec<_>>();
 
             // Close the sync db
             sync_db.close().await.unwrap();
@@ -1682,7 +1680,7 @@ mod tests {
             let sync_lower_bound = target_db.inactivity_floor_loc;
             let sync_upper_bound = target_db.op_count() - 1;
 
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let target_hash = target_db.root(&mut hasher);
 
             let AnyTest { mmr, log, .. } = target_db;
@@ -1756,7 +1754,7 @@ mod tests {
             let target_db_mmr_size = db.mmr.size();
 
             let pinned_nodes = join_all(
-                Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(db.inactivity_floor_loc))
+                nodes_to_pin(leaf_num_to_pos(db.inactivity_floor_loc))
                     .map(|pos| db.mmr.get_node(pos)),
             )
             .await;
@@ -1767,7 +1765,7 @@ mod tests {
             let AnyTest { mmr, log, .. } = db;
 
             // When we re-open the database, the MMR is closed and the log is opened.
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             mmr.close(&mut hasher).await.unwrap();
 
             let sync_db: AnyTest =

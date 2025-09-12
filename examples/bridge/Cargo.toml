@@ -1,12 +1,12 @@
 [package]
 name = "commonware-bridge"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.61"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Send succinct consensus certificates between two networks."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/bridge"
 documentation = "https://docs.rs/commonware-bridge"
 
@@ -18,7 +18,7 @@ commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 commonware-consensus = { workspace = true }
-commonware-storage = { workspace = true }
+commonware-storage = { workspace = true, features = ["std"] }
 commonware-stream = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }

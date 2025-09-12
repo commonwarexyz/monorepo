@@ -1,12 +1,12 @@
 [package]
 name = "commonware-consensus"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.61"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Order opaque messages in a Byzantine environment."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/consensus"
 documentation = "https://docs.rs/commonware-consensus"
 
@@ -25,7 +25,7 @@ futures = { workspace = true }
 commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
-commonware-storage = { workspace = true }
+commonware-storage = { workspace = true, features = ["std"] }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
 rand = { workspace = true }

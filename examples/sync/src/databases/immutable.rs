@@ -8,7 +8,7 @@ use commonware_storage::{
         self,
         immutable::{self, Config},
     },
-    mmr::{hasher::Standard, verification::Proof},
+    mmr::{Proof, StandardHasher as Standard},
     store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};

@@ -270,10 +270,10 @@ mod tests {
 
             // Insert multiple items across different sections
             let items = vec![(1u64, 1), (2u64, 2), (3u64, 3), (4u64, 4), (5u64, 5)];
-
             for (index, data) in &items {
                 cache.put(*index, *data).await.expect("Failed to put data");
             }
+            assert_eq!(cache.first(), Some(1));
 
             // Check metrics
             let buffer = context.encode();
@@ -291,6 +291,7 @@ mod tests {
                     assert_eq!(retrieved.expect("Data not found"), data);
                 }
             }
+            assert_eq!(cache.first(), Some(3));
 
             // Check metrics
             let buffer = context.encode();
@@ -298,9 +299,11 @@ mod tests {
 
             // Try to prune older section
             cache.prune(2).await.expect("Failed to prune");
+            assert_eq!(cache.first(), Some(3));
 
             // Try to prune current section again
             cache.prune(3).await.expect("Failed to prune");
+            assert_eq!(cache.first(), Some(3));
 
             // Try to put older index
             let result = cache.put(1, 1).await;
@@ -442,6 +445,9 @@ mod tests {
                 .await
                 .expect("Failed to initialize cache");
 
+            // Check first
+            assert_eq!(cache.first(), None);
+
             // Insert values with gaps
             cache.put(1, 1).await.unwrap();
             cache.put(10, 10).await.unwrap();
@@ -452,6 +458,7 @@ mod tests {
             let (current_end, start_next) = cache.next_gap(0);
             assert!(current_end.is_none());
             assert_eq!(start_next, Some(1));
+            assert_eq!(cache.first(), Some(1));
 
             let (current_end, start_next) = cache.next_gap(1);
             assert_eq!(current_end, Some(1));
@@ -493,6 +500,7 @@ mod tests {
                 .expect("Failed to initialize cache");
 
             // Test 1: Empty cache - should return no items
+            assert_eq!(cache.first(), None);
             assert_eq!(cache.missing_items(0, 5), Vec::<u64>::new());
             assert_eq!(cache.missing_items(100, 10), Vec::<u64>::new());
 

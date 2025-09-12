@@ -191,8 +191,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         let record = self
             .journal
             .get_exact(section, location.offset, location.len)
-            .await?
-            .ok_or(Error::RecordCorrupted)?;
+            .await?;
         Ok(Some(record.value))
     }
 
@@ -215,8 +214,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
             let record = self
                 .journal
                 .get_exact(section, location.offset, location.len)
-                .await?
-                .ok_or(Error::RecordCorrupted)?;
+                .await?;
 
             // Get key from item
             if record.key.as_ref() == key.as_ref() {

@@ -77,7 +77,7 @@ where
 {
     type Digest = D;
     type Data = Op;
-    type Proof = mmr::verification::Proof<D>;
+    type Proof = mmr::Proof<D>;
     type Error = crate::Error;
 
     async fn get_data(

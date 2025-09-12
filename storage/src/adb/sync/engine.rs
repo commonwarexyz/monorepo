@@ -7,7 +7,7 @@ use crate::{
         target::validate_update,
         Database, Error, Journal, Target,
     },
-    mmr::hasher,
+    mmr::StandardHasher,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
@@ -132,7 +132,7 @@ where
     resolver: R,
 
     /// Hasher used for proof verification
-    hasher: crate::mmr::hasher::Standard<DB::Hasher>,
+    hasher: StandardHasher<DB::Hasher>,
 
     /// Runtime context for database operations
     context: DB::Context,
@@ -191,7 +191,7 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            hasher: hasher::Standard::<DB::Hasher>::new(),
+            hasher: StandardHasher::<DB::Hasher>::new(),
             context: config.context,
             config: config.db_config,
             update_receiver: config.update_rx,
@@ -522,7 +522,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::verification::Proof;
+    use crate::mmr::Proof;
     use commonware_cryptography::sha256;
     use futures::channel::oneshot;
 

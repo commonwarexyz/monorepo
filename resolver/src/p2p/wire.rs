@@ -125,7 +125,7 @@ mod tests {
         let payload = Payload::<MockKey>::Response(Bytes::from("Hello, world!"));
         let original = Message { id: 4321, payload };
         let encoded = original.encode();
-        let decoded = Message::decode(encoded.clone()).unwrap();
+        let decoded = Message::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
