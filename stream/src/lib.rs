@@ -11,12 +11,12 @@ use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
-        dial_end, dial_start, listen_end, listen_start, Context, Msg1, Msg2, Msg3, RecvCipher,
-        SendCipher,
+        dial_end, dial_start, listen_end, listen_start, Context, Error as HandshakeError, Msg1,
+        Msg2, Msg3, RecvCipher, SendCipher,
     },
     Signer,
 };
-use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
+use commonware_runtime::{Clock, Sink, Stream};
 use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRngCore;
 use std::{future::Future, time::Duration};
@@ -27,66 +27,10 @@ use crate::utils::codec::{recv_frame, send_frame};
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
 pub enum Error {
-    // Handshake errors
-    #[error("handshake timeout")]
-    HandshakeTimeout,
-
-    // Hello errors
-    #[error("hello not for us")]
-    HelloNotForUs,
-    #[error("hello uses our public key")]
-    HelloUsesOurKey,
-    #[error("invalid signature")]
-    InvalidSignature,
-    #[error("timestamp too old: {0}")]
-    InvalidTimestampOld(u64),
-    #[error("timestamp too future: {0}")]
-    InvalidTimestampFuture(u64),
-    #[error("info continuation tag was invalid")]
-    InvalidInfoContinuationTag,
-
-    // Confirmation errors
-    #[error("shared secret was not contributory")]
-    SharedSecretNotContributory,
-    #[error("cipher creation failed")]
-    CipherCreation,
-    #[error("HKDF expansion failed")]
-    HKDFExpansion,
-    #[error("key confirmation failed")]
-    ConfirmationFailed,
-    #[error("invalid key confirmation")]
-    InvalidConfirmation,
-
-    // Connection errors
-    #[error("cannot dial self")]
-    DialSelf,
-    #[error("wrong peer")]
-    WrongPeer,
-    #[error("recv failed")]
-    RecvFailed(RuntimeError),
-    #[error("recv too large: {0} bytes")]
-    RecvTooLarge(usize),
-    #[error("send failed")]
-    SendFailed(RuntimeError),
-    #[error("send zero size")]
-    SendZeroSize,
-    #[error("send too large: {0} bytes")]
-    SendTooLarge(usize),
-    #[error("connection closed")]
-    StreamClosed,
-
-    // Encryption errors
-    #[error("nonce overflow")]
-    NonceOverflow,
-    #[error("encryption failed")]
-    EncryptionFailed,
-    #[error("decryption failed")]
-    DecryptionFailed,
-
-    // Codec errors
+    #[error("handshake error: {0}")]
+    HandshakeError(HandshakeError),
     #[error("unable to decode: {0}")]
     UnableToDecode(CodecError),
-
     #[error("peer rejected: {0:X?}")]
     PeerRejected(Vec<u8>),
 }
@@ -94,6 +38,12 @@ pub enum Error {
 impl From<CodecError> for Error {
     fn from(value: CodecError) -> Self {
         Self::UnableToDecode(value)
+    }
+}
+
+impl From<HandshakeError> for Error {
+    fn from(value: HandshakeError) -> Self {
+        Self::HandshakeError(value)
     }
 }
 
@@ -163,7 +113,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     let msg2_bytes = recv_frame(&mut stream, config.max_message_size).await?;
     let msg2 = Msg2::<S::Signature>::decode(msg2_bytes)?;
 
-    let (msg3, send, recv) = dial_end(state, msg2).expect("FIXME");
+    let (msg3, send, recv) = dial_end(state, msg2)?;
     send_frame(&mut sink, &msg3.encode(), config.max_message_size).await?;
 
     Ok((
@@ -201,14 +151,13 @@ pub async fn listen<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
         &mut ctx,
         Context::new(current_time, config.signing_key, peer.clone()),
         msg1,
-    )
-    .expect("FIXME");
+    )?;
     send_frame(&mut sink, &msg2.encode(), config.max_message_size).await?;
 
     let msg3_bytes = recv_frame(&mut stream, config.max_message_size).await?;
     let msg3 = Msg3::decode(msg3_bytes)?;
 
-    let (send, recv) = listen_end(state, msg3).expect("FIXME");
+    let (send, recv) = listen_end(state, msg3)?;
 
     Ok((
         peer,
@@ -233,7 +182,7 @@ pub struct Sender<O> {
 
 impl<O: Sink> Sender<O> {
     pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        let c = self.cipher.send(msg);
+        let c = self.cipher.send(msg)?;
         send_frame(&mut self.sink, &c, self.max_message_size).await?;
         Ok(())
     }
@@ -248,6 +197,6 @@ pub struct Receiver<I> {
 impl<I: Stream> Receiver<I> {
     pub async fn recv(&mut self) -> Result<Bytes, Error> {
         let c = recv_frame(&mut self.stream, self.max_message_size).await?;
-        Ok(self.cipher.recv(&c).into())
+        Ok(self.cipher.recv(&c)?.into())
     }
 }

@@ -6,6 +6,9 @@ use crate::{
     PublicKey, Signer, Verifier,
 };
 
+mod error;
+pub use error::Error;
+
 mod key_exchange;
 use key_exchange::{EphemeralPublicKey, SecretKey};
 
@@ -186,7 +189,7 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 pub fn dial_end<P: PublicKey>(
     state: DialState<P>,
     msg: Msg2<<P as Verifier>::Signature>,
-) -> Result<(Msg3, SendCipher, RecvCipher), ()> {
+) -> Result<(Msg3, SendCipher, RecvCipher), Error> {
     let DialState {
         esk,
         peer_identity,
@@ -197,10 +200,10 @@ pub fn dial_end<P: PublicKey>(
         .commit(msg.epk.encode())
         .verify(&peer_identity, &msg.sig)
     {
-        return Err(());
+        return Err(Error::HandshakeFailed);
     }
     let Some(secret) = esk.exchange(&msg.epk) else {
-        return Err(());
+        return Err(Error::HandshakeFailed);
     };
     transcript.commit(secret.as_ref());
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_L2D));
@@ -208,7 +211,7 @@ pub fn dial_end<P: PublicKey>(
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
     let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
     if msg.confirmation != confirmation_l2d {
-        return Err(());
+        return Err(Error::HandshakeFailed);
     }
 
     Ok((
@@ -224,7 +227,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
     rng: &mut impl CryptoRngCore,
     ctx: Context<S, P>,
     msg: Msg1<<P as Verifier>::Signature>,
-) -> Result<(ListenState, Msg2<<S as Signer>::Signature>), ()> {
+) -> Result<(ListenState, Msg2<<S as Signer>::Signature>), Error> {
     let Context {
         current_time,
         my_identity,
@@ -237,7 +240,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         .commit(msg.epk.encode())
         .verify(&peer_identity, &msg.sig)
     {
-        return Err(());
+        return Err(Error::HandshakeFailed);
     }
     let esk = SecretKey::new(rng);
     let epk = esk.public();
@@ -247,7 +250,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         .commit(epk.encode())
         .sign(&my_identity);
     let Some(secret) = esk.exchange(&msg.epk) else {
-        return Err(());
+        return Err(Error::HandshakeFailed);
     };
     transcript.commit(secret.as_ref());
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_L2D));
@@ -270,9 +273,9 @@ pub fn listen_start<S: Signer, P: PublicKey>(
     ))
 }
 
-pub fn listen_end(state: ListenState, msg: Msg3) -> Result<(SendCipher, RecvCipher), ()> {
+pub fn listen_end(state: ListenState, msg: Msg3) -> Result<(SendCipher, RecvCipher), Error> {
     if msg.confirmation != state.confirmation {
-        return Err(());
+        return Err(Error::HandshakeFailed);
     }
     Ok((state.send, state.recv))
 }
