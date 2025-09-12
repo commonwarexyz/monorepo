@@ -36,7 +36,7 @@ jobs:
             flags: ""
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Run ignored tests
@@ -69,7 +69,7 @@ jobs:
             benchmark_name: "commonware-coding"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Install nightly Rust toolchain
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Run setup
@@ -88,7 +88,7 @@ jobs:
         fuzz_dir: [codec/fuzz, coding/fuzz, collector/fuzz, cryptography/fuzz, runtime/fuzz, storage/fuzz, stream/fuzz, utils/fuzz]
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Install nightly Rust toolchain
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Get Rust version
@@ -98,7 +98,7 @@ jobs:
       uses: ./.github/actions/setup
     - name: Cache cargo-fuzz
       id: cargo-fuzz-cache
-      uses: actions/cache@v4
+      uses: actions/cache@b7a00a3203cfa62623760990f5171f9b4a2ab1a7 # v4.0.0
       with:
         path: ~/.cargo/bin/cargo-fuzz
         key: ${{ runner.os }}-${{ env.FUZZ_VERSION }}-cargo-fuzz-${{ steps.rust-version.outputs.rust_version }}
