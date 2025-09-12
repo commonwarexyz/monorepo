@@ -305,8 +305,8 @@ impl<const N: usize> BitMap<N> {
         for chunk in &mut self.chunks {
             chunk.fill(value);
         }
-        // Clear trailing bits to maintain invariant when setting to true
-        if value != 0 {
+        // Clear trailing bits to maintain invariant
+        if bit {
             self.clear_trailing_bits();
         }
     }
