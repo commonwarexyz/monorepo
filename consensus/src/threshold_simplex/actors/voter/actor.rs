@@ -1111,12 +1111,11 @@ impl<
     async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
         // Check to see if notarize is for proposal in view
         let view = notarize.view();
-        let round = self.current_round();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            round,
+            Rnd::new(self.epoch, view),
         ));
 
         // Handle notarize
@@ -1167,12 +1166,11 @@ impl<
     async fn handle_notarization(&mut self, notarization: Notarization<V, D>) {
         // Create round (if it doesn't exist)
         let view = notarization.view();
-        let round = self.current_round();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            round,
+            Rnd::new(self.epoch, view),
         ));
 
         // Store notarization
@@ -1229,7 +1227,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            Rnd::new(self.epoch, nullification.view()),
+            Rnd::new(self.epoch, view),
         ));
 
         // Store nullification

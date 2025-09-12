@@ -129,7 +129,7 @@ impl<
     pub async fn init(context: R, config: Config<V, P, Z, B>) -> (Self, Mailbox<V, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
-            partition_prefix: config.partition_prefix.clone(),
+            partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
             prunable_items_per_section: config.prunable_items_per_section,
             replay_buffer: config.replay_buffer,
             write_buffer: config.write_buffer,
@@ -201,7 +201,7 @@ impl<
                 ),
                 freezer_journal_target_size: config.freezer_journal_target_size,
                 freezer_journal_compression: config.freezer_journal_compression,
-                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: config.immutable_items_per_section,
                 codec_config: config.codec_config.clone(),
@@ -238,10 +238,10 @@ impl<
                 identity: config.identity,
                 mailbox_size: config.mailbox_size,
                 backfill_quota: config.backfill_quota,
-                namespace: config.namespace.clone(),
+                namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
-                codec_config: config.codec_config.clone(),
+                codec_config: config.codec_config,
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
                 cache,
@@ -375,13 +375,14 @@ impl<
                             // the request as we wouldn't know when to drop it, and the request may
                             // never complete if the block is not finalized.
                             if let Some(round) = round {
+                                // While this is unlikely to be necessary, we skip fetching blocks
+                                // for rounds that have already been finalized with something else.
                                 if round < self.last_processed_round {
                                     continue;
                                 }
-                                // Fetch from network
-                                //
-                                // If this is a valid view, this request should be fine to "keep
-                                // open" even if the oneshot is cancelled.
+                                // Attempt to fetch the block (with notarization) from the resolver.
+                                // If this is a valid view, this request should be fine to keep open
+                                // until resolution or pruning (even if the oneshot is canceled).
                                 debug!(?round, ?commitment, "requested block missing");
                                 resolver.fetch(Request::<B>::Notarized { round }).await;
                             }

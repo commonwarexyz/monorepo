@@ -97,7 +97,8 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         .expect("failed to initialize metadata");
 
         // Load metadata
-        let cached_epochs = metadata.get(&CACHED_EPOCHS_KEY).cloned().unwrap_or(vec![0]);
+        let cached_epochs: Vec<Epoch> =
+            metadata.get(&CACHED_EPOCHS_KEY).cloned().unwrap_or(vec![0]);
 
         // Restore cache from metadata
         let mut cache = Self {
@@ -188,7 +189,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     ) -> prunable::Archive<TwoCap, R, B::Commitment, T> {
         let start = Instant::now();
         let cfg = prunable::Config {
-            partition: format!("{}-cache-{name}-{epoch}", self.cfg.partition_prefix),
+            partition: format!("{}-cache-{epoch}-{name}", self.cfg.partition_prefix),
             translator: TwoCap,
             items_per_section: self.cfg.prunable_items_per_section,
             compression: None,
@@ -269,7 +270,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
                 debug!(?round, "{} cached", name);
             }
             Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(?round, "{} already pruned", name);
+                debug!(?round, name, "already pruned");
             }
             Err(e) => {
                 panic!("failed to insert {name}: {e}");
@@ -348,10 +349,10 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
                 notarizations: nv,
                 finalizations: fv,
             } = self.caches.remove(epoch).unwrap();
-            vb.close().await.expect("failed to destroy vb");
-            nb.close().await.expect("failed to destroy nb");
-            nv.close().await.expect("failed to destroy nv");
-            fv.close().await.expect("failed to destroy fv");
+            vb.destroy().await.expect("failed to destroy vb");
+            nb.destroy().await.expect("failed to destroy nb");
+            nv.destroy().await.expect("failed to destroy nv");
+            fv.destroy().await.expect("failed to destroy fv");
         }
 
         // Update metadata if necessary
