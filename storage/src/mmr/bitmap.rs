@@ -39,7 +39,7 @@ use tracing::{debug, error, warn};
 /// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
 /// limited to (u32::MAX * N * 8).
 pub struct MerkleizedBitMap<H: CHasher, const N: usize> {
-    /// The core bitmap functionality
+    /// The underlying bitmap.
     bitmap: BitMap<N>,
 
     /// The length of the bitmap range that is currently included in the `mmr`.
