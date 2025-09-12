@@ -1,15 +1,15 @@
 //! Types used in [crate::simplex].
 
-use crate::Viewable;
+use crate::{
+    types::{Epoch, View},
+    Epochable, Viewable,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifier};
 use commonware_utils::{quorum, union};
-
-/// View is a monotonically increasing counter that represents the current focus of consensus.
-pub type View = u64;
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current view and the parent payload that new proposals are built on.
@@ -25,6 +25,22 @@ pub struct Context<D: Digest> {
     /// payload (any view without a nullification may eventually be finalized and skipping
     /// it would result in a fork).
     pub parent: (View, D),
+}
+
+impl<D: Digest> Epochable for Context<D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.view
+    }
+}
+
+impl<D: Digest> Viewable for Context<D> {
+    type View = View;
+
+    fn view(&self) -> View {
+        self.view
+    }
 }
 
 /// Attributable is a trait that provides access to the signer index.

@@ -6,9 +6,10 @@ use crate::{
         types::{
             threshold, Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, View, Voter,
+            NullifyFinalize, Proposal, Voter,
         },
     },
+    types::{Epoch, View},
     Automaton, Relay, Reporter, Supervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{Digest, PublicKey, Signer};
@@ -333,6 +334,7 @@ pub struct Actor<
 
     genesis: Option<D>,
 
+    epoch: Epoch,
     namespace: Vec<u8>,
 
     leader_timeout: Duration,
@@ -425,6 +427,7 @@ impl<
 
                 genesis: None,
 
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
                 leader_timeout: cfg.leader_timeout,
@@ -1691,7 +1694,7 @@ impl<
         let (mut sender, mut receiver) = wrap(self.max_participants, sender, receiver);
 
         // Compute genesis
-        let genesis = self.automaton.genesis().await;
+        let genesis = self.automaton.genesis(self.epoch).await;
         self.genesis = Some(genesis);
 
         // Add initial view

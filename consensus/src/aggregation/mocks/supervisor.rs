@@ -1,4 +1,4 @@
-use crate::{aggregation::types::Epoch, Supervisor as S, ThresholdSupervisor as TS};
+use crate::{types::Epoch, Supervisor as S, ThresholdSupervisor as TS};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops::evaluate_all,

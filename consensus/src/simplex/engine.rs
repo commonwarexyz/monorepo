@@ -1,9 +1,9 @@
 use super::{
     actors::{resolver, voter},
     config::Config,
-    types::{Activity, Context, View},
+    types::{Activity, Context},
 };
-use crate::{Automaton, Relay, Reporter, Supervisor};
+use crate::{types::View, Automaton, Relay, Reporter, Supervisor};
 use commonware_cryptography::{Digest, Signer};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -57,6 +57,7 @@ impl<
                 supervisor: cfg.supervisor.clone(),
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
+                epoch: cfg.epoch,
                 namespace: cfg.namespace.clone(),
                 max_participants: cfg.max_participants,
                 leader_timeout: cfg.leader_timeout,

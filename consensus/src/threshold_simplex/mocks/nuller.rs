@@ -1,7 +1,8 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
-    threshold_simplex::types::{Finalize, Nullify, View, Voter},
+    threshold_simplex::types::{Finalize, Nullify, Voter},
+    types::{Epoch, View},
     ThresholdSupervisor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -16,6 +17,7 @@ use tracing::debug;
 
 pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
     pub supervisor: S,
+    pub epoch: Epoch,
     pub namespace: Vec<u8>,
 }
 
@@ -27,9 +29,7 @@ pub struct Nuller<
 > {
     context: E,
     supervisor: S,
-
     namespace: Vec<u8>,
-
     _hasher: PhantomData<H>,
     _variant: PhantomData<V>,
 }
@@ -45,9 +45,7 @@ impl<
         Self {
             context,
             supervisor: cfg.supervisor,
-
             namespace: cfg.namespace,
-
             _hasher: PhantomData,
             _variant: PhantomData,
         }
@@ -75,7 +73,7 @@ impl<
                     // Nullify
                     let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
-                    let n = Nullify::sign(&self.namespace, share, view);
+                    let n = Nullify::sign(&self.namespace, share, notarize.proposal.round);
                     let msg = Voter::<V, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 

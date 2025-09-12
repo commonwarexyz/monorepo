@@ -67,8 +67,8 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, types::Epoch, Config, Engine};
-    use crate::aggregation::mocks::Strategy;
+    use super::{mocks, Config, Engine};
+    use crate::{aggregation::mocks::Strategy, types::Epoch};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
