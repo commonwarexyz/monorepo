@@ -686,31 +686,25 @@ impl Tasks {
     /// Forcibly shutdown all tasks and clear the queue.
     /// This is called when the executor is dropped to prevent memory leaks.
     fn shutdown(&self) {
-        // Step 1: Clear the queue first to drop Arc<Task> references
-        // This is important because tasks in the queue hold strong references
-        self.queue.lock().unwrap().clear();
-        
-        // Step 2: Now mark all tasks as completed and drop their futures
-        // We do this after clearing the queue to avoid any re-enqueueing
-        {
-            let all_tasks = self.all_tasks.lock().unwrap();
-            for weak_task in all_tasks.iter() {
-                if let Some(task) = weak_task.upgrade() {
-                    // This means there's still a strong reference somewhere
-                    // Force-drop the future to break circular references
-                    if let Operation::Work { future, completed } = &task.operation {
-                        *completed.lock().unwrap() = true;
-                        *future.lock().unwrap() = None;
-                    }
-                }
+        // Step 1: Snapshot tasks to operate without holding locks during drops
+        let tasks: Vec<Arc<Task>> = {
+            let all = self.all_tasks.lock().unwrap();
+            all.iter().filter_map(|w| w.upgrade()).collect()
+        };
+
+        // Step 2: Mark tasks as completed and drop their futures to release captured resources
+        for task in tasks {
+            if let Operation::Work { future, completed } = &task.operation {
+                *completed.lock().unwrap() = true;
+                *future.lock().unwrap() = None;
             }
         }
-        
-        // Step 3: Clear all tracked weak references
-        // This frees the memory used by the weak reference vector
+
+        // Step 3: Clear the run queue and weak refs
+        self.queue.lock().unwrap().clear();
         self.all_tasks.lock().unwrap().clear();
-        
-        // Step 4: Reset all state to initial values
+
+        // Step 4: Reset counters
         *self.counter.lock().unwrap() = 0;
         *self.root_registered.lock().unwrap() = false;
     }
@@ -1069,8 +1063,8 @@ impl crate::Metrics for Context {
             name,
             spawned: false,
             executor: self.executor.clone(),
-            // Preserve owner for labeled contexts; tasks use detached() to avoid cycles
-            owner: self.owner.clone(),
+            // Labeled contexts are intended for subcomponents; do not keep a strong owner
+            owner: None,
             network: self.network.clone(),
             storage: self.storage.clone(),
             metrics: self.metrics.clone(),
