@@ -10,7 +10,7 @@ use crate::{authenticated::Mailbox, Channel};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
-use commonware_stream::public_key;
+use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
@@ -134,8 +134,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
 
         // Start listener
-        let stream_cfg = public_key::Config {
-            crypto: self.cfg.crypto,
+        let stream_cfg = StreamConfig {
+            signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
             max_message_size: self.cfg.max_message_size + types::MAX_PAYLOAD_DATA_OVERHEAD,
             synchrony_bound: self.cfg.synchrony_bound,

@@ -11,9 +11,6 @@ pub async fn send_frame<S: Sink>(
 ) -> Result<(), Error> {
     // Validate frame size
     let n = buf.len();
-    if n == 0 {
-        return Err(Error::SendZeroSize);
-    }
     if n > max_message_size {
         return Err(Error::SendTooLarge(n));
     }
@@ -134,18 +131,6 @@ mod tests {
 
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::SendTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
-        });
-    }
-
-    #[test]
-    fn test_send_zero_size() {
-        let (mut sink, _) = mocks::Channel::init();
-
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let buf = [];
-            let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
-            assert!(matches!(&result, Err(Error::SendZeroSize)));
         });
     }
 
