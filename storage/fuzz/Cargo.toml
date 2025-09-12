@@ -12,7 +12,7 @@ cargo-fuzz = true
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-runtime = { workspace = true }
-commonware-storage = { workspace = true }
+commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
