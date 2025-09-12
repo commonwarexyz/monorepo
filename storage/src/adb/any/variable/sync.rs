@@ -132,13 +132,11 @@ where
         // Create the database instance
         let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
         let (log, metadata) = journal.into_inner();
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
         let db = any::variable::Any {
             mmr,
             log,
             log_size: upper_bound + 1,
             inactivity_floor_loc: lower_bound,
-            oldest_retained_loc,
             metadata,
             locations,
             log_items_per_section: db_config.log_items_per_section.get(),
@@ -1766,7 +1764,10 @@ mod tests {
 
             // Verify oldest retained location matches the sync lower bound
             // (synced database should only retain operations from lower_bound onwards)
-            assert_eq!(got_db.oldest_retained_loc, target_inactivity_floor);
+            assert_eq!(
+                read_oldest_retained_loc(&got_db.metadata),
+                target_inactivity_floor
+            );
 
             // Verify root hashes match (already checked in sync engine, but let's be explicit)
             let mut target_hasher = crate::mmr::hasher::Standard::<Sha256>::new();

@@ -147,9 +147,6 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
     /// are over keys that have been updated by some operation at or after this point).
     inactivity_floor_loc: u64,
 
-    /// The location of the oldest operation in the log that remains readable.
-    oldest_retained_loc: u64,
-
     /// Metadata that stores the oldest retained location in the log.
     /// This is needed because state sync may cause the first log section to be populated only
     /// after some offset into it.
@@ -238,15 +235,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        // Restore oldest_retained_loc from metadata or default to 0
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata);
-
         let db = Self {
             mmr,
             log,
             log_size: 0,             // Updated in build_snapshot_from_log
             inactivity_floor_loc: 0, // Updated in build_snapshot_from_log
-            oldest_retained_loc,
             metadata,
             locations,
             log_items_per_section: cfg.log_items_per_section.get(),
@@ -277,7 +270,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut after_last_commit = None;
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
-        let mut current_loc = self.oldest_retained_loc;
+        let mut current_loc = read_oldest_retained_loc(&self.metadata);
         let expected_first_section = current_loc / self.log_items_per_section;
         let mut warned_about_first_section = false;
 
@@ -422,7 +415,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Panics if `loc` is greater than or equal to the number of operations in the log.
     pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
         assert!(loc < self.op_count());
-        if loc < self.oldest_retained_loc {
+        if loc < read_oldest_retained_loc(&self.metadata) {
             return Err(Error::OperationPruned(loc));
         }
 
@@ -534,7 +527,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         if self.log_size == 0 {
             None
         } else {
-            Some(self.oldest_retained_loc)
+            Some(read_oldest_retained_loc(&self.metadata))
         }
     }
 
@@ -799,7 +792,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
         assert!(target_prune_loc <= self.inactivity_floor_loc);
-        if target_prune_loc <= self.oldest_retained_loc {
+        if target_prune_loc <= read_oldest_retained_loc(&self.metadata) {
             return Ok(());
         }
 
@@ -823,7 +816,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // * All log operations always have corresponding MMR & location entries,
         let section_with_target = target_prune_loc / self.log_items_per_section;
         let new_oldest_retained_loc = section_with_target * self.log_items_per_section;
-        if new_oldest_retained_loc <= self.oldest_retained_loc {
+        if new_oldest_retained_loc <= read_oldest_retained_loc(&self.metadata) {
             // Only update the persisted oldest retained location if it has changed.
             // This if statement handles the case where state sync finishes with the
             // oldest_retained_loc in the middle of the first populated section, and then
@@ -836,21 +829,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         write_oldest_retained_loc(&mut self.metadata, new_oldest_retained_loc);
         self.metadata.sync().await?;
         assert!(self.log.prune(section_with_target).await?);
-        self.oldest_retained_loc = new_oldest_retained_loc;
 
         debug!(
             log_size = self.log_size,
-            oldest_retained_loc = self.oldest_retained_loc,
+            oldest_retained_loc = new_oldest_retained_loc,
             "pruned inactive ops"
         );
 
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         try_join!(
             self.locations
-                .prune(self.oldest_retained_loc)
+                .prune(new_oldest_retained_loc)
                 .map_err(Error::Journal),
             self.mmr
-                .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
+                .prune_to_pos(&mut self.hasher, leaf_num_to_pos(new_oldest_retained_loc))
                 .map_err(Error::Mmr),
         )?;
 
