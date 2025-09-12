@@ -1,3 +1,5 @@
+use core::ops::Range;
+
 use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
 use rand_core::CryptoRngCore;
 
@@ -130,6 +132,7 @@ pub struct DialState<P> {
     esk: SecretKey,
     peer_identity: P,
     transcript: Transcript,
+    ok_timestamps: Range<u64>,
 }
 
 pub struct ListenState {
@@ -140,14 +143,21 @@ pub struct ListenState {
 
 pub struct Context<S, P> {
     current_time: u64,
+    ok_timestamps: Range<u64>,
     my_identity: S,
     peer_identity: P,
 }
 
 impl<S, P> Context<S, P> {
-    pub fn new(current_time_ms: u64, my_identity: S, peer_identity: P) -> Self {
+    pub fn new(
+        current_time_ms: u64,
+        ok_timestamps: Range<u64>,
+        my_identity: S,
+        peer_identity: P,
+    ) -> Self {
         Self {
             current_time: current_time_ms,
+            ok_timestamps,
             my_identity,
             peer_identity,
         }
@@ -160,6 +170,7 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 ) -> (DialState<P>, Msg1<<S as Signer>::Signature>) {
     let Context {
         current_time,
+        ok_timestamps,
         my_identity,
         peer_identity,
     } = ctx;
@@ -177,6 +188,7 @@ pub fn dial_start<S: Signer, P: PublicKey>(
             esk,
             peer_identity,
             transcript,
+            ok_timestamps,
         },
         Msg1 {
             time_ms: current_time,
@@ -194,7 +206,11 @@ pub fn dial_end<P: PublicKey>(
         esk,
         peer_identity,
         mut transcript,
+        ok_timestamps,
     } = state;
+    if !ok_timestamps.contains(&msg.time_ms) {
+        return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
+    }
     if !transcript
         .commit(msg.time_ms.encode())
         .commit(msg.epk.encode())
@@ -232,7 +248,11 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         current_time,
         my_identity,
         peer_identity,
+        ok_timestamps,
     } = ctx;
+    if !ok_timestamps.contains(&msg.time_ms) {
+        return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
+    }
     let mut transcript = Transcript::new(NAMESPACE);
     if !transcript
         .commit(msg.time_ms.encode())
