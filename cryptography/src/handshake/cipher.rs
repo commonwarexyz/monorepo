@@ -38,7 +38,7 @@ impl SendCipher {
     pub fn send(&mut self, data: &[u8]) -> Vec<u8> {
         self.inner
             .encrypt((&self.nonce.inc()[..12]).into(), data)
-            .unwrap()
+            .expect("FIXME")
     }
 }
 
@@ -60,6 +60,6 @@ impl RecvCipher {
     pub fn recv(&mut self, encrypted_data: &[u8]) -> Vec<u8> {
         self.inner
             .decrypt((&self.nonce.inc()[..12]).into(), encrypted_data)
-            .unwrap()
+            .expect("FIXME")
     }
 }
