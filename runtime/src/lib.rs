@@ -1538,6 +1538,60 @@ mod tests {
         });
     }
 
+    fn test_circular_reference_prevents_cleanup<R: Runner>(runner: R) {
+        runner.start(|_| async move {
+            // Setup tracked resource
+            let dropper = Arc::new(());
+            let executor = deterministic::Runner::default();
+            executor.start({
+                let dropper = dropper.clone();
+                move |context| async move {
+                    // Create tasks with circular dependencies through channels
+                    let (mut setup_tx, mut setup_rx) = mpsc::unbounded::<()>();
+                    let (mut tx1, mut rx1) = mpsc::unbounded::<()>();
+                    let (mut tx2, mut rx2) = mpsc::unbounded::<()>();
+
+                    // Task 1 holds tx2 and waits on rx1
+                    context.with_label("task1").spawn({
+                        let mut setup_tx = setup_tx.clone();
+                        let dropper = dropper.clone();
+                        move |_| async move {
+                            // Setup deadlock and mark ready
+                            tx2.send(()).await.unwrap();
+                            rx1.next().await.unwrap();
+                            setup_tx.send(()).await.unwrap();
+
+                            // Wait forever
+                            while rx1.next().await.is_some() {}
+                            drop(tx2);
+                            drop(dropper);
+                        }
+                    });
+
+                    // Task 2 holds tx1 and waits on rx2
+                    context.with_label("task2").spawn(move |_| async move {
+                        // Setup deadlock and mark ready
+                        tx1.send(()).await.unwrap();
+                        rx2.next().await.unwrap();
+                        setup_tx.send(()).await.unwrap();
+
+                        // Wait forever
+                        while rx2.next().await.is_some() {}
+                        drop(tx1);
+                        drop(dropper);
+                    });
+
+                    // Wait for tasks to start
+                    setup_rx.next().await.unwrap();
+                    setup_rx.next().await.unwrap();
+                }
+            });
+
+            // After runtime drop, both tasks should be cleaned up
+            Arc::try_unwrap(dropper).expect("references remaining");
+        });
+    }
+
     fn test_metrics<R: Runner>(runner: R)
     where
         R::Context: Metrics,
@@ -1803,6 +1857,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_circular_reference_prevents_cleanup() {
+        let executor = deterministic::Runner::default();
+        test_circular_reference_prevents_cleanup(executor);
+    }
+
+    #[test]
     fn test_deterministic_metrics() {
         let executor = deterministic::Runner::default();
         test_metrics(executor);
@@ -2033,6 +2093,12 @@ mod tests {
             let executor = tokio::Runner::default();
             test_spawn_blocking_ref_duplicate(executor, dedicated);
         }
+    }
+
+    #[test]
+    fn test_tokio_circular_reference_prevents_cleanup() {
+        let executor = tokio::Runner::default();
+        test_circular_reference_prevents_cleanup(executor);
     }
 
     #[test]

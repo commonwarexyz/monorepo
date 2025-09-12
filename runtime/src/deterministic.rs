@@ -233,6 +233,28 @@ pub struct Executor {
     recovered: Mutex<bool>,
 }
 
+impl Drop for Executor {
+    fn drop(&mut self) {
+        // Force shutdown in a specific order to break all circular references
+
+        // Step 1: Clear sleeping tasks to drop any wakers
+        self.sleeping.lock().unwrap().clear();
+
+        // Step 2: Mark executor as finished to prevent new tasks
+        *self.finished.lock().unwrap() = true;
+
+        // Step 3: Shutdown all tasks to break circular references
+        self.tasks.shutdown();
+
+        // Step 4: Clear all partitions
+        self.partitions.lock().unwrap().clear();
+
+        // Note: If this Drop is not being called, it means there are still
+        // Arc<Executor> references being held somewhere, likely by contexts
+        // captured in futures or wakers stored in channels.
+    }
+}
+
 enum State {
     Config(Config),
     Context(Context),
@@ -309,7 +331,7 @@ impl crate::Runner for Runner {
         };
 
         // Pin root task to the heap
-        let executor = context.executor.clone();
+        let executor = context.executor();
         let mut root = Box::pin(f(context));
 
         // Register the root task
@@ -374,10 +396,17 @@ impl crate::Runner for Runner {
                         }
 
                         // Poll the task
-                        let mut fut = future.lock().unwrap();
-                        if fut.as_mut().poll(&mut cx).is_ready() {
-                            trace!(id = task.id, "task is complete");
-                            *completed.lock().unwrap() = true;
+                        let mut fut_opt = future.lock().unwrap();
+                        if let Some(ref mut fut) = *fut_opt {
+                            if fut.as_mut().poll(&mut cx).is_ready() {
+                                trace!(id = task.id, "task is complete");
+                                *completed.lock().unwrap() = true;
+                                // Drop the future to free memory
+                                *fut_opt = None;
+                                continue;
+                            }
+                        } else {
+                            // Future was already dropped, skip
                             continue;
                         }
                     }
@@ -458,7 +487,7 @@ impl crate::Runner for Runner {
 enum Operation {
     Root,
     Work {
-        future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+        future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
         completed: Mutex<bool>,
     },
 }
@@ -488,6 +517,8 @@ struct Tasks {
     counter: Mutex<u128>,
     /// The queue of tasks that are waiting to be executed.
     queue: Mutex<Vec<Arc<Task>>>,
+    /// All tasks that have been created (for cleanup on shutdown).
+    all_tasks: Mutex<Vec<Weak<Task>>>,
     /// Indicates whether the root task has been registered.
     root_registered: Mutex<bool>,
 }
@@ -498,6 +529,7 @@ impl Tasks {
         Self {
             counter: Mutex::new(0),
             queue: Mutex::new(Vec::new()),
+            all_tasks: Mutex::new(Vec::new()),
             root_registered: Mutex::new(false),
         }
     }
@@ -520,13 +552,22 @@ impl Tasks {
             *registered = true;
         }
         let id = arc_self.increment();
-        let mut queue = arc_self.queue.lock().unwrap();
-        queue.push(Arc::new(Task {
+        let task = Arc::new(Task {
             id,
             label: Label::root(),
             tasks: Arc::downgrade(arc_self),
             operation: Operation::Root,
-        }));
+        });
+
+        // Track this task for cleanup
+        arc_self
+            .all_tasks
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&task));
+
+        // Add to queue
+        arc_self.queue.lock().unwrap().push(task);
     }
 
     /// Register a new task to be executed.
@@ -536,20 +577,36 @@ impl Tasks {
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) {
         let id = arc_self.increment();
-        let mut queue = arc_self.queue.lock().unwrap();
-        queue.push(Arc::new(Task {
+        let task = Arc::new(Task {
             id,
             label,
             tasks: Arc::downgrade(arc_self),
             operation: Operation::Work {
-                future: Mutex::new(future),
+                future: Mutex::new(Some(future)),
                 completed: Mutex::new(false),
             },
-        }));
+        });
+
+        // Track this task for cleanup
+        arc_self
+            .all_tasks
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&task));
+
+        // Add to queue
+        arc_self.queue.lock().unwrap().push(task);
     }
 
     /// Enqueue an already registered task to be executed.
     fn enqueue(&self, task: Arc<Task>) {
+        // Don't enqueue completed tasks to prevent memory accumulation
+        if let Operation::Work { completed, .. } = &task.operation {
+            if *completed.lock().unwrap() {
+                return;
+            }
+        }
+
         let mut queue = self.queue.lock().unwrap();
         queue.push(task);
     }
@@ -565,6 +622,32 @@ impl Tasks {
     fn len(&self) -> usize {
         self.queue.lock().unwrap().len()
     }
+
+    /// Forcibly shutdown all tasks and clear the queue.
+    /// This is called when the executor is dropped to prevent memory leaks.
+    fn shutdown(&self) {
+        // Step 1: Snapshot tasks to operate without holding locks during drops
+        let tasks: Vec<Arc<Task>> = {
+            let all = self.all_tasks.lock().unwrap();
+            all.iter().filter_map(|w| w.upgrade()).collect()
+        };
+
+        // Step 2: Mark tasks as completed and drop their futures to release captured resources
+        for task in tasks {
+            if let Operation::Work { future, completed } = &task.operation {
+                *completed.lock().unwrap() = true;
+                *future.lock().unwrap() = None;
+            }
+        }
+
+        // Step 3: Clear the run queue and weak refs
+        self.queue.lock().unwrap().clear();
+        self.all_tasks.lock().unwrap().clear();
+
+        // Step 4: Reset counters
+        *self.counter.lock().unwrap() = 0;
+        *self.root_registered.lock().unwrap() = false;
+    }
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
@@ -575,9 +658,15 @@ type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 pub struct Context {
     name: String,
     spawned: bool,
-    executor: Arc<Executor>,
+    // Weak reference to break cycles when contexts are captured by futures
+    executor: Weak<Executor>,
+    // Root contexts hold a strong reference so recovery works after start() returns
+    owner: Option<Arc<Executor>>,
     network: Arc<Network>,
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
+    // Cache commonly-used handles to avoid upgrading Weak for simple access
+    metrics: Arc<Metrics>,
+    auditor: Arc<Auditor>,
     children: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
@@ -626,9 +715,12 @@ impl Context {
         Context {
             name: String::new(),
             spawned: false,
-            executor: executor.clone(),
+            executor: Arc::downgrade(&executor),
+            owner: Some(executor.clone()),
             network: Arc::new(network),
             storage,
+            metrics,
+            auditor,
             children: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -646,13 +738,14 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     pub fn recover(self) -> Self {
         // Ensure we are finished
-        if !*self.executor.finished.lock().unwrap() {
+        if !*self.executor().finished.lock().unwrap() {
             panic!("execution is not finished");
         }
 
         // Ensure runtime has not already been recovered
         {
-            let mut recovered = self.executor.recovered.lock().unwrap();
+            let exec = self.executor();
+            let mut recovered = exec.recovered.lock().unwrap();
             if *recovered {
                 panic!("runtime has already been recovered");
             }
@@ -665,18 +758,18 @@ impl Context {
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
-        let auditor = self.executor.auditor.clone();
+        let auditor = self.auditor.clone();
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
         let executor = Arc::new(Executor {
             // Copied from the current runtime
-            cycle: self.executor.cycle,
-            deadline: self.executor.deadline,
+            cycle: self.executor().cycle,
+            deadline: self.executor().deadline,
             auditor: auditor.clone(),
-            rng: Mutex::new(self.executor.rng.lock().unwrap().clone()),
-            time: Mutex::new(*self.executor.time.lock().unwrap()),
-            partitions: Mutex::new(self.executor.partitions.lock().unwrap().clone()),
+            rng: Mutex::new(self.executor().rng.lock().unwrap().clone()),
+            time: Mutex::new(*self.executor().time.lock().unwrap()),
+            partitions: Mutex::new(self.executor().partitions.lock().unwrap().clone()),
 
             // New state for the new runtime
             registry: Mutex::new(registry),
@@ -690,15 +783,36 @@ impl Context {
         Self {
             name: String::new(),
             spawned: false,
-            executor,
+            executor: Arc::downgrade(&executor),
+            owner: Some(executor.clone()),
             network: Arc::new(network),
             storage: self.storage,
+            metrics,
+            auditor,
             children: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn auditor(&self) -> &Auditor {
-        &self.executor.auditor
+        &self.auditor
+    }
+
+    // Upgrade executor Weak reference; panic if unavailable
+    fn executor(&self) -> Arc<Executor> {
+        self.executor
+            .upgrade()
+            .expect("executor dropped while context still in use")
+    }
+
+    // Make a detached context without a strong Executor owner
+    fn detached(mut self) -> Self {
+        self.owner = None;
+        self
+    }
+
+    // Access metrics in a uniform way for macros
+    fn metrics_handle(&self) -> &Metrics {
+        &self.metrics
     }
 }
 
@@ -708,8 +822,12 @@ impl Clone for Context {
             name: self.name.clone(),
             spawned: false,
             executor: self.executor.clone(),
+            // Preserve owner for clones; tasks use detached() to avoid cycles
+            owner: self.owner.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            metrics: self.metrics.clone(),
+            auditor: self.auditor.clone(),
             children: self.children.clone(),
         }
     }
@@ -729,13 +847,14 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
-        let executor = self.executor.clone();
+        let executor = self.executor();
 
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
 
-        let future = f(self);
+        // Detach the context handed to the spawned task to avoid cycles
+        let future = f(self.detached());
         let (f, handle) = Handle::init_future(future, gauge, false, children);
 
         // Spawn the task
@@ -756,7 +875,7 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
-        let executor = self.executor.clone();
+        let executor = self.executor();
 
         move |f: F| {
             // Give spawned task its own empty children list
@@ -801,8 +920,8 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Initialize the blocking task
-        let executor = self.executor.clone();
-        let (f, handle) = Handle::init_blocking(|| f(self), gauge, false);
+        let executor = self.executor();
+        let (f, handle) = Handle::init_blocking(|| f(self.detached()), gauge, false);
 
         // Spawn the task
         let f = async move { f() };
@@ -823,7 +942,7 @@ impl crate::Spawner for Context {
         let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
-        let executor = self.executor.clone();
+        let executor = self.executor();
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, gauge, false);
 
@@ -835,12 +954,15 @@ impl crate::Spawner for Context {
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
-        self.executor.auditor.event(b"stop", |hasher| {
+        self.auditor.event(b"stop", |hasher| {
             hasher.update(value.to_be_bytes());
         });
-        let stop_resolved = {
-            let mut shutdown = self.executor.shutdown.lock().unwrap();
+        // If executor is already dropped, consider stop complete
+        let stop_resolved = if let Some(exec) = self.executor.upgrade() {
+            let mut shutdown = exec.shutdown.lock().unwrap();
             shutdown.stop(value)
+        } else {
+            return Ok(());
         };
 
         // Wait for all tasks to complete or the timeout to fire
@@ -860,8 +982,13 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.auditor.event(b"stopped", |_| {});
-        self.executor.shutdown.lock().unwrap().stopped()
+        self.auditor.event(b"stopped", |_| {});
+        if let Some(exec) = self.executor.upgrade() {
+            exec.shutdown.lock().unwrap().stopped()
+        } else {
+            // Executor already gone; treat as already stopped
+            Signal::Closed(0)
+        }
     }
 }
 
@@ -883,8 +1010,12 @@ impl crate::Metrics for Context {
             name,
             spawned: false,
             executor: self.executor.clone(),
+            // Labeled contexts are intended for subcomponents; do not keep a strong owner
+            owner: None,
             network: self.network.clone(),
             storage: self.storage.clone(),
+            metrics: self.metrics.clone(),
+            auditor: self.auditor.clone(),
             children: self.children.clone(),
         }
     }
@@ -899,7 +1030,7 @@ impl crate::Metrics for Context {
         let help = help.into();
 
         // Register metric
-        self.executor.auditor.event(b"register", |hasher| {
+        self.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
         });
@@ -911,23 +1042,26 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        self.executor
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric)
+        if let Some(exec) = self.executor.upgrade() {
+            exec.registry
+                .lock()
+                .unwrap()
+                .register(prefixed_name, help, metric)
+        }
     }
 
     fn encode(&self) -> String {
-        self.executor.auditor.event(b"encode", |_| {});
+        self.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
-        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        if let Some(exec) = self.executor.upgrade() {
+            encode(&mut buffer, &exec.registry.lock().unwrap()).expect("encoding failed");
+        }
         buffer
     }
 }
 
 struct Sleeper {
-    executor: Arc<Executor>,
+    executor: Weak<Executor>,
     time: SystemTime,
     registered: bool,
 }
@@ -962,26 +1096,35 @@ impl Future for Sleeper {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        {
-            let current_time = *self.executor.time.lock().unwrap();
-            if current_time >= self.time {
-                return Poll::Ready(());
+        if let Some(exec) = self.executor.upgrade() {
+            {
+                let current_time = *exec.time.lock().unwrap();
+                if current_time >= self.time {
+                    return Poll::Ready(());
+                }
             }
+            if !self.registered {
+                self.registered = true;
+                exec.sleeping.lock().unwrap().push(Alarm {
+                    time: self.time,
+                    waker: cx.waker().clone(),
+                });
+            }
+            Poll::Pending
+        } else {
+            // Executor dropped; treat sleep as complete
+            Poll::Ready(())
         }
-        if !self.registered {
-            self.registered = true;
-            self.executor.sleeping.lock().unwrap().push(Alarm {
-                time: self.time,
-                waker: cx.waker().clone(),
-            });
-        }
-        Poll::Pending
     }
 }
 
 impl Clock for Context {
     fn current(&self) -> SystemTime {
-        *self.executor.time.lock().unwrap()
+        if let Some(exec) = self.executor.upgrade() {
+            *exec.time.lock().unwrap()
+        } else {
+            UNIX_EPOCH
+        }
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
@@ -1029,31 +1172,52 @@ impl crate::Network for Context {
 
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
-        self.executor.auditor.event(b"rand", |hasher| {
+        self.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        self.executor.rng.lock().unwrap().next_u32()
+        if let Some(exec) = self.executor.upgrade() {
+            exec.rng.lock().unwrap().next_u32()
+        } else {
+            0
+        }
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.executor.auditor.event(b"rand", |hasher| {
+        self.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        self.executor.rng.lock().unwrap().next_u64()
+        if let Some(exec) = self.executor.upgrade() {
+            exec.rng.lock().unwrap().next_u64()
+        } else {
+            0
+        }
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.executor.auditor.event(b"rand", |hasher| {
+        self.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
-        self.executor.rng.lock().unwrap().fill_bytes(dest)
+        if let Some(exec) = self.executor.upgrade() {
+            exec.rng.lock().unwrap().fill_bytes(dest)
+        } else {
+            for b in dest.iter_mut() {
+                *b = 0;
+            }
+        }
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.executor.auditor.event(b"rand", |hasher| {
+        self.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        self.executor.rng.lock().unwrap().try_fill_bytes(dest)
+        if let Some(exec) = self.executor.upgrade() {
+            exec.rng.lock().unwrap().try_fill_bytes(dest)
+        } else {
+            for b in dest.iter_mut() {
+                *b = 0;
+            }
+            Ok(())
+        }
     }
 }
 
