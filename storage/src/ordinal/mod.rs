@@ -47,7 +47,7 @@
 //! synced until [Ordinal::sync] is called. As a result, data is not guaranteed to be atomically
 //! persisted (i.e. shutdown before [Ordinal::sync] may lead to some writes being lost).
 //!
-//! _If you want atomicity for sparse writes, pair [commonware_utils::BitVec] and
+//! _If you want atomicity for sparse writes, pair [commonware_utils::bitmap::BitMap] and
 //! [crate::metadata::Metadata] with [Ordinal] (use bits to indicate which items have been atomically
 //! written)._
 //!
@@ -137,7 +137,7 @@ mod tests {
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, BitVec, NZUsize, NZU64};
+    use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
@@ -1625,7 +1625,7 @@ mod tests {
 
             // Reinitialize with empty HashMap - should skip all sections
             {
-                let bits: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+                let bits: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
                 let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
                     context.clone(),
                     cfg.clone(),
@@ -1680,16 +1680,16 @@ mod tests {
 
             // Reinitialize with bits for only section 1
             {
-                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+                let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
 
-                // Create a BitVec that marks indices 12, 15, and 18 as present
-                let mut bitvec = BitVec::zeroes(10);
-                bitvec.set(2); // Index 12 (offset 2 in section 1)
-                bitvec.set(5); // Index 15 (offset 5 in section 1)
-                bitvec.set(8); // Index 18 (offset 8 in section 1)
-                let bitvec_option = Some(bitvec);
+                // Create a BitMap that marks indices 12, 15, and 18 as present
+                let mut bitmap = BitMap::zeroes(10);
+                bitmap.set(2, true); // Index 12 (offset 2 in section 1)
+                bitmap.set(5, true); // Index 15 (offset 5 in section 1)
+                bitmap.set(8, true); // Index 18 (offset 8 in section 1)
+                let bitmap_option = Some(bitmap);
 
-                bits_map.insert(1, &bitvec_option);
+                bits_map.insert(1, &bitmap_option);
 
                 let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
                     context.clone(),
@@ -1766,8 +1766,8 @@ mod tests {
 
             // Reinitialize with None option for section 1 (expects all records)
             {
-                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
-                let none_option: Option<BitVec> = None;
+                let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
+                let none_option: Option<BitMap> = None;
                 bits_map.insert(1, &none_option);
 
                 let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
@@ -1822,8 +1822,8 @@ mod tests {
             // Reinitialize with None option for section 1 (expects all records)
             // This should panic because index 6 is missing
             {
-                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
-                let none_option: Option<BitVec> = None;
+                let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
+                let none_option: Option<BitMap> = None;
                 bits_map.insert(1, &none_option);
 
                 let _store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
@@ -1875,19 +1875,19 @@ mod tests {
 
             // Reinitialize with mixed bits configuration
             {
-                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+                let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
 
                 // Section 0: None option (expects all records)
-                let none_option: Option<BitVec> = None;
+                let none_option: Option<BitMap> = None;
                 bits_map.insert(0, &none_option);
 
-                // Section 1: BitVec with specific indices
-                let mut bitvec1 = BitVec::zeroes(5);
-                bitvec1.set(0); // Index 5
-                bitvec1.set(2); // Index 7
-                                // Note: not setting bit for index 9, so it should be ignored
-                let bitvec1_option = Some(bitvec1);
-                bits_map.insert(1, &bitvec1_option);
+                // Section 1: BitMap with specific indices
+                let mut bitmap1 = BitMap::zeroes(5);
+                bitmap1.set(0, true); // Index 5
+                bitmap1.set(2, true); // Index 7
+                                      // Note: not setting bit for index 9, so it should be ignored
+                let bitmap1_option = Some(bitmap1);
+                bits_map.insert(1, &bitmap1_option);
 
                 // Section 2: Not in map, should be skipped entirely
 
@@ -1913,7 +1913,7 @@ mod tests {
                 assert!(store.has(7));
                 assert!(!store.has(6));
                 assert!(!store.has(8));
-                assert!(!store.has(9)); // Not set in bitvec
+                assert!(!store.has(9)); // Not set in bitmap
 
                 // No records from section 2 should be available
                 for i in 10..15 {
@@ -1964,15 +1964,15 @@ mod tests {
 
             // Reinitialize with bits that include the corrupted record
             {
-                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+                let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
 
-                // Create a BitVec that includes the corrupted record
-                let mut bitvec = BitVec::zeroes(5);
-                bitvec.set(0); // Index 0
-                bitvec.set(2); // Index 2 (corrupted) - this will cause a panic
-                bitvec.set(4); // Index 4
-                let bitvec_option = Some(bitvec);
-                bits_map.insert(0, &bitvec_option);
+                // Create a BitMap that includes the corrupted record
+                let mut bitmap = BitMap::zeroes(5);
+                bitmap.set(0, true); // Index 0
+                bitmap.set(2, true); // Index 2 (corrupted) - this will cause a panic
+                bitmap.set(4, true); // Index 4
+                let bitmap_option = Some(bitmap);
+                bits_map.insert(0, &bitmap_option);
 
                 let _store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
                     context.clone(),

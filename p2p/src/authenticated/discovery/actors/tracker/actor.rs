@@ -284,7 +284,7 @@ mod tests {
         deterministic::{self, Context},
         Clock, Runner,
     };
-    use commonware_utils::{BitVec as UtilsBitVec, NZU32};
+    use commonware_utils::{bitmap::BitMap, NZU32};
     use futures::future::Either;
     use governor::Quota;
     use std::{
@@ -589,7 +589,7 @@ mod tests {
             let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::test();
             let bit_vec_unknown_idx = types::BitVec {
                 index: 99,
-                bits: UtilsBitVec::ones(1),
+                bits: BitMap::ones(1),
             };
 
             let _r1 = connect_to_peer(
@@ -744,11 +744,11 @@ mod tests {
                 connect_to_peer(&mut mailbox, &pk2, &peer_mailbox_s2, &mut peer_receiver_s2).await;
 
             // Act as if pk1 received a bit vector where pk2 is not known.
-            let mut bv = UtilsBitVec::zeroes(set1.len());
+            let mut bv = BitMap::zeroes(set1.len());
             let idx_tracker_in_set1 = set1.iter().position(|p| p == &tracker_pk).unwrap();
             let idx_pk1_in_set1 = set1.iter().position(|p| p == &pk1).unwrap();
-            bv.set(idx_tracker_in_set1);
-            bv.set(idx_pk1_in_set1);
+            bv.set(idx_tracker_in_set1, true);
+            bv.set(idx_pk1_in_set1, true);
             mailbox
                 .bit_vec(
                     types::BitVec { index: 1, bits: bv },
@@ -831,14 +831,14 @@ mod tests {
 
             let mut sorted_set0_peers = peer_set_0_peers.clone();
             sorted_set0_peers.sort();
-            let mut knowledge_for_set0 = UtilsBitVec::zeroes(sorted_set0_peers.len());
+            let mut knowledge_for_set0 = BitMap::zeroes(sorted_set0_peers.len());
             let idx_tracker_in_set0 = sorted_set0_peers
                 .iter()
                 .position(|p| p == &tracker_pk)
                 .unwrap();
             let idx_pk1_in_set0 = sorted_set0_peers.iter().position(|p| p == &pk1).unwrap();
-            knowledge_for_set0.set(idx_tracker_in_set0);
-            knowledge_for_set0.set(idx_pk1_in_set0);
+            knowledge_for_set0.set(idx_tracker_in_set0, true);
+            knowledge_for_set0.set(idx_pk1_in_set0, true);
 
             let bit_vec_from_pk1 = types::BitVec {
                 index: 0,
@@ -1155,7 +1155,7 @@ mod tests {
             let (peer_mailbox, mut peer_receiver) = Mailbox::test();
             let invalid_bit_vec = types::BitVec {
                 index: 0,
-                bits: UtilsBitVec::ones(2),
+                bits: BitMap::ones(2),
             };
             mailbox.bit_vec(invalid_bit_vec, peer_mailbox.clone()).await;
             assert!(matches!(
@@ -1212,7 +1212,7 @@ mod tests {
             assert_eq!(bit_vec0.bits.len(), set0_peers.len());
             let tracker_idx_s0 = set0_peers.iter().position(|p| p == &tracker_pk).unwrap();
             assert!(
-                bit_vec0.bits.get(tracker_idx_s0).unwrap(),
+                bit_vec0.bits.get(tracker_idx_s0),
                 "Tracker should know itself in set 0"
             );
 
@@ -1238,16 +1238,16 @@ mod tests {
                 _ => panic!("Expected updated BitVec for set 0"),
             };
             let peer1_idx_s0 = set0_peers.iter().position(|p| p == &peer1_pk).unwrap();
-            assert!(bit_vec0_updated.bits.get(tracker_idx_s0).unwrap());
+            assert!(bit_vec0_updated.bits.get(tracker_idx_s0));
             assert!(
-                bit_vec0_updated.bits.get(peer1_idx_s0).unwrap(),
+                bit_vec0_updated.bits.get(peer1_idx_s0),
                 "Tracker should know peer1 in set 0 after Peers msg"
             );
 
             // --- Peer1 sends BitVec for set 0, indicating it only knows tracker ---
             // Tracker should respond with PeerInfo for peer1_pk (as it just learned it)
-            let mut peer1_knowledge_s0 = UtilsBitVec::zeroes(set0_peers.len());
-            peer1_knowledge_s0.set(tracker_idx_s0); // Peer1 knows tracker
+            let mut peer1_knowledge_s0 = BitMap::zeroes(set0_peers.len());
+            peer1_knowledge_s0.set(tracker_idx_s0, true); // Peer1 knows tracker
             mailbox
                 .bit_vec(
                     types::BitVec {
