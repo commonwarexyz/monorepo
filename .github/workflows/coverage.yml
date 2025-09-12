@@ -43,7 +43,10 @@ jobs:
       run: |
         sed -i.bak '/fuzz/d' Cargo.toml
     - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@cargo-llvm-cov@b6e0e800275831ad121eb9bdb0c52635d36da3d4 # v0.6.19
+      uses: taiki-e/install-action@b6e0e800275831ad121eb9bdb0c52635d36da3d4 # v0.6.19
+      with:
+        tool: cargo-llvm-cov@0.6.19
+
     - name: Generate coverage report
       run: cargo llvm-cov --workspace --lcov --output-path lcov.info -- --include-ignored
     - name: Upload coverage to Codecov
