@@ -44,7 +44,7 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use rand::{CryptoRng, Rng, RngCore};
+use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -150,7 +150,7 @@ impl crate::Signer for PrivateKey {
 }
 
 impl PrivateKeyExt for PrivateKey {
-    fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self {
+    fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self {
         let (private, _) = ops::keypair::<_, MinPk>(rng);
         let raw = private.encode_fixed();
         Self { raw, key: private }
@@ -385,7 +385,7 @@ impl BatchVerifier<PublicKey> for Batch {
         true
     }
 
-    fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool {
+    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
         MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures).is_ok()
     }
 }

@@ -99,7 +99,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         let mut intervals = RMap::new();
         {
             debug!("initializing cache");
-            let stream = journal.replay(cfg.replay_buffer).await?;
+            let stream = journal.replay(0, 0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
@@ -160,14 +160,18 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         let record = self
             .journal
             .get_exact(section, location.offset, location.len)
-            .await?
-            .ok_or(Error::RecordCorrupted)?;
+            .await?;
         Ok(Some(record.value))
     }
 
     /// Retrieve the next gap in the [Cache].
     pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.intervals.next_gap(index)
+    }
+
+    /// Returns the first index in the [Cache].
+    pub fn first(&self) -> Option<u64> {
+        self.intervals.iter().next().map(|(&start, _)| start)
     }
 
     /// Get up to the next `max` missing items after `start`.

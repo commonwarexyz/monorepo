@@ -8,11 +8,11 @@ use commonware_storage::{
         self,
         immutable::{self, Config},
     },
-    mmr::{hasher::Standard, verification::Proof},
+    mmr::{Proof, StandardHasher as Standard},
     store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
-use std::future::Future;
+use std::{future::Future, num::NonZeroU64};
 
 /// Database type alias.
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
@@ -119,7 +119,7 @@ where
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
         self.historical_proof(size, start_loc, max_ops)
     }

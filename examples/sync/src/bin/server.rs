@@ -8,7 +8,7 @@ use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
     Storage, StreamOf,
 };
-use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
+use commonware_storage::{adb::sync::Target, mmr::StandardHasher as Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{self},
@@ -24,6 +24,7 @@ use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
     net::{Ipv4Addr, SocketAddr},
+    num::NonZeroU64,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -198,6 +199,8 @@ where
     // Calculate how many operations to return
     let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
+    let max_ops =
+        NonZeroU64::new(max_ops).expect("max_ops cannot be zero since start_loc < db_size");
 
     debug!(
         request_id = request.request_id,

@@ -4,9 +4,9 @@ use crate::Key;
 use commonware_codec::{Encode, Read};
 use commonware_storage::{
     adb,
-    mmr::{hasher::Standard, verification::Proof},
+    mmr::{Proof, StandardHasher as Standard},
 };
-use std::future::Future;
+use std::{future::Future, num::NonZeroU64};
 
 pub mod any;
 pub mod immutable;
@@ -72,7 +72,7 @@ pub trait Syncable {
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send;
 
     /// Get the database type name for logging.

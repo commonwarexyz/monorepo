@@ -5,11 +5,11 @@ use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
     adb::{self, any::fixed},
-    mmr::{hasher::Standard, verification::Proof},
+    mmr::{Proof, StandardHasher as Standard},
     store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
-use std::future::Future;
+use std::{future::Future, num::NonZeroU64};
 
 /// Database type alias.
 pub type Database<E> = fixed::Any<E, Key, Value, Hasher, Translator>;
@@ -30,7 +30,6 @@ pub fn create_config() -> fixed::Config<Translator> {
         translator: Translator::default(),
         thread_pool: None,
         buffer_pool: buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-        pruning_delay: 1024,
     }
 }
 
@@ -108,7 +107,7 @@ where
         &self,
         size: u64,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
         self.historical_proof(size, start_loc, max_ops)
     }

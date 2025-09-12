@@ -30,7 +30,7 @@ use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
@@ -40,15 +40,9 @@ pub type CoreSha256 = ISha256;
 const DIGEST_LENGTH: usize = 32;
 
 /// SHA-256 hasher.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Sha256 {
     hasher: ISha256,
-}
-
-impl Default for Sha256 {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Clone for Sha256 {
@@ -68,12 +62,6 @@ impl Sha256 {
 
 impl Hasher for Sha256 {
     type Digest = Digest;
-
-    fn new() -> Self {
-        Self {
-            hasher: ISha256::new(),
-        }
-    }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
@@ -156,7 +144,7 @@ impl Display for Digest {
 }
 
 impl crate::Digest for Digest {
-    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self {
+    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)
