@@ -800,9 +800,9 @@ impl Link {
         max_size: usize,
         received_messages: Family<metrics::Message, Counter>,
     ) -> Self {
-        let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes, SystemTime)>();
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
+        let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes, SystemTime)>();
         context
             .clone()
             .with_label("link")
