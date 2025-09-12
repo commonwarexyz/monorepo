@@ -2,7 +2,10 @@
 
 use arbitrary::Arbitrary;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
+    Write,
+};
 use commonware_collector::{
     p2p::{Config, Engine, Mailbox},
     Handler, Monitor, Originator,
@@ -40,29 +43,23 @@ struct FuzzRequest {
 
 impl Write for FuzzRequest {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.id);
-        buf.put_u32(self.data.len() as u32);
-        buf.put_slice(&self.data);
+        self.id.write(buf);
+        self.data.write(buf);
     }
 }
 
 impl Read for FuzzRequest {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _cfg: &()) -> Result<Self, CodecError> {
+    type Cfg = RangeCfg;
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
-        let len = u32::read(buf)? as usize;
-        if len > MAX_LEN {
-            return Err(CodecError::InvalidVarint(0));
-        }
-        let mut data = vec![0u8; len];
-        buf.copy_to_slice(&mut data);
+        let data = Vec::read_range(buf, *cfg)?;
         Ok(Self { id, data })
     }
 }
 
 impl EncodeSize for FuzzRequest {
     fn encode_size(&self) -> usize {
-        u64::SIZE + u32::SIZE + self.data.len()
+        u64::SIZE + self.data.encode_size()
     }
 }
 
@@ -88,29 +85,23 @@ struct FuzzResponse {
 
 impl Write for FuzzResponse {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.id);
-        buf.put_u32(self.result.len() as u32);
-        buf.put_slice(&self.result);
+        self.id.write(buf);
+        self.result.write(buf);
     }
 }
 
 impl Read for FuzzResponse {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _cfg: &()) -> Result<Self, CodecError> {
+    type Cfg = RangeCfg;
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
-        let len = u32::read(buf)? as usize;
-        if len > MAX_LEN {
-            return Err(CodecError::InvalidVarint(0));
-        }
-        let mut result = vec![0u8; len];
-        buf.copy_to_slice(&mut result);
+        let result = Vec::read_range(buf, *cfg)?;
         Ok(Self { id, result })
     }
 }
 
 impl EncodeSize for FuzzResponse {
     fn encode_size(&self) -> usize {
-        u64::SIZE + u32::SIZE + self.result.len()
+        u64::SIZE + self.result.encode_size()
     }
 }
 
@@ -316,7 +307,6 @@ fn fuzz(input: FuzzInput) {
             handlers.insert(i, FuzzHandler::new(rng.gen(), StdRng::seed_from_u64(seed)));
             monitors.insert(i, FuzzMonitor::new());
         }
-
         assert!(!peers.is_empty(), "no peers");
 
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
@@ -405,21 +395,19 @@ fn fuzz(input: FuzzInput) {
                     priority_response,
                 } => {
                     let idx = (peer_idx as usize) % peers.len();
-
                     let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
                         FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
                     });
                     let monitor = monitors.get(&idx).cloned().unwrap_or_else(FuzzMonitor::new);
-
                     let config = Config {
                         blocker: FuzzBlocker,
                         monitor,
                         handler,
                         mailbox_size: (mailbox_size as usize),
                         priority_request,
-                        request_codec: (),
+                        request_codec: RangeCfg::from(..=MAX_LEN),
                         priority_response,
-                        response_codec: (),
+                        response_codec: RangeCfg::from(..=MAX_LEN),
                     };
 
                     let (engine, mailbox) = Engine::new(context.clone(), config);
