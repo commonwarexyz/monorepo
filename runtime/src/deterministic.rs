@@ -359,21 +359,6 @@ impl crate::Runner for Runner {
                 tasks.shuffle(&mut *rng);
             }
 
-            // Clean up completed tasks periodically to prevent memory accumulation
-            // Run more frequently (every 10 iterations) to prevent memory buildup
-            if iter % 10 == 0 {
-                executor.tasks.cleanup_completed();
-            }
-            
-            // Also compact the sleeping tasks heap periodically
-            // BinaryHeap doesn't expose capacity, so we periodically rebuild it
-            // to ensure it doesn't hold onto excessive memory
-            if iter % 100 == 0 {
-                let mut sleeping = executor.sleeping.lock().unwrap();
-                let items: Vec<_> = sleeping.drain().collect();
-                *sleeping = BinaryHeap::from(items);
-            }
-
             // Run all snapshotted tasks
             //
             // This approach is more efficient than randomly selecting a task one-at-a-time
@@ -636,51 +621,6 @@ impl Tasks {
     /// Get the number of tasks in the queue.
     fn len(&self) -> usize {
         self.queue.lock().unwrap().len()
-    }
-
-    /// Remove completed tasks from the queue to free memory.
-    /// This is called periodically during execution to prevent memory accumulation.
-    fn cleanup_completed(&self) {
-        let mut queue = self.queue.lock().unwrap();
-
-        // Filter out completed tasks and drop their futures immediately
-        queue.retain(|task| {
-            match &task.operation {
-                Operation::Root => true, // Keep root task
-                Operation::Work { completed, future } => {
-                    let is_completed = *completed.lock().unwrap();
-                    if is_completed {
-                        // Drop the future to free memory
-                        *future.lock().unwrap() = None;
-                        false // Remove from queue
-                    } else {
-                        true // Keep in queue
-                    }
-                }
-            }
-        });
-        drop(queue);
-
-        // Clean up all_tasks more aggressively
-        let mut all_tasks = self.all_tasks.lock().unwrap();
-        
-        // First, drop futures for any completed tasks
-        for weak_task in all_tasks.iter() {
-            if let Some(task) = weak_task.upgrade() {
-                if let Operation::Work { completed, future } = &task.operation {
-                    if *completed.lock().unwrap() {
-                        *future.lock().unwrap() = None;
-                    }
-                }
-            }
-        }
-        
-        // Then remove all weak references that can't be upgraded
-        // This includes completed tasks and tasks that have been dropped
-        all_tasks.retain(|weak_task| weak_task.strong_count() > 0);
-        
-        // Shrink the vector to free unused capacity
-        all_tasks.shrink_to_fit();
     }
 
     /// Forcibly shutdown all tasks and clear the queue.
