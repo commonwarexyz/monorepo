@@ -235,13 +235,13 @@ pub struct Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
-        // Forcibly shutdown all tasks to prevent memory leaks
-        self.tasks.shutdown();
-        
-        // Clear all sleeping tasks
+        // First, clear sleeping tasks to drop any wakers that might hold task references
         self.sleeping.lock().unwrap().clear();
-        
-        // Clear all partitions
+
+        // Then shutdown all tasks to break circular references
+        self.tasks.shutdown();
+
+        // Finally clear all partitions
         self.partitions.lock().unwrap().clear();
     }
 }
@@ -349,9 +349,10 @@ impl crate::Runner for Runner {
                 let mut rng = executor.rng.lock().unwrap();
                 tasks.shuffle(&mut *rng);
             }
-            
+
             // Clean up completed tasks periodically to prevent memory accumulation
-            if iter % 100 == 0 {
+            // Run more frequently (every 10 iterations) to prevent memory buildup
+            if iter % 10 == 0 {
                 executor.tasks.cleanup_completed();
             }
 
@@ -554,10 +555,14 @@ impl Tasks {
             tasks: Arc::downgrade(arc_self),
             operation: Operation::Root,
         });
-        
+
         // Track this task for cleanup
-        arc_self.all_tasks.lock().unwrap().push(Arc::downgrade(&task));
-        
+        arc_self
+            .all_tasks
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&task));
+
         // Add to queue
         arc_self.queue.lock().unwrap().push(task);
     }
@@ -578,10 +583,14 @@ impl Tasks {
                 completed: Mutex::new(false),
             },
         });
-        
+
         // Track this task for cleanup
-        arc_self.all_tasks.lock().unwrap().push(Arc::downgrade(&task));
-        
+        arc_self
+            .all_tasks
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&task));
+
         // Add to queue
         arc_self.queue.lock().unwrap().push(task);
     }
@@ -594,7 +603,7 @@ impl Tasks {
                 return;
             }
         }
-        
+
         let mut queue = self.queue.lock().unwrap();
         queue.push(task);
     }
@@ -610,12 +619,12 @@ impl Tasks {
     fn len(&self) -> usize {
         self.queue.lock().unwrap().len()
     }
-    
+
     /// Remove completed tasks from the queue to free memory.
     /// This is called periodically during execution to prevent memory accumulation.
     fn cleanup_completed(&self) {
         let mut queue = self.queue.lock().unwrap();
-        
+
         // Filter out completed tasks
         queue.retain(|task| {
             match &task.operation {
@@ -632,33 +641,41 @@ impl Tasks {
                 }
             }
         });
+        drop(queue);
+
+        // Also clean up dead weak references from all_tasks to prevent unbounded growth
+        let mut all_tasks = self.all_tasks.lock().unwrap();
+        all_tasks.retain(|weak_task| weak_task.strong_count() > 0);
     }
-    
+
     /// Forcibly shutdown all tasks and clear the queue.
     /// This is called when the executor is dropped to prevent memory leaks.
     fn shutdown(&self) {
-        // First, drop futures from all tasks that have ever been created
-        // This breaks circular references held by the futures
-        let all_tasks = self.all_tasks.lock().unwrap();
-        for weak_task in all_tasks.iter() {
-            if let Some(task) = weak_task.upgrade() {
-                if let Operation::Work { future, completed } = &task.operation {
-                    // Mark as completed to prevent re-enqueueing
-                    *completed.lock().unwrap() = true;
-                    // Drop the future to release captured resources
-                    *future.lock().unwrap() = None;
+        // Step 1: Mark all tasks as completed and drop their futures
+        // This prevents any task from being re-enqueued and breaks circular references
+        {
+            let all_tasks = self.all_tasks.lock().unwrap();
+            for weak_task in all_tasks.iter() {
+                if let Some(task) = weak_task.upgrade() {
+                    if let Operation::Work { future, completed } = &task.operation {
+                        // Mark as completed first to prevent re-enqueueing
+                        *completed.lock().unwrap() = true;
+                        // Then drop the future to release captured resources
+                        *future.lock().unwrap() = None;
+                    }
+                    // Explicitly drop the strong reference we just created
+                    drop(task);
                 }
             }
         }
-        drop(all_tasks);
-        
-        // Clear the queue
+
+        // Step 2: Clear the queue to drop any remaining Arc<Task> references
         self.queue.lock().unwrap().clear();
-        
-        // Clear all tracked tasks
+
+        // Step 3: Clear all tracked weak references
         self.all_tasks.lock().unwrap().clear();
-        
-        // Reset task counter and root registration
+
+        // Step 4: Reset state
         *self.counter.lock().unwrap() = 0;
         *self.root_registered.lock().unwrap() = false;
     }
@@ -1583,10 +1600,10 @@ mod tests {
 
         for iteration in 0..3 {
             println!("\n=== Iteration {} ===", iteration);
-            
+
             // Reset counter for this iteration
             let initial_drops = TASK_DROPS.load(Ordering::SeqCst);
-            
+
             {
                 let executor = deterministic::Runner::default();
 
@@ -1597,17 +1614,21 @@ mod tests {
 
                     // Only create the resources inside the tasks, not outside
                     // This ensures they're only held by the tasks
-                    
+
                     // Task 1 holds tx2 and waits on rx1
                     context.with_label("task1").spawn(move |_| async move {
-                        let _resource = Arc::new(TrackedResource { _id: iteration * 2 + 1 });
+                        let _resource = Arc::new(TrackedResource {
+                            _id: iteration * 2 + 1,
+                        });
                         let _tx = tx2; // Holds reference to task2's channel
                         while let Some(_) = rx1.next().await {}
                     });
 
                     // Task 2 holds tx1 and waits on rx2
                     context.with_label("task2").spawn(move |_| async move {
-                        let _resource = Arc::new(TrackedResource { _id: iteration * 2 + 2 });
+                        let _resource = Arc::new(TrackedResource {
+                            _id: iteration * 2 + 2,
+                        });
                         let _tx = tx1; // Holds reference to task1's channel
                         while let Some(_) = rx2.next().await {}
                     });
@@ -1618,13 +1639,16 @@ mod tests {
                     // Tasks are now deadlocked in a circular wait
                     // They won't complete even though we're exiting
                 });
-                
+
                 // Executor drops here and should clean up the tasks
             }
 
             let drops_after = TASK_DROPS.load(Ordering::SeqCst);
             let iteration_drops = drops_after - initial_drops;
-            println!("Iteration {}: {} resources dropped", iteration, iteration_drops);
+            println!(
+                "Iteration {}: {} resources dropped",
+                iteration, iteration_drops
+            );
 
             // With our fixes, resources should be freed when executor drops
             if iteration_drops == 2 {
@@ -1633,13 +1657,16 @@ mod tests {
                 println!("WARNING: Expected 2 drops, got {}", iteration_drops);
             }
         }
-        
+
         // Final check
         println!("\n=== Final Results ===");
         let final_drops = TASK_DROPS.load(Ordering::SeqCst);
         println!("Total resources dropped: {}/6", final_drops);
-        
-        assert_eq!(final_drops, 6, "All resources should be freed with executor cleanup");
+
+        assert_eq!(
+            final_drops, 6,
+            "All resources should be freed with executor cleanup"
+        );
     }
 
     #[test]
@@ -1911,66 +1938,69 @@ mod tests {
     #[test]
     fn test_executor_drop_cleans_up_tasks() {
         // This test verifies that dropping the executor properly cleans up tasks
-        
-        use std::sync::Arc;
+
         use futures::channel::mpsc;
-        
+        use std::sync::Arc;
+
         static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
-        
+
         struct DropTracker {
             _id: usize,
         }
-        
+
         impl Drop for DropTracker {
             fn drop(&mut self) {
                 DROP_COUNT.fetch_add(1, Ordering::SeqCst);
             }
         }
-        
+
         DROP_COUNT.store(0, Ordering::SeqCst);
-        
+
         {
             let executor = deterministic::Runner::default();
-            
+
             executor.start(|context| async move {
                 // Create circular references similar to the network pattern
                 let (tx1, mut rx1) = mpsc::unbounded::<()>();
                 let (tx2, mut rx2) = mpsc::unbounded::<()>();
-                
+
                 let tracker1 = Arc::new(DropTracker { _id: 1 });
                 let tracker2 = Arc::new(DropTracker { _id: 2 });
-                
+
                 let t1 = tracker1.clone();
                 context.with_label("task1").spawn(move |_| async move {
                     let _tracker = t1;
                     let _tx = tx2;
                     while let Some(_) = rx1.next().await {}
                 });
-                
+
                 let t2 = tracker2.clone();
                 context.with_label("task2").spawn(move |_| async move {
                     let _tracker = t2;
                     let _tx = tx1;
                     while let Some(_) = rx2.next().await {}
                 });
-                
+
                 // Don't wait for tasks to complete - they're deadlocked
                 context.sleep(Duration::from_millis(1)).await;
             });
-            
+
             // Executor drops here - should forcibly clean up tasks
         }
-        
+
         // Give a moment for drops to happen
         std::thread::sleep(std::time::Duration::from_millis(10));
-        
+
         let drops = DROP_COUNT.load(Ordering::SeqCst);
         println!("Drops after executor dropped: {}", drops);
-        
+
         // With our fixes, the executor's Drop impl should break circular references
-        assert_eq!(drops, 2, "Executor should have cleaned up circular references");
+        assert_eq!(
+            drops, 2,
+            "Executor should have cleaned up circular references"
+        );
     }
-    
+
     #[test]
     fn test_waker_keeps_completed_tasks_alive() {
         // This test shows that wakers can keep completed tasks in memory
