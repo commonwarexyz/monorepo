@@ -16,7 +16,7 @@ use commonware_cryptography::{
     },
     Signer,
 };
-use commonware_runtime::{Clock, Sink, Stream};
+use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
 use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
@@ -33,6 +33,18 @@ pub enum Error {
     UnableToDecode(CodecError),
     #[error("peer rejected: {0:X?}")]
     PeerRejected(Vec<u8>),
+    #[error("recv failed")]
+    RecvFailed(RuntimeError),
+    #[error("recv too large: {0} bytes")]
+    RecvTooLarge(usize),
+    #[error("send failed")]
+    SendFailed(RuntimeError),
+    #[error("send zero size")]
+    SendZeroSize,
+    #[error("send too large: {0} bytes")]
+    SendTooLarge(usize),
+    #[error("connection closed")]
+    StreamClosed,
 }
 
 impl From<CodecError> for Error {
@@ -72,6 +84,9 @@ pub struct Config<S> {
 
     /// Maximum age of handshake messages before rejection.
     pub max_handshake_age: Duration,
+
+    /// The allotted time for the handshake to complete.
+    pub handshake_timeout: Duration,
 }
 
 impl<S> Config<S> {
