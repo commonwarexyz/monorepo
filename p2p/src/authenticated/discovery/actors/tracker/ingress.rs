@@ -215,24 +215,22 @@ impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
     ///
     /// Returns `true` if the reservation was released, `false` if the mailbox is full.
     pub fn try_release(&mut self, metadata: Metadata<C>) -> bool {
-        let Err(e) = self.sender.try_send(Message::Release { metadata }) else {
-            return true;
-        };
-        assert!(
-            e.is_full(),
-            "Unexpected error trying to release reservation {e:?}"
-        );
-        false
+        match self.sender.try_send(Message::Release { metadata }) {
+            Ok(()) => true,
+            Err(e) if e.is_full() => false,
+            // If the receiver has been dropped (e.g., during shutdown), treat as released.
+            Err(e) if e.is_disconnected() => true,
+            // Any other error (shouldn’t happen with mpsc), treat conservatively as not released.
+            Err(_e) => false,
+        }
     }
 
     /// Release a reservation.
     ///
     /// This method will block if the mailbox is full.
     pub async fn release(&mut self, metadata: Metadata<C>) {
-        self.sender
-            .send(Message::Release { metadata })
-            .await
-            .unwrap();
+        // If the receiver has been dropped (e.g., during shutdown), ignore the error.
+        let _ = self.sender.send(Message::Release { metadata }).await;
     }
 }
 
