@@ -1,0 +1,301 @@
+use core::ops::Range;
+
+use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
+use rand_core::CryptoRngCore;
+
+use crate::{
+    transcript::{Summary, Transcript},
+    PublicKey, Signer, Verifier,
+};
+
+mod error;
+pub use error::Error;
+
+mod key_exchange;
+use key_exchange::{EphemeralPublicKey, SecretKey};
+
+mod cipher;
+pub use cipher::{RecvCipher, SendCipher};
+
+const NAMESPACE: &'static [u8] = b"commonware/handshake";
+const LABEL_CIPHER_L2D: &'static [u8] = b"cipher_l2d";
+const LABEL_CIPHER_D2L: &'static [u8] = b"cipher_d2l";
+const LABEL_CONFIRMATION_L2D: &'static [u8] = b"confirmation_l2d";
+const LABEL_CONFIRMATION_D2L: &'static [u8] = b"confirmation_d2l";
+
+pub struct Msg1<S> {
+    time_ms: u64,
+    epk: EphemeralPublicKey,
+    sig: S,
+}
+
+impl<S: EncodeSize> EncodeSize for Msg1<S> {
+    fn encode_size(&self) -> usize {
+        self.time_ms.encode_size() + self.epk.encode_size() + self.sig.encode_size()
+    }
+}
+
+impl<S: Write> Write for Msg1<S> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.time_ms.write(buf);
+        self.epk.write(buf);
+        self.sig.write(buf);
+    }
+}
+
+impl<S: Read> Read for Msg1<S> {
+    type Cfg = S::Cfg;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            time_ms: ReadExt::read(buf)?,
+            epk: ReadExt::read(buf)?,
+            sig: Read::read_cfg(buf, cfg)?,
+        })
+    }
+}
+
+pub struct Msg2<S> {
+    time_ms: u64,
+    epk: EphemeralPublicKey,
+    sig: S,
+    confirmation: Summary,
+}
+
+impl<S: EncodeSize> EncodeSize for Msg2<S> {
+    fn encode_size(&self) -> usize {
+        self.time_ms.encode_size()
+            + self.epk.encode_size()
+            + self.sig.encode_size()
+            + self.confirmation.encode_size()
+    }
+}
+
+impl<S: Write> Write for Msg2<S> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.time_ms.write(buf);
+        self.epk.write(buf);
+        self.sig.write(buf);
+        self.confirmation.write(buf);
+    }
+}
+
+impl<S: Read> Read for Msg2<S> {
+    type Cfg = S::Cfg;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            time_ms: ReadExt::read(buf)?,
+            epk: ReadExt::read(buf)?,
+            sig: Read::read_cfg(buf, cfg)?,
+            confirmation: ReadExt::read(buf)?,
+        })
+    }
+}
+
+pub struct Msg3 {
+    confirmation: Summary,
+}
+
+impl EncodeSize for Msg3 {
+    fn encode_size(&self) -> usize {
+        self.confirmation.encode_size()
+    }
+}
+
+impl Write for Msg3 {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.confirmation.write(buf);
+    }
+}
+
+impl Read for Msg3 {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            confirmation: ReadExt::read(buf)?,
+        })
+    }
+}
+
+pub struct DialState<P> {
+    esk: SecretKey,
+    peer_identity: P,
+    transcript: Transcript,
+    ok_timestamps: Range<u64>,
+}
+
+pub struct ListenState {
+    confirmation: Summary,
+    send: SendCipher,
+    recv: RecvCipher,
+}
+
+pub struct Context<S, P> {
+    current_time: u64,
+    ok_timestamps: Range<u64>,
+    my_identity: S,
+    peer_identity: P,
+}
+
+impl<S, P> Context<S, P> {
+    pub fn new(
+        current_time_ms: u64,
+        ok_timestamps: Range<u64>,
+        my_identity: S,
+        peer_identity: P,
+    ) -> Self {
+        Self {
+            current_time: current_time_ms,
+            ok_timestamps,
+            my_identity,
+            peer_identity,
+        }
+    }
+}
+
+pub fn dial_start<S: Signer, P: PublicKey>(
+    rng: impl CryptoRngCore,
+    ctx: Context<S, P>,
+) -> (DialState<P>, Msg1<<S as Signer>::Signature>) {
+    let Context {
+        current_time,
+        ok_timestamps,
+        my_identity,
+        peer_identity,
+    } = ctx;
+    let esk = SecretKey::new(rng);
+    let epk = esk.public();
+    let mut transcript = Transcript::new(NAMESPACE);
+    let sig = transcript
+        .commit(peer_identity.encode())
+        .commit(current_time.encode())
+        .commit(epk.encode())
+        .sign(&my_identity);
+    transcript.commit(my_identity.public_key().encode());
+    (
+        DialState {
+            esk,
+            peer_identity,
+            transcript,
+            ok_timestamps,
+        },
+        Msg1 {
+            time_ms: current_time,
+            epk,
+            sig,
+        },
+    )
+}
+
+pub fn dial_end<P: PublicKey>(
+    state: DialState<P>,
+    msg: Msg2<<P as Verifier>::Signature>,
+) -> Result<(Msg3, SendCipher, RecvCipher), Error> {
+    let DialState {
+        esk,
+        peer_identity,
+        mut transcript,
+        ok_timestamps,
+    } = state;
+    if !ok_timestamps.contains(&msg.time_ms) {
+        return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
+    }
+    if !transcript
+        .commit(msg.time_ms.encode())
+        .commit(msg.epk.encode())
+        .verify(&peer_identity, &msg.sig)
+    {
+        return Err(Error::HandshakeFailed);
+    }
+    let Some(secret) = esk.exchange(&msg.epk) else {
+        return Err(Error::HandshakeFailed);
+    };
+    transcript.commit(secret.as_ref());
+    let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_L2D));
+    let send = SendCipher::new(transcript.noise(LABEL_CIPHER_D2L));
+    let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
+    let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
+    if msg.confirmation != confirmation_l2d {
+        return Err(Error::HandshakeFailed);
+    }
+
+    Ok((
+        Msg3 {
+            confirmation: confirmation_d2l,
+        },
+        send,
+        recv,
+    ))
+}
+
+pub fn listen_start<S: Signer, P: PublicKey>(
+    rng: &mut impl CryptoRngCore,
+    ctx: Context<S, P>,
+    msg: Msg1<<P as Verifier>::Signature>,
+) -> Result<(ListenState, Msg2<<S as Signer>::Signature>), Error> {
+    let Context {
+        current_time,
+        my_identity,
+        peer_identity,
+        ok_timestamps,
+    } = ctx;
+    if !ok_timestamps.contains(&msg.time_ms) {
+        return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
+    }
+    let mut transcript = Transcript::new(NAMESPACE);
+    if !transcript
+        .commit(msg.time_ms.encode())
+        .commit(my_identity.public_key().encode())
+        .commit(msg.epk.encode())
+        .verify(&peer_identity, &msg.sig)
+    {
+        return Err(Error::HandshakeFailed);
+    }
+    let esk = SecretKey::new(rng);
+    let epk = esk.public();
+    let sig = transcript
+        .commit(peer_identity.encode())
+        .commit(current_time.encode())
+        .commit(epk.encode())
+        .sign(&my_identity);
+    let Some(secret) = esk.exchange(&msg.epk) else {
+        return Err(Error::HandshakeFailed);
+    };
+    transcript.commit(secret.as_ref());
+    let send = SendCipher::new(transcript.noise(LABEL_CIPHER_L2D));
+    let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_D2L));
+    let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
+    let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
+
+    Ok((
+        ListenState {
+            confirmation: confirmation_d2l,
+            send,
+            recv,
+        },
+        Msg2 {
+            time_ms: current_time,
+            epk,
+            sig,
+            confirmation: confirmation_l2d,
+        },
+    ))
+}
+
+pub fn listen_end(state: ListenState, msg: Msg3) -> Result<(SendCipher, RecvCipher), Error> {
+    if msg.confirmation != state.confirmation {
+        return Err(Error::HandshakeFailed);
+    }
+    Ok((state.send, state.recv))
+}

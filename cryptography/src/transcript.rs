@@ -6,12 +6,14 @@
 
 use blake3::BLOCK_LEN;
 use bytes::Buf;
-use commonware_codec::{varint::UInt, EncodeSize, Write};
+use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, Write};
 use rand_core::{
     impls::{next_u32_via_fill, next_u64_via_fill},
     CryptoRng, CryptoRngCore, RngCore,
 };
 use zeroize::ZeroizeOnDrop;
+
+use crate::{Signer, Verifier};
 
 /// Provides an implementation of [CryptoRngCore].
 ///
@@ -255,6 +257,17 @@ impl Transcript {
     }
 }
 
+// Utility methods which can be created using the other methods.
+impl Transcript {
+    pub fn sign<S: Signer>(&self, s: &S) -> <S as Signer>::Signature {
+        s.sign(None, self.summarize().hash.as_bytes())
+    }
+
+    pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
+        v.verify(None, self.summarize().hash.as_bytes(), sig)
+    }
+}
+
 /// Represents a summary of a transcript.
 ///
 /// This is the primary way to compare two transcripts for equality.
@@ -263,6 +276,28 @@ impl Transcript {
 #[derive(Debug, Clone, PartialEq, Eq, ZeroizeOnDrop)]
 pub struct Summary {
     hash: blake3::Hash,
+}
+
+impl EncodeSize for Summary {
+    fn encode_size(&self) -> usize {
+        blake3::OUT_LEN
+    }
+}
+
+impl Write for Summary {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.hash.as_bytes().write(buf)
+    }
+}
+
+impl Read for Summary {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            hash: blake3::Hash::from_bytes(ReadExt::read(buf)?),
+        })
+    }
 }
 
 #[cfg(test)]
