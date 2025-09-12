@@ -140,16 +140,10 @@ fn fuzz(input: FuzzInput) {
                 Operation::Put { index, value } => {
                     if let Some(ref mut cache) = cache_opt {
                         let result = cache.put(index, value).await;
-                        match result {
-                            Ok(_) => {
-                                // Cache put only inserts if index doesn't already exist
-                                // Only update expected_data if this is a new index
-                                if !expected_data.contains_key(&index) {
-                                    expected_data.insert(index, value);
-                                }
-                            },
-                            Err(_) => {
-                            }
+                        if result.is_ok() {
+                            // Cache put only inserts if index doesn't already exist
+                            // Only update expected_data if this is a new index
+                            expected_data.entry(index).or_insert(value);
                         }
                     }
                 },
@@ -157,7 +151,7 @@ fn fuzz(input: FuzzInput) {
                     if let Some(ref cache) = cache_opt {
                         let result = cache.get(index).await.expect("Get should not error");
                         
-                        let should_exist = pruned_min.map_or(true, |min| {
+                        let should_exist = pruned_min.is_none_or(|min| {
                             let section = (index / input.config.items_per_blob) * input.config.items_per_blob;
                             section >= min
                         }) && expected_data.contains_key(&index);
@@ -173,7 +167,7 @@ fn fuzz(input: FuzzInput) {
                     if let Some(ref cache) = cache_opt {
                         let has = cache.has(index);
                         
-                        let should_exist = pruned_min.map_or(true, |min| {
+                        let should_exist = pruned_min.is_none_or(|min| {
                             let section = (index / input.config.items_per_blob) * input.config.items_per_blob;
                             section >= min
                         }) && expected_data.contains_key(&index);
@@ -188,7 +182,7 @@ fn fuzz(input: FuzzInput) {
                         let expected_first = expected_data
                             .keys()
                             .filter(|&&k| {
-                                pruned_min.map_or(true, |min| {
+                                pruned_min.is_none_or(|min| {
                                     let section = (k / input.config.items_per_blob) * input.config.items_per_blob;
                                     section >= min
                                 })

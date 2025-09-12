@@ -10,10 +10,10 @@ const MAX_OPERATIONS: usize = 100;
 
 #[derive(Clone, Debug)]
 enum TranslatorType {
-    OneCap,
-    TwoCap,
-    FourCap,
-    EightCap,
+    One,
+    Two,
+    Four,
+    Eight,
 }
 
 #[derive(Clone, Debug)]
@@ -40,10 +40,10 @@ struct FuzzInput {
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, libfuzzer_sys::arbitrary::Error> {
         let translator_type = match u8::arbitrary(u)? % 4 {
-            0 => TranslatorType::OneCap,
-            1 => TranslatorType::TwoCap,
-            2 => TranslatorType::FourCap,
-            _ => TranslatorType::EightCap,
+            0 => TranslatorType::One,
+            1 => TranslatorType::Two,
+            2 => TranslatorType::Four,
+            _ => TranslatorType::Eight,
         };
         
         let num_operations = (u8::arbitrary(u)? as usize) % MAX_OPERATIONS + 1;
@@ -278,10 +278,10 @@ fn test_uint_identity_edge_cases() {
 
 fn fuzz(input: FuzzInput) {
     match input.translator_type {
-        TranslatorType::OneCap => test_one_cap(&input.operations),
-        TranslatorType::TwoCap => test_two_cap(&input.operations),
-        TranslatorType::FourCap => test_four_cap(&input.operations),
-        TranslatorType::EightCap => test_eight_cap(&input.operations),
+        TranslatorType::One => test_one_cap(&input.operations),
+        TranslatorType::Two => test_two_cap(&input.operations),
+        TranslatorType::Four => test_four_cap(&input.operations),
+        TranslatorType::Eight => test_eight_cap(&input.operations),
     }
     
     test_uint_identity_edge_cases();
