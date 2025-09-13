@@ -235,23 +235,14 @@ pub struct Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
-        // Force shutdown in a specific order to break all circular references
-
-        // Step 1: Clear sleeping tasks to drop any wakers
-        self.sleeping.lock().unwrap().clear();
-
-        // Step 2: Mark executor as finished to prevent new tasks
+        // Mark executor as finished to prevent new tasks
         *self.finished.lock().unwrap() = true;
 
-        // Step 3: Shutdown all tasks to break circular references
-        self.tasks.shutdown();
+        // Drop all outstanding tasks
+        self.tasks.clear();
 
-        // Step 4: Clear all partitions
-        self.partitions.lock().unwrap().clear();
-
-        // Note: If this Drop is not being called, it means there are still
-        // Arc<Executor> references being held somewhere, likely by contexts
-        // captured in futures or wakers stored in channels.
+        // Discard any remaining alarms (tasks already dropped)
+        self.sleeping.lock().unwrap().clear();
     }
 }
 
@@ -388,25 +379,22 @@ impl crate::Runner for Runner {
                             return output;
                         }
                     }
-                    Operation::Work { future, completed } => {
-                        // If task is completed, skip it
-                        if *completed.lock().unwrap() {
-                            trace!(id = task.id, "dropping already complete task");
+                    Operation::Work(future) => {
+                        // Get the future (if it still exists)
+                        let mut fut_opt = future.lock().unwrap();
+                        let Some(fut) = fut_opt.as_mut() else {
                             continue;
-                        }
+                        };
 
                         // Poll the task
-                        let mut fut_opt = future.lock().unwrap();
-                        if let Some(ref mut fut) = *fut_opt {
-                            if fut.as_mut().poll(&mut cx).is_ready() {
-                                trace!(id = task.id, "task is complete");
-                                *completed.lock().unwrap() = true;
-                                // Drop the future to free memory
-                                *fut_opt = None;
-                                continue;
+                        if fut.as_mut().poll(&mut cx).is_ready() {
+                            trace!(id = task.id, "task is complete");
+
+                            // Remove the future from pending and drop
+                            if let Some(tasks) = task.tasks.upgrade() {
+                                tasks.pending.lock().unwrap().remove(&task.id);
                             }
-                        } else {
-                            // Future was already dropped, skip
+                            *fut_opt = None;
                             continue;
                         }
                     }
@@ -486,10 +474,7 @@ impl crate::Runner for Runner {
 /// The operation that a task is performing.
 enum Operation {
     Root,
-    Work {
-        future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
-        completed: Mutex<bool>,
-    },
+    Work(Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>),
 }
 
 /// A task that is being executed by the runtime.
@@ -517,8 +502,8 @@ struct Tasks {
     counter: Mutex<u128>,
     /// The queue of tasks that are waiting to be executed.
     queue: Mutex<Vec<Arc<Task>>>,
-    /// All tasks that have been created (for cleanup on shutdown).
-    all_tasks: Mutex<Vec<Weak<Task>>>,
+    /// Incomplete tasks that may still be referenced by external wakers.
+    pending: Mutex<HashMap<u128, Weak<Task>>>,
     /// Indicates whether the root task has been registered.
     root_registered: Mutex<bool>,
 }
@@ -529,7 +514,7 @@ impl Tasks {
         Self {
             counter: Mutex::new(0),
             queue: Mutex::new(Vec::new()),
-            all_tasks: Mutex::new(Vec::new()),
+            pending: Mutex::new(HashMap::new()),
             root_registered: Mutex::new(false),
         }
     }
@@ -559,12 +544,12 @@ impl Tasks {
             operation: Operation::Root,
         });
 
-        // Track this task for cleanup
+        // Track as pending until completion
         arc_self
-            .all_tasks
+            .pending
             .lock()
             .unwrap()
-            .push(Arc::downgrade(&task));
+            .insert(id, Arc::downgrade(&task));
 
         // Add to queue
         arc_self.queue.lock().unwrap().push(task);
@@ -581,18 +566,15 @@ impl Tasks {
             id,
             label,
             tasks: Arc::downgrade(arc_self),
-            operation: Operation::Work {
-                future: Mutex::new(Some(future)),
-                completed: Mutex::new(false),
-            },
+            operation: Operation::Work(Mutex::new(Some(future))),
         });
 
-        // Track this task for cleanup
+        // Track as pending until completion
         arc_self
-            .all_tasks
+            .pending
             .lock()
             .unwrap()
-            .push(Arc::downgrade(&task));
+            .insert(id, Arc::downgrade(&task));
 
         // Add to queue
         arc_self.queue.lock().unwrap().push(task);
@@ -600,13 +582,6 @@ impl Tasks {
 
     /// Enqueue an already registered task to be executed.
     fn enqueue(&self, task: Arc<Task>) {
-        // Don't enqueue completed tasks to prevent memory accumulation
-        if let Operation::Work { completed, .. } = &task.operation {
-            if *completed.lock().unwrap() {
-                return;
-            }
-        }
-
         let mut queue = self.queue.lock().unwrap();
         queue.push(task);
     }
@@ -623,30 +598,24 @@ impl Tasks {
         self.queue.lock().unwrap().len()
     }
 
-    /// Forcibly shutdown all tasks and clear the queue.
-    /// This is called when the executor is dropped to prevent memory leaks.
-    fn shutdown(&self) {
-        // Step 1: Snapshot tasks to operate without holding locks during drops
-        let tasks: Vec<Arc<Task>> = {
-            let all = self.all_tasks.lock().unwrap();
-            all.iter().filter_map(|w| w.upgrade()).collect()
+    /// Drop all active tasks.
+    fn clear(&self) {
+        // Snapshot pending tasks
+        let pending: Vec<Arc<Task>> = {
+            let pending = self.pending.lock().unwrap();
+            pending.values().filter_map(|w| w.upgrade()).collect()
         };
 
-        // Step 2: Mark tasks as completed and drop their futures to release captured resources
-        for task in tasks {
-            if let Operation::Work { future, completed } = &task.operation {
-                *completed.lock().unwrap() = true;
+        // Drop their futures to release captured resources
+        for task in pending {
+            if let Operation::Work(future) = &task.operation {
                 *future.lock().unwrap() = None;
             }
         }
 
-        // Step 3: Clear the run queue and weak refs
+        // Clear the run queue and pending refs (in case called again)
         self.queue.lock().unwrap().clear();
-        self.all_tasks.lock().unwrap().clear();
-
-        // Step 4: Reset counters
-        *self.counter.lock().unwrap() = 0;
-        *self.root_registered.lock().unwrap() = false;
+        self.pending.lock().unwrap().clear();
     }
 }
 
