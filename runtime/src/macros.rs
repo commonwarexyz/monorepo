@@ -30,7 +30,7 @@ macro_rules! spawn_metrics {
     // Increment the number of spawned tasks and return a gauge for the number of running tasks
     ($label:expr, @make $ctx:ident) => {{
         let label = $label;
-        let metrics = $ctx.metrics_handle();
+        let metrics = $ctx.metrics();
         metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = metrics.tasks_running.get_or_create(&label).clone();
         (label, gauge)

@@ -372,8 +372,8 @@ pub struct Context {
 }
 
 impl Context {
-    // Access runtime metrics for spawn_metrics! macro
-    fn metrics_handle(&self) -> &Metrics {
+    /// Access the [Metrics] of the runtime.
+    fn metrics(&self) -> &Metrics {
         &self.executor.metrics
     }
 }
