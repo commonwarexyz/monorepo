@@ -264,6 +264,9 @@ impl Executor {
     }
 }
 
+/// An artifact that can be used to recover the state of the runtime.
+///
+/// This is useful when mocking unclean shutdown (while retaining deterministic behavior).
 pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
@@ -328,6 +331,8 @@ impl Runner {
         Self::new(cfg)
     }
 
+    /// Like [crate::Runner::start], but also returns a [Checkpoint] that can be used
+    /// to recover the state of the runtime in a subsequent run.
     pub fn start_and_recover<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
     where
         F: FnOnce(Context) -> Fut,
@@ -495,11 +500,14 @@ impl Runner {
         // Stop the executor
         executor.stop();
 
-        // Extract the executor from the Arc
+        // Assert the context doesn't escape the start() function (behavior
+        // is undefined in this case)
         assert!(
             Arc::weak_count(&executor) == 0,
             "executor still has weak references"
         );
+
+        // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
         (output, executor.checkpoint(storage))
