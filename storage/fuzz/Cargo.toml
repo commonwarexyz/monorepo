@@ -135,6 +135,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mmr_journaled"
+path = "fuzz_targets/mmr_journaled.rs"
+test = false
+doc = false
+bench = false
+
+
+[[bin]]
+name = "mmr_bitmap"
+path = "fuzz_targets/mmr_bitmap.rs"
+test = false
+doc = false
+bench = false
+
+
+[[bin]]
 name = "cache_operations"
 path = "fuzz_targets/cache_operations.rs"
 test = false
