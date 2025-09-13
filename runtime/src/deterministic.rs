@@ -835,7 +835,6 @@ impl crate::Spawner for Context {
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
 
-        // Detach the context handed to the spawned task to avoid cycles
         let future = f(self);
         let (f, handle) = Handle::init_future(future, gauge, false, children);
 
