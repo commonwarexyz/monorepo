@@ -246,9 +246,18 @@ impl Drop for Executor {
     }
 }
 
+struct Checkpoint {
+    cycle: Duration,
+    deadline: Option<SystemTime>,
+    auditor: Auditor,
+    rng: StdRng,
+    time: SystemTime,
+    partitions: HashMap<String, Partition>,
+}
+
 enum State {
     Config(Config),
-    Context(Context),
+    Checkpoint(Checkpoint),
 }
 
 /// Implementation of [crate::Runner] for the `deterministic` runtime.
@@ -262,10 +271,10 @@ impl From<Config> for Runner {
     }
 }
 
-impl From<Context> for Runner {
-    fn from(context: Context) -> Self {
+impl From<Checkpoint> for Runner {
+    fn from(checkpoint: Checkpoint) -> Self {
         Self {
-            state: State::Context(context),
+            state: State::Checkpoint(checkpoint),
         }
     }
 }
@@ -299,30 +308,23 @@ impl Runner {
         };
         Self::new(cfg)
     }
-}
 
-impl Default for Runner {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
-}
-
-impl crate::Runner for Runner {
-    type Context = Context;
-
-    fn start<F, Fut>(self, f: F) -> Fut::Output
+    pub fn start_and_checkpoint<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
     where
-        F: FnOnce(Self::Context) -> Fut,
+        F: FnOnce(Context) -> Fut,
         Fut: Future,
     {
         // Setup context (depending on how the runtime was initialized)
-        let context = match self.state {
+        let mut context = match self.state {
             State::Config(config) => Context::new(config),
-            State::Context(context) => context,
+            State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
 
         // Pin root task to the heap
-        let executor = context.executor();
+        let executor = context
+            .owner
+            .take()
+            .expect("executor dropped while context still in use");
         let mut root = Box::pin(f(context));
 
         // Register the root task
@@ -330,7 +332,7 @@ impl crate::Runner for Runner {
 
         // Process tasks until root task completes or progress stalls
         let mut iter = 0;
-        loop {
+        let output = loop {
             // Ensure we have not exceeded our deadline
             {
                 let current = executor.time.lock().unwrap();
@@ -467,7 +469,31 @@ impl crate::Runner for Runner {
                 panic!("runtime stalled");
             }
             iter += 1;
-        }
+        };
+
+        // Drop the executor after all
+        drop(executor);
+
+        output
+    }
+}
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+impl crate::Runner for Runner {
+    type Context = Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
+    where
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future,
+    {
+        let (output, _) = self.start_and_checkpoint(f);
+        output
     }
 }
 
@@ -685,7 +711,7 @@ impl Context {
             name: String::new(),
             spawned: false,
             executor: Arc::downgrade(&executor),
-            owner: Some(executor.clone()),
+            owner: Some(executor),
             network: Arc::new(network),
             storage,
             metrics,
@@ -705,40 +731,29 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    pub fn recover(self) -> Self {
-        // Ensure we are finished
-        if !*self.executor().finished.lock().unwrap() {
-            panic!("execution is not finished");
-        }
-
-        // Ensure runtime has not already been recovered
-        {
-            let exec = self.executor();
-            let mut recovered = exec.recovered.lock().unwrap();
-            if *recovered {
-                panic!("runtime has already been recovered");
-            }
-            *recovered = true;
-        }
-
+    pub fn recover(checkpoint: Checkpoint) -> Self {
         // Rebuild metrics
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
-        let auditor = self.auditor.clone();
+        let auditor = Arc::new(checkpoint.auditor);
+        let storage = MeteredStorage::new(
+            AuditedStorage::new(MemStorage::default(), auditor.clone()),
+            runtime_registry,
+        );
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
         let executor = Arc::new(Executor {
-            // Copied from the current runtime
-            cycle: self.executor().cycle,
-            deadline: self.executor().deadline,
+            // Copied from the checkpoint
+            cycle: checkpoint.cycle,
+            deadline: checkpoint.deadline,
             auditor: auditor.clone(),
-            rng: Mutex::new(self.executor().rng.lock().unwrap().clone()),
-            time: Mutex::new(*self.executor().time.lock().unwrap()),
-            partitions: Mutex::new(self.executor().partitions.lock().unwrap().clone()),
+            rng: Mutex::new(checkpoint.rng),
+            time: Mutex::new(checkpoint.time),
+            partitions: Mutex::new(checkpoint.partitions),
 
             // New state for the new runtime
             registry: Mutex::new(registry),
@@ -753,9 +768,9 @@ impl Context {
             name: String::new(),
             spawned: false,
             executor: Arc::downgrade(&executor),
-            owner: Some(executor.clone()),
+            owner: Some(executor),
             network: Arc::new(network),
-            storage: self.storage,
+            storage,
             metrics,
             auditor,
             children: Arc::new(Mutex::new(Vec::new())),
@@ -791,7 +806,6 @@ impl Clone for Context {
             name: self.name.clone(),
             spawned: false,
             executor: self.executor.clone(),
-            // Preserve owner for clones; tasks use detached() to avoid cycles
             owner: self.owner.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -979,8 +993,7 @@ impl crate::Metrics for Context {
             name,
             spawned: false,
             executor: self.executor.clone(),
-            // Labeled contexts are intended for subcomponents; do not keep a strong owner
-            owner: None,
+            owner: self.owner.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
             metrics: self.metrics.clone(),
