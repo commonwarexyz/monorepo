@@ -81,7 +81,7 @@ mod tests {
     #[test_traced]
     fn test_index_many_keys() {
         let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
+        runner.start(|mut context| async move {
             let mut index = Index::init(context.clone(), TwoCap);
 
             // Insert enough keys to generate some collisions, then confirm each value we inserted
