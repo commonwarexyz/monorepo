@@ -235,24 +235,8 @@ pub struct Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
-        // Force shutdown in a specific order to break all circular references
-
         // Step 1: Mark executor as finished to prevent new tasks
         *self.finished.lock().unwrap() = true;
-
-        // Step 2: Proactively wake all sleeping tasks so they become queued
-        // and are handled uniformly by shutdown (their futures will be dropped).
-        let wakers: Vec<Waker> = {
-            let mut sleeping = self.sleeping.lock().unwrap();
-            let mut wakers = Vec::with_capacity(sleeping.len());
-            while let Some(alarm) = sleeping.pop() {
-                wakers.push(alarm.waker);
-            }
-            wakers
-        };
-        for w in wakers {
-            w.wake();
-        }
 
         // Step 3: Shutdown all tasks (queued + pending) to drop their futures
         self.tasks.shutdown();
@@ -262,10 +246,6 @@ impl Drop for Executor {
 
         // Step 5: Clear all partitions
         self.partitions.lock().unwrap().clear();
-
-        // Note: If this Drop is not being called, it means there are still
-        // Arc<Executor> references being held somewhere, likely by contexts
-        // captured in futures or wakers stored in channels.
     }
 }
 
@@ -404,31 +384,29 @@ impl crate::Runner for Runner {
                     }
                     Operation::Work { future, completed } => {
                         // If task is completed, skip it
+                        let mut fut_opt = future.lock().unwrap();
                         if *completed.lock().unwrap() {
                             trace!(id = task.id, "dropping already complete task");
+
+                            // Drop the future
+                            if let Some(tasks) = task.tasks.upgrade() {
+                                tasks.pending.lock().unwrap().remove(&task.id);
+                            }
+                            *fut_opt = None;
                             continue;
                         }
 
                         // Poll the task
-                        let mut fut_opt = future.lock().unwrap();
-                        if let Some(ref mut fut) = *fut_opt {
-                            if fut.as_mut().poll(&mut cx).is_ready() {
-                                trace!(id = task.id, "task is complete");
-                                *completed.lock().unwrap() = true;
-                                // Drop the future to free memory
-                                *fut_opt = None;
-                                continue;
-                            }
-                            // Not ready; mark as pending (waiting for wake)
+                        let fut = fut_opt.as_mut().unwrap();
+                        if fut.as_mut().poll(&mut cx).is_ready() {
+                            trace!(id = task.id, "task is complete");
+                            *completed.lock().unwrap() = true;
+
+                            // Drop the future
                             if let Some(tasks) = task.tasks.upgrade() {
-                                tasks
-                                    .pending
-                                    .lock()
-                                    .unwrap()
-                                    .insert(task.id, Arc::downgrade(&task));
+                                tasks.pending.lock().unwrap().remove(&task.id);
                             }
-                        } else {
-                            // Future was already dropped, skip
+                            *fut_opt = None;
                             continue;
                         }
                     }
@@ -528,8 +506,6 @@ impl ArcWake for Task {
         // Upgrade the weak reference to re-enqueue this task.
         // If upgrade fails, the task queue has been dropped and no action is required.
         if let Some(tasks) = arc_self.tasks.upgrade() {
-            // On wake, the task is no longer waiting; remove from pending.
-            tasks.pending.lock().unwrap().remove(&arc_self.id);
             // Re-enqueue for execution
             tasks.enqueue(arc_self.clone());
         }
@@ -585,6 +561,13 @@ impl Tasks {
             operation: Operation::Root,
         });
 
+        // Track as pending until completion
+        arc_self
+            .pending
+            .lock()
+            .unwrap()
+            .insert(id, Arc::downgrade(&task));
+
         // Add to queue
         arc_self.queue.lock().unwrap().push(task);
     }
@@ -606,19 +589,19 @@ impl Tasks {
             },
         });
 
+        // Track as pending until completion
+        arc_self
+            .pending
+            .lock()
+            .unwrap()
+            .insert(id, Arc::downgrade(&task));
+
         // Add to queue
         arc_self.queue.lock().unwrap().push(task);
     }
 
     /// Enqueue an already registered task to be executed.
     fn enqueue(&self, task: Arc<Task>) {
-        // Don't enqueue completed tasks to prevent memory accumulation
-        if let Operation::Work { completed, .. } = &task.operation {
-            if *completed.lock().unwrap() {
-                return;
-            }
-        }
-
         let mut queue = self.queue.lock().unwrap();
         queue.push(task);
     }
@@ -639,18 +622,13 @@ impl Tasks {
     /// This is called when the executor is dropped to prevent memory leaks.
     fn shutdown(&self) {
         // Step 1: Snapshot incomplete tasks (pending waiters + queued tasks)
-        let mut tasks: Vec<Arc<Task>> = Vec::new();
-        {
-            let queue = self.queue.lock().unwrap();
-            tasks.extend(queue.iter().cloned());
-        }
-        {
+        let active: Vec<Arc<Task>> = {
             let pending = self.pending.lock().unwrap();
-            tasks.extend(pending.values().filter_map(|w| w.upgrade()));
-        }
+            pending.values().filter_map(|w| w.upgrade()).collect()
+        };
 
         // Step 2: Mark tasks as completed and drop their futures to release captured resources
-        for task in tasks {
+        for task in active {
             if let Operation::Work { future, completed } = &task.operation {
                 *completed.lock().unwrap() = true;
                 *future.lock().unwrap() = None;
