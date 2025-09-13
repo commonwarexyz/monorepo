@@ -349,12 +349,12 @@ impl Runner {
             }
 
             // Snapshot available tasks
-            let mut tasks = executor.tasks.drain();
+            let mut queue = executor.tasks.drain();
 
             // Shuffle tasks
             {
                 let mut rng = executor.rng.lock().unwrap();
-                tasks.shuffle(&mut *rng);
+                queue.shuffle(&mut *rng);
             }
 
             // Run all snapshotted tasks
@@ -362,9 +362,9 @@ impl Runner {
             // This approach is more efficient than randomly selecting a task one-at-a-time
             // because it ensures we don't pull the same pending task multiple times in a row (without
             // processing a different task required for other tasks to make progress).
-            trace!(iter, tasks = tasks.len(), "starting loop");
+            trace!(iter, tasks = queue.len(), "starting loop");
             let mut output = None;
-            for task in tasks {
+            for task in queue {
                 // Record task for auditing
                 executor.auditor.event(b"process_task", |hasher| {
                     hasher.update(task.id.to_be_bytes());
@@ -389,21 +389,16 @@ impl Runner {
                         }
                     }
                     Operation::Work(future) => {
-                        // Get the future (if it still exists)
+                        // Get the future (it must still exist at this point)
                         let mut fut_opt = future.lock().unwrap();
-                        let Some(fut) = fut_opt.as_mut() else {
-                            // If the future is not found, we are shutting down and pending is already cleared
-                            continue;
-                        };
+                        let fut = fut_opt.as_mut().expect("future is missing");
 
                         // Poll the task
                         if fut.as_mut().poll(&mut cx).is_ready() {
                             trace!(id = task.id, "task is complete");
 
                             // Remove the future from pending and drop
-                            if let Some(tasks) = task.tasks.upgrade() {
-                                tasks.pending.lock().unwrap().remove(&task.id);
-                            }
+                            executor.tasks.pending.lock().unwrap().remove(&task.id);
                             *fut_opt = None;
                             continue;
                         }
@@ -413,6 +408,8 @@ impl Runner {
                 // Try again later if task is still pending
                 trace!(id = task.id, "task is still pending");
             }
+
+            // If the root task has completed, exit as soon as possible
             if let Some(output) = output {
                 break output;
             }
