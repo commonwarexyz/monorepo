@@ -228,7 +228,6 @@ pub struct Executor {
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
-    partitions: Mutex<HashMap<String, Partition>>,
     shutdown: Mutex<Stopper>,
     finished: Mutex<bool>,
 }
@@ -245,7 +244,7 @@ impl Executor {
         self.sleeping.lock().unwrap().clear();
     }
 
-    fn checkpoint(self) -> Checkpoint {
+    fn checkpoint(self, storage: Arc<MeteredStorage<AuditedStorage<MemStorage>>>) -> Checkpoint {
         // Ensure executor is finished
         assert!(*self.finished.lock().unwrap());
 
@@ -256,7 +255,7 @@ impl Executor {
             auditor: self.auditor,
             rng: self.rng,
             time: self.time,
-            partitions: self.partitions,
+            storage,
         }
     }
 }
@@ -267,7 +266,7 @@ pub struct Checkpoint {
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
-    partitions: Mutex<HashMap<String, Partition>>,
+    storage: Arc<MeteredStorage<AuditedStorage<MemStorage>>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -337,6 +336,7 @@ impl Runner {
         };
 
         // Pin root task to the heap
+        let storage = context.storage.clone();
         let mut root = Box::pin(f(context));
 
         // Register the root task
@@ -498,7 +498,7 @@ impl Runner {
         );
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
-        (output, executor.checkpoint())
+        (output, executor.checkpoint(storage))
     }
 }
 
@@ -680,7 +680,7 @@ pub struct Context {
     // Weak reference to break cycles when contexts are captured by futures
     executor: Weak<Executor>,
     network: Arc<Network>,
-    storage: MeteredStorage<AuditedStorage<MemStorage>>,
+    storage: Arc<MeteredStorage<AuditedStorage<MemStorage>>>,
     // Cache commonly-used handles to avoid upgrading Weak for simple access
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -717,7 +717,6 @@ impl Context {
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
-            partitions: Mutex::new(HashMap::new()),
             shutdown: Mutex::new(Stopper::default()),
             finished: Mutex::new(false),
         });
@@ -728,7 +727,7 @@ impl Context {
                 spawned: false,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
-                storage,
+                storage: Arc::new(storage),
                 metrics,
                 auditor,
                 children: Arc::new(Mutex::new(Vec::new())),
@@ -755,10 +754,6 @@ impl Context {
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
-        let storage = MeteredStorage::new(
-            AuditedStorage::new(MemStorage::default(), checkpoint.auditor.clone()),
-            runtime_registry,
-        );
         let network =
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
@@ -770,7 +765,6 @@ impl Context {
             auditor: checkpoint.auditor.clone(),
             rng: checkpoint.rng,
             time: checkpoint.time,
-            partitions: checkpoint.partitions,
 
             // New state for the new runtime
             registry: Mutex::new(registry),
@@ -786,7 +780,7 @@ impl Context {
                 spawned: false,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
-                storage,
+                storage: checkpoint.storage,
                 metrics,
                 auditor: checkpoint.auditor,
                 children: Arc::new(Mutex::new(Vec::new())),
