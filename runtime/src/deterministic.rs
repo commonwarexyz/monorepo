@@ -309,22 +309,18 @@ impl Runner {
         Self::new(cfg)
     }
 
-    pub fn start_and_checkpoint<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
+    pub fn start_and_recover<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
     where
         F: FnOnce(Context) -> Fut,
         Fut: Future,
     {
         // Setup context (depending on how the runtime was initialized)
-        let mut context = match self.state {
+        let (mut context, executor) = match self.state {
             State::Config(config) => Context::new(config),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
 
         // Pin root task to the heap
-        let executor = context
-            .owner
-            .take()
-            .expect("executor dropped while context still in use");
         let mut root = Box::pin(f(context));
 
         // Register the root task
@@ -358,6 +354,7 @@ impl Runner {
             // because it ensures we don't pull the same pending task multiple times in a row (without
             // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = tasks.len(), "starting loop");
+            let mut output = None;
             for task in tasks {
                 // Record task for auditing
                 executor.auditor.event(b"process_task", |hasher| {
@@ -375,10 +372,11 @@ impl Runner {
                 match &task.operation {
                     Operation::Root => {
                         // Poll the root task
-                        if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
+                        if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
                             trace!(id = task.id, "task is complete");
                             *executor.finished.lock().unwrap() = true;
-                            return output;
+                            output = Some(result);
+                            break;
                         }
                     }
                     Operation::Work(future) => {
@@ -404,6 +402,9 @@ impl Runner {
 
                 // Try again later if task is still pending
                 trace!(id = task.id, "task is still pending");
+            }
+            if let Some(output) = output {
+                break output;
             }
 
             // Advance time by cycle
@@ -471,8 +472,7 @@ impl Runner {
             iter += 1;
         };
 
-        // Drop the executor after all
-        drop(executor);
+        // Clear tasks in the executor (before dropping the executor)
 
         output
     }
@@ -492,7 +492,7 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
-        let (output, _) = self.start_and_checkpoint(f);
+        let (output, _) = self.start_and_recover(f);
         output
     }
 }
@@ -655,8 +655,6 @@ pub struct Context {
     spawned: bool,
     // Weak reference to break cycles when contexts are captured by futures
     executor: Weak<Executor>,
-    // Root contexts hold a strong reference so recovery works after start() returns
-    owner: Option<Arc<Executor>>,
     network: Arc<Network>,
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
     // Cache commonly-used handles to avoid upgrading Weak for simple access
@@ -665,14 +663,8 @@ pub struct Context {
     children: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
-impl Default for Context {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
-}
-
 impl Context {
-    pub fn new(cfg: Config) -> Self {
+    fn new(cfg: Config) -> (Self, Arc<Executor>) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -707,17 +699,19 @@ impl Context {
             recovered: Mutex::new(false),
         });
 
-        Context {
-            name: String::new(),
-            spawned: false,
-            executor: Arc::downgrade(&executor),
-            owner: Some(executor),
-            network: Arc::new(network),
-            storage,
-            metrics,
-            auditor,
-            children: Arc::new(Mutex::new(Vec::new())),
-        }
+        (
+            Self {
+                name: String::new(),
+                spawned: false,
+                executor: Arc::downgrade(&executor),
+                network: Arc::new(network),
+                storage,
+                metrics,
+                auditor,
+                children: Arc::new(Mutex::new(Vec::new())),
+            },
+            executor,
+        )
     }
 
     /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
@@ -731,7 +725,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    pub fn recover(checkpoint: Checkpoint) -> Self {
+    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>) {
         // Rebuild metrics
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -764,17 +758,19 @@ impl Context {
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
-        Self {
-            name: String::new(),
-            spawned: false,
-            executor: Arc::downgrade(&executor),
-            owner: Some(executor),
-            network: Arc::new(network),
-            storage,
-            metrics,
-            auditor,
-            children: Arc::new(Mutex::new(Vec::new())),
-        }
+        (
+            Self {
+                name: String::new(),
+                spawned: false,
+                executor: Arc::downgrade(&executor),
+                network: Arc::new(network),
+                storage,
+                metrics,
+                auditor,
+                children: Arc::new(Mutex::new(Vec::new())),
+            },
+            executor,
+        )
     }
 
     pub fn auditor(&self) -> &Auditor {
@@ -786,12 +782,6 @@ impl Context {
         self.executor
             .upgrade()
             .expect("executor dropped while context still in use")
-    }
-
-    // Make a detached context without a strong Executor owner
-    fn detached(mut self) -> Self {
-        self.owner = None;
-        self
     }
 
     // Access metrics in a uniform way for macros
@@ -806,7 +796,6 @@ impl Clone for Context {
             name: self.name.clone(),
             spawned: false,
             executor: self.executor.clone(),
-            owner: self.owner.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
             metrics: self.metrics.clone(),
@@ -837,7 +826,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         // Detach the context handed to the spawned task to avoid cycles
-        let future = f(self.detached());
+        let future = f(self);
         let (f, handle) = Handle::init_future(future, gauge, false, children);
 
         // Spawn the task
@@ -904,7 +893,7 @@ impl crate::Spawner for Context {
 
         // Initialize the blocking task
         let executor = self.executor();
-        let (f, handle) = Handle::init_blocking(|| f(self.detached()), gauge, false);
+        let (f, handle) = Handle::init_blocking(|| f(self), gauge, false);
 
         // Spawn the task
         let f = async move { f() };
@@ -993,7 +982,6 @@ impl crate::Metrics for Context {
             name,
             spawned: false,
             executor: self.executor.clone(),
-            owner: self.owner.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
             metrics: self.metrics.clone(),
