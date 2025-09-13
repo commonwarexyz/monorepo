@@ -1070,35 +1070,29 @@ impl Future for Sleeper {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        if let Some(exec) = self.executor.upgrade() {
-            {
-                let current_time = *exec.time.lock().unwrap();
-                if current_time >= self.time {
-                    return Poll::Ready(());
-                }
+        let executor = self.executor.upgrade().expect("executor already dropped");
+        {
+            let current_time = *executor.time.lock().unwrap();
+            if current_time >= self.time {
+                return Poll::Ready(());
             }
-            if !self.registered {
-                self.registered = true;
-                exec.sleeping.lock().unwrap().push(Alarm {
-                    time: self.time,
-                    waker: cx.waker().clone(),
-                });
-            }
-            Poll::Pending
-        } else {
-            // Executor dropped; treat sleep as complete
-            Poll::Ready(())
         }
+        if !self.registered {
+            self.registered = true;
+            executor.sleeping.lock().unwrap().push(Alarm {
+                time: self.time,
+                waker: cx.waker().clone(),
+            });
+        }
+        Poll::Pending
     }
 }
 
 impl Clock for Context {
     fn current(&self) -> SystemTime {
-        if let Some(exec) = self.executor.upgrade() {
-            *exec.time.lock().unwrap()
-        } else {
-            UNIX_EPOCH
-        }
+        let executor = self.executor.upgrade().expect("executor already dropped");
+        let time = *executor.time.lock().unwrap();
+        time
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
