@@ -601,13 +601,13 @@ impl Tasks {
     /// Drop all active tasks.
     fn clear(&self) {
         // Snapshot pending tasks
-        let active: Vec<Arc<Task>> = {
+        let pending: Vec<Arc<Task>> = {
             let pending = self.pending.lock().unwrap();
             pending.values().filter_map(|w| w.upgrade()).collect()
         };
 
         // Drop their futures to release captured resources
-        for task in active {
+        for task in pending {
             if let Operation::Work(future) = &task.operation {
                 *future.lock().unwrap() = None;
             }
