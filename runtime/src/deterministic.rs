@@ -490,9 +490,7 @@ impl Runner {
 
         // Stop the executor
         executor.stop();
-        let Ok(executor) = Arc::try_unwrap(executor) else {
-            panic!("executor still has references");
-        };
+        let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
         (output, executor.checkpoint())
     }
@@ -797,9 +795,7 @@ impl Context {
 
     // Upgrade executor Weak reference; panic if unavailable
     fn executor(&self) -> Arc<Executor> {
-        self.executor
-            .upgrade()
-            .expect("executor dropped while context still in use")
+        self.executor.upgrade().expect("executor already dropped")
     }
 
     // Access metrics in a uniform way for macros
@@ -1204,7 +1200,7 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, utils::run_tasks, Blob, Runner as _, Storage};
+    use crate::{deterministic, utils::run_tasks, Blob, Runner as _, Spawner, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
@@ -1356,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "execution is not finished")]
+    #[should_panic(expected = "executor already dropped")]
     fn test_context_return() {
         // Initialize runtime
         let executor = deterministic::Runner::default();
@@ -1367,8 +1363,8 @@ mod tests {
             context
         });
 
-        // Should never reach this line
-        drop(context);
+        // Attempt to spawn on the context (should fail)
+        context.spawn(|_| async move {});
     }
 
     #[test]
