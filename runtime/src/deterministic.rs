@@ -382,27 +382,18 @@ impl crate::Runner for Runner {
                             return output;
                         }
                     }
-                    Operation::Work { future, completed } => {
-                        // If task is completed, skip it
+                    Operation::Work(future) => {
+                        // Get the future (if it still exists)
                         let mut fut_opt = future.lock().unwrap();
-                        if *completed.lock().unwrap() {
-                            trace!(id = task.id, "dropping already complete task");
-
-                            // Drop the future
-                            if let Some(tasks) = task.tasks.upgrade() {
-                                tasks.pending.lock().unwrap().remove(&task.id);
-                            }
-                            *fut_opt = None;
+                        let Some(fut) = fut_opt.as_mut() else {
                             continue;
-                        }
+                        };
 
                         // Poll the task
-                        let fut = fut_opt.as_mut().unwrap();
                         if fut.as_mut().poll(&mut cx).is_ready() {
                             trace!(id = task.id, "task is complete");
-                            *completed.lock().unwrap() = true;
 
-                            // Drop the future
+                            // Remove the future from pending and drop
                             if let Some(tasks) = task.tasks.upgrade() {
                                 tasks.pending.lock().unwrap().remove(&task.id);
                             }
@@ -486,10 +477,7 @@ impl crate::Runner for Runner {
 /// The operation that a task is performing.
 enum Operation {
     Root,
-    Work {
-        future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>,
-        completed: Mutex<bool>,
-    },
+    Work(Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>),
 }
 
 /// A task that is being executed by the runtime.
@@ -583,10 +571,7 @@ impl Tasks {
             id,
             label,
             tasks: Arc::downgrade(arc_self),
-            operation: Operation::Work {
-                future: Mutex::new(Some(future)),
-                completed: Mutex::new(false),
-            },
+            operation: Operation::Work(Mutex::new(Some(future))),
         });
 
         // Track as pending until completion
@@ -621,16 +606,15 @@ impl Tasks {
     /// Forcibly shutdown all incomplete tasks and clear the queue.
     /// This is called when the executor is dropped to prevent memory leaks.
     fn shutdown(&self) {
-        // Step 1: Snapshot incomplete tasks (pending waiters + queued tasks)
+        // Step 1: Snapshot pending tasks
         let active: Vec<Arc<Task>> = {
             let pending = self.pending.lock().unwrap();
             pending.values().filter_map(|w| w.upgrade()).collect()
         };
 
-        // Step 2: Mark tasks as completed and drop their futures to release captured resources
+        // Step 2: Drop their futures to release captured resources
         for task in active {
-            if let Operation::Work { future, completed } = &task.operation {
-                *completed.lock().unwrap() = true;
+            if let Operation::Work(future) = &task.operation {
                 *future.lock().unwrap() = None;
             }
         }
@@ -638,10 +622,6 @@ impl Tasks {
         // Step 3: Clear the run queue and pending refs
         self.queue.lock().unwrap().clear();
         self.pending.lock().unwrap().clear();
-
-        // Step 4: Reset counters
-        *self.counter.lock().unwrap() = 0;
-        *self.root_registered.lock().unwrap() = false;
     }
 }
 
