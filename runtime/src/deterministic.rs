@@ -239,7 +239,7 @@ impl Drop for Executor {
         *self.finished.lock().unwrap() = true;
 
         // Drop all outstanding tasks
-        self.tasks.shutdown();
+        self.tasks.clear();
 
         // Discard any remaining alarms (tasks already dropped)
         self.sleeping.lock().unwrap().clear();
@@ -598,23 +598,22 @@ impl Tasks {
         self.queue.lock().unwrap().len()
     }
 
-    /// Forcibly shutdown all incomplete tasks and clear the queue.
-    /// This is called when the executor is dropped to prevent memory leaks.
-    fn shutdown(&self) {
-        // Step 1: Snapshot pending tasks
+    /// Drop all active tasks.
+    fn clear(&self) {
+        // Snapshot pending tasks
         let active: Vec<Arc<Task>> = {
             let pending = self.pending.lock().unwrap();
             pending.values().filter_map(|w| w.upgrade()).collect()
         };
 
-        // Step 2: Drop their futures to release captured resources
+        // Drop their futures to release captured resources
         for task in active {
             if let Operation::Work(future) = &task.operation {
                 *future.lock().unwrap() = None;
             }
         }
 
-        // Step 3: Clear the run queue and pending refs
+        // Clear the run queue and pending refs (in case called again)
         self.queue.lock().unwrap().clear();
         self.pending.lock().unwrap().clear();
     }
