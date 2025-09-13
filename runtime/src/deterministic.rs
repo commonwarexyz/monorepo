@@ -235,17 +235,14 @@ pub struct Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
-        // Step 1: Mark executor as finished to prevent new tasks
+        // Mark executor as finished to prevent new tasks
         *self.finished.lock().unwrap() = true;
 
-        // Step 3: Shutdown all tasks (queued + pending) to drop their futures
+        // Drop all outstanding tasks
         self.tasks.shutdown();
 
-        // Step 4: Clear any remaining sleeping alarms (now harmless)
+        // Discard any remaining alarms (tasks already dropped)
         self.sleeping.lock().unwrap().clear();
-
-        // Step 5: Clear all partitions
-        self.partitions.lock().unwrap().clear();
     }
 }
 
@@ -494,7 +491,6 @@ impl ArcWake for Task {
         // Upgrade the weak reference to re-enqueue this task.
         // If upgrade fails, the task queue has been dropped and no action is required.
         if let Some(tasks) = arc_self.tasks.upgrade() {
-            // Re-enqueue for execution
             tasks.enqueue(arc_self.clone());
         }
     }
@@ -507,7 +503,6 @@ struct Tasks {
     /// The queue of tasks that are waiting to be executed.
     queue: Mutex<Vec<Arc<Task>>>,
     /// Incomplete tasks that may still be referenced by external wakers.
-    /// Keyed by task id for O(1) removal on completion.
     pending: Mutex<HashMap<u128, Weak<Task>>>,
     /// Indicates whether the root task has been registered.
     root_registered: Mutex<bool>,
