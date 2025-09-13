@@ -414,7 +414,7 @@ mod tests {
         // Must be shorter than the maximum shutdown range to make progress after restarting
         let rebroadcast_timeout = NonZeroDuration::new_panic(Duration::from_millis(20));
 
-        let mut prev_ctx = None;
+        let mut prev_checkpoint = None;
         let all_validators = Arc::new(Mutex::new(Vec::new()));
 
         // Generate shares once
@@ -532,30 +532,30 @@ mod tests {
                     select! {
                         _ = context.sleep(shutdown_wait) => {
                             debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");
-                            (false, context) // Unclean shutdown
+                            false // Unclean shutdown
                         },
                         _ = completion => {
                             debug!("Shared reporter completed normally");
-                            (true, context) // Clean completion
+                            true // Clean completion
                         },
                     }
                 }
             };
 
-            let (complete, context) = if let Some(prev_ctx) = prev_ctx {
+            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
                 debug!(shutdown_count, "Restarting from previous context");
-                deterministic::Runner::from(prev_ctx)
+                deterministic::Runner::from(prev_checkpoint)
             } else {
                 debug!("Starting initial run");
                 deterministic::Runner::timed(Duration::from_secs(45))
             }
-            .start(f);
+            .start_and_recover(f);
             if complete && shutdown_count >= min_shutdowns {
                 debug!("Test completed successfully");
                 break;
             }
 
-            prev_ctx = Some(context.recover());
+            prev_checkpoint = Some(checkpoint);
             shutdown_count += 1;
         }
     }
@@ -668,15 +668,15 @@ mod tests {
                         debug!(tip_index, skip_index, target_index, "reporter status");
                         if tip_index >= skip_index + window - 1 {
                             // max we can proceed before item confirmed
-                            return context;
+                            return;
                         }
                     }
                     context.sleep(Duration::from_millis(50)).await;
                 }
             }
         };
-        let context = deterministic::Runner::timed(Duration::from_secs(60)).start(f);
-        let prev_ctx = context.recover();
+        let (_, checkpoint) =
+            deterministic::Runner::timed(Duration::from_secs(60)).start_and_recover(f);
 
         // Second run: restart and verify the skip_index gets confirmed
         let f2 = move |context: Context| {
@@ -762,7 +762,7 @@ mod tests {
                 }
             }
         };
-        deterministic::Runner::from(prev_ctx).start(f2);
+        deterministic::Runner::from(checkpoint).start(f2);
     }
 
     #[test_traced("INFO")]
