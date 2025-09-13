@@ -947,12 +947,10 @@ impl crate::Spawner for Context {
         self.auditor.event(b"stop", |hasher| {
             hasher.update(value.to_be_bytes());
         });
-        // If executor is already dropped, consider stop complete
-        let stop_resolved = if let Some(exec) = self.executor.upgrade() {
-            let mut shutdown = exec.shutdown.lock().unwrap();
+        let stop_resolved = {
+            let executor = self.executor();
+            let mut shutdown = executor.shutdown.lock().unwrap();
             shutdown.stop(value)
-        } else {
-            return Ok(());
         };
 
         // Wait for all tasks to complete or the timeout to fire
@@ -973,12 +971,9 @@ impl crate::Spawner for Context {
 
     fn stopped(&self) -> Signal {
         self.auditor.event(b"stopped", |_| {});
-        if let Some(exec) = self.executor.upgrade() {
-            exec.shutdown.lock().unwrap().stopped()
-        } else {
-            // Executor already gone; treat as already stopped
-            Signal::Closed(0)
-        }
+        let executor = self.executor();
+        let stopped = executor.shutdown.lock().unwrap().stopped();
+        stopped
     }
 }
 
@@ -1163,49 +1158,28 @@ impl RngCore for Context {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        if let Some(exec) = self.executor.upgrade() {
-            exec.rng.lock().unwrap().next_u32()
-        } else {
-            0
-        }
+        self.executor().rng.lock().unwrap().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        if let Some(exec) = self.executor.upgrade() {
-            exec.rng.lock().unwrap().next_u64()
-        } else {
-            0
-        }
+        self.executor().rng.lock().unwrap().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
-        if let Some(exec) = self.executor.upgrade() {
-            exec.rng.lock().unwrap().fill_bytes(dest)
-        } else {
-            for b in dest.iter_mut() {
-                *b = 0;
-            }
-        }
+        self.executor().rng.lock().unwrap().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
         self.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        if let Some(exec) = self.executor.upgrade() {
-            exec.rng.lock().unwrap().try_fill_bytes(dest)
-        } else {
-            for b in dest.iter_mut() {
-                *b = 0;
-            }
-            Ok(())
-        }
+        self.executor().rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
 
