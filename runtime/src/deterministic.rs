@@ -232,18 +232,23 @@ pub struct Executor {
 }
 
 impl Executor {
+    /// Clear all tasks.
+    ///
+    /// We don't consume [Executor] because it must remain upgradable for any tasks
+    /// that interact with the runtime during drop.
     fn stop(&self) {
         // Mark executor as finished to prevent new tasks
         *self.finished.lock().unwrap() = true;
 
+        // Drop all wakers
+        self.sleeping.lock().unwrap().clear();
+
         // Drop all outstanding tasks
         self.tasks.clear();
-
-        // Discard any remaining alarms (tasks already dropped)
-        self.sleeping.lock().unwrap().clear();
     }
 
-    fn checkpoint(self, storage: Arc<MeteredStorage<AuditedStorage<MemStorage>>>) -> Checkpoint {
+    /// Recover reusable information from the [Executor].
+    fn checkpoint(self, storage: Arc<Storage>) -> Checkpoint {
         // Ensure executor is finished
         assert!(*self.finished.lock().unwrap());
 
@@ -265,7 +270,7 @@ pub struct Checkpoint {
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
-    storage: Arc<MeteredStorage<AuditedStorage<MemStorage>>>,
+    storage: Arc<Storage>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -669,6 +674,7 @@ impl Tasks {
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
+type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
@@ -676,13 +682,9 @@ type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 pub struct Context {
     name: String,
     spawned: bool,
-    // Weak reference to break cycles when contexts are captured by futures
     executor: Weak<Executor>,
     network: Arc<Network>,
-    storage: Arc<MeteredStorage<AuditedStorage<MemStorage>>>,
-    // Cache commonly-used handles to avoid upgrading Weak for simple access
-    metrics: Arc<Metrics>,
-    auditor: Arc<Auditor>,
+    storage: Arc<Storage>,
     children: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
@@ -727,8 +729,6 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
-                metrics,
-                auditor,
                 children: Arc::new(Mutex::new(Vec::new())),
             },
             executor,
@@ -761,7 +761,7 @@ impl Context {
             // Copied from the checkpoint
             cycle: checkpoint.cycle,
             deadline: checkpoint.deadline,
-            auditor: checkpoint.auditor.clone(),
+            auditor: checkpoint.auditor,
             rng: checkpoint.rng,
             time: checkpoint.time,
 
@@ -780,16 +780,10 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                metrics,
-                auditor: checkpoint.auditor,
                 children: Arc::new(Mutex::new(Vec::new())),
             },
             executor,
         )
-    }
-
-    pub fn auditor(&self) -> &Auditor {
-        &self.auditor
     }
 
     // Upgrade executor Weak reference; panic if unavailable
@@ -797,9 +791,9 @@ impl Context {
         self.executor.upgrade().expect("executor already dropped")
     }
 
-    // Access metrics in a uniform way for macros
-    fn metrics_handle(&self) -> &Metrics {
-        &self.metrics
+    /// Get a clone of the [Auditor].
+    pub fn auditor(&self) -> Arc<Auditor> {
+        self.executor().auditor.clone()
     }
 }
 
@@ -811,8 +805,6 @@ impl Clone for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
-            metrics: self.metrics.clone(),
-            auditor: self.auditor.clone(),
             children: self.children.clone(),
         }
     }
@@ -939,11 +931,11 @@ impl crate::Spawner for Context {
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
-        self.auditor.event(b"stop", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"stop", |hasher| {
             hasher.update(value.to_be_bytes());
         });
         let stop_resolved = {
-            let executor = self.executor();
             let mut shutdown = executor.shutdown.lock().unwrap();
             shutdown.stop(value)
         };
@@ -965,8 +957,8 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.auditor.event(b"stopped", |_| {});
         let executor = self.executor();
+        executor.auditor.event(b"stopped", |_| {});
         let stopped = executor.shutdown.lock().unwrap().stopped();
         stopped
     }
@@ -992,8 +984,6 @@ impl crate::Metrics for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
-            metrics: self.metrics.clone(),
-            auditor: self.auditor.clone(),
             children: self.children.clone(),
         }
     }
@@ -1008,7 +998,8 @@ impl crate::Metrics for Context {
         let help = help.into();
 
         // Register metric
-        self.auditor.event(b"register", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
         });
@@ -1020,20 +1011,18 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        if let Some(exec) = self.executor.upgrade() {
-            exec.registry
-                .lock()
-                .unwrap()
-                .register(prefixed_name, help, metric)
-        }
+        executor
+            .registry
+            .lock()
+            .unwrap()
+            .register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
-        self.auditor.event(b"encode", |_| {});
+        let executor = self.executor();
+        executor.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
-        if let Some(exec) = self.executor.upgrade() {
-            encode(&mut buffer, &exec.registry.lock().unwrap()).expect("encoding failed");
-        }
+        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
         buffer
     }
 }
@@ -1150,38 +1139,45 @@ impl crate::Network for Context {
 
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
-        self.auditor.event(b"rand", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        self.executor().rng.lock().unwrap().next_u32()
+        let result = executor.rng.lock().unwrap().next_u32();
+        result
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.auditor.event(b"rand", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        self.executor().rng.lock().unwrap().next_u64()
+        let result = executor.rng.lock().unwrap().next_u64();
+        result
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.auditor.event(b"rand", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
-        self.executor().rng.lock().unwrap().fill_bytes(dest)
+        executor.rng.lock().unwrap().fill_bytes(dest);
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.auditor.event(b"rand", |hasher| {
+        let executor = self.executor();
+        executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        self.executor().rng.lock().unwrap().try_fill_bytes(dest)
+        let result = executor.rng.lock().unwrap().try_fill_bytes(dest);
+        result
     }
 }
 
 impl CryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <MeteredStorage<AuditedStorage<MemStorage>> as crate::Storage>::Blob;
+    type Blob = <Storage as crate::Storage>::Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
         self.storage.open(partition, name).await
