@@ -392,6 +392,7 @@ impl Runner {
                         // Get the future (if it still exists)
                         let mut fut_opt = future.lock().unwrap();
                         let Some(fut) = fut_opt.as_mut() else {
+                            // If the future is not found, we are shutting down and pending is already cleared
                             continue;
                         };
 
