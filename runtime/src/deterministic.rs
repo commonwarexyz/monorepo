@@ -246,22 +246,6 @@ impl Executor {
         // Drop all outstanding tasks
         self.tasks.clear();
     }
-
-    /// Recover reusable information from the [Executor].
-    fn checkpoint(self, storage: Arc<Storage>) -> Checkpoint {
-        // Ensure executor is finished
-        assert!(*self.finished.lock().unwrap());
-
-        // Prepare checkpoint
-        Checkpoint {
-            cycle: self.cycle,
-            deadline: self.deadline,
-            auditor: self.auditor,
-            rng: self.rng,
-            time: self.time,
-            storage,
-        }
-    }
 }
 
 /// An artifact that can be used to recover the state of the runtime.
@@ -510,7 +494,17 @@ impl Runner {
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
-        (output, executor.checkpoint(storage))
+        // Construct a checkpoint that can be used to restart the runtime
+        let checkpoint = Checkpoint {
+            cycle: executor.cycle,
+            deadline: executor.deadline,
+            auditor: executor.auditor,
+            rng: executor.rng,
+            time: executor.time,
+            storage,
+        };
+
+        (output, checkpoint)
     }
 }
 
