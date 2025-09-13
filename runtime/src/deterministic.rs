@@ -106,6 +106,7 @@ impl Metrics {
 }
 
 /// Track the state of the runtime for determinism auditing.
+#[derive(Debug)]
 pub struct Auditor {
     hash: Mutex<Vec<u8>>,
 }
@@ -230,11 +231,10 @@ pub struct Executor {
     partitions: Mutex<HashMap<String, Partition>>,
     shutdown: Mutex<Stopper>,
     finished: Mutex<bool>,
-    recovered: Mutex<bool>,
 }
 
-impl Drop for Executor {
-    fn drop(&mut self) {
+impl Executor {
+    fn stop(&self) {
         // Mark executor as finished to prevent new tasks
         *self.finished.lock().unwrap() = true;
 
@@ -244,17 +244,33 @@ impl Drop for Executor {
         // Discard any remaining alarms (tasks already dropped)
         self.sleeping.lock().unwrap().clear();
     }
+
+    fn checkpoint(self) -> Checkpoint {
+        // Ensure executor is finished
+        assert!(*self.finished.lock().unwrap());
+
+        // Prepare checkpoint
+        Checkpoint {
+            cycle: self.cycle,
+            deadline: self.deadline,
+            auditor: self.auditor,
+            rng: self.rng,
+            time: self.time,
+            partitions: self.partitions,
+        }
+    }
 }
 
-struct Checkpoint {
+pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
-    auditor: Auditor,
-    rng: StdRng,
-    time: SystemTime,
-    partitions: HashMap<String, Partition>,
+    auditor: Arc<Auditor>,
+    rng: Mutex<StdRng>,
+    time: Mutex<SystemTime>,
+    partitions: Mutex<HashMap<String, Partition>>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum State {
     Config(Config),
     Checkpoint(Checkpoint),
@@ -315,7 +331,7 @@ impl Runner {
         Fut: Future,
     {
         // Setup context (depending on how the runtime was initialized)
-        let (mut context, executor) = match self.state {
+        let (context, executor) = match self.state {
             State::Config(config) => Context::new(config),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
@@ -472,9 +488,13 @@ impl Runner {
             iter += 1;
         };
 
-        // Clear tasks in the executor (before dropping the executor)
+        // Stop the executor
+        executor.stop();
+        let Ok(executor) = Arc::try_unwrap(executor) else {
+            panic!("executor still has references");
+        };
 
-        output
+        (output, executor.checkpoint())
     }
 }
 
@@ -696,7 +716,6 @@ impl Context {
             partitions: Mutex::new(HashMap::new()),
             shutdown: Mutex::new(Stopper::default()),
             finished: Mutex::new(false),
-            recovered: Mutex::new(false),
         });
 
         (
@@ -732,22 +751,22 @@ impl Context {
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
-        let auditor = Arc::new(checkpoint.auditor);
         let storage = MeteredStorage::new(
-            AuditedStorage::new(MemStorage::default(), auditor.clone()),
+            AuditedStorage::new(MemStorage::default(), checkpoint.auditor.clone()),
             runtime_registry,
         );
-        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
+        let network =
+            AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
         let executor = Arc::new(Executor {
             // Copied from the checkpoint
             cycle: checkpoint.cycle,
             deadline: checkpoint.deadline,
-            auditor: auditor.clone(),
-            rng: Mutex::new(checkpoint.rng),
-            time: Mutex::new(checkpoint.time),
-            partitions: Mutex::new(checkpoint.partitions),
+            auditor: checkpoint.auditor.clone(),
+            rng: checkpoint.rng,
+            time: checkpoint.time,
+            partitions: checkpoint.partitions,
 
             // New state for the new runtime
             registry: Mutex::new(registry),
@@ -756,7 +775,6 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             finished: Mutex::new(false),
-            recovered: Mutex::new(false),
         });
         (
             Self {
@@ -766,7 +784,7 @@ impl Context {
                 network: Arc::new(network),
                 storage,
                 metrics,
-                auditor,
+                auditor: checkpoint.auditor,
                 children: Arc::new(Mutex::new(Vec::new())),
             },
             executor,
@@ -1318,20 +1336,18 @@ mod tests {
         let data = b"Hello, world!";
 
         // Run some tasks, sync storage, and recover the runtime
-        let (context, state) = executor1.start(|context| async move {
+        let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
             blob.write_at(Vec::from(data), 0).await.unwrap();
             blob.sync().await.unwrap();
-            let state = context.auditor().state();
-            (context, state)
+            context.auditor().state()
         });
-        let recovered_context = context.recover();
 
         // Verify auditor state is the same
-        assert_eq!(state, recovered_context.auditor().state());
+        assert_eq!(state, checkpoint.auditor.state());
 
         // Check that synced storage persists after recovery
-        let executor = Runner::from(recovered_context);
+        let executor = Runner::from(checkpoint);
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
@@ -1349,17 +1365,14 @@ mod tests {
         let data = Vec::from("Hello, world!");
 
         // Run some tasks without syncing storage
-        let context = executor.start(|context| async move {
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let context = context.clone();
             let (blob, _) = context.open(partition, name).await.unwrap();
             blob.write_at(data, 0).await.unwrap();
-            // Intentionally do not call sync() here
-            context
         });
 
         // Recover the runtime
-        let context = context.recover();
-        let executor = Runner::from(context);
+        let executor = Runner::from(checkpoint);
 
         // Check that unsynced storage does not persist after recovery
         executor.start(|context| async move {
@@ -1370,32 +1383,18 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "execution is not finished")]
-    fn test_recover_before_finish_panics() {
+    fn test_context_return() {
         // Initialize runtime
         let executor = deterministic::Runner::default();
 
         // Start runtime
-        executor.start(|context| async move {
+        let context = executor.start(|context| async move {
             // Attempt to recover before the runtime has finished
-            context.recover();
+            context
         });
-    }
 
-    #[test]
-    #[should_panic(expected = "runtime has already been recovered")]
-    fn test_recover_twice_panics() {
-        // Initialize runtime
-        let executor = deterministic::Runner::default();
-
-        // Finish runtime
-        let context = executor.start(|context| async move { context });
-
-        // Recover for the first time
-        let cloned_context = context.clone();
-        context.recover();
-
-        // Attempt to recover again using the same context
-        cloned_context.recover();
+        // Should never reach this line
+        drop(context);
     }
 
     #[test]
