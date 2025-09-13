@@ -791,6 +791,11 @@ impl Context {
         self.executor.upgrade().expect("executor already dropped")
     }
 
+    /// Access the [Metrics] of the runtime.
+    fn metrics(&self) -> Arc<Metrics> {
+        self.executor().metrics.clone()
+    }
+
     /// Get a clone of the [Auditor].
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()
