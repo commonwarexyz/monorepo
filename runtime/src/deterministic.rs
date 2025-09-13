@@ -788,7 +788,7 @@ impl Context {
         )
     }
 
-    // Upgrade executor Weak reference; panic if unavailable
+    /// Upgrade executor Weak reference; panic if unavailable
     fn executor(&self) -> Arc<Executor> {
         self.executor.upgrade().expect("executor already dropped")
     }
@@ -1040,6 +1040,13 @@ struct Sleeper {
     registered: bool,
 }
 
+impl Sleeper {
+    /// Upgrade executor Weak reference.
+    fn executor(&self) -> Arc<Executor> {
+        self.executor.upgrade().expect("executor already dropped")
+    }
+}
+
 struct Alarm {
     time: SystemTime,
     waker: Waker,
@@ -1070,7 +1077,7 @@ impl Future for Sleeper {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let executor = self.executor.upgrade().expect("executor already dropped");
+        let executor = self.executor();
         {
             let current_time = *executor.time.lock().unwrap();
             if current_time >= self.time {
@@ -1090,9 +1097,7 @@ impl Future for Sleeper {
 
 impl Clock for Context {
     fn current(&self) -> SystemTime {
-        let executor = self.executor.upgrade().expect("executor already dropped");
-        let time = *executor.time.lock().unwrap();
-        time
+        *self.executor().time.lock().unwrap()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
