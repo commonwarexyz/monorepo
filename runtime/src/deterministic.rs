@@ -490,6 +490,12 @@ impl Runner {
 
         // Stop the executor
         executor.stop();
+
+        // Extract the executor from the Arc
+        assert!(
+            Arc::weak_count(&executor) == 0,
+            "executor still has weak references"
+        );
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
         (output, executor.checkpoint())
@@ -1200,7 +1206,7 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, utils::run_tasks, Blob, Runner as _, Spawner, Storage};
+    use crate::{deterministic, utils::run_tasks, Blob, Runner as _, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
@@ -1352,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "executor already dropped")]
+    #[should_panic(expected = "executor still has weak references")]
     fn test_context_return() {
         // Initialize runtime
         let executor = deterministic::Runner::default();
@@ -1363,8 +1369,8 @@ mod tests {
             context
         });
 
-        // Attempt to spawn on the context (should fail)
-        context.spawn(|_| async move {});
+        // Should never get this far
+        drop(context);
     }
 
     #[test]
