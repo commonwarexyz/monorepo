@@ -106,7 +106,6 @@ impl Metrics {
 }
 
 /// Track the state of the runtime for determinism auditing.
-#[derive(Debug)]
 pub struct Auditor {
     hash: Mutex<Vec<u8>>,
 }
