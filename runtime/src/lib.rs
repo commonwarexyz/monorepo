@@ -109,6 +109,10 @@ pub trait Runner {
     type Context;
 
     /// Start running a root task.
+    ///
+    /// When this function returns, all spawned tasks will be canceled. If clean
+    /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
+    /// [Spawner::stopped] to coordinate clean shutdown.
     fn start<F, Fut>(self, f: F) -> Fut::Output
     where
         F: FnOnce(Self::Context) -> Fut,
