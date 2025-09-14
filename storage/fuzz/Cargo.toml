@@ -163,3 +163,10 @@ path = "fuzz_targets/mmr_grafting.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "adb_immutable"
+path = "fuzz_targets/adb_immutable.rs"
+test = false
+doc = false
+bench = false
