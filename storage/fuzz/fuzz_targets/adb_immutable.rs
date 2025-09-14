@@ -253,7 +253,7 @@ fn fuzz(input: FuzzInput) {
                 ImmutableOperation::OldestRetainedLoc => {
                     let _ = db.oldest_retained_loc();
                 }
-                
+
                 ImmutableOperation::Root => {
                     if uncommitted_ops.is_empty() {
                         let _ = db.root(&mut hasher);
