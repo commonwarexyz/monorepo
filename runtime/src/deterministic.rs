@@ -779,17 +779,17 @@ impl Context {
         )
     }
 
-    /// Upgrade executor Weak reference; panic if unavailable
+    /// Upgrade Weak reference to [Executor].
     fn executor(&self) -> Arc<Executor> {
         self.executor.upgrade().expect("executor already dropped")
     }
 
-    /// Access the [Metrics] of the runtime.
+    /// Get a reference to [Metrics].
     fn metrics(&self) -> Arc<Metrics> {
         self.executor().metrics.clone()
     }
 
-    /// Get a clone of the [Auditor].
+    /// Get a reference to the [Auditor].
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()
     }
