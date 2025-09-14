@@ -464,6 +464,7 @@ mod tests {
             atomic::{AtomicU32, Ordering},
             Arc, Mutex,
         },
+        task::{Context as TContext, Poll, Waker},
     };
     use tracing::{error, Level};
     use utils::reschedule;
@@ -1169,6 +1170,9 @@ mod tests {
                     assert_eq!(value, 42);
                     drop(signal);
                 });
+
+            // Ensure waker is registered
+            reschedule().await;
         });
     }
 
@@ -1612,6 +1616,71 @@ mod tests {
         });
     }
 
+    fn test_late_waker<R: Runner>(runner: R)
+    where
+        R::Context: Metrics + Spawner,
+    {
+        // A future that captures its waker and sends it to the caller, then
+        // stays pending forever.
+        struct CaptureWaker {
+            tx: Option<oneshot::Sender<Waker>>,
+            sent: bool,
+        }
+
+        impl Future for CaptureWaker {
+            type Output = ();
+            fn poll(mut self: Pin<&mut Self>, cx: &mut TContext<'_>) -> Poll<Self::Output> {
+                if !self.sent {
+                    if let Some(tx) = self.tx.take() {
+                        // Send a clone of the current task's waker to the root
+                        let _ = tx.send(cx.waker().clone());
+                    }
+                    self.sent = true;
+                }
+                Poll::Pending
+            }
+        }
+
+        // A guard that wakes the captured waker on drop.
+        struct WakeOnDrop(Option<Waker>);
+        impl Drop for WakeOnDrop {
+            fn drop(&mut self) {
+                if let Some(w) = self.0.take() {
+                    w.wake_by_ref();
+                }
+            }
+        }
+
+        let holder = runner.start(|context| async move {
+            // Wire a oneshot to receive the task waker.
+            let (tx, rx) = oneshot::channel::<Waker>();
+
+            // Spawn a task that registers its waker and then stays pending.
+            context
+                .with_label("capture-waker")
+                .spawn(move |_| async move {
+                    CaptureWaker {
+                        tx: Some(tx),
+                        sent: false,
+                    }
+                    .await;
+                });
+
+            // Ensure the spawned task runs and registers its waker.
+            utils::reschedule().await;
+
+            // Receive the waker from the spawned task.
+            let waker = rx.await.expect("waker not received");
+
+            // Return a guard that will wake after the runtime has dropped.
+            WakeOnDrop(Some(waker))
+        });
+
+        // Dropping the guard after the runtime has torn down will trigger a wake on
+        // a task whose executor has been dropped.
+        drop(holder);
+    }
+
     fn test_metrics<R: Runner>(runner: R)
     where
         R::Context: Metrics,
@@ -1889,78 +1958,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_metrics() {
+    fn test_deterministic_late_waker() {
         let executor = deterministic::Runner::default();
-        test_metrics(executor);
+        test_late_waker(executor);
     }
 
     #[test]
-    fn test_deterministic_panic_if_unwrap_tasks_on_late_wake() {
-        use futures::channel::oneshot;
-        use std::task::{Context as TContext, Poll, Waker};
-
-        // A future that captures its waker and sends it to the caller, then
-        // stays pending forever.
-        struct CaptureWaker {
-            tx: Option<oneshot::Sender<Waker>>,
-            sent: bool,
-        }
-
-        impl Future for CaptureWaker {
-            type Output = ();
-            fn poll(mut self: Pin<&mut Self>, cx: &mut TContext<'_>) -> Poll<Self::Output> {
-                if !self.sent {
-                    if let Some(tx) = self.tx.take() {
-                        // Send a clone of the current task's waker to the root
-                        let _ = tx.send(cx.waker().clone());
-                    }
-                    self.sent = true;
-                }
-                Poll::Pending
-            }
-        }
-
-        // A guard that wakes the captured waker on drop.
-        struct WakeOnDrop(Option<Waker>);
-        impl Drop for WakeOnDrop {
-            fn drop(&mut self) {
-                if let Some(w) = self.0.take() {
-                    w.wake_by_ref();
-                }
-            }
-        }
-
+    fn test_deterministic_metrics() {
         let executor = deterministic::Runner::default();
-        let holder = executor.start(|context| async move {
-            // Wire a oneshot to receive the task waker.
-            let (tx, rx) = oneshot::channel::<Waker>();
-
-            // Spawn a task that registers its waker and then stays pending.
-            context
-                .with_label("capture-waker")
-                .spawn(move |_| async move {
-                    CaptureWaker {
-                        tx: Some(tx),
-                        sent: false,
-                    }
-                    .await;
-                });
-
-            // Ensure the spawned task runs and registers its waker.
-            utils::reschedule().await;
-
-            // Receive the waker from the spawned task.
-            let waker = rx.await.expect("waker not received");
-
-            // Return a guard that will wake after the runtime has dropped.
-            WakeOnDrop(Some(waker))
-        });
-
-        // Dropping the guard after the runtime has torn down will trigger a wake on
-        // a task whose executor has been dropped. If ArcWake unconditionally unwraps
-        // the task queue upgrade, this will panic. With correct handling, it should
-        // be a no-op (and may drop the future if still present).
-        drop(holder);
+        test_metrics(executor);
     }
 
     #[test]
@@ -2200,6 +2206,12 @@ mod tests {
     fn test_tokio_circular_reference_prevents_cleanup() {
         let executor = tokio::Runner::default();
         test_circular_reference_prevents_cleanup(executor);
+    }
+
+    #[test]
+    fn test_tokio_late_waker() {
+        let executor = tokio::Runner::default();
+        test_late_waker(executor);
     }
 
     #[test]

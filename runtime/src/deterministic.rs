@@ -545,6 +545,8 @@ impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         // Upgrade the weak reference to re-enqueue this task.
         // If upgrade fails, the task queue has been dropped and no action is required.
+        //
+        // This can happen if some data is passed into the runtime and it drops after the runtime exits.
         if let Some(tasks) = arc_self.tasks.upgrade() {
             tasks.enqueue(arc_self.clone());
         } else if let Operation::Work(future) = &arc_self.operation {
