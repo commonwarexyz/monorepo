@@ -315,7 +315,7 @@ impl Runner {
         F: FnOnce(Context) -> Fut,
         Fut: Future,
     {
-        // Setup context (depending on how the runtime was initialized)
+        // Setup context and return strong reference to executor
         let (context, executor) = match self.state {
             State::Config(config) => Context::new(config),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
