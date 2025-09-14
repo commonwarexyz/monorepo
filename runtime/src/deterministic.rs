@@ -232,7 +232,7 @@ impl Executor {
     ///
     /// We don't consume [Executor] because it must remain upgradable for any tasks
     /// that interact with the runtime during drop.
-    fn stop(&self) {
+    fn clear(&self) {
         // Drop all wakers
         self.sleeping.lock().unwrap().clear();
 
@@ -477,8 +477,8 @@ impl Runner {
             iter += 1;
         };
 
-        // Stop the executor
-        executor.stop();
+        // Clear remaining tasks from the executor
+        executor.clear();
 
         // Assert the context doesn't escape the start() function (behavior
         // is undefined in this case)
