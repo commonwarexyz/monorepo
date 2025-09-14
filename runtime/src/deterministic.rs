@@ -389,9 +389,15 @@ impl Runner {
                         }
                     }
                     Operation::Work(future) => {
-                        // Get the future (it must still exist at this point)
+                        // Get the future (if it still exists)
                         let mut fut_opt = future.lock().unwrap();
-                        let fut = fut_opt.as_mut().expect("future is missing");
+                        let Some(fut) = fut_opt.as_mut() else {
+                            trace!(id = task.id, "task is complete");
+
+                            // Remove the future from pending
+                            executor.tasks.pending.lock().unwrap().remove(&task.id);
+                            continue;
+                        };
 
                         // Poll the task
                         if fut.as_mut().poll(&mut cx).is_ready() {
@@ -542,11 +548,9 @@ struct Task {
 
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        // Upgrade the weak reference to re-enqueue this task.
-        // If upgrade fails, the task queue has been dropped and no action is required.
-        if let Some(tasks) = arc_self.tasks.upgrade() {
-            tasks.enqueue(arc_self.clone());
-        }
+        // Tasks can only be woken prior to cleanup, so this is upgrade is guaranteed to succeed
+        let tasks = arc_self.tasks.upgrade().expect("tasks already dropped");
+        tasks.enqueue(arc_self.clone());
     }
 }
 
