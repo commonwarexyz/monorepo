@@ -156,3 +156,10 @@ path = "fuzz_targets/cache_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mmr_grafting"
+path = "fuzz_targets/mmr_grafting.rs"
+test = false
+doc = false
+bench = false
