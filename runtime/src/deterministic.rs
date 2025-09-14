@@ -228,7 +228,6 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
-    finished: Mutex<bool>,
 }
 
 impl Executor {
@@ -237,9 +236,6 @@ impl Executor {
     /// We don't consume [Executor] because it must remain upgradable for any tasks
     /// that interact with the runtime during drop.
     fn stop(&self) {
-        // Mark executor as finished to prevent new tasks
-        *self.finished.lock().unwrap() = true;
-
         // Drop all wakers
         self.sleeping.lock().unwrap().clear();
 
@@ -383,7 +379,6 @@ impl Runner {
                         // Poll the root task
                         if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
                             trace!(id = task.id, "root task is complete");
-                            *executor.finished.lock().unwrap() = true;
                             output = Some(result);
                             break;
                         }
@@ -728,7 +723,6 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
-            finished: Mutex::new(false),
         });
 
         (
@@ -780,7 +774,6 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
-            finished: Mutex::new(false),
         });
         (
             Self {
