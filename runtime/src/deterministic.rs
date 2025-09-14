@@ -382,7 +382,7 @@ impl Runner {
                     Operation::Root => {
                         // Poll the root task
                         if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
-                            trace!(id = task.id, "task is complete");
+                            trace!(id = task.id, "root task is complete");
                             *executor.finished.lock().unwrap() = true;
                             output = Some(result);
                             break;
@@ -392,7 +392,7 @@ impl Runner {
                         // Get the future (if it still exists)
                         let mut fut_opt = future.lock().unwrap();
                         let Some(fut) = fut_opt.as_mut() else {
-                            trace!(id = task.id, "task is complete");
+                            trace!(id = task.id, "skipping already complete task");
 
                             // Remove the future from pending
                             executor.tasks.pending.lock().unwrap().remove(&task.id);
@@ -541,7 +541,7 @@ enum Operation {
 struct Task {
     id: u128,
     label: Label,
-    tasks: Weak<Tasks>,
+    tasks: Arc<Tasks>,
 
     operation: Operation,
 }
@@ -549,8 +549,7 @@ struct Task {
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         // Tasks can only be woken prior to cleanup, so this is upgrade is guaranteed to succeed
-        let tasks = arc_self.tasks.upgrade().expect("tasks already dropped");
-        tasks.enqueue(arc_self.clone());
+        arc_self.tasks.enqueue(arc_self.clone());
     }
 }
 
@@ -598,7 +597,7 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label: Label::root(),
-            tasks: Arc::downgrade(arc_self),
+            tasks: arc_self.clone(),
             operation: Operation::Root,
         });
 
@@ -623,7 +622,7 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label,
-            tasks: Arc::downgrade(arc_self),
+            tasks: arc_self.clone(),
             operation: Operation::Work(Mutex::new(Some(future))),
         });
 
