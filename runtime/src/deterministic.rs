@@ -676,7 +676,7 @@ impl Tasks {
             }
         }
 
-        // Clear the run queue and pending refs (in case called again)
+        // Clear the run queue and pending refs
         self.queue.lock().unwrap().clear();
         self.pending.lock().unwrap().clear();
     }
