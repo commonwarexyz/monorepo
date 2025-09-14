@@ -601,9 +601,13 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         &mut self,
         prune_to_pos: u64,
     ) -> Result<BTreeMap<u64, H::Digest>, Error> {
+        assert!(prune_to_pos >= self.pruned_to_pos);
+
         let mut pinned_nodes = BTreeMap::new();
         for pos in nodes_to_pin(prune_to_pos) {
-            let digest = self.get_node(pos).await?.unwrap();
+            let digest = self.get_node(pos).await?.expect(
+                "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
+            );
             self.metadata
                 .put(U64::new(NODE_PREFIX, pos), digest.to_vec());
             pinned_nodes.insert(pos, digest);
@@ -670,7 +674,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// requiring it sync the MMR to write any potential unprocessed updates.
     pub async fn prune_to_pos(&mut self, h: &mut impl Hasher<H>, pos: u64) -> Result<(), Error> {
         assert!(pos <= self.size());
-        if self.size() == 0 {
+        if pos <= self.pruned_to_pos {
             return Ok(());
         }
 
@@ -948,6 +952,10 @@ mod tests {
             }
             assert!(matches!(mmr.pop(1).await, Err(Error::ElementPruned(_))));
 
+            // Make sure pruning to an older location is a no-op.
+            assert!(mmr.prune_to_pos(&mut hasher, leaf_pos - 1).await.is_ok());
+            assert_eq!(mmr.pruned_to_pos(), leaf_pos);
+
             mmr.destroy().await.unwrap();
         });
     }
@@ -1188,6 +1196,10 @@ mod tests {
                 .unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
             assert_eq!(pruned_mmr.oldest_retained_pos(), Some(size));
+            assert_eq!(pruned_mmr.pruned_to_pos(), size);
+
+            // Make sure pruning to older location is a no-op.
+            assert!(pruned_mmr.prune_to_pos(&mut hasher, size - 1).await.is_ok());
             assert_eq!(pruned_mmr.pruned_to_pos(), size);
 
             // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
