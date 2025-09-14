@@ -552,6 +552,9 @@ impl ArcWake for Task {
         // If upgrade fails, the task queue has been dropped and no action is required.
         if let Some(tasks) = arc_self.tasks.upgrade() {
             tasks.enqueue(arc_self.clone());
+        } else if let Operation::Work(future) = &arc_self.operation {
+            // Drop the future to release captured resources
+            *future.lock().unwrap() = None;
         }
     }
 }
