@@ -1895,27 +1895,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_late_wake_after_executor_drop() {
-        // This test ensures that late wake() calls that occur during executor drop
-        // (e.g., from shutdown signal internals) do not panic. It will fail if
-        // ArcWake unconditionally unwraps the task queue (i.e., if Weak<Tasks>
-        // is upgraded with .unwrap() instead of handling None).
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Spawn a task that awaits the shutdown signal. It will poll once,
-            // register its waker inside the shared signal, and then remain pending
-            // because we never call stop().
-            context.with_label("waiter").spawn(|ctx| async move {
-                let _ = ctx.stopped().await;
-            });
-
-            // Yield once to ensure the spawned task runs and polls the signal
-            // before the root completes, so its waker is registered.
-            utils::reschedule().await;
-        });
-    }
-
-    #[test]
     fn test_deterministic_panic_if_unwrap_tasks_on_late_wake() {
         use futures::channel::oneshot;
         use std::task::{Context as TContext, Poll, Waker};
