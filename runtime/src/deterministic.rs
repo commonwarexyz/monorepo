@@ -562,8 +562,6 @@ struct Tasks {
     queue: Mutex<Vec<Arc<Task>>>,
     /// Incomplete tasks that may still be referenced by external wakers.
     pending: Mutex<HashMap<u128, Weak<Task>>>,
-    /// Indicates whether the root task has been registered.
-    root_registered: Mutex<bool>,
 }
 
 impl Tasks {
@@ -573,7 +571,6 @@ impl Tasks {
             counter: Mutex::new(0),
             queue: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
-            root_registered: Mutex::new(false),
         }
     }
 
@@ -589,11 +586,6 @@ impl Tasks {
     ///
     /// If the root task has already been registered, this function will panic.
     fn register_root(arc_self: &Arc<Self>) {
-        {
-            let mut registered = arc_self.root_registered.lock().unwrap();
-            assert!(!*registered, "root already registered");
-            *registered = true;
-        }
         let id = arc_self.increment();
         let task = Arc::new(Task {
             id,
