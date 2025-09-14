@@ -545,12 +545,14 @@ impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         // Upgrade the weak reference to re-enqueue this task.
         // If upgrade fails, the task queue has been dropped and no action is required.
-        if let Some(tasks) = arc_self.tasks.upgrade() {
-            tasks.enqueue(arc_self.clone());
-        } else if let Operation::Work(future) = &arc_self.operation {
-            // Drop the future to release captured resources
-            *future.lock().unwrap() = None;
-        }
+        // if let Some(tasks) = arc_self.tasks.upgrade() {
+        //     tasks.enqueue(arc_self.clone());
+        // } else if let Operation::Work(future) = &arc_self.operation {
+        //     // Drop the future to release captured resources
+        //     *future.lock().unwrap() = None;
+        // }
+        let tasks = arc_self.tasks.upgrade().unwrap();
+        tasks.enqueue(arc_self.clone());
     }
 }
 
