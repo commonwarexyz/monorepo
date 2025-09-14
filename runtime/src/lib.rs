@@ -1152,6 +1152,25 @@ mod tests {
         });
     }
 
+    fn test_unfulfilled_shutdown<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics,
+    {
+        runner.start(|context| async move {
+            // Spawn a task that waits for signal
+            context
+                .with_label("before")
+                .spawn(move |context| async move {
+                    let mut signal = context.stopped();
+                    let value = (&mut signal).await.unwrap();
+
+                    // We should never reach this point
+                    assert_eq!(value, 42);
+                    drop(signal);
+                });
+        });
+    }
+
     fn test_spawn_ref<R: Runner>(runner: R)
     where
         R::Context: Spawner,
@@ -1752,6 +1771,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_unfulfilled_shutdown() {
+        let executor = deterministic::Runner::default();
+        test_unfulfilled_shutdown(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_ref() {
         let executor = deterministic::Runner::default();
         test_spawn_ref(executor);
@@ -1988,6 +2013,12 @@ mod tests {
     fn test_tokio_shutdown_multiple_stop_calls() {
         let executor = tokio::Runner::default();
         test_shutdown_multiple_stop_calls(executor);
+    }
+
+    #[test]
+    fn test_tokio_unfulfilled_shutdown() {
+        let executor = tokio::Runner::default();
+        test_unfulfilled_shutdown(executor);
     }
 
     #[test]
