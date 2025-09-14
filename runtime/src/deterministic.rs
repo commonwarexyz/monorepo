@@ -52,7 +52,7 @@ use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap},
-    mem::replace,
+    mem::{replace, take},
     net::SocketAddr,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
@@ -650,21 +650,24 @@ impl Tasks {
     /// Drop all active tasks.
     fn clear(&self) {
         // Snapshot pending tasks
-        let pending: Vec<Arc<Task>> = {
-            let pending = self.pending.lock().unwrap();
-            pending.values().filter_map(|w| w.upgrade()).collect()
+        let pending: BTreeMap<u128, Weak<Task>> = {
+            let mut pending = self.pending.lock().unwrap();
+            take(&mut *pending)
         };
 
         // Drop their futures to release captured resources
-        for task in pending {
-            if let Operation::Work(future) = &task.operation {
-                *future.lock().unwrap() = None;
-            }
+        for (_, task) in pending {
+            let Some(task) = task.upgrade() else {
+                continue;
+            };
+            let Operation::Work(future) = &task.operation else {
+                continue;
+            };
+            *future.lock().unwrap() = None;
         }
 
-        // Clear the run queue and pending refs
+        // Clear the run queue
         self.queue.lock().unwrap().clear();
-        self.pending.lock().unwrap().clear();
     }
 }
 
