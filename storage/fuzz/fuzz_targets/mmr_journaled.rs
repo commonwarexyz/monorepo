@@ -113,7 +113,7 @@ fn fuzz(input: FuzzInput) {
         let mut elements = Vec::new();
         let mut positions = Vec::new();
         let mut has_batched_updates = false;
-        let mut historical_sizes = Vec::new(); // Track valid MMR sizes for historical proofs
+        let mut historical_sizes = Vec::new();
         let mut mmr_opt = Some(mmr);
 
         for op in input.operations {
@@ -180,6 +180,7 @@ fn fuzz(input: FuzzInput) {
                     if element_pos >= mmr.size() {
                         continue;
                     }
+                    mmr.process_updates(&mut hasher);
                     let _ = mmr.proof(element_pos).await;
                 }
 
@@ -188,6 +189,7 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
+                    mmr.process_updates(&mut hasher);
                     let _ = mmr.range_proof(start_pos, end_pos).await;
                 }
 
@@ -196,14 +198,21 @@ fn fuzz(input: FuzzInput) {
                     start_pos,
                     end_pos,
                 } => {
+                    // Ensure the size represents a valid MMR structure
+                    use commonware_storage::mmr::iterator::PeakIterator;
+                    let valid_size = PeakIterator::to_nearest_size(size.min(mmr.size()));
+
                     if (start_pos > end_pos)
-                        || (start_pos >= size)
-                        || (end_pos >= size)
-                        || (size > mmr.size())
+                        || (start_pos >= valid_size)
+                        || (end_pos >= valid_size)
+                        || (valid_size == 0)
                     {
                         continue;
                     }
-                    let _ = mmr.historical_range_proof(size, start_pos, end_pos).await;
+                    mmr.process_updates(&mut hasher);
+                    let _ = mmr
+                        .historical_range_proof(valid_size, start_pos, end_pos)
+                        .await;
                 }
 
                 MmrJournaledOperation::Sync => {
