@@ -541,15 +541,18 @@ enum Operation {
 struct Task {
     id: u128,
     label: Label,
-    tasks: Arc<Tasks>,
+    tasks: Weak<Tasks>,
 
     operation: Operation,
 }
 
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        // Tasks can only be woken prior to cleanup, so this is upgrade is guaranteed to succeed
-        arc_self.tasks.enqueue(arc_self.clone());
+        // Upgrade the weak reference to re-enqueue this task.
+        // If upgrade fails, the task queue has been dropped and no action is required.
+        if let Some(tasks) = arc_self.tasks.upgrade() {
+            tasks.enqueue(arc_self.clone());
+        }
     }
 }
 
@@ -597,7 +600,7 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label: Label::root(),
-            tasks: arc_self.clone(),
+            tasks: Arc::downgrade(arc_self),
             operation: Operation::Root,
         });
 
@@ -622,7 +625,7 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label,
-            tasks: arc_self.clone(),
+            tasks: Arc::downgrade(arc_self),
             operation: Operation::Work(Mutex::new(Some(future))),
         });
 
