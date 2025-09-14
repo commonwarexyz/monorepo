@@ -1630,7 +1630,6 @@ mod tests {
             tx: Option<oneshot::Sender<Waker>>,
             sent: bool,
         }
-
         impl Future for CaptureWaker {
             type Output = ();
             fn poll(mut self: Pin<&mut Self>, cx: &mut TContext<'_>) -> Poll<Self::Output> {
@@ -1655,6 +1654,7 @@ mod tests {
             }
         }
 
+        // Run the executor to completion
         let holder = runner.start(|context| async move {
             // Wire a oneshot to receive the task waker.
             let (tx, rx) = oneshot::channel::<Waker>();
