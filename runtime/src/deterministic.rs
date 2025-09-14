@@ -1031,7 +1031,7 @@ struct Sleeper {
 }
 
 impl Sleeper {
-    /// Upgrade executor Weak reference.
+    /// Upgrade Weak reference to [Executor].
     fn executor(&self) -> Arc<Executor> {
         self.executor.upgrade().expect("executor already dropped")
     }
