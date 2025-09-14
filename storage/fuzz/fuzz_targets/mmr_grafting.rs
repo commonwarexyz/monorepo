@@ -17,8 +17,12 @@ const MAX_OPERATIONS: usize = 50;
 const MAX_ELEMENTS: usize = 100;
 const MAX_DATA_SIZE: usize = 128;
 const MAX_HEIGHT: u32 = 10;
-const MAX_LEAF_NUM: u64 = 1000;
-const MAX_NODE_POS: u64 = 10000;
+
+/// Returns the position of the leaf with number `leaf_num` in an MMR.
+const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
+    // This will never underflow since 2*n >= count_ones(n).
+    leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
+}
 
 #[derive(Arbitrary, Debug, Clone)]
 enum GraftingOperation {
@@ -26,7 +30,7 @@ enum GraftingOperation {
         leaf_indices: Vec<u64>,
     },
     LeafDigest {
-        pos: u64,
+        leaf_num: u64,
         element_size: usize,
     },
     NodeDigest {
@@ -110,6 +114,7 @@ fn fuzz(input: FuzzInput) {
         let mut base_mmr = Mmr::<Sha256>::new();
         let mut peak_tree = Mmr::<Sha256>::new();
 
+        // Initialize base MMR with some elements
         let mut standard_hasher = StandardHasher::<Sha256>::new();
         for _ in 0..rng.gen_range(1..20) {
             let val: u8 = rng.gen();
@@ -123,38 +128,62 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations {
             match op {
                 GraftingOperation::LoadGraftedDigests { leaf_indices } => {
+                    // Need enough leaves for grafting (at least 2 for height=1)
+                    if base_mmr.leaves() < 2 || leaf_indices.is_empty() {
+                        continue;
+                    }
+
                     let mut hasher = StandardHasher::<Sha256>::new();
                     let mut grafting_hasher = GraftingHasher::new(&mut hasher, 1);
 
-                    if !leaf_indices.is_empty() && base_mmr.size() > 0 {
-                        let max_leaf = base_mmr.leaves();
-                        let valid_leaves: Vec<u64> = leaf_indices
-                            .iter()
-                            .map(|&idx| idx % max_leaf.max(1))
-                            .collect();
+                    // Constrain indices to safe range (leaves that will have valid destination positions)
+                    let max_safe_leaf = (base_mmr.leaves() / 2).max(1);
+                    let valid_leaves: Vec<u64> = leaf_indices
+                        .iter()
+                        .map(|&idx| idx % max_safe_leaf)
+                        .collect();
 
-                        if !valid_leaves.is_empty() {
-                            let _ = grafting_hasher
-                                .load_grafted_digests(&valid_leaves, &base_mmr)
-                                .await;
-                            loaded_leaves = valid_leaves;
-                        }
+                    if grafting_hasher
+                        .load_grafted_digests(&valid_leaves, &base_mmr)
+                        .await
+                        .is_ok()
+                    {
+                        loaded_leaves = valid_leaves;
                     }
                 }
 
-                GraftingOperation::LeafDigest { pos, element_size } => {
+                GraftingOperation::LeafDigest {
+                    leaf_num,
+                    element_size,
+                } => {
+                    // Ensure we have enough leaves in base MMR for grafting
+                    if base_mmr.leaves() == 0 {
+                        continue;
+                    }
+
+                    // For height=1 grafting, we need nodes at height 1 or above to exist
+                    // The destination position for leaf_num is the position of its parent
+                    // We need at least 2 leaves to have any internal nodes
+                    if base_mmr.leaves() < 2 {
+                        continue;
+                    }
+
                     let mut hasher = StandardHasher::<Sha256>::new();
                     let mut grafting_hasher = GraftingHasher::new(&mut hasher, 1);
 
-                    if !loaded_leaves.is_empty() && base_mmr.size() > 0 {
-                        let _ = grafting_hasher
-                            .load_grafted_digests(&loaded_leaves, &base_mmr)
-                            .await;
-                        let leaf_num = loaded_leaves[pos as usize % loaded_leaves.len()];
-                        let safe_pos = 2 * leaf_num;
+                    // Constrain leaf_num to valid range (fewer leaves than base MMR leaves to be safe)
+                    let max_safe_leaf = (base_mmr.leaves() / 2).max(1);
+                    let valid_leaf_num = leaf_num % max_safe_leaf;
+                    let leaf_pos = leaf_num_to_pos(valid_leaf_num);
 
+                    // Load the grafted digest first (required by the assertion in leaf_digest)
+                    if grafting_hasher
+                        .load_grafted_digests(&[valid_leaf_num], &base_mmr)
+                        .await
+                        .is_ok()
+                    {
                         let element = generate_element(&mut rng, element_size);
-                        let _ = grafting_hasher.leaf_digest(safe_pos, &element);
+                        let _ = grafting_hasher.leaf_digest(leaf_pos, &element);
                     }
                 }
 
@@ -162,17 +191,18 @@ fn fuzz(input: FuzzInput) {
                     let mut hasher = StandardHasher::<Sha256>::new();
                     let mut grafting_hasher = GraftingHasher::new(&mut hasher, 1);
 
-                    let safe_pos = pos % MAX_NODE_POS;
+                    // Any position is valid for node_digest
                     let left = generate_digest(&mut rng, 1);
                     let right = generate_digest(&mut rng, 2);
-                    let _ = grafting_hasher.node_digest(safe_pos, &left, &right);
+                    let _ = grafting_hasher.node_digest(pos, &left, &right);
                 }
 
                 GraftingOperation::Root { size, num_peaks } => {
                     let mut hasher = StandardHasher::<Sha256>::new();
                     let mut grafting_hasher = GraftingHasher::new(&mut hasher, 1);
 
-                    let safe_size = (size % MAX_NODE_POS).max(1);
+                    // Constrain size and num_peaks to reasonable values
+                    let safe_size = size.max(1);
                     let safe_num_peaks = (num_peaks % 10).max(1);
                     let peaks: Vec<Digest> = (0..safe_num_peaks)
                         .map(|i| generate_digest(&mut rng, i as u8))
@@ -186,9 +216,11 @@ fn fuzz(input: FuzzInput) {
 
                     let mut forked = grafting_hasher.fork();
                     let element = generate_element(&mut rng, 10);
+
+                    // Only use fork if we have loaded leaves
                     if !loaded_leaves.is_empty() {
-                        let safe_pos = 2 * loaded_leaves[0];
-                        let _ = forked.leaf_digest(safe_pos, &element);
+                        let leaf_pos = leaf_num_to_pos(loaded_leaves[0]);
+                        let _ = forked.leaf_digest(leaf_pos, &element);
                     }
                 }
 
@@ -197,8 +229,9 @@ fn fuzz(input: FuzzInput) {
                     num,
                     num_elements,
                 } => {
+                    // Constrain parameters
                     let safe_height = height % MAX_HEIGHT;
-                    let safe_num = num % MAX_LEAF_NUM;
+                    let safe_num = num;
                     let safe_num_elements = (num_elements % MAX_ELEMENTS).max(1);
 
                     let elements: Vec<Vec<u8>> = (0..safe_num_elements)
@@ -222,22 +255,25 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 GraftingOperation::VerifyElementInclusion { pos } => {
-                    if base_mmr.size() > 0 && peak_tree.size() > 0 {
-                        let safe_pos = pos % base_mmr.size();
-                        let height = 1;
-                        let storage: GraftingStorage<Sha256, _, _> =
-                            GraftingStorage::new(&peak_tree, &base_mmr, height);
+                    // Ensure both MMRs have elements
+                    if base_mmr.size() == 0 || peak_tree.size() == 0 {
+                        continue;
+                    }
 
-                        if let Ok(proof) =
-                            verification::range_proof(&storage, safe_pos, safe_pos).await
-                        {
-                            let element = generate_element(&mut rng, 10);
-                            let mut verifier = Verifier::<Sha256>::new(height, 0, vec![&element]);
-                            let mut hasher = StandardHasher::<Sha256>::new();
-                            let root = storage
-                                .root(&mut hasher)
-                                .await
-                                .unwrap_or_else(|_| generate_digest(&mut rng, 0));
+                    // Constrain pos to valid range [0, base_mmr.size())
+                    let safe_pos = pos % base_mmr.size();
+                    let height = 1;
+                    let storage: GraftingStorage<Sha256, _, _> =
+                        GraftingStorage::new(&peak_tree, &base_mmr, height);
+
+                    // Generate proof with constrained positions
+                    if let Ok(proof) = verification::range_proof(&storage, safe_pos, safe_pos).await
+                    {
+                        let element = generate_element(&mut rng, 10);
+                        let mut verifier = Verifier::<Sha256>::new(height, 0, vec![&element]);
+                        let mut hasher = StandardHasher::<Sha256>::new();
+
+                        if let Ok(root) = storage.root(&mut hasher).await {
                             let _ = proof.verify_element_inclusion(
                                 &mut verifier,
                                 &element,
@@ -249,32 +285,43 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 GraftingOperation::VerifyRangeInclusion { start_pos, end_pos } => {
-                    if base_mmr.size() > 1 && peak_tree.size() > 0 {
-                        let safe_start = start_pos % (base_mmr.size() - 1);
-                        let safe_end =
-                            safe_start + (end_pos % 10).min(base_mmr.size() - safe_start - 1);
+                    // Ensure both MMRs have elements
+                    if base_mmr.size() == 0 || peak_tree.size() == 0 {
+                        continue;
+                    }
 
-                        let height = 1;
-                        let storage: GraftingStorage<Sha256, _, _> =
-                            GraftingStorage::new(&peak_tree, &base_mmr, height);
+                    // Constrain positions according to range_proof assertions:
+                    // - start_pos < mmr.size()
+                    // - end_pos < mmr.size()
+                    // - start_pos <= end_pos
+                    let safe_start = start_pos % base_mmr.size();
+                    let safe_end = if end_pos < start_pos {
+                        safe_start
+                    } else {
+                        safe_start + ((end_pos - start_pos) % (base_mmr.size() - safe_start))
+                    };
 
-                        if let Ok(proof) =
-                            verification::range_proof(&storage, safe_start, safe_end).await
-                        {
-                            let num_elements = (safe_end - safe_start + 1) as usize;
-                            let elements: Vec<Vec<u8>> = (0..num_elements)
-                                .map(|_| generate_element(&mut rng, 10))
-                                .collect();
-                            let element_refs: Vec<&[u8]> =
-                                elements.iter().map(|e| e.as_slice()).collect();
+                    // Ensure safe_end < base_mmr.size()
+                    let safe_end = safe_end.min(base_mmr.size() - 1);
 
-                            let mut verifier =
-                                Verifier::<Sha256>::new(height, 0, element_refs.clone());
-                            let mut hasher = StandardHasher::<Sha256>::new();
-                            let root = storage
-                                .root(&mut hasher)
-                                .await
-                                .unwrap_or_else(|_| generate_digest(&mut rng, 0));
+                    let height = 1;
+                    let storage: GraftingStorage<Sha256, _, _> =
+                        GraftingStorage::new(&peak_tree, &base_mmr, height);
+
+                    if let Ok(proof) =
+                        verification::range_proof(&storage, safe_start, safe_end).await
+                    {
+                        let num_elements = (safe_end - safe_start + 1) as usize;
+                        let elements: Vec<Vec<u8>> = (0..num_elements)
+                            .map(|_| generate_element(&mut rng, 10))
+                            .collect();
+                        let element_refs: Vec<&[u8]> =
+                            elements.iter().map(|e| e.as_slice()).collect();
+
+                        let mut verifier = Verifier::<Sha256>::new(height, 0, element_refs.clone());
+                        let mut hasher = StandardHasher::<Sha256>::new();
+
+                        if let Ok(root) = storage.root(&mut hasher).await {
                             let _ = proof.verify_range_inclusion(
                                 &mut verifier,
                                 &element_refs,
@@ -286,30 +333,43 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 GraftingOperation::CreateGraftedStorage { height } => {
+                    // Constrain height to reasonable values
                     let safe_height = (height % MAX_HEIGHT).min(5);
+
                     let storage: GraftingStorage<Sha256, _, _> =
                         GraftingStorage::new(&peak_tree, &base_mmr, safe_height);
-                    let _ = storage.size();
-                    let mut hasher = StandardHasher::<Sha256>::new();
-                    let _ = storage.root(&mut hasher).await;
-                }
 
-                GraftingOperation::GetNodeFromStorage { pos } => {
-                    if base_mmr.size() > 0 {
-                        let safe_pos = pos % base_mmr.size();
-                        let height = 1;
-                        let storage: GraftingStorage<Sha256, _, _> =
-                            GraftingStorage::new(&peak_tree, &base_mmr, height);
-                        let _ = storage.get_node(safe_pos).await;
+                    let _ = storage.size();
+
+                    // Only compute root if both trees have content to avoid panics
+                    if base_mmr.size() > 0 && peak_tree.size() > 0 {
+                        let mut hasher = StandardHasher::<Sha256>::new();
+                        let _ = storage.root(&mut hasher).await;
                     }
                 }
 
-                GraftingOperation::ComputeStorageRoot => {
-                    let height = rng.gen_range(0..5);
+                GraftingOperation::GetNodeFromStorage { pos } => {
+                    if base_mmr.size() == 0 {
+                        continue;
+                    }
+
+                    // Constrain pos to valid range
+                    let safe_pos = pos % base_mmr.size();
+                    let height = 1;
                     let storage: GraftingStorage<Sha256, _, _> =
                         GraftingStorage::new(&peak_tree, &base_mmr, height);
-                    let mut hasher = StandardHasher::<Sha256>::new();
-                    let _ = storage.root(&mut hasher).await;
+                    let _ = storage.get_node(safe_pos).await;
+                }
+
+                GraftingOperation::ComputeStorageRoot => {
+                    // Only compute root if both trees have content to avoid panics
+                    if base_mmr.size() > 0 && peak_tree.size() > 0 {
+                        let height = rng.gen_range(0..5);
+                        let storage: GraftingStorage<Sha256, _, _> =
+                            GraftingStorage::new(&peak_tree, &base_mmr, height);
+                        let mut hasher = StandardHasher::<Sha256>::new();
+                        let _ = storage.root(&mut hasher).await;
+                    }
                 }
 
                 GraftingOperation::AddToBaseMmr { element_size } => {
@@ -328,12 +388,17 @@ fn fuzz(input: FuzzInput) {
                     if base_mmr.leaves() > 0 && !loaded_leaves.is_empty() {
                         let mut hasher = StandardHasher::<Sha256>::new();
                         let mut grafting_hasher = GraftingHasher::new(&mut hasher, safe_height);
-                        let _ = grafting_hasher
+
+                        if grafting_hasher
                             .load_grafted_digests(&loaded_leaves, &base_mmr)
-                            .await;
-                        peak_tree.add(&mut grafting_hasher, &element);
-                        peak_elements.push(element);
+                            .await
+                            .is_ok()
+                        {
+                            peak_tree.add(&mut grafting_hasher, &element);
+                            peak_elements.push(element);
+                        }
                     } else {
+                        // Can add without grafting if no special requirements
                         let mut hasher = StandardHasher::<Sha256>::new();
                         peak_tree.add(&mut hasher, &element);
                         peak_elements.push(element);
@@ -341,17 +406,29 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 GraftingOperation::GenerateProof { start_pos, end_pos } => {
-                    if base_mmr.size() > 0 && peak_tree.size() > 0 {
-                        let safe_start = start_pos % base_mmr.size();
-                        let safe_end = safe_start.max(end_pos % base_mmr.size());
-
-                        if safe_start <= safe_end && safe_end < base_mmr.size() {
-                            let height = rng.gen_range(0..3);
-                            let storage: GraftingStorage<Sha256, _, _> =
-                                GraftingStorage::new(&peak_tree, &base_mmr, height);
-                            let _ = verification::range_proof(&storage, safe_start, safe_end).await;
-                        }
+                    // Ensure both MMRs have elements
+                    if base_mmr.size() == 0 || peak_tree.size() == 0 {
+                        continue;
                     }
+
+                    // Apply range_proof assertions:
+                    // - start_pos < mmr.size()
+                    // - end_pos < mmr.size()
+                    // - start_pos <= end_pos
+                    let safe_start = start_pos % base_mmr.size();
+                    let safe_end = if end_pos < safe_start {
+                        safe_start
+                    } else {
+                        safe_start + ((end_pos - safe_start) % (base_mmr.size() - safe_start))
+                    };
+
+                    // Ensure safe_end < base_mmr.size()
+                    let safe_end = safe_end.min(base_mmr.size() - 1);
+
+                    let height = rng.gen_range(0..3);
+                    let storage: GraftingStorage<Sha256, _, _> =
+                        GraftingStorage::new(&peak_tree, &base_mmr, height);
+                    let _ = verification::range_proof(&storage, safe_start, safe_end).await;
                 }
             }
         }
