@@ -51,7 +51,7 @@ use prometheus_client::{
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BinaryHeap, HashMap},
+    collections::{BTreeMap, BinaryHeap},
     mem::replace,
     net::SocketAddr,
     pin::Pin,
@@ -60,9 +60,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::trace;
-
-/// Map of names to blob contents.
-pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
 
 #[derive(Debug)]
 struct Metrics {
@@ -563,7 +560,7 @@ struct Tasks {
     /// The queue of tasks that are waiting to be executed.
     queue: Mutex<Vec<Arc<Task>>>,
     /// Incomplete tasks that may still be referenced by external wakers.
-    pending: Mutex<HashMap<u128, Weak<Task>>>,
+    pending: Mutex<BTreeMap<u128, Weak<Task>>>,
 }
 
 impl Tasks {
@@ -572,7 +569,7 @@ impl Tasks {
         Self {
             counter: Mutex::new(0),
             queue: Mutex::new(Vec::new()),
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(BTreeMap::new()),
         }
     }
 
