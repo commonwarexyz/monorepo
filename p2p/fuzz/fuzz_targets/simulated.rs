@@ -11,6 +11,7 @@ use commonware_runtime::{deterministic, Clock, Handle, Metrics, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
+    cmp::min,
     collections::{HashMap, VecDeque},
     time::Duration,
 };
@@ -70,30 +71,31 @@ enum SimulatedOperation {
 struct FuzzInput {
     seed: u64,
     operations: Vec<SimulatedOperation>,
-    n: u8,
+    peer_number: u8,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
         let operations = u.arbitrary()?;
-        let n = u.int_in_range(2..=MAX_PEERS as u32)? as u8;
+        let peer_number = u.int_in_range(2..=MAX_PEERS as u32)? as u8;
         Ok(FuzzInput {
             seed,
             operations,
-            n,
+            peer_number,
         })
     }
 }
 
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.seed);
-    let n = input.n;
+    let mut max_msg_size: Option<usize> = None;
+    let peer_number = input.peer_number;
 
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         let mut peers = Vec::new();
-        for i in 0..n {
+        for i in 0..peer_number {
             let seed = rng.gen::<u64>() ^ (i as u64);
             let private_key = ed25519::PrivateKey::from_seed(seed);
             peers.push(private_key.public_key());
@@ -114,8 +116,9 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
                 SimulatedOperation::CreateNetwork { max_size } => {
+                    let max_msg_size = Some((max_size as usize).clamp(1, MAX_MESSAGE_SIZE));
                     let config = Config {
-                        max_size: (max_size as usize).clamp(1, MAX_MESSAGE_SIZE),
+                        max_size: max_msg_size.unwrap(),
                     };
                     if let Some(handle) = network_handle.take() {
                         handle.abort();
@@ -156,7 +159,10 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let from_idx = (peer_idx as usize) % peers.len();
                     let to_idx = (to_idx as usize) % peers.len();
-                    let msg_size = msg_size.clamp(1, MAX_MESSAGE_SIZE as u32);
+                    if max_msg_size.is_none() {
+                        continue;
+                    }
+                    let msg_size = min(msg_size, max_msg_size.unwrap() as u32);
 
                     if let Some((ref mut sender, _)) = channels.get_mut(&(from_idx, channel_id)) {
                         let mut bytes = vec![0u8; msg_size as usize];
@@ -289,6 +295,7 @@ fn fuzz(input: FuzzInput) {
                     if let Some(handle) = network_handle.take() {
                         handle.abort();
                     }
+                    max_msg_size = None;
                     oracle = None;
                     channels.clear();
                     registered_peer_channels.clear();
