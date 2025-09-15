@@ -34,7 +34,7 @@ use tracing::debug;
 /// - `items_per_section`: number of items per section
 ///
 /// # Returns
-/// A `(journal, size)` where:
+/// (journal, size) where:
 /// - No section index < `lower_bound / items_per_section` exists.
 /// - No section index > `upper_bound / items_per_section` exists.
 /// - No item with location > `upper_bound` exists.
