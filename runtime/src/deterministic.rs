@@ -344,8 +344,8 @@ impl Runner {
             // Snapshot available tasks
             let mut queue = executor.tasks.drain();
 
-            // Shuffle tasks
-            {
+            // Shuffle tasks (if more than one)
+            if queue.len() > 1 {
                 let mut rng = executor.rng.lock().unwrap();
                 queue.shuffle(&mut *rng);
             }
