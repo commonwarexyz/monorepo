@@ -48,13 +48,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "confirmation"
-path = "fuzz_targets/confirmation.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "e2e"
 path = "fuzz_targets/e2e.rs"
 test = false
