@@ -39,7 +39,7 @@ use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     future::AbortHandle,
-    task::{waker, ArcWake},
+    task::{waker_ref, ArcWake},
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -382,7 +382,7 @@ impl Runner {
                     id: task.id,
                     tasks: Arc::downgrade(&executor.tasks),
                 });
-                let waker = waker(enq);
+                let waker = waker_ref(&enq);
                 let mut cx = task::Context::from_waker(&waker);
 
                 // Poll the task
@@ -578,7 +578,7 @@ struct Tasks {
     /// The queue of tasks that are waiting to be executed.
     queue: Mutex<Vec<u128>>,
     /// Incomplete tasks that may still be referenced by external wakers.
-    pending: Mutex<BTreeMap<u128, Weak<Task>>>,
+    pending: Mutex<BTreeMap<u128, Arc<Task>>>,
 }
 
 impl Tasks {
@@ -611,11 +611,7 @@ impl Tasks {
         });
 
         // Track as pending until completion
-        arc_self
-            .pending
-            .lock()
-            .unwrap()
-            .insert(id, Arc::downgrade(&task));
+        arc_self.pending.lock().unwrap().insert(id, task);
 
         // Add to queue
         arc_self.queue.lock().unwrap().push(id);
@@ -635,11 +631,7 @@ impl Tasks {
         });
 
         // Track as pending until completion
-        arc_self
-            .pending
-            .lock()
-            .unwrap()
-            .insert(id, Arc::downgrade(&task));
+        arc_self.pending.lock().unwrap().insert(id, task);
 
         // Add to queue
         arc_self.queue.lock().unwrap().push(id);
@@ -666,7 +658,7 @@ impl Tasks {
     /// Lookup a task by id.
     fn get(&self, id: u128) -> Option<Arc<Task>> {
         let pending = self.pending.lock().unwrap();
-        pending.get(&id).and_then(|w| w.upgrade())
+        pending.get(&id).cloned()
     }
 
     /// Remove a task from the pending map.
@@ -677,14 +669,11 @@ impl Tasks {
     /// Drop all active tasks.
     fn clear(&self) {
         // Clear pending tasks
-        let pending: BTreeMap<u128, Weak<Task>> = {
+        let pending: BTreeMap<u128, Arc<Task>> = {
             let mut pending = self.pending.lock().unwrap();
             take(&mut *pending)
         };
         for (_, task) in pending {
-            let Some(task) = task.upgrade() else {
-                continue;
-            };
             let Operation::Work(future) = &task.operation else {
                 continue;
             };
