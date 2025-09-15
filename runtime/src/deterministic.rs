@@ -361,7 +361,7 @@ impl Runner {
             trace!(iter, tasks = queue.len(), "starting loop");
             let mut output = None;
             for id in queue {
-                // Lookup the task by (it may have completed already)
+                // Lookup the task (it may have completed already)
                 let Some(task) = executor.tasks.get(id) else {
                     trace!(id, "skipping missing task");
                     continue;
@@ -372,10 +372,8 @@ impl Runner {
                     hasher.update(task.id.to_be_bytes());
                     hasher.update(task.label.name().as_bytes());
                 });
-                trace!(id, "processing task");
-
-                // Record task poll
                 executor.metrics.task_polls.get_or_create(&task.label).inc();
+                trace!(id, "processing task");
 
                 // Prepare task for polling
                 let waker = waker(Arc::new(TaskWaker {
@@ -385,8 +383,8 @@ impl Runner {
                 let mut cx = task::Context::from_waker(&waker);
 
                 // Poll the task
-                match &task.operation {
-                    Operation::Root => {
+                match &task.mode {
+                    Mode::Root => {
                         // Poll the root task
                         if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
                             trace!(id, "root task is complete");
@@ -394,13 +392,13 @@ impl Runner {
                             break;
                         }
                     }
-                    Operation::Work(future) => {
+                    Mode::Work(future) => {
                         // Get the future (if it still exists)
                         let mut fut_opt = future.lock().unwrap();
                         let Some(fut) = fut_opt.as_mut() else {
                             trace!(id, "skipping already complete task");
 
-                            // Remove the future from pending
+                            // Remove the future
                             executor.tasks.remove(id);
                             continue;
                         };
@@ -409,7 +407,7 @@ impl Runner {
                         if fut.as_mut().poll(&mut cx).is_ready() {
                             trace!(id = task.id, "task is complete");
 
-                            // Remove the future from pending and drop
+                            // Remove the future and drop
                             executor.tasks.remove(id);
                             *fut_opt = None;
                             continue;
@@ -441,7 +439,7 @@ impl Runner {
             trace!(now = current.epoch_millis(), "time advanced");
 
             // Skip time if there is nothing to do
-            if executor.tasks.len() == 0 {
+            if executor.tasks.ready() == 0 {
                 let mut skip = None;
                 {
                     let sleeping = executor.sleeping.lock().unwrap();
@@ -480,8 +478,8 @@ impl Runner {
                 waker.wake();
             }
 
-            // Account for remaining tasks
-            remaining += executor.tasks.len();
+            // Account for ready tasks
+            remaining += executor.tasks.ready();
 
             // If there are no tasks to run and no tasks sleeping, the executor is stalled
             // and will never finish.
@@ -537,8 +535,8 @@ impl crate::Runner for Runner {
     }
 }
 
-/// The operation that a task is performing.
-enum Operation {
+/// The mode of a [Task].
+enum Mode {
     Root,
     Work(Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>),
 }
@@ -548,10 +546,10 @@ struct Task {
     id: u128,
     label: Label,
 
-    operation: Operation,
+    mode: Mode,
 }
 
-/// A waker for some task tracked by the runtime.
+/// A waker for some [Task] tracked by the [Executor].
 struct TaskWaker {
     id: u128,
 
@@ -565,16 +563,16 @@ impl ArcWake for TaskWaker {
         //
         // This can happen if some data is passed into the runtime and it drops after the runtime exits.
         if let Some(tasks) = arc_self.tasks.upgrade() {
-            tasks.enqueue(arc_self.id);
+            tasks.queue(arc_self.id);
         }
     }
 }
 
-/// A task queue that is used to manage the tasks that are being executed by the runtime.
+/// A collection of [Task]s that are being executed by the [Executor].
 struct Tasks {
     /// The current task counter.
     counter: Mutex<u128>,
-    /// The queue of tasks that are ready to be polled.
+    /// Tasks that are ready to be polled.
     ready: Mutex<Vec<u128>>,
     /// All tasks that are still running.
     running: Mutex<BTreeMap<u128, Arc<Task>>>,
@@ -606,17 +604,12 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label: Label::root(),
-            operation: Operation::Root,
+            mode: Mode::Root,
         });
-
-        // Track as pending until completion
-        arc_self.running.lock().unwrap().insert(id, task);
-
-        // Add to ready
-        arc_self.ready.lock().unwrap().push(id);
+        arc_self.register(id, task);
     }
 
-    /// Register a new task to be executed.
+    /// Register a non-root task to be executed.
     fn register_work(
         arc_self: &Arc<Self>,
         label: Label,
@@ -626,35 +619,39 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label,
-            operation: Operation::Work(Mutex::new(Some(future))),
+            mode: Mode::Work(Mutex::new(Some(future))),
         });
+        arc_self.register(id, task);
+    }
 
-        // Track as pending until completion
-        arc_self.running.lock().unwrap().insert(id, task);
+    /// Register a new task to be executed.
+    fn register(&self, id: u128, task: Arc<Task>) {
+        // Track as running until completion
+        self.running.lock().unwrap().insert(id, task);
 
         // Add to ready
-        arc_self.ready.lock().unwrap().push(id);
+        self.queue(id);
     }
 
     /// Enqueue an already registered task to be executed.
-    fn enqueue(&self, id: u128) {
-        let mut queue = self.ready.lock().unwrap();
-        queue.push(id);
+    fn queue(&self, id: u128) {
+        let mut ready = self.ready.lock().unwrap();
+        ready.push(id);
     }
 
-    /// Dequeue all tasks that are ready to execute.
+    /// Drain all ready tasks.
     fn drain(&self) -> Vec<u128> {
         let mut queue = self.ready.lock().unwrap();
         let len = queue.len();
         replace(&mut *queue, Vec::with_capacity(len))
     }
 
-    /// Get the number of ready tasks.
-    fn len(&self) -> usize {
+    /// The number of ready tasks.
+    fn ready(&self) -> usize {
         self.ready.lock().unwrap().len()
     }
 
-    /// Lookup a task by id.
+    /// Lookup a task.
     ///
     /// We must return cloned here because we cannot hold the running lock while polling a task (will
     /// deadlock if [Self::register_work] is called).
@@ -663,27 +660,27 @@ impl Tasks {
         running.get(&id).cloned()
     }
 
-    /// Remove a task from the pending map.
+    /// Remove a task.
     fn remove(&self, id: u128) {
         self.running.lock().unwrap().remove(&id);
     }
 
     /// Drop all running tasks.
     fn clear(&self) {
-        // Clear pending tasks
+        // Clear running tasks
         let running: BTreeMap<u128, Arc<Task>> = {
             let mut running = self.running.lock().unwrap();
             take(&mut *running)
         };
         for (_, task) in running {
-            let Operation::Work(future) = &task.operation else {
+            let Mode::Work(future) = &task.mode else {
                 continue;
             };
             *future.lock().unwrap() = None;
         }
 
         // Clear ready (already dropped any future it may contain
-        // when iterating over pending)
+        // when iterating over running)
         self.ready.lock().unwrap().clear();
     }
 }
