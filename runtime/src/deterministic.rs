@@ -446,30 +446,21 @@ impl Runner {
             }
 
             // Wake all sleeping tasks that are ready
-            let mut to_wake = Vec::new();
-            let mut remaining;
             {
                 let mut sleeping = executor.sleeping.lock().unwrap();
                 while let Some(next) = sleeping.peek() {
                     if next.time <= current {
                         let sleeper = sleeping.pop().unwrap();
-                        to_wake.push(sleeper.waker);
+                        sleeper.waker.wake();
                     } else {
                         break;
                     }
                 }
-                remaining = sleeping.len();
             }
-            for waker in to_wake {
-                waker.wake();
-            }
-
-            // Account for ready tasks
-            remaining += executor.tasks.ready();
 
             // If there are no tasks to run and no tasks sleeping, the executor is stalled
             // and will never finish.
-            if remaining == 0 {
+            if executor.tasks.ready() == 0 {
                 panic!("runtime stalled");
             }
             iter += 1;
