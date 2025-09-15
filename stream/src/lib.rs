@@ -99,18 +99,6 @@ impl<S> Config<S> {
     }
 }
 
-/// Allows consumers to stop handshakes early if the peer is invalid.
-///
-/// This can be used to implement a block-list system, where some peers should
-/// not be allowed to create connections, or an allow-list system where only
-/// a predefined list of peers are able to create connections, or some other
-/// arbitrary piece of logic.
-pub trait Bouncer<K> {
-    // alternative name: vibe_check
-    /// This should return true if a connection to this peer should be accepted.
-    fn allows_peer(&mut self, peer: K) -> impl Future<Output = bool> + Send;
-}
-
 pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     mut ctx: R,
     config: Config<S>,
@@ -152,16 +140,23 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     ))
 }
 
-pub async fn listen<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
+pub async fn listen<
+    R: CryptoRngCore + Clock,
+    S: Signer,
+    I: Stream,
+    O: Sink,
+    Fut: Future<Output = bool>,
+    F: FnOnce(S::PublicKey) -> Fut,
+>(
     mut ctx: R,
-    bouncer: &mut impl Bouncer<S::PublicKey>,
+    bouncer: F,
     config: Config<S>,
     mut stream: I,
     mut sink: O,
 ) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error> {
     let peer_bytes = recv_frame(&mut stream, config.max_message_size).await?;
     let peer = S::PublicKey::decode(peer_bytes)?;
-    if !bouncer.allows_peer(peer.clone()).await {
+    if !bouncer(peer.clone()).await {
         return Err(Error::PeerRejected(peer.encode().to_vec()));
     }
 

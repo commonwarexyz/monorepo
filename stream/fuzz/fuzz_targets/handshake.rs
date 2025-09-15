@@ -6,13 +6,7 @@ use commonware_cryptography::{
     PrivateKeyExt as _, Signer,
 };
 use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
-use commonware_stream::{
-    public_key::{
-        handshake::{Hello, Info},
-        x25519, Config, IncomingConnection,
-    },
-    utils::codec::send_frame,
-};
+use commonware_stream::utils::codec::send_frame;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
