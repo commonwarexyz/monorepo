@@ -49,7 +49,7 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
@@ -102,15 +102,18 @@ impl Metrics {
     }
 }
 
+/// A SHA-256 digest.
+type Digest = [u8; 32];
+
 /// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
-    hash: Mutex<Vec<u8>>,
+    digest: Mutex<Digest>,
 }
 
 impl Default for Auditor {
     fn default() -> Self {
         Self {
-            hash: Vec::new().into(),
+            digest: Digest::default().into(),
         }
     }
 }
@@ -123,14 +126,14 @@ impl Auditor {
     where
         F: FnOnce(&mut Sha256),
     {
-        let mut hash = self.hash.lock().unwrap();
+        let mut digest = self.digest.lock().unwrap();
 
         let mut hasher = Sha256::new();
-        hasher.update(&*hash);
+        hasher.update(digest.as_ref());
         hasher.update(label);
         payload(&mut hasher);
 
-        *hash = hasher.finalize().to_vec();
+        *digest = hasher.finalize().into();
     }
 
     /// Generate a representation of the current state of the runtime.
@@ -138,8 +141,8 @@ impl Auditor {
     /// This can be used to ensure that logic running on top
     /// of the runtime is interacting deterministically.
     pub fn state(&self) -> String {
-        let hash = self.hash.lock().unwrap().clone();
-        hex(&hash)
+        let hash = self.digest.lock().unwrap();
+        hex(hash.as_ref())
     }
 }
 
