@@ -149,10 +149,6 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 }
 
 fn fuzz(input: FuzzInput) {
-    if input.peer_seeds.is_empty() || input.actions.is_empty() {
-        return;
-    }
-
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Create network
