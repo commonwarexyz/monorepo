@@ -31,6 +31,7 @@ jobs:
         sed -i.bak '/examples/d' Cargo.toml
     - name: Remove fuzz
       run: |
+        rm -rf broadcast/fuzz
         rm -rf codec/fuzz
         rm -rf coding/fuzz
         rm -rf collector/fuzz
