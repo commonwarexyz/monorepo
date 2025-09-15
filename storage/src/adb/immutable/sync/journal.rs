@@ -130,8 +130,9 @@ where
 /// - `size` is the next location that should be appended to by the sync engine.
 ///
 /// # Errors
+/// Returns [Error::InvalidSyncRange] if lower_bound > upper_bound.
 /// Returns [Error::UnexpectedData] if existing data extends beyond `upper_bound`.
-pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
+pub(super) async fn init_journal<E: Storage + Metrics, V: Codec>(
     context: E,
     cfg: VConfig<V::Cfg>,
     lower_bound: u64,
