@@ -199,7 +199,6 @@ fn fuzz(input: FuzzInput) {
             jitter: Duration::from_millis(input.network_jitter_ms),
             success_rate: input.network_success_rate,
         };
-
         for p1 in &peers {
             for p2 in &peers {
                 if p1 != p2 {
