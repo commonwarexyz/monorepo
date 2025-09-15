@@ -230,20 +230,6 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
 }
 
-impl Executor {
-    /// Clear all tasks.
-    ///
-    /// We don't consume [Executor] because it must remain upgradable for any tasks
-    /// that interact with the runtime during drop.
-    fn clear(&self) {
-        // Drop all wakers
-        self.sleeping.lock().unwrap().clear();
-
-        // Drop all outstanding tasks
-        self.tasks.clear();
-    }
-}
-
 /// An artifact that can be used to recover the state of the runtime.
 ///
 /// This is useful when mocking unclean shutdown (while retaining deterministic behavior).
@@ -344,7 +330,7 @@ impl Runner {
                 }
             }
 
-            // Snapshot available tasks (by id)
+            // Drain all ready tasks
             let mut queue = executor.tasks.drain();
 
             // Shuffle tasks (if more than one)
@@ -405,9 +391,9 @@ impl Runner {
 
                         // Poll the task
                         if fut.as_mut().poll(&mut cx).is_ready() {
-                            trace!(id = task.id, "task is complete");
+                            trace!(id, "task is complete");
 
-                            // Remove the future and drop
+                            // Remove the future
                             executor.tasks.remove(id);
                             *fut_opt = None;
                             continue;
@@ -489,8 +475,20 @@ impl Runner {
             iter += 1;
         };
 
-        // Clear remaining tasks from the executor
-        executor.clear();
+        // Clear remaining tasks from the executor.
+        //
+        // It is critical that we wait to drop the strong
+        // reference to executor until after we have dropped
+        // all tasks (as they may attempt to upgrade their weak
+        // reference to the executor during drop).
+        executor.sleeping.lock().unwrap().clear(); // included in tasks
+        let tasks = executor.tasks.clear();
+        for task in tasks {
+            let Mode::Work(future) = &task.mode else {
+                continue;
+            };
+            *future.lock().unwrap() = None;
+        }
 
         // Assert the context doesn't escape the start() function (behavior
         // is undefined in this case)
@@ -541,7 +539,7 @@ enum Mode {
     Work(Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>),
 }
 
-/// A task that is being executed by the runtime.
+/// A future being executed by the [Executor].
 struct Task {
     id: u128,
     label: Label,
@@ -549,7 +547,7 @@ struct Task {
     mode: Mode,
 }
 
-/// A waker for some [Task] tracked by the [Executor].
+/// A waker for a [Task].
 struct TaskWaker {
     id: u128,
 
@@ -570,11 +568,11 @@ impl ArcWake for TaskWaker {
 
 /// A collection of [Task]s that are being executed by the [Executor].
 struct Tasks {
-    /// The current task counter.
+    /// The next task id.
     counter: Mutex<u128>,
-    /// Tasks that are ready to be polled.
+    /// Tasks ready to be polled.
     ready: Mutex<Vec<u128>>,
-    /// All tasks that are still running.
+    /// All running tasks.
     running: Mutex<BTreeMap<u128, Arc<Task>>>,
 }
 
@@ -665,23 +663,17 @@ impl Tasks {
         self.running.lock().unwrap().remove(&id);
     }
 
-    /// Drop all running tasks.
-    fn clear(&self) {
+    /// Clear all tasks.
+    fn clear(&self) -> Vec<Arc<Task>> {
+        // Clear ready
+        self.ready.lock().unwrap().clear();
+
         // Clear running tasks
         let running: BTreeMap<u128, Arc<Task>> = {
             let mut running = self.running.lock().unwrap();
             take(&mut *running)
         };
-        for (_, task) in running {
-            let Mode::Work(future) = &task.mode else {
-                continue;
-            };
-            *future.lock().unwrap() = None;
-        }
-
-        // Clear ready (already dropped any future it may contain
-        // when iterating over running)
-        self.ready.lock().unwrap().clear();
+        running.into_values().collect()
     }
 }
 
