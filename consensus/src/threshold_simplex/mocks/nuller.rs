@@ -2,7 +2,7 @@
 
 use crate::{
     threshold_simplex::types::{Finalize, Nullify, Voter},
-    types::{Epoch, View},
+    types::View,
     ThresholdSupervisor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -17,7 +17,6 @@ use tracing::debug;
 
 pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
     pub supervisor: S,
-    pub epoch: Epoch,
     pub namespace: Vec<u8>,
 }
 

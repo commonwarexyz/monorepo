@@ -9,8 +9,8 @@ use crate::{
             NullifyFinalize, Proposal, Voter,
         },
     },
-    types::{Epoch, View},
-    Automaton, Relay, Reporter, Supervisor, Viewable, LATENCY,
+    types::{Epoch, Round as Rnd, View},
+    Automaton, Epochable, Relay, Reporter, Supervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{Digest, PublicKey, Signer};
 use commonware_macros::select;
@@ -44,7 +44,6 @@ type Notarizable<'a, V, D> = Option<(
     &'a BTreeSet<u32>,
     &'a Vec<Option<Notarize<V, D>>>,
 )>;
-type Nullifiable<'a, V> = Option<(View, &'a BTreeMap<u32, Nullify<V>>)>;
 type Finalizable<'a, V, D> = Option<(
     Proposal<D>,
     &'a BTreeSet<u32>,
@@ -63,7 +62,7 @@ struct Round<
     supervisor: S,
     reporter: R,
 
-    view: View,
+    round: Rnd,
     leader: C,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -99,15 +98,17 @@ impl<
         S: Supervisor<Index = View, PublicKey = C>,
     > Round<C, D, R, S>
 {
-    pub fn new(current: SystemTime, reporter: R, supervisor: S, view: View) -> Self {
-        let leader = supervisor.leader(view).expect("unable to compute leader");
-        let participants = supervisor.participants(view).unwrap().len();
+    pub fn new(current: SystemTime, reporter: R, supervisor: S, round: Rnd) -> Self {
+        let leader = supervisor
+            .leader(round.view())
+            .expect("unable to compute leader");
+        let participants = supervisor.participants(round.view()).unwrap().len();
         Self {
             start: current,
             supervisor,
             reporter,
 
-            view,
+            round,
             leader,
             leader_deadline: None,
             advance_deadline: None,
@@ -139,7 +140,7 @@ impl<
         if let Some(previous_notarize) = self.notarizes[public_key_index as usize].as_ref() {
             if previous_notarize == &notarize {
                 trace!(
-                    view = self.view,
+                    round = ?self.round,
                     signer = ?notarize.signer(),
                     "already notarized"
                 );
@@ -151,7 +152,7 @@ impl<
             self.reporter
                 .report(Activity::ConflictingNotarize(fault))
                 .await;
-            warn!(view = self.view, signer = ?previous_notarize.signer(), "recorded fault");
+            warn!(round = ?self.round, signer = ?previous_notarize.signer(), "recorded fault");
             return false;
         }
 
@@ -189,7 +190,7 @@ impl<
         let fault = NullifyFinalize::new(nullify, finalize.clone());
         self.reporter.report(Activity::NullifyFinalize(fault)).await;
         warn!(
-            view = self.view,
+            round = ?self.round,
             signer = ?finalize.signer(),
             "recorded fault"
         );
@@ -209,7 +210,7 @@ impl<
             // There should never exist enough notarizes for multiple proposals, so it doesn't
             // matter which one we choose.
             debug!(
-                view = self.view,
+                round = ?self.round,
                 proposal = ?proposal,
                 verified = self.verified_proposal,
                 "broadcasting notarization"
@@ -220,7 +221,11 @@ impl<
         None
     }
 
-    fn nullifiable(&mut self, threshold: u32, force: bool) -> Nullifiable<'_, C::Signature> {
+    fn nullifiable(
+        &mut self,
+        threshold: u32,
+        force: bool,
+    ) -> Option<&BTreeMap<u32, Nullify<C::Signature>>> {
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
         }
@@ -228,7 +233,7 @@ impl<
             return None;
         }
         self.broadcast_nullification = true;
-        Some((self.view, &self.nullifies))
+        Some(&self.nullifies)
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<C::Signature, D>) -> bool {
@@ -238,14 +243,14 @@ impl<
             // Create fault
             let fault = NullifyFinalize::new(nullify.clone(), finalize);
             self.reporter.report(Activity::NullifyFinalize(fault)).await;
-            warn!(view = self.view, signer=?nullify.signer(), "recorded fault");
+            warn!(round = ?self.round, signer=?nullify.signer(), "recorded fault");
             return false;
         }
 
         // Check if already finalized
         if let Some(previous) = self.finalizes[public_key_index as usize].as_ref() {
             if previous == &finalize {
-                trace!(view = ?self.view, signer = ?previous.signer(), "already finalized");
+                trace!(round = ?self.round, signer = ?previous.signer(), "already finalized");
                 return false;
             }
 
@@ -254,7 +259,7 @@ impl<
             self.reporter
                 .report(Activity::ConflictingFinalize(fault))
                 .await;
-            warn!(view = self.view, signer=?previous.signer(), "recorded fault");
+            warn!(round = ?self.round, signer=?previous.signer(), "recorded fault");
             return false;
         }
 
@@ -285,7 +290,7 @@ impl<
             // There should never exist enough finalizes for multiple proposals, so it doesn't
             // matter which one we choose.
             debug!(
-                view = self.view,
+                round = ?self.round,
                 proposal = ?proposal,
                 verified = self.verified_proposal,
                 "broadcasting finalization"
@@ -297,7 +302,7 @@ impl<
     }
 
     pub fn at_least_one_honest(&self) -> Option<View> {
-        let participants = self.supervisor.participants(self.view)?;
+        let participants = self.supervisor.participants(self.round.view())?;
         let threshold = quorum(participants.len() as u32);
         let at_least_one_honest = (threshold - 1) / 2 + 1;
         for (proposal, notarizes) in self.notarized_proposals.iter() {
@@ -578,7 +583,7 @@ impl<
         // Request proposal from application
         debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
-            view: self.view,
+            round: Rnd::new(self.epoch, self.view),
             parent: (parent_view, parent_payload),
         };
         Some((context.clone(), self.automaton.propose(context).await))
@@ -668,7 +673,7 @@ impl<
             &self.namespace,
             &mut self.crypto,
             public_key_index,
-            self.view,
+            Rnd::new(self.epoch, self.view),
         );
 
         // Handle the nullify
@@ -693,12 +698,12 @@ impl<
 
     async fn nullify(&mut self, nullify: Nullify<C::Signature>) -> bool {
         // Ensure we are in the right view to process this message
-        if !self.interesting(nullify.view, false) {
+        if !self.interesting(nullify.view(), false) {
             return false;
         }
 
         // Verify that signer is a validator
-        let Some(participants) = self.supervisor.participants(nullify.view) else {
+        let Some(participants) = self.supervisor.participants(nullify.view()) else {
             return false;
         };
         let Some(public_key) = participants.get(nullify.signer() as usize) else {
@@ -723,7 +728,7 @@ impl<
                 self.context.current(),
                 self.reporter.clone(),
                 self.supervisor.clone(),
-                view,
+                Rnd::new(self.epoch, view),
             )
         });
 
@@ -789,7 +794,7 @@ impl<
                 .clone();
 
             // Check parent validity
-            if proposal.view <= proposal.parent {
+            if proposal.view() <= proposal.parent {
                 return None;
             }
             if proposal.parent < self.last_finalized {
@@ -837,14 +842,14 @@ impl<
         };
 
         // Request verification
-        debug!(view = proposal.view, "requested proposal verification",);
+        debug!(view = proposal.view(), "requested proposal verification",);
         let context = Context {
-            view: proposal.view,
+            round: Rnd::new(self.epoch, proposal.view()),
             parent: (proposal.parent, parent_payload),
         };
         let payload = proposal.payload;
         let round_proposal = Some(proposal);
-        let round = self.views.get_mut(&context.view).unwrap();
+        let round = self.views.get_mut(&context.view()).unwrap();
         round.proposal = round_proposal;
         Some((
             context.clone(),
@@ -907,7 +912,7 @@ impl<
                 self.context.current(),
                 self.reporter.clone(),
                 self.supervisor.clone(),
-                view,
+                Rnd::new(self.epoch, view),
             )
         });
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
@@ -1042,7 +1047,7 @@ impl<
                 self.context.current(),
                 self.reporter.clone(),
                 self.supervisor.clone(),
-                view,
+                Rnd::new(self.epoch, view),
             )
         });
 
@@ -1094,7 +1099,7 @@ impl<
                 self.context.current(),
                 self.reporter.clone(),
                 self.supervisor.clone(),
-                view,
+                Rnd::new(self.epoch, view),
             )
         });
         for signature in &notarization.signatures {
@@ -1118,7 +1123,7 @@ impl<
         if round.proposal.is_none() {
             let proposal = notarization.proposal.clone();
             debug!(
-                view = proposal.view,
+                view = proposal.view(),
                 "setting unverified proposal in notarization"
             );
             round.proposal = Some(proposal);
@@ -1130,20 +1135,20 @@ impl<
 
     async fn nullification(&mut self, nullification: Nullification<C::Signature>) -> bool {
         // Check if we are still in a view where this notarization could help
-        if !self.interesting(nullification.view, true) {
+        if !self.interesting(nullification.view(), true) {
             return false;
         }
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&nullification.view) {
+        if let Some(ref round) = self.views.get_mut(&nullification.view()) {
             if round.broadcast_nullification {
                 return false;
             }
         }
 
         // Verify nullification
-        let Some(participants) = self.supervisor.participants(nullification.view) else {
+        let Some(participants) = self.supervisor.participants(nullification.view()) else {
             return false;
         };
         if !nullification.verify(&self.namespace, participants) {
@@ -1158,22 +1163,23 @@ impl<
     async fn handle_nullification(&mut self, nullification: &Nullification<C::Signature>) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = nullification.view();
+        let rnd = Rnd::new(self.epoch, view);
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.context.current(),
                 self.reporter.clone(),
                 self.supervisor.clone(),
-                view,
+                rnd,
             )
         });
         for signature in &nullification.signatures {
-            let nullify = Nullify::new(view, signature.clone());
+            let nullify = Nullify::new(rnd, signature.clone());
             let msg = Voter::Nullify(nullify.clone());
             if round.add_verified_nullify(nullify).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
                     .unwrap()
-                    .append(nullification.view, msg)
+                    .append(nullification.view(), msg)
                     .await
                     .expect("unable to append to journal");
             }
@@ -1184,7 +1190,7 @@ impl<
         round.advance_deadline = None;
 
         // Enter next view
-        self.enter_view(nullification.view + 1);
+        self.enter_view(nullification.view() + 1);
     }
 
     async fn finalize(&mut self, finalize: Finalize<C::Signature, D>) -> bool {
@@ -1220,7 +1226,7 @@ impl<
                 self.context.current(),
                 self.reporter.clone(),
                 self.supervisor.clone(),
-                view,
+                Rnd::new(self.epoch, view),
             )
         });
 
@@ -1272,7 +1278,7 @@ impl<
                 self.context.current(),
                 self.reporter.clone(),
                 self.supervisor.clone(),
-                view,
+                Rnd::new(self.epoch, view),
             )
         });
         for signature in &finalization.signatures {
@@ -1292,7 +1298,7 @@ impl<
         if round.proposal.is_none() {
             let proposal = finalization.proposal.clone();
             debug!(
-                view = proposal.view,
+                view = proposal.view(),
                 "setting unverified proposal in finalization"
             );
             round.proposal = Some(proposal);
@@ -1393,14 +1399,14 @@ impl<
             }
         };
         let threshold = quorum(validators.len() as u32);
-        let (_, nullifies) = round.nullifiable(threshold, force)?;
+        let nullifies = round.nullifiable(threshold, force)?;
 
         // Construct nullification
         let signatures = nullifies
             .values()
             .map(|n| n.signature.clone())
             .collect::<Vec<_>>();
-        Some(Nullification::new(view, signatures))
+        Some(Nullification::new(Rnd::new(self.epoch, view), signatures))
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<C::Signature, D>> {
@@ -1873,22 +1879,22 @@ impl<
                     let proposed = match proposed {
                         Ok(proposed) => proposed,
                         Err(err) => {
-                            debug!(?err, view = context.view, "failed to propose container");
+                            debug!(?err, round = ?context.round, "failed to propose container");
                             continue;
                         }
                     };
 
                     // If we have already moved to another view, drop the response as we will
                     // not broadcast it
-                    if self.view != context.view {
-                        debug!(view = context.view, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
+                    if self.view != context.view() {
+                        debug!(round = ?context.round, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
                         continue;
                     }
 
                     // Construct proposal
-                    let proposal = Proposal::new(context.view, context.parent.0, proposed);
+                    let proposal = Proposal::new(Rnd::new(self.epoch, context.view()), context.parent.0, proposed);
                     if !self.our_proposal(proposal).await {
-                        warn!(view = context.view, "failed to record our container");
+                        warn!(round = ?context.round, "failed to record our container");
                         continue;
                     }
                     view = self.view;
@@ -1905,18 +1911,18 @@ impl<
                     match verified {
                         Ok(verified) => {
                             if !verified {
-                                debug!(view = context.view, "proposal failed verification");
+                                debug!(round = ?context.round, "proposal failed verification");
                                 continue;
                             }
                         },
                         Err(err) => {
-                            debug!(?err, view = context.view, "failed to verify proposal");
+                            debug!(?err, round = ?context.round, "failed to verify proposal");
                             continue;
                         }
                     };
 
                     // Handle verified proposal
-                    view = context.view;
+                    view = context.view();
                     if !self.verified(view).await {
                         continue;
                     }
@@ -1954,6 +1960,11 @@ impl<
                     let Ok(msg) = msg else {
                         continue;
                     };
+
+                    // Skip if the epoch is not the current epoch
+                    if msg.epoch() != self.epoch {
+                        continue;
+                    }
 
                     // Process message
                     view = msg.view();

@@ -1,7 +1,7 @@
 //! Types used in [crate::simplex].
 
 use crate::{
-    types::{Epoch, View},
+    types::{Epoch, Round, View},
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
@@ -12,11 +12,11 @@ use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifier}
 use commonware_utils::{quorum, union};
 
 /// Context is a collection of metadata from consensus about a given payload.
-/// It provides information about the current view and the parent payload that new proposals are built on.
+/// It provides information about the current epoch/view and the parent payload that new proposals are built on.
 #[derive(Clone)]
 pub struct Context<D: Digest> {
-    /// Current view (round) of consensus.
-    pub view: View,
+    /// Current round of consensus.
+    pub round: Round,
 
     /// Parent the payload is built on.
     ///
@@ -31,7 +31,7 @@ impl<D: Digest> Epochable for Context<D> {
     type Epoch = Epoch;
 
     fn epoch(&self) -> Epoch {
-        self.view
+        self.round.epoch()
     }
 }
 
@@ -39,7 +39,7 @@ impl<D: Digest> Viewable for Context<D> {
     type View = View;
 
     fn view(&self) -> View {
-        self.view
+        self.round.view()
     }
 }
 
@@ -55,12 +55,6 @@ pub trait Attributable {
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
-
-/// Creates a message to be signed containing just the view number
-#[inline]
-pub fn view_message(view: View) -> Vec<u8> {
-    View::encode(&view).into()
-}
 
 /// Creates a namespace for notarize messages by appending the NOTARIZE_SUFFIX
 #[inline]
@@ -165,12 +159,27 @@ impl<S: CSignature, D: Digest> Read for Voter<S, D> {
 impl<S: CSignature, D: Digest> EncodeSize for Voter<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Voter::Notarize(notarize) => notarize.encode_size(),
-            Voter::Notarization(notarization) => notarization.encode_size(),
-            Voter::Nullify(nullify) => nullify.encode_size(),
-            Voter::Nullification(nullification) => nullification.encode_size(),
-            Voter::Finalize(finalize) => finalize.encode_size(),
-            Voter::Finalization(finalization) => finalization.encode_size(),
+            Voter::Notarize(n) => n.encode_size(),
+            Voter::Notarization(n) => n.encode_size(),
+            Voter::Nullify(n) => n.encode_size(),
+            Voter::Nullification(n) => n.encode_size(),
+            Voter::Finalize(f) => f.encode_size(),
+            Voter::Finalization(f) => f.encode_size(),
+        }
+    }
+}
+
+impl<S: CSignature, D: Digest> Epochable for Voter<S, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        match self {
+            Voter::Notarize(n) => n.epoch(),
+            Voter::Notarization(n) => n.epoch(),
+            Voter::Nullify(n) => n.epoch(),
+            Voter::Nullification(n) => n.epoch(),
+            Voter::Finalize(f) => f.epoch(),
+            Voter::Finalization(f) => f.epoch(),
         }
     }
 }
@@ -180,12 +189,12 @@ impl<S: CSignature, D: Digest> Viewable for Voter<S, D> {
 
     fn view(&self) -> View {
         match self {
-            Voter::Notarize(notarize) => notarize.view(),
-            Voter::Notarization(notarization) => notarization.view(),
-            Voter::Nullify(nullify) => nullify.view(),
-            Voter::Nullification(nullification) => nullification.view(),
-            Voter::Finalize(finalize) => finalize.view(),
-            Voter::Finalization(finalization) => finalization.view(),
+            Voter::Notarize(n) => n.view(),
+            Voter::Notarization(n) => n.view(),
+            Voter::Nullify(n) => n.view(),
+            Voter::Nullification(n) => n.view(),
+            Voter::Finalize(f) => f.view(),
+            Voter::Finalization(f) => f.view(),
         }
     }
 }
@@ -194,8 +203,8 @@ impl<S: CSignature, D: Digest> Viewable for Voter<S, D> {
 /// It includes the view number, the parent view, and the actual payload.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Proposal<D: Digest> {
-    /// The view (round) in which this proposal is made
-    pub view: View,
+    /// The round in which this proposal is made
+    pub round: Round,
     /// The view of the parent proposal that this one builds upon
     pub parent: View,
     /// The actual payload/content of the proposal (typically a digest of the block data)
@@ -203,10 +212,10 @@ pub struct Proposal<D: Digest> {
 }
 
 impl<D: Digest> Proposal<D> {
-    /// Creates a new proposal with the specified view, parent view, and payload.
-    pub fn new(view: View, parent: View, payload: D) -> Self {
+    /// Creates a new proposal with the specified round, parent view, and payload.
+    pub fn new(round: Round, parent: View, payload: D) -> Self {
         Self {
-            view,
+            round,
             parent,
             payload,
         }
@@ -215,7 +224,7 @@ impl<D: Digest> Proposal<D> {
 
 impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.view).write(writer);
+        self.round.write(writer);
         UInt(self.parent).write(writer);
         self.payload.write(writer);
     }
@@ -225,11 +234,11 @@ impl<D: Digest> Read for Proposal<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let view = UInt::read_cfg(reader, &())?.into();
+        let round = Round::read_cfg(reader, &())?;
         let parent = UInt::read_cfg(reader, &())?.into();
         let payload = D::read_cfg(reader, &())?;
         Ok(Self {
-            view,
+            round,
             parent,
             payload,
         })
@@ -238,7 +247,7 @@ impl<D: Digest> Read for Proposal<D> {
 
 impl<D: Digest> EncodeSize for Proposal<D> {
     fn encode_size(&self) -> usize {
-        UInt(self.view).encode_size() + UInt(self.parent).encode_size() + self.payload.encode_size()
+        self.round.encode_size() + UInt(self.parent).encode_size() + self.payload.encode_size()
     }
 }
 
@@ -246,7 +255,15 @@ impl<D: Digest> Viewable for Proposal<D> {
     type View = View;
 
     fn view(&self) -> View {
-        self.view
+        self.round.view()
+    }
+}
+
+impl<D: Digest> Epochable for Proposal<D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
     }
 }
 
@@ -384,6 +401,14 @@ impl<S: CSignature, D: Digest> Viewable for Notarize<S, D> {
     }
 }
 
+impl<S: CSignature, D: Digest> Epochable for Notarize<S, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
+    }
+}
+
 impl<S: CSignature, D: Digest> Attributable for Notarize<S, D> {
     fn signer(&self) -> u32 {
         self.signature.signer()
@@ -497,29 +522,37 @@ impl<S: CSignature, D: Digest> Viewable for Notarization<S, D> {
     }
 }
 
+impl<S: CSignature, D: Digest> Epochable for Notarization<S, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
+    }
+}
+
 /// Nullify represents a validator's nullify to skip the current view.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullify<S: CSignature> {
-    /// The view to be nullified (skipped)
-    pub view: View,
-    /// The validator's signature on the view
+    /// The round to be nullified (skipped)
+    pub round: Round,
+    /// The validator's signature on the round (epoch + view)
     pub signature: Signature<S>,
 }
 
 impl<S: CSignature> Nullify<S> {
     /// Creates a new nullify with the given view and signature.
-    pub fn new(view: View, signature: Signature<S>) -> Self {
-        Self { view, signature }
+    pub fn new(round: Round, signature: Signature<S>) -> Self {
+        Self { round, signature }
     }
 
     /// Verifies the signature on this nullify using the provided verifier.
     pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
-        let message = view_message(self.view);
+        let message = self.round.encode();
         public_key.verify(
             Some(nullify_namespace.as_ref()),
-            &message,
+            message.as_ref(),
             &self.signature.signature,
         )
     }
@@ -529,13 +562,13 @@ impl<S: CSignature> Nullify<S> {
         namespace: &[u8],
         signer: &mut C,
         public_key_index: u32,
-        view: View,
+        round: Round,
     ) -> Self {
         let nullify_namespace = nullify_namespace(namespace);
-        let message = view_message(view);
-        let signature = signer.sign(Some(nullify_namespace.as_ref()), &message);
+        let message = round.encode();
+        let signature = signer.sign(Some(nullify_namespace.as_ref()), message.as_ref());
         Self {
-            view,
+            round,
             signature: Signature::new(public_key_index, signature),
         }
     }
@@ -543,7 +576,7 @@ impl<S: CSignature> Nullify<S> {
 
 impl<S: CSignature> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.view).write(writer);
+        self.round.write(writer);
         self.signature.write(writer);
     }
 }
@@ -552,15 +585,15 @@ impl<S: CSignature> Read for Nullify<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let view = UInt::read(reader)?.into();
+        let round = Round::read(reader)?;
         let signature = Signature::<S>::read(reader)?;
-        Ok(Self { view, signature })
+        Ok(Self { round, signature })
     }
 }
 
 impl<S: CSignature> EncodeSize for Nullify<S> {
     fn encode_size(&self) -> usize {
-        UInt(self.view).encode_size() + self.signature.encode_size()
+        self.round.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -568,7 +601,15 @@ impl<S: CSignature> Viewable for Nullify<S> {
     type View = View;
 
     fn view(&self) -> View {
-        self.view
+        self.round.view()
+    }
+}
+
+impl<S: CSignature> Epochable for Nullify<S> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
     }
 }
 
@@ -582,8 +623,8 @@ impl<S: CSignature> Attributable for Nullify<S> {
 /// When a view is nullified, the consensus moves to the next view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullification<S: CSignature> {
-    /// The view that has been nullified
-    pub view: View,
+    /// The round that has been nullified
+    pub round: Round,
     /// The set of signatures from validators (must meet quorum threshold)
     pub signatures: Vec<Signature<S>>,
 }
@@ -594,8 +635,8 @@ impl<S: CSignature> Nullification<S> {
     /// # Warning
     ///
     /// The signatures must be sorted by the public key index.
-    pub fn new(view: View, signatures: Vec<Signature<S>>) -> Self {
-        Self { view, signatures }
+    pub fn new(round: Round, signatures: Vec<Signature<S>>) -> Self {
+        Self { round, signatures }
     }
 
     /// Verifies all signatures in this nullification using the provided verifier.
@@ -613,7 +654,7 @@ impl<S: CSignature> Nullification<S> {
 
         // Verify signatures
         let nullify_namespace = nullify_namespace(namespace);
-        let message = view_message(self.view);
+        let message = self.round.encode();
         for signature in &self.signatures {
             // Get public key
             let Some(public_key) = participants.get(signature.public_key as usize) else {
@@ -623,7 +664,7 @@ impl<S: CSignature> Nullification<S> {
             // Verify signature
             if !public_key.verify(
                 Some(nullify_namespace.as_ref()),
-                &message,
+                message.as_ref(),
                 &signature.signature,
             ) {
                 return false;
@@ -635,7 +676,7 @@ impl<S: CSignature> Nullification<S> {
 
 impl<S: CSignature> Write for Nullification<S> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.view).write(writer);
+        self.round.write(writer);
         self.signatures.write(writer);
     }
 }
@@ -644,7 +685,7 @@ impl<S: CSignature> Read for Nullification<S> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
-        let view = UInt::read(reader)?.into();
+        let round = Round::read(reader)?;
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
 
         // Ensure the signatures are sorted by public key index and are unique
@@ -656,13 +697,13 @@ impl<S: CSignature> Read for Nullification<S> {
                 ));
             }
         }
-        Ok(Self { view, signatures })
+        Ok(Self { round, signatures })
     }
 }
 
 impl<S: CSignature> EncodeSize for Nullification<S> {
     fn encode_size(&self) -> usize {
-        UInt(self.view).encode_size() + self.signatures.encode_size()
+        self.round.encode_size() + self.signatures.encode_size()
     }
 }
 
@@ -670,7 +711,15 @@ impl<S: CSignature> Viewable for Nullification<S> {
     type View = View;
 
     fn view(&self) -> View {
-        self.view
+        self.round.view()
+    }
+}
+
+impl<S: CSignature> Epochable for Nullification<S> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
     }
 }
 
@@ -759,6 +808,14 @@ impl<S: CSignature, D: Digest> Viewable for Finalize<S, D> {
 impl<S: CSignature, D: Digest> Attributable for Finalize<S, D> {
     fn signer(&self) -> u32 {
         self.signature.signer()
+    }
+}
+
+impl<S: CSignature, D: Digest> Epochable for Finalize<S, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
     }
 }
 
@@ -861,6 +918,14 @@ impl<S: CSignature, D: Digest> Viewable for Finalization<S, D> {
 
     fn view(&self) -> View {
         self.proposal.view()
+    }
+}
+
+impl<S: CSignature, D: Digest> Epochable for Finalization<S, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
     }
 }
 
@@ -1137,19 +1202,33 @@ impl<S: CSignature, D: Digest> Read for Activity<S, D> {
 impl<S: CSignature, D: Digest> EncodeSize for Activity<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Activity::Notarize(notarize) => notarize.encode_size(),
-            Activity::Notarization(notarization) => notarization.encode_size(),
-            Activity::Nullify(nullify) => nullify.encode_size(),
-            Activity::Nullification(nullification) => nullification.encode_size(),
-            Activity::Finalize(finalize) => finalize.encode_size(),
-            Activity::Finalization(finalization) => finalization.encode_size(),
-            Activity::ConflictingNotarize(conflicting_notarize) => {
-                conflicting_notarize.encode_size()
-            }
-            Activity::ConflictingFinalize(conflicting_finalize) => {
-                conflicting_finalize.encode_size()
-            }
-            Activity::NullifyFinalize(nullify_finalize) => nullify_finalize.encode_size(),
+            Activity::Notarize(n) => n.encode_size(),
+            Activity::Notarization(n) => n.encode_size(),
+            Activity::Nullify(n) => n.encode_size(),
+            Activity::Nullification(n) => n.encode_size(),
+            Activity::Finalize(f) => f.encode_size(),
+            Activity::Finalization(f) => f.encode_size(),
+            Activity::ConflictingNotarize(c) => c.encode_size(),
+            Activity::ConflictingFinalize(c) => c.encode_size(),
+            Activity::NullifyFinalize(n) => n.encode_size(),
+        }
+    }
+}
+
+impl<S: CSignature, D: Digest> Epochable for Activity<S, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        match self {
+            Activity::Notarize(n) => n.epoch(),
+            Activity::Notarization(n) => n.epoch(),
+            Activity::Nullify(n) => n.epoch(),
+            Activity::Nullification(n) => n.epoch(),
+            Activity::Finalize(f) => f.epoch(),
+            Activity::Finalization(f) => f.epoch(),
+            Activity::ConflictingNotarize(c) => c.epoch(),
+            Activity::ConflictingFinalize(c) => c.epoch(),
+            Activity::NullifyFinalize(n) => n.epoch(),
         }
     }
 }
@@ -1159,15 +1238,15 @@ impl<S: CSignature, D: Digest> Viewable for Activity<S, D> {
 
     fn view(&self) -> View {
         match self {
-            Activity::Notarize(notarize) => notarize.view(),
-            Activity::Notarization(notarization) => notarization.view(),
-            Activity::Nullify(nullify) => nullify.view(),
-            Activity::Nullification(nullification) => nullification.view(),
-            Activity::Finalize(finalize) => finalize.view(),
-            Activity::Finalization(finalization) => finalization.view(),
-            Activity::ConflictingNotarize(conflicting_notarize) => conflicting_notarize.view(),
-            Activity::ConflictingFinalize(conflicting_finalize) => conflicting_finalize.view(),
-            Activity::NullifyFinalize(nullify_finalize) => nullify_finalize.view(),
+            Activity::Notarize(n) => n.view(),
+            Activity::Notarization(n) => n.view(),
+            Activity::Nullify(n) => n.view(),
+            Activity::Nullification(n) => n.view(),
+            Activity::Finalize(f) => f.view(),
+            Activity::Finalization(f) => f.view(),
+            Activity::ConflictingNotarize(c) => c.view(),
+            Activity::ConflictingFinalize(c) => c.view(),
+            Activity::NullifyFinalize(n) => n.view(),
         }
     }
 }
@@ -1176,8 +1255,8 @@ impl<S: CSignature, D: Digest> Viewable for Activity<S, D> {
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct ConflictingNotarize<S: CSignature, D: Digest> {
-    /// The view in which the conflict occurred
-    pub view: View,
+    /// The round in which the conflict occurred
+    pub round: Round,
     /// The parent view of the first conflicting proposal
     pub parent_1: View,
     /// The payload of the first conflicting proposal
@@ -1198,7 +1277,7 @@ impl<S: CSignature, D: Digest> ConflictingNotarize<S, D> {
         assert_eq!(notarize_1.view(), notarize_2.view());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
         Self {
-            view: notarize_1.view(),
+            round: notarize_1.proposal.round,
             parent_1: notarize_1.proposal.parent,
             payload_1: notarize_1.proposal.payload,
             signature_1: notarize_1.signature,
@@ -1212,11 +1291,11 @@ impl<S: CSignature, D: Digest> ConflictingNotarize<S, D> {
     pub fn notarizes(&self) -> (Notarize<S, D>, Notarize<S, D>) {
         (
             Notarize::new(
-                Proposal::new(self.view, self.parent_1, self.payload_1),
+                Proposal::new(self.round, self.parent_1, self.payload_1),
                 self.signature_1.clone(),
             ),
             Notarize::new(
-                Proposal::new(self.view, self.parent_2, self.payload_2),
+                Proposal::new(self.round, self.parent_2, self.payload_2),
                 self.signature_2.clone(),
             ),
         )
@@ -1231,7 +1310,7 @@ impl<S: CSignature, D: Digest> ConflictingNotarize<S, D> {
 
 impl<S: CSignature, D: Digest> Write for ConflictingNotarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.view).write(writer);
+        self.round.write(writer);
         UInt(self.parent_1).write(writer);
         self.payload_1.write(writer);
         self.signature_1.write(writer);
@@ -1245,7 +1324,7 @@ impl<S: CSignature, D: Digest> Read for ConflictingNotarize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let view = UInt::read(reader)?.into();
+        let round = Round::read_cfg(reader, &())?;
         let parent_1 = UInt::read(reader)?.into();
         let payload_1 = D::read_cfg(reader, &())?;
         let signature_1 = Signature::<S>::read(reader)?;
@@ -1259,7 +1338,7 @@ impl<S: CSignature, D: Digest> Read for ConflictingNotarize<S, D> {
             ));
         }
         Ok(Self {
-            view,
+            round,
             parent_1,
             payload_1,
             signature_1,
@@ -1272,7 +1351,7 @@ impl<S: CSignature, D: Digest> Read for ConflictingNotarize<S, D> {
 
 impl<S: CSignature, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
     fn encode_size(&self) -> usize {
-        UInt(self.view).encode_size()
+        self.round.encode_size()
             + UInt(self.parent_1).encode_size()
             + self.payload_1.encode_size()
             + self.signature_1.encode_size()
@@ -1286,7 +1365,15 @@ impl<S: CSignature, D: Digest> Viewable for ConflictingNotarize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
-        self.view
+        self.round.view()
+    }
+}
+
+impl<S: CSignature, D: Digest> Epochable for ConflictingNotarize<S, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
     }
 }
 
@@ -1300,8 +1387,8 @@ impl<S: CSignature, D: Digest> Attributable for ConflictingNotarize<S, D> {
 /// Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct ConflictingFinalize<S: CSignature, D: Digest> {
-    /// The view in which the conflict occurred
-    pub view: View,
+    /// The round in which the conflict occurred
+    pub round: Round,
     /// The parent view of the first conflicting proposal
     pub parent_1: View,
     /// The payload of the first conflicting proposal
@@ -1322,7 +1409,7 @@ impl<S: CSignature, D: Digest> ConflictingFinalize<S, D> {
         assert_eq!(finalize_1.view(), finalize_2.view());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
         Self {
-            view: finalize_1.view(),
+            round: finalize_1.proposal.round,
             parent_1: finalize_1.proposal.parent,
             payload_1: finalize_1.proposal.payload,
             signature_1: finalize_1.signature,
@@ -1336,11 +1423,11 @@ impl<S: CSignature, D: Digest> ConflictingFinalize<S, D> {
     pub fn finalizes(&self) -> (Finalize<S, D>, Finalize<S, D>) {
         (
             Finalize::new(
-                Proposal::new(self.view, self.parent_1, self.payload_1),
+                Proposal::new(self.round, self.parent_1, self.payload_1),
                 self.signature_1.clone(),
             ),
             Finalize::new(
-                Proposal::new(self.view, self.parent_2, self.payload_2),
+                Proposal::new(self.round, self.parent_2, self.payload_2),
                 self.signature_2.clone(),
             ),
         )
@@ -1355,7 +1442,7 @@ impl<S: CSignature, D: Digest> ConflictingFinalize<S, D> {
 
 impl<S: CSignature, D: Digest> Write for ConflictingFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.view).write(writer);
+        self.round.write(writer);
         UInt(self.parent_1).write(writer);
         self.payload_1.write(writer);
         self.signature_1.write(writer);
@@ -1369,7 +1456,7 @@ impl<S: CSignature, D: Digest> Read for ConflictingFinalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let view = UInt::read(reader)?.into();
+        let round = Round::read(reader)?;
         let parent_1 = UInt::read(reader)?.into();
         let payload_1 = D::read_cfg(reader, &())?;
         let signature_1 = Signature::<S>::read(reader)?;
@@ -1383,7 +1470,7 @@ impl<S: CSignature, D: Digest> Read for ConflictingFinalize<S, D> {
             ));
         }
         Ok(Self {
-            view,
+            round,
             parent_1,
             payload_1,
             signature_1,
@@ -1396,7 +1483,7 @@ impl<S: CSignature, D: Digest> Read for ConflictingFinalize<S, D> {
 
 impl<S: CSignature, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
     fn encode_size(&self) -> usize {
-        UInt(self.view).encode_size()
+        self.round.encode_size()
             + UInt(self.parent_1).encode_size()
             + self.payload_1.encode_size()
             + self.signature_1.encode_size()
@@ -1410,7 +1497,15 @@ impl<S: CSignature, D: Digest> Viewable for ConflictingFinalize<S, D> {
     type View = View;
 
     fn view(&self) -> View {
-        self.view
+        self.round.view()
+    }
+}
+
+impl<S: CSignature, D: Digest> Epochable for ConflictingFinalize<S, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
     }
 }
 
@@ -1447,7 +1542,7 @@ impl<S: CSignature, D: Digest> NullifyFinalize<S, D> {
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
     pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
-        let nullify = Nullify::new(self.proposal.view(), self.view_signature.clone());
+        let nullify = Nullify::new(self.proposal.round, self.view_signature.clone());
         let finalize = Finalize::new(self.proposal.clone(), self.finalize_signature.clone());
         nullify.verify(namespace, public_key) && finalize.verify(namespace, public_key)
     }
@@ -1504,6 +1599,14 @@ impl<S: CSignature, D: Digest> Attributable for NullifyFinalize<S, D> {
     }
 }
 
+impl<S: CSignature, D: Digest> Epochable for NullifyFinalize<S, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1527,7 +1630,7 @@ mod tests {
 
     #[test]
     fn test_proposal_encode_decode() {
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let encoded = proposal.encode();
         let decoded = Proposal::<Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(proposal, decoded);
@@ -1536,7 +1639,7 @@ mod tests {
     #[test]
     fn test_notarize_encode_decode() {
         let mut scheme = sample_scheme(0);
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let notarize = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal);
         let encoded = notarize.encode();
         let decoded = Notarize::<Signature, Sha256Digest>::decode(encoded).unwrap();
@@ -1548,7 +1651,7 @@ mod tests {
     fn test_notarization_encode_decode() {
         let mut scheme_1 = sample_scheme(0);
         let mut scheme_2 = sample_scheme(1);
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let notarize_1 = Notarize::sign(NAMESPACE, &mut scheme_1, 0, proposal.clone());
         let notarize_2 = Notarize::sign(NAMESPACE, &mut scheme_2, 1, proposal.clone());
         let signatures = vec![notarize_1.signature.clone(), notarize_2.signature.clone()];
@@ -1565,7 +1668,7 @@ mod tests {
     #[test]
     fn test_nullify_encode_decode() {
         let mut scheme = sample_scheme(0);
-        let nullify = Nullify::sign(NAMESPACE, &mut scheme, 0, 10);
+        let nullify = Nullify::sign(NAMESPACE, &mut scheme, 0, Round::new(0, 10));
         let encoded = nullify.encode();
         let decoded = Nullify::<Signature>::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
@@ -1576,10 +1679,10 @@ mod tests {
     fn test_nullification_encode_decode() {
         let mut scheme_1 = sample_scheme(0);
         let mut scheme_2 = sample_scheme(1);
-        let nullify_1 = Nullify::sign(NAMESPACE, &mut scheme_1, 0, 10);
-        let nullify_2 = Nullify::sign(NAMESPACE, &mut scheme_2, 1, 10);
+        let nullify_1 = Nullify::sign(NAMESPACE, &mut scheme_1, 0, Round::new(0, 10));
+        let nullify_2 = Nullify::sign(NAMESPACE, &mut scheme_2, 1, Round::new(0, 10));
         let signatures = vec![nullify_1.signature.clone(), nullify_2.signature.clone()];
-        let nullification = Nullification::new(10, signatures.clone());
+        let nullification = Nullification::new(Round::new(0, 10), signatures.clone());
         let encoded = nullification.encode();
         let decoded = Nullification::<Signature>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert_eq!(nullification, decoded);
@@ -1591,7 +1694,7 @@ mod tests {
     #[test]
     fn test_finalize_encode_decode() {
         let mut scheme = sample_scheme(0);
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let finalize = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal);
         let encoded = finalize.encode();
         let decoded = Finalize::<Signature, Sha256Digest>::decode(encoded).unwrap();
@@ -1602,7 +1705,7 @@ mod tests {
     fn test_finalization_encode_decode() {
         let mut scheme_1 = sample_scheme(0);
         let mut scheme_2 = sample_scheme(1);
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let finalize_1 = Finalize::sign(NAMESPACE, &mut scheme_1, 0, proposal.clone());
         let finalize_2 = Finalize::sign(NAMESPACE, &mut scheme_2, 1, proposal.clone());
         let signatures = vec![finalize_1.signature.clone(), finalize_2.signature.clone()];
@@ -1638,7 +1741,7 @@ mod tests {
     #[test]
     fn test_response_encode_decode() {
         let mut scheme = sample_scheme(0);
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let notarize = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal.clone());
         let notarization = Notarization::new(proposal.clone(), vec![notarize.signature.clone()]);
         let response = Response::new(1, vec![notarization], vec![]);
@@ -1652,8 +1755,8 @@ mod tests {
     #[test]
     fn test_conflicting_notarize_encode_decode() {
         let mut scheme = sample_scheme(0);
-        let proposal1 = Proposal::new(10, 5, sample_digest(1));
-        let proposal2 = Proposal::new(10, 6, sample_digest(2));
+        let proposal1 = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
+        let proposal2 = Proposal::new(Round::new(0, 10), 6, sample_digest(2));
         let notarize1 = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal1.clone());
         let notarize2 = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal2.clone());
         let conflicting = ConflictingNotarize::new(notarize1, notarize2);
@@ -1666,8 +1769,8 @@ mod tests {
     #[test]
     fn test_conflicting_finalize_encode_decode() {
         let mut scheme = sample_scheme(0);
-        let proposal1 = Proposal::new(10, 5, sample_digest(1));
-        let proposal2 = Proposal::new(10, 6, sample_digest(2));
+        let proposal1 = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
+        let proposal2 = Proposal::new(Round::new(0, 10), 6, sample_digest(2));
         let finalize1 = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal1.clone());
         let finalize2 = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal2.clone());
         let conflicting = ConflictingFinalize::new(finalize1, finalize2);
@@ -1680,8 +1783,8 @@ mod tests {
     #[test]
     fn test_nullify_finalize_encode_decode() {
         let mut scheme = sample_scheme(0);
-        let proposal = Proposal::new(10, 5, sample_digest(1));
-        let nullify = Nullify::sign(NAMESPACE, &mut scheme, 1, 10);
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
+        let nullify = Nullify::sign(NAMESPACE, &mut scheme, 1, Round::new(0, 10));
         let finalize = Finalize::sign(NAMESPACE, &mut scheme, 1, proposal.clone());
         let nullify_finalize = NullifyFinalize::new(nullify, finalize);
         let encoded = nullify_finalize.encode();
@@ -1693,7 +1796,7 @@ mod tests {
     #[test]
     fn test_notarize_verify_wrong_namespace() {
         let mut scheme = sample_scheme(0);
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let notarize = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal);
 
         // Verify with wrong namespace - should fail
@@ -1704,7 +1807,7 @@ mod tests {
     fn test_notarize_verify_wrong_public_key() {
         let mut scheme1 = sample_scheme(0);
         let scheme2 = sample_scheme(1); // Different key
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let notarize = Notarize::sign(NAMESPACE, &mut scheme1, 0, proposal);
 
         // Verify with wrong public key - should fail
@@ -1715,7 +1818,7 @@ mod tests {
     fn test_notarization_verify_insufficient_signatures() {
         let mut scheme_1 = sample_scheme(0);
         let mut scheme_2 = sample_scheme(1);
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
         let notarize_1 = Notarize::sign(NAMESPACE, &mut scheme_1, 0, proposal.clone());
         let notarize_2 = Notarize::sign(NAMESPACE, &mut scheme_2, 1, proposal.clone());
 
@@ -1739,7 +1842,7 @@ mod tests {
     fn test_notarization_verify_invalid_validator_index() {
         let mut scheme_1 = sample_scheme(0);
         let scheme_2 = sample_scheme(1);
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
 
         // Create notarize with invalid public key index (3, which is out of bounds)
         let notarize_1 = Notarize::sign(NAMESPACE, &mut scheme_1, 0, proposal.clone());
@@ -1762,8 +1865,8 @@ mod tests {
         let mut scheme = sample_scheme(0);
 
         // Create two different proposals for the same view
-        let proposal1 = Proposal::new(10, 5, sample_digest(1));
-        let proposal2 = Proposal::new(10, 6, sample_digest(2)); // Different parent
+        let proposal1 = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
+        let proposal2 = Proposal::new(Round::new(0, 10), 6, sample_digest(2)); // Different parent
 
         // Create notarizes for both proposals from the same validator
         let notarize1 = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal1.clone());
@@ -1782,7 +1885,7 @@ mod tests {
         // This will compile but should fail verification since the signatures are from different validators
         let (_, n2) = conflict.notarizes();
         let invalid_conflict = ConflictingNotarize {
-            view: n2.view(),
+            round: n2.proposal.round,
             parent_1: n2.proposal.parent,
             payload_1: n2.proposal.payload,
             signature_1: n2.signature,
@@ -1799,13 +1902,13 @@ mod tests {
     #[test]
     fn test_nullify_finalize_detection() {
         let mut scheme = sample_scheme(0);
-        let view = 10;
+        let round = Round::new(0, 10);
 
         // Create a nullify for view 10
-        let nullify = Nullify::sign(NAMESPACE, &mut scheme, 0, view);
+        let nullify = Nullify::sign(NAMESPACE, &mut scheme, 0, round);
 
         // Create a finalize for the same view
-        let proposal = Proposal::new(view, 5, sample_digest(1));
+        let proposal = Proposal::new(round, 5, sample_digest(1));
         let finalize = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal.clone());
 
         // Create nullify+finalize evidence
@@ -1816,7 +1919,7 @@ mod tests {
 
         // Now create invalid evidence with different validators
         let mut scheme2 = sample_scheme(1);
-        let nullify2 = Nullify::sign(NAMESPACE, &mut scheme2, 1, view);
+        let nullify2 = Nullify::sign(NAMESPACE, &mut scheme2, 1, round);
         let finalize2 = Finalize::sign(NAMESPACE, &mut scheme2, 1, proposal);
 
         // This will compile but verification with wrong key should fail
@@ -1831,12 +1934,12 @@ mod tests {
         let mut scheme_2 = sample_scheme(1);
 
         // Create nullify for view 10
-        let nullify_1 = Nullify::sign(NAMESPACE, &mut scheme_1, 0, 10);
-        let nullify_2 = Nullify::sign(NAMESPACE, &mut scheme_2, 1, 10);
+        let nullify_1 = Nullify::sign(NAMESPACE, &mut scheme_1, 0, Round::new(0, 10));
+        let nullify_2 = Nullify::sign(NAMESPACE, &mut scheme_2, 1, Round::new(0, 10));
 
         // Create a nullification with valid signatures
         let signatures = vec![nullify_1.signature.clone(), nullify_2.signature.clone()];
-        let nullification = Nullification::new(10, signatures);
+        let nullification = Nullification::new(Round::new(0, 10), signatures);
 
         // Create a validator set of 2
         let validators = vec![scheme_1.public_key(), scheme_2.public_key()];
@@ -1849,7 +1952,7 @@ mod tests {
             super::Signature::new(2, scheme_1.sign(Some(NAMESPACE), &nullify_1.encode()));
 
         let invalid_signatures = vec![nullify_1.signature.clone(), tampered_sig];
-        let invalid_nullification = Nullification::new(10, invalid_signatures);
+        let invalid_nullification = Nullification::new(Round::new(0, 10), invalid_signatures);
 
         // Verification should fail with tampered signature
         assert!(!invalid_nullification.verify::<PublicKey>(NAMESPACE, &validators));

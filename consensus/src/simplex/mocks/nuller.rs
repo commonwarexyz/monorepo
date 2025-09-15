@@ -73,8 +73,12 @@ impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C
                         .unwrap();
 
                     // Nullify
-                    let msg =
-                        Nullify::sign(&self.namespace, &mut self.crypto, public_key_index, view);
+                    let msg = Nullify::sign(
+                        &self.namespace,
+                        &mut self.crypto,
+                        public_key_index,
+                        notarize.proposal.round,
+                    );
                     let msg = Voter::Nullify::<C::Signature, H::Digest>(msg)
                         .encode()
                         .into();

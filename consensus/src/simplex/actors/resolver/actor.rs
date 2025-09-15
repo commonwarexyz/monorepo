@@ -7,8 +7,8 @@ use crate::{
         actors::voter,
         types::{Backfiller, Notarization, Nullification, Request, Response},
     },
-    types::View,
-    Supervisor, Viewable,
+    types::{Epoch, View},
+    Epochable, Supervisor, Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
@@ -107,6 +107,7 @@ pub struct Actor<
     context: E,
     supervisor: S,
 
+    epoch: Epoch,
     namespace: Vec<u8>,
 
     notarizations: BTreeMap<View, Notarization<C::Signature, D>>,
@@ -170,6 +171,7 @@ impl<
                 context,
                 supervisor: cfg.supervisor,
 
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
                 notarizations: BTreeMap::new(),
@@ -391,7 +393,7 @@ impl<
                         }
                         Message::Nullified { nullification } => {
                             // Update current view
-                            let view = nullification.view;
+                            let view = nullification.view();
                             if view > current_view {
                                 current_view = view;
                             } else {
@@ -443,7 +445,7 @@ impl<
                         break;
                     };
 
-                    // Skip if there is a decoding error
+                    // Block if there is a decoding error
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
@@ -507,6 +509,12 @@ impl<
                             let mut notarizations_found = BTreeSet::new();
                             let mut nullifications_found = BTreeSet::new();
                             for notarization in response.notarizations {
+                                let epoch = notarization.epoch();
+                                if epoch != self.epoch {
+                                    warn!(?epoch, sender = ?s, "blocking peer for epoch mismatch");
+                                    self.requester.block(s.clone());
+                                    continue;
+                                }
                                 let view = notarization.view();
                                 let entry = Entry { task: Task::Notarization, view };
                                 if !self.required.contains(&entry) {
@@ -530,6 +538,12 @@ impl<
 
                             // Parse nullifications
                             for nullification in response.nullifications {
+                                let epoch = nullification.epoch();
+                                if epoch != self.epoch {
+                                    warn!(?epoch, sender = ?s, "blocking peer for epoch mismatch");
+                                    self.requester.block(s.clone());
+                                    continue;
+                                }
                                 let view = nullification.view();
                                 let entry = Entry { task: Task::Nullification, view };
                                 if !self.required.contains(&entry) {

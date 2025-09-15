@@ -993,7 +993,7 @@ impl<
         };
         let proposal = proposal.clone();
         let payload = proposal.payload;
-        let round = self.views.get_mut(&context.round.view()).unwrap();
+        let round = self.views.get_mut(&context.view()).unwrap();
         round.requested_proposal_verify = true;
         Some((
             context.clone(),
@@ -1037,10 +1037,6 @@ impl<
             return None;
         };
         Some((*leader == self.crypto.public_key(), elapsed.as_secs_f64()))
-    }
-
-    fn current_round(&self) -> Rnd {
-        Rnd::new(self.epoch, self.view)
     }
 
     fn enter_view(&mut self, view: u64, seed: V::Signature) {
@@ -1896,14 +1892,15 @@ impl<
 
                     // If we have already moved to another view, drop the response as we will
                     // not broadcast it
-                    if self.current_round() != context.round {
-                        debug!(round = ?context.round, our_round = ?self.current_round(), reason = "no longer in required view", "dropping requested proposal");
+                    let our_round = Rnd::new(self.epoch, self.view);
+                    if our_round != context.round {
+                        debug!(round = ?context.round, ?our_round, reason = "no longer in required view", "dropping requested proposal");
                         continue;
                     }
 
                     // Construct proposal
                     let proposal = Proposal::new(
-                        self.current_round(),
+                        context.round,
                         context.parent.0,
                         proposed,
                     );
@@ -1936,7 +1933,7 @@ impl<
                     };
 
                     // Handle verified proposal
-                    view = context.round.view();
+                    view = context.view();
                     if !self.verified(view).await {
                         continue;
                     }

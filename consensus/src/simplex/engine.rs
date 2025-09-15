@@ -78,6 +78,7 @@ impl<
                 crypto: public_key,
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
                 max_participants: cfg.max_participants,
                 activity_timeout: cfg.activity_timeout,

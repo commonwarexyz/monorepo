@@ -50,6 +50,7 @@ mod tests {
             mocks,
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
+        types::Round,
         Viewable,
     };
     use commonware_codec::Encode;
@@ -75,6 +76,7 @@ mod tests {
     /// 3. Send a finalization for view 300 (should be processed).
     #[test_traced]
     fn test_stale_backfill() {
+        let epoch = 333;
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
@@ -131,7 +133,7 @@ mod tests {
                 reporter: supervisor.clone(),
                 supervisor,
                 partition: "test".to_string(),
-                epoch: 0,
+                epoch,
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
@@ -193,7 +195,7 @@ mod tests {
 
             // Send finalization over network (view 100)
             let payload = Sha256::hash(b"test");
-            let proposal = Proposal::new(100, 50, payload);
+            let proposal = Proposal::new(Round::new(epoch, 100), 50, payload);
             let mut signatures = Vec::new();
             for i in 0..threshold {
                 let finalization =
@@ -221,7 +223,7 @@ mod tests {
 
             // Send old notarization from backfiller that should be ignored (view 50)
             let payload = Sha256::hash(b"test2");
-            let proposal = Proposal::new(50, 49, payload);
+            let proposal = Proposal::new(Round::new(epoch, 50), 49, payload);
             let mut signatures = Vec::new();
             for i in 0..threshold {
                 let notarization =
@@ -233,7 +235,7 @@ mod tests {
 
             // Send new finalization (view 300)
             let payload = Sha256::hash(b"test3");
-            let proposal = Proposal::new(300, 100, payload);
+            let proposal = Proposal::new(Round::new(epoch, 300), 100, payload);
             let mut signatures = Vec::new();
             for i in 0..threshold {
                 let finalization =
@@ -272,6 +274,7 @@ mod tests {
     ///    relative to the current last_finalized.
     #[test_traced]
     fn test_append_old_interesting_view() {
+        let epoch = 333;
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
@@ -328,7 +331,7 @@ mod tests {
                 reporter: supervisor.clone(),
                 supervisor,
                 partition: "test".to_string(),
-                epoch: 0,
+                epoch,
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
@@ -396,7 +399,11 @@ mod tests {
             let journal_floor_target: View = lf_target - activity_timeout + 5;
 
             // Send finalization over network (view 100)
-            let proposal = Proposal::new(lf_target, lf_target - 1, Sha256::hash(b"test"));
+            let proposal = Proposal::new(
+                Round::new(epoch, lf_target),
+                lf_target - 1,
+                Sha256::hash(b"test"),
+            );
             let mut signatures = Vec::new();
             for i in 0..threshold {
                 let finalization = Finalize::sign(
@@ -428,7 +435,7 @@ mod tests {
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
             let proposal = Proposal::new(
-                journal_floor_target,
+                Round::new(epoch, journal_floor_target),
                 journal_floor_target - 1,
                 Sha256::hash(b"test2"),
             );
@@ -467,7 +474,7 @@ mod tests {
             // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
             let problematic_view: View = journal_floor_target - 3;
             let proposal = Proposal::new(
-                problematic_view,
+                Round::new(epoch, problematic_view),
                 problematic_view - 1,
                 Sha256::hash(b"test3"),
             );
@@ -501,7 +508,7 @@ mod tests {
             }
 
             // Send finalization over network (view 100)
-            let proposal = Proposal::new(100, 99, Sha256::hash(b"test"));
+            let proposal = Proposal::new(Round::new(epoch, 100), 99, Sha256::hash(b"test"));
             let mut signatures = Vec::new();
             for i in 0..threshold {
                 let finalization = Finalize::sign(

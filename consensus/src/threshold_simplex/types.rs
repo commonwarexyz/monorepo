@@ -1527,13 +1527,13 @@ pub enum Backfiller<V: Variant, D: Digest> {
 impl<V: Variant, D: Digest> Write for Backfiller<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Backfiller::Request(v) => {
+            Backfiller::Request(request) => {
                 0u8.write(writer);
-                v.write(writer);
+                request.write(writer);
             }
-            Backfiller::Response(v) => {
+            Backfiller::Response(response) => {
                 1u8.write(writer);
-                v.write(writer);
+                response.write(writer);
             }
         }
     }

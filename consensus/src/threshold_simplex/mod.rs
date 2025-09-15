@@ -689,7 +689,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 0,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2359,7 +2359,6 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
                         supervisor,
-                        epoch: 333,
                         namespace: namespace.clone(),
                     };
 
@@ -2911,7 +2910,6 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
                         supervisor,
-                        epoch: 333,
                         namespace: namespace.clone(),
                     };
                     let engine: mocks::nuller::Nuller<_, V, Sha256, _> =
