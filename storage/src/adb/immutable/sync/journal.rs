@@ -186,7 +186,7 @@ pub(super) async fn init_journal<E: Storage + Metrics, V: Codec>(
 
     // Check if data exceeds the sync range
     if last_section > upper_section {
-        let loc = (upper_section + 1) * items_per_section;
+        let loc = last_section * items_per_section;
         return Err(Error::UnexpectedData(loc));
     }
 
@@ -198,7 +198,7 @@ pub(super) async fn init_journal<E: Storage + Metrics, V: Codec>(
 ///
 /// # Errors
 ///
-/// Short-circuits and returns [Error::UnexpectedData] if the journal's size > upper_bound + 1.
+/// Returns [Error::UnexpectedData] if the journal's size > upper_bound + 1.
 ///
 /// # Panics
 ///

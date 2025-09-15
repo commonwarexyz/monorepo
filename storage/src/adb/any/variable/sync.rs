@@ -479,7 +479,7 @@ where
 
     // Check if data exceeds the sync range
     if last_section > upper_section {
-        let loc = (upper_section + 1) * items_per_section;
+        let loc = upper_section * items_per_section;
         return Err(crate::journal::Error::UnexpectedData(loc));
     }
 

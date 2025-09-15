@@ -215,7 +215,7 @@ The DSL supports complex conditional logic using AND (`&&`) and OR (`||`) operat
 
 ## Simulating an Alto-Like Network
 
-To simulate the performance of HotStuff, Simplicity, and Minimmit on an [Alto-like Network](https://alto.commonware.xyz), run the following commands:
+To simulate the performance of HotStuff, Simplex, and Minimmit on an [Alto-like Network](https://alto.commonware.xyz), run the following commands:
 
 ```
 # Basic simulation without bandwidth constraints
