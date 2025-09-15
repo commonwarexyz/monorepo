@@ -344,7 +344,7 @@ impl Runner {
                 }
             }
 
-            // Snapshot available tasks
+            // Snapshot available tasks (by id)
             let mut queue = executor.tasks.drain();
 
             // Shuffle tasks (if more than one)
@@ -360,7 +360,12 @@ impl Runner {
             // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = queue.len(), "starting loop");
             let mut output = None;
-            for task in queue {
+            for id in queue {
+                // Lookup the task by id (it may have completed already)
+                let Some(task) = executor.tasks.get(id) else {
+                    trace!(id, "skipping missing task");
+                    continue;
+                };
                 // Record task for auditing
                 executor.auditor.event(b"process_task", |hasher| {
                     hasher.update(task.id.to_be_bytes());
@@ -372,7 +377,11 @@ impl Runner {
                 executor.metrics.task_polls.get_or_create(&task.label).inc();
 
                 // Prepare task for polling
-                let waker = waker_ref(&task);
+                let enq = Arc::new(TaskWaker {
+                    tasks: Arc::downgrade(&executor.tasks),
+                    id: task.id,
+                });
+                let waker = waker_ref(&enq);
                 let mut cx = task::Context::from_waker(&waker);
                 match &task.operation {
                     Operation::Root => {
@@ -390,7 +399,7 @@ impl Runner {
                             trace!(id = task.id, "skipping already complete task");
 
                             // Remove the future from pending
-                            executor.tasks.pending.lock().unwrap().remove(&task.id);
+                            executor.tasks.remove_pending(task.id);
                             continue;
                         };
 
@@ -399,7 +408,7 @@ impl Runner {
                             trace!(id = task.id, "task is complete");
 
                             // Remove the future from pending and drop
-                            executor.tasks.pending.lock().unwrap().remove(&task.id);
+                            executor.tasks.remove_pending(task.id);
                             *fut_opt = None;
                             continue;
                         }
@@ -536,22 +545,24 @@ enum Operation {
 struct Task {
     id: u128,
     label: Label,
-    tasks: Weak<Tasks>,
 
     operation: Operation,
 }
 
-impl ArcWake for Task {
+/// A waker for some task tracked by the runtime.
+struct TaskWaker {
+    tasks: Weak<Tasks>,
+    id: u128,
+}
+
+impl ArcWake for TaskWaker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         // Upgrade the weak reference to re-enqueue this task.
         // If upgrade fails, the task queue has been dropped and no action is required.
         //
         // This can happen if some data is passed into the runtime and it drops after the runtime exits.
         if let Some(tasks) = arc_self.tasks.upgrade() {
-            tasks.enqueue(arc_self.clone());
-        } else if let Operation::Work(future) = &arc_self.operation {
-            // Drop the future to release captured resources
-            *future.lock().unwrap() = None;
+            tasks.enqueue(arc_self.id);
         }
     }
 }
@@ -561,7 +572,7 @@ struct Tasks {
     /// The current task counter.
     counter: Mutex<u128>,
     /// The queue of tasks that are waiting to be executed.
-    queue: Mutex<Vec<Arc<Task>>>,
+    queue: Mutex<Vec<u128>>,
     /// Incomplete tasks that may still be referenced by external wakers.
     pending: Mutex<BTreeMap<u128, Weak<Task>>>,
 }
@@ -592,7 +603,6 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label: Label::root(),
-            tasks: Arc::downgrade(arc_self),
             operation: Operation::Root,
         });
 
@@ -604,7 +614,7 @@ impl Tasks {
             .insert(id, Arc::downgrade(&task));
 
         // Add to queue
-        arc_self.queue.lock().unwrap().push(task);
+        arc_self.queue.lock().unwrap().push(id);
     }
 
     /// Register a new task to be executed.
@@ -617,7 +627,6 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label,
-            tasks: Arc::downgrade(arc_self),
             operation: Operation::Work(Mutex::new(Some(future))),
         });
 
@@ -629,17 +638,17 @@ impl Tasks {
             .insert(id, Arc::downgrade(&task));
 
         // Add to queue
-        arc_self.queue.lock().unwrap().push(task);
+        arc_self.queue.lock().unwrap().push(id);
     }
 
     /// Enqueue an already registered task to be executed.
-    fn enqueue(&self, task: Arc<Task>) {
+    fn enqueue(&self, id: u128) {
         let mut queue = self.queue.lock().unwrap();
-        queue.push(task);
+        queue.push(id);
     }
 
     /// Dequeue all tasks that are ready to execute.
-    fn drain(&self) -> Vec<Arc<Task>> {
+    fn drain(&self) -> Vec<u128> {
         let mut queue = self.queue.lock().unwrap();
         let len = queue.len();
         replace(&mut *queue, Vec::with_capacity(len))
@@ -648,6 +657,17 @@ impl Tasks {
     /// Get the number of tasks in the queue.
     fn len(&self) -> usize {
         self.queue.lock().unwrap().len()
+    }
+
+    /// Lookup a task by id.
+    fn get(&self, id: u128) -> Option<Arc<Task>> {
+        let pending = self.pending.lock().unwrap();
+        pending.get(&id).and_then(|w| w.upgrade())
+    }
+
+    /// Remove a task from the pending map.
+    fn remove_pending(&self, id: u128) {
+        self.pending.lock().unwrap().remove(&id);
     }
 
     /// Drop all active tasks.
