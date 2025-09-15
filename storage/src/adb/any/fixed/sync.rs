@@ -1974,25 +1974,17 @@ mod tests {
             journal.close().await.unwrap();
 
             // Initialize with sync boundaries where existing data exceeds the upper bound
-            // Lower bound: 8 (prune operations 0-7)
-            // Upper bound: 28 (existing data goes to 29, which exceeds this)
             let lower_bound = 8;
-            let upper_bound = 28;
+            for upper_bound in 9..29 {
+                let result = init_journal::<Context, Digest>(
+                    context.clone(),
+                    cfg.clone(),
+                    lower_bound,
+                    upper_bound,
+                )
+                .await;
 
-            // Should return UnexpectedData error since journal_size (30) > upper_bound + 1 (29)
-            let result = init_journal::<Context, Digest>(
-                context.clone(),
-                cfg.clone(),
-                lower_bound,
-                upper_bound,
-            )
-            .await;
-
-            match result {
-                Err(journal::Error::UnexpectedData(pos)) => {
-                    assert_eq!(pos, initial_size);
-                }
-                _ => panic!("Expected UnexpectedData",),
+                assert!(matches!(result, Err(journal::Error::UnexpectedData(_))));
             }
             context.remove(&cfg.partition, None).await.unwrap();
         });

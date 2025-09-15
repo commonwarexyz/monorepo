@@ -601,8 +601,8 @@ mod tests {
             journal.close().await.unwrap();
 
             // Test sync boundaries within the same section
-            let lower_bound = 11; // operation 11 (section 2: 11/5 = 2)
-            let upper_bound = 13; // operation 13 (section 2: 13/5 = 2)
+            let lower_bound = 10; // operation 10 (section 2: 10/5 = 2)
+            let upper_bound = 14; // operation 14 (section 2: 14/5 = 2)
             let journal = init_journal(
                 context.clone(),
                 cfg.clone(),
@@ -613,14 +613,12 @@ mod tests {
             .await
             .expect("Failed to initialize journal with same-section bounds");
 
-            // Both operations are in section 1, so section 0 should be pruned, section 1+ retained
-            let target_section = lower_bound / items_per_section; // 6/5 = 1
+            // Both operations are in section 2, so sections 0, 1 should be pruned, section 2 retained
+            let target_section = lower_bound / items_per_section; // 10/5 = 2
             assert_eq!(journal.oldest_section(), Some(target_section));
-
-            // Verify pruning and retention
-            assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
-            assert!(!journal.blobs.contains_key(&1)); // Section 1 should be pruned
-            assert!(journal.blobs.contains_key(&2)); // Section 2 should be retained
+            assert!(!journal.blobs.contains_key(&0));
+            assert!(!journal.blobs.contains_key(&1));
+            assert!(journal.blobs.contains_key(&2));
 
             // Verify data integrity
             let item = journal.get(2, 0).await.unwrap();
@@ -630,13 +628,9 @@ mod tests {
             let item = journal.get(2, 3).await.unwrap();
             assert_eq!(item, 203); // Item at offset 3 in section 2 (2*100+3)
 
-            // Verify section 2 size (3 operations)
-            let section_2_size = journal.size(3).await.unwrap();
-            assert_eq!(section_2_size, 48); // Should be 3 operations * 16 bytes = 48 bytes
-
-            // Verify that no operation beyond upper_bound (13) exists
-            let result = journal.get(2, 4).await;
-            assert!(result.is_err()); // Operation 14 doesn't exist (we only created up to 13)
+            // Verify section 2 size
+            let section_2_size = journal.size(2).await.unwrap();
+            assert_eq!(section_2_size, 80); // Should be 5 operations * 16 bytes = 80 bytes
 
             let result = journal.get(3, 0).await;
             assert!(matches!(result, Err(Error::SectionOutOfRange(3)))); // Section 3 was never created
