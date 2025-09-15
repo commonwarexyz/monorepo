@@ -458,7 +458,7 @@ impl Runner {
                 }
             }
 
-            // If there are no tasks to run and no tasks sleeping, the executor is stalled
+            // If there are no tasks to run after advancing time, the executor is stalled
             // and will never finish.
             if executor.tasks.ready() == 0 {
                 panic!("runtime stalled");
