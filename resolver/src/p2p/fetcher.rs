@@ -314,8 +314,9 @@ mod tests {
         }
     }
 
-    fn create_test_fetcher() -> Fetcher<Context, Ed25519PublicKey, MockKey, MockSender> {
-        let context = Context::default();
+    fn create_test_fetcher(
+        context: Context,
+    ) -> Fetcher<Context, Ed25519PublicKey, MockKey, MockSender> {
         let public_key = commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
         let requester_config = RequesterConfig {
             public_key,
@@ -332,8 +333,8 @@ mod tests {
     #[test]
     fn test_retain_function() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Add some keys to pending and active states
             fetcher.add_pending(MockKey(1));
@@ -375,8 +376,8 @@ mod tests {
     #[test]
     fn test_clear_function() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Add some keys to pending and active states
             fetcher.add_pending(MockKey(1));
@@ -410,8 +411,8 @@ mod tests {
     #[test]
     fn test_len_functions() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Initially empty
             assert_eq!(fetcher.len(), 0);
@@ -449,8 +450,8 @@ mod tests {
     #[test]
     fn test_retain_with_empty_collections() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Test retain on empty collections
             fetcher.retain(|_| true);
@@ -464,8 +465,8 @@ mod tests {
     #[test]
     fn test_retain_all_elements_match_predicate() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys
             fetcher.add_pending(MockKey(1));
@@ -488,8 +489,8 @@ mod tests {
     #[test]
     fn test_retain_no_elements_match_predicate() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys
             fetcher.add_pending(MockKey(1));
@@ -510,8 +511,8 @@ mod tests {
     #[test]
     fn test_cancel_function() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys to both pending and active states
             fetcher.add_pending(MockKey(1));
@@ -540,8 +541,8 @@ mod tests {
     #[test]
     fn test_contains_function() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Initially empty
             assert!(!fetcher.contains(&MockKey(1)));
@@ -570,8 +571,8 @@ mod tests {
     #[test]
     fn test_add_pending_function() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Add first key
             fetcher.add_pending(MockKey(1));
@@ -592,8 +593,8 @@ mod tests {
     #[should_panic(expected = "assertion failed")]
     fn test_add_pending_duplicate_panics() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             fetcher.add_pending(MockKey(1));
             // This should panic
@@ -604,8 +605,8 @@ mod tests {
     #[test]
     fn test_get_pending_deadline() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // No deadline when empty
             assert!(fetcher.get_pending_deadline().is_none());
@@ -627,8 +628,8 @@ mod tests {
     #[test]
     fn test_get_active_deadline() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let fetcher = create_test_fetcher(context);
 
             // No deadline when empty (requester has no timeouts)
             assert!(fetcher.get_active_deadline().is_none());
@@ -638,8 +639,8 @@ mod tests {
     #[test]
     fn test_pop_pending() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys
             fetcher.add_pending(MockKey(1));
@@ -663,8 +664,8 @@ mod tests {
     #[should_panic]
     fn test_pop_pending_empty_panics() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
             // This should panic
             fetcher.pop_pending();
         });
@@ -673,8 +674,8 @@ mod tests {
     #[test]
     fn test_pop_active() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let fetcher = create_test_fetcher(context);
 
             // No active requests, should return None when popping
             // (This tests the case where requester.next() returns None or the active map doesn't contain the key)
@@ -685,8 +686,8 @@ mod tests {
     #[test]
     fn test_pop_by_id() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
             let dummy_peer =
                 commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
 
@@ -704,8 +705,8 @@ mod tests {
     #[test]
     fn test_reconcile_and_block() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
             let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
 
@@ -723,8 +724,8 @@ mod tests {
     #[test]
     fn test_len_blocked() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Initially no blocked peers
             let initial_blocked = fetcher.len_blocked();
@@ -742,8 +743,8 @@ mod tests {
     #[test]
     fn test_edge_cases_empty_state() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let fetcher = create_test_fetcher(context);
 
             // Test all functions on empty fetcher
             assert_eq!(fetcher.len(), 0);
@@ -758,8 +759,8 @@ mod tests {
     #[test]
     fn test_cancel_edge_cases() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Cancel from empty fetcher
             assert!(!fetcher.cancel(&MockKey(1)));
@@ -774,8 +775,8 @@ mod tests {
     #[test]
     fn test_retain_preserves_active_state() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys to active with specific IDs
             fetcher.active.insert(100, MockKey(1));
@@ -799,8 +800,8 @@ mod tests {
     #[test]
     fn test_mixed_operations() {
         let runner = Runner::default();
-        runner.start(|_| async {
-            let mut fetcher = create_test_fetcher();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
 
             // Add keys to both pending and active
             fetcher.add_pending(MockKey(1));
