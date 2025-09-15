@@ -107,17 +107,20 @@ mod sealed {
         /// This type must be the same size as the signed integer type.
         type UnsignedEquivalent: UPrim;
 
-        /// Compile-time assertion to ensure that the size of the signed integer is equal to the size of
-        /// the unsigned integer.
-        #[doc(hidden)]
-        const _COMMIT_OP_ASSERT: () =
-            assert!(size_of::<Self>() == size_of::<Self::UnsignedEquivalent>());
-
         /// Converts the signed integer to an unsigned integer using ZigZag encoding.
         fn as_zigzag(&self) -> Self::UnsignedEquivalent;
 
         /// Converts a (ZigZag'ed) unsigned integer back to a signed integer.
         fn un_zigzag(value: Self::UnsignedEquivalent) -> Self;
+    }
+
+    /// Asserts that two types are the same size at compile time.
+    #[inline(always)]
+    const fn assert_equal_size<T: Sized, U: Sized>() {
+        assert!(
+            size_of::<T>() == size_of::<U>(),
+            "Unsigned integer must be the same size as the signed integer"
+        );
     }
 
     // Implements the `SPrim` trait for all signed integer types.
@@ -128,11 +131,21 @@ mod sealed {
 
                 #[inline]
                 fn as_zigzag(&self) -> $utype {
+                    // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+                    const {
+                        assert_equal_size::<$type, $utype>();
+                    }
+
                     let shr = size_of::<$utype>() * 8 - 1;
                     ((self << 1) ^ (self >> shr)) as $utype
                 }
                 #[inline]
                 fn un_zigzag(value: $utype) -> Self {
+                    // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+                    const {
+                        assert_equal_size::<$type, $utype>();
+                    }
+
                     ((value >> 1) as $type) ^ (-((value & 1) as $type))
                 }
             }
