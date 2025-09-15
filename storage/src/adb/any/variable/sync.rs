@@ -10,7 +10,7 @@ use crate::{
     index::Index,
     journal::{
         fixed,
-        variable::{Config as VConfig, Journal as VJournal, ITEM_ALIGNMENT},
+        variable::{Config as VConfig, Journal as VJournal},
         Error,
     },
     metadata::Metadata,
@@ -20,15 +20,96 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage, Storage};
-use commonware_utils::{sequence::prefixed_u64::U64, Array};
-use futures::{pin_mut, StreamExt};
-use std::{num::NonZeroU64, ops::Bound};
+use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::{sequence::prefixed_u64::U64, Array, NZUsize};
+use futures::{pin_mut, StreamExt as _};
+use std::num::NonZeroU64;
 use tracing::debug;
+
+/// Wraps a [VJournal] to provide a sync-compatible interface.
+pub struct Journal<E, K, V>
+where
+    E: Storage + Metrics + Clock,
+    K: Array,
+    V: Codec,
+{
+    /// Underlying variable journal storing the operations.
+    inner: VJournal<E, Variable<K, V>>,
+
+    /// Operations per storage section in the `inner` journal.
+    items_per_section: NonZeroU64,
+
+    /// Next location to append to in the `inner` journal.
+    size: u64,
+
+    /// Tracks the oldest retained location in the `inner` journal.
+    metadata: Metadata<E, U64, u64>,
+}
+
+impl<E, K, V> Journal<E, K, V>
+where
+    E: Storage + Metrics + Clock,
+    K: Array,
+    V: Codec,
+{
+    /// Create a new sync-compatible [Journal].
+    ///
+    /// Arguments:
+    /// - `inner`: The wrapped [VJournal], whose logical last operation location is `size - 1`.
+    /// - `items_per_section`: Operations per section.
+    /// - `metadata`: Metadata for the journal. Tracks the oldest retained location.
+    /// - `size`: Location of the next operation to append.
+    pub async fn new(
+        inner: VJournal<E, Variable<K, V>>,
+        items_per_section: NonZeroU64,
+        metadata: Metadata<E, U64, u64>,
+        size: u64,
+    ) -> Result<Self, crate::journal::Error> {
+        Ok(Self {
+            inner,
+            items_per_section,
+            size,
+            metadata,
+        })
+    }
+
+    /// Return the inner [VJournal] and [Metadata].
+    #[allow(clippy::type_complexity)]
+    pub fn into_inner(self) -> (VJournal<E, Variable<K, V>>, Metadata<E, U64, u64>) {
+        (self.inner, self.metadata)
+    }
+}
+
+impl<E, K, V> sync::Journal for Journal<E, K, V>
+where
+    E: Storage + Metrics + Clock,
+    K: Array,
+    V: Codec,
+{
+    type Op = Variable<K, V>;
+    type Error = crate::journal::Error;
+
+    async fn size(&self) -> Result<u64, Self::Error> {
+        Ok(self.size)
+    }
+
+    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
+        let section = self.size / self.items_per_section;
+        self.inner.append(section, op).await?;
+        self.size += 1;
+        Ok(())
+    }
+
+    async fn close(self) -> Result<(), Self::Error> {
+        self.inner.close().await?;
+        self.metadata.close().await?;
+        Ok(())
+    }
+}
 
 impl<E, K, V, H, T> sync::Database for any::variable::Any<E, K, V, H, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Codec,
     H: Hasher,
@@ -207,9 +288,7 @@ where
 ///   empty journal.
 /// - Overlap within [`lower_bound`, `upper_bound`]:
 ///   - Prunes sections strictly below `lower_bound / items_per_section` (section-aligned).
-///   - Removes any sections strictly greater than `upper_bound / items_per_section`.
-///   - Truncates the final retained section so that no item with location greater
-///     than `upper_bound` remains.
+/// - Unexpected data beyond `upper_bound`: returns [Error::UnexpectedData].
 ///
 /// Note that lower-bound pruning is section-aligned. This means the first retained section may
 /// still contain items whose locations are < `lower_bound`. Callers should ignore these.
@@ -222,17 +301,21 @@ where
 /// - `items_per_section`: number of items per section
 ///
 /// # Returns
-/// A journal whose sections satisfy:
+/// (journal, size) where:
 /// - No section index < `lower_bound / items_per_section` exists.
 /// - No section index > `upper_bound / items_per_section` exists.
-/// - The last retained section is truncated so that its last item’s location is `<= upper_bound`.
+/// - No item with location > `upper_bound` exists.
+/// - `size` is the next location that should be appended to by the sync engine.
+///
+/// # Errors
+/// Returns [Error::UnexpectedData] if existing data extends beyond `upper_bound`.
 pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     context: E,
     cfg: VConfig<V::Cfg>,
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<VJournal<E, V>, Error> {
+) -> Result<(VJournal<E, V>, u64), Error> {
     if lower_bound > upper_bound {
         return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
     }
@@ -259,7 +342,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     // No existing data
     let Some(last_section) = last_section else {
         debug!("no existing journal data, creating fresh journal");
-        return Ok(journal);
+        return Ok((journal, lower_bound));
     };
 
     // If all existing data is before our sync range, destroy and recreate fresh
@@ -269,7 +352,8 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
             lower_section, "existing journal data is stale, re-initializing"
         );
         journal.destroy().await?;
-        return VJournal::init(context, cfg).await;
+        let journal = VJournal::init(context, cfg).await?;
+        return Ok((journal, lower_bound));
     }
 
     // Prune sections below the lower bound.
@@ -277,203 +361,44 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
         journal.prune(lower_section).await?;
     }
 
-    // Remove any sections beyond the upper bound
+    // Check if data exceeds the sync range
     if last_section > upper_section {
-        debug!(
-            last_section,
-            lower_section,
-            upper_section,
-            "existing journal data exceeds sync range, removing sections beyond upper bound"
-        );
-
-        let sections_to_remove: Vec<u64> = journal
-            .blobs
-            .range((Bound::Excluded(upper_section), Bound::Unbounded))
-            .map(|(&section, _)| section)
-            .collect();
-
-        for section in sections_to_remove {
-            debug!(section, "removing section beyond upper bound");
-            if let Some(blob) = journal.blobs.remove(&section) {
-                drop(blob);
-                let name = section.to_be_bytes();
-                journal
-                    .context
-                    .remove(&journal.cfg.partition, Some(&name))
-                    .await?;
-                journal.tracked.dec();
-            }
-        }
+        let loc = (upper_section + 1) * items_per_section;
+        return Err(Error::UnexpectedData(loc));
     }
 
-    // Remove any items beyond upper_bound
-    rewind_upper(&mut journal, upper_bound, items_per_section).await?;
-
-    Ok(journal)
+    let size = get_size(&journal, items_per_section, upper_bound).await?;
+    Ok((journal, size))
 }
 
-/// Wraps a [VJournal] to provide a sync-compatible interface.
-pub struct Journal<E, K, V>
-where
-    E: Storage + Metrics + Clock,
-    K: Array,
-    V: Codec,
-{
-    /// Underlying variable journal storing the operations.
-    inner: VJournal<E, Variable<K, V>>,
-
-    /// Operations per storage section in the `inner` journal.
-    items_per_section: NonZeroU64,
-
-    /// Next location to append to in the `inner` journal.
-    size: u64,
-
-    /// Tracks the oldest retained location in the `inner` journal.
-    metadata: Metadata<E, U64, u64>,
-}
-
-impl<E, K, V> Journal<E, K, V>
-where
-    E: Storage + Metrics + Clock,
-    K: Array,
-    V: Codec,
-{
-    /// Create a new sync-compatible [Journal].
-    ///
-    /// Arguments:
-    /// - `inner`: The wrapped [VJournal], whose logical last operation location is `size - 1`.
-    /// - `items_per_section`: Operations per section.
-    /// - `metadata`: Metadata for the journal. Tracks the oldest retained location.
-    /// - `size`: Location of the next operation to append.
-    pub async fn new(
-        inner: VJournal<E, Variable<K, V>>,
-        items_per_section: NonZeroU64,
-        metadata: Metadata<E, U64, u64>,
-        size: u64,
-    ) -> Result<Self, crate::journal::Error> {
-        Ok(Self {
-            inner,
-            items_per_section,
-            size,
-            metadata,
-        })
-    }
-
-    /// Return the inner [VJournal] and [Metadata].
-    #[allow(clippy::type_complexity)]
-    pub fn into_inner(self) -> (VJournal<E, Variable<K, V>>, Metadata<E, U64, u64>) {
-        (self.inner, self.metadata)
-    }
-}
-
-impl<E, K, V> sync::Journal for Journal<E, K, V>
-where
-    E: Storage + Metrics + Clock,
-    K: Array,
-    V: Codec,
-{
-    type Op = Variable<K, V>;
-    type Error = crate::journal::Error;
-
-    async fn size(&self) -> Result<u64, Self::Error> {
-        Ok(self.size)
-    }
-
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        let section = self.size / self.items_per_section;
-        self.inner.append(section, op).await?;
-        self.size += 1;
-        Ok(())
-    }
-
-    async fn close(self) -> Result<(), Self::Error> {
-        self.inner.close().await?;
-        self.metadata.close().await?;
-        Ok(())
-    }
-}
-
-/// Remove items beyond the `upper_bound` location (inclusive).
-/// Assumes each section contains `items_per_section` items.
-async fn rewind_upper<E: Storage + Metrics, V: Codec>(
-    journal: &mut VJournal<E, V>,
-    upper_bound: u64,
+/// Returns the size of the journal.
+///
+/// # Errors
+///
+/// Short-circuits and returns [Error::UnexpectedData] if the journal's size > upper_bound + 1.
+///
+/// # Panics
+///
+/// Panics if the journal is empty.
+pub(crate) async fn get_size<E: Storage + Metrics, V: Codec>(
+    journal: &VJournal<E, V>,
     items_per_section: u64,
-) -> Result<(), Error> {
-    // Find which section contains the upper_bound item
-    let upper_section = upper_bound / items_per_section;
-    let Some(blob) = journal.blobs.get(&upper_section) else {
-        return Ok(()); // Section doesn't exist, nothing to truncate
-    };
-
-    // Calculate the logical item range for this section
-    let section_start = upper_section * items_per_section;
-    let section_end = section_start + items_per_section - 1;
-
-    // If upper_bound is at the very end of the section, no truncation needed
-    if upper_bound >= section_end {
-        return Ok(());
-    }
-
-    // Calculate how many items to keep (upper_bound is inclusive)
-    let items_to_keep = (upper_bound - section_start + 1) as u32;
-    debug!(
-        upper_section,
-        upper_bound,
-        section_start,
-        section_end,
-        items_to_keep,
-        "truncating section to remove items beyond upper_bound"
-    );
-
-    // Find where to rewind to (after the last item we want to keep)
-    let target_byte_size = compute_offset::<E, V>(
-        blob,
-        &journal.cfg.codec_config,
-        journal.cfg.compression.is_some(),
-        items_to_keep,
-    )
-    .await?;
-
-    // Rewind to the appropriate position to remove items beyond the upper bound
-    journal
-        .rewind_section(upper_section, target_byte_size)
-        .await?;
-
-    debug!(
-        upper_section,
-        items_to_keep, target_byte_size, "section truncated"
-    );
-
-    Ok(())
-}
-
-/// Return the byte offset of the next element after `items_count` elements of `blob`.
-async fn compute_offset<E: Storage + Metrics, V: Codec>(
-    blob: &commonware_runtime::buffer::Append<E::Blob>,
-    codec_config: &V::Cfg,
-    compressed: bool,
-    items_count: u32,
+    upper_bound: u64,
 ) -> Result<u64, Error> {
-    if items_count == 0 {
-        return Ok(0);
-    }
-
-    let mut current_offset = 0u32;
-    for _ in 0..items_count {
-        match VJournal::<E, V>::read(compressed, codec_config, blob, current_offset).await {
-            Ok((next_slot, _item_len, _item)) => {
-                current_offset = next_slot;
-            }
-            Err(Error::Runtime(commonware_runtime::Error::BlobInsufficientLength)) => {
-                // This section has fewer than `items_count` items.
-                break;
-            }
-            Err(e) => return Err(e),
+    let last_section = journal.blobs.last_key_value().map(|(&s, _)| s).unwrap();
+    let last_section_start = last_section * items_per_section;
+    let stream = journal.replay(last_section, 0, NZUsize!(1024)).await?;
+    pin_mut!(stream);
+    let mut size = last_section_start;
+    while let Some(item) = stream.next().await {
+        let (section, _offset, _size, _op) = item?;
+        assert_eq!(section, last_section);
+        size += 1;
+        if size > upper_bound + 1 {
+            return Err(Error::UnexpectedData(size));
         }
     }
-
-    Ok((current_offset as u64) * ITEM_ALIGNMENT)
+    Ok(size)
 }
 
 /// Count the actual number of items in a journal section.
@@ -633,7 +558,6 @@ where
 /// 1. Remove all sections before the one containing lower_bound
 /// 2. Prune the lower section, if needed, to make contiguous with range starting at lower_bound
 /// 3. Remove all sections after the one containing upper_bound  
-/// 4. Truncate the upper section to remove elements after upper_bound
 ///
 /// Returns the next logical location for writing. Updates metadata with the new
 /// oldest_retained_loc (either at section boundaries for contiguous cases or at
@@ -685,31 +609,8 @@ where
         journal.prune(lower_section).await?;
     }
 
-    // Remove sections after the upper_section
-    let sections_to_remove: Vec<u64> = journal
-        .blobs
-        .range((Bound::Excluded(upper_section), Bound::Unbounded))
-        .map(|(&section, _)| section)
-        .collect();
-
-    for section in sections_to_remove {
-        debug!(section, "removing section beyond upper bound");
-        if let Some(blob) = journal.blobs.remove(&section) {
-            drop(blob);
-            let name = section.to_be_bytes();
-            journal
-                .context
-                .remove(&journal.cfg.partition, Some(&name))
-                .await?;
-            journal.tracked.dec();
-        }
-    }
-
     // Prune the lower section if needed
     prune_lower(journal, metadata, lower_bound, items_per_section).await?;
-
-    // Rewind the upper section if needed
-    rewind_upper(journal, upper_bound, items_per_section).await?;
 
     // Compute the next location to write and the new oldest_retained_loc
     // If journal is empty, return (lower_bound, lower_bound)
@@ -725,6 +626,13 @@ where
         .last_key_value()
         .map(|(section, _)| *section)
         .unwrap();
+
+    // Check if data exceeds the sync range
+    if last_section > upper_section {
+        let loc = (upper_section + 1) * items_per_section;
+        return Err(crate::journal::Error::UnexpectedData(loc));
+    }
+
     let last_blob = journal.blobs.get(&last_section).unwrap();
     let items_in_last_section = count_items_in_section::<E, V>(
         last_blob,
@@ -738,6 +646,12 @@ where
         last_section * items_per_section
     };
     let next_loc = last_section_start + items_in_last_section as u64;
+
+    // Check if the computed next location exceeds the upper bound
+    if next_loc > upper_bound + 1 {
+        return Err(crate::journal::Error::UnexpectedData(next_loc));
+    }
+
     Ok(next_loc)
 }
 
@@ -746,14 +660,10 @@ mod tests {
     use super::*;
     use crate::{
         adb::sync::{
-            self,
             engine::{Config, NextStep},
             resolver::tests::FailResolver,
             Engine, Target,
         },
-        journal::variable::ITEM_ALIGNMENT,
-        mmr::hasher::Standard,
-        store::operation::Variable,
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256, Digest as _, Sha256};
@@ -790,7 +700,7 @@ mod tests {
             let lower_bound = 10;
             let upper_bound = 25;
             let items_per_section = NZU64!(5);
-            let mut journal = init_journal(
+            let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -799,6 +709,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with sync boundaries");
+            assert_eq!(size, lower_bound);
 
             // Verify the journal is ready for sync items
             assert!(journal.blobs.is_empty()); // No sections created yet
@@ -856,7 +767,7 @@ mod tests {
             // lower_bound: 8 (section 1), upper_bound: 30 (section 6)
             let lower_bound = 8;
             let upper_bound = 30;
-            let mut journal = init_journal(
+            let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -865,6 +776,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with overlap");
+            assert_eq!(size, 20);
 
             // Verify pruning: sections before lower_section are pruned
             let lower_section = lower_bound / items_per_section; // 8/5 = 1
@@ -965,7 +877,7 @@ mod tests {
             // Initialize with sync boundaries that exactly match existing data
             let lower_bound = 5; // section 1
             let upper_bound = 19; // section 3
-            let journal = init_journal(
+            let (journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -974,6 +886,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with exact match");
+            assert_eq!(size, 20);
 
             // Verify pruning to lower bound
             let lower_section = lower_bound / items_per_section; // 5/5 = 1
@@ -1017,12 +930,13 @@ mod tests {
     }
 
     /// Test `init_journal` when existing data exceeds the sync target range.
+    /// This tests that UnexpectedData error is returned when existing data goes beyond the upper bound.
     #[test_traced]
-    fn test_init_journal_existing_data_with_rewind() {
+    fn test_init_journal_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = VConfig {
-                partition: "test_rewind".into(),
+                partition: "test_unexpected_data".into(),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -1049,62 +963,19 @@ mod tests {
 
             // Initialize with sync boundaries that are exceeded by existing data
             let lower_bound = 8; // section 1
-            let upper_bound = 17; // section 3
-            let mut journal = init_journal(
-                context.clone(),
-                cfg.clone(),
-                lower_bound,
-                upper_bound,
-                items_per_section,
-            )
-            .await
-            .expect("Failed to initialize journal with rewind");
+            for upper_bound in 9..28 {
+                let result = init_journal::<deterministic::Context, u64>(
+                    context.clone(),
+                    cfg.clone(),
+                    lower_bound,
+                    upper_bound,
+                    items_per_section,
+                )
+                .await;
 
-            // Verify pruning to lower bound and rewinding beyond upper bound
-            let lower_section = lower_bound / items_per_section; // 8/5 = 1
-            assert_eq!(journal.oldest_section(), Some(lower_section));
-
-            // Verify section 0 is pruned (< lower_section)
-            assert!(!journal.blobs.contains_key(&0));
-
-            // Verify sections within sync range exist (lower_section <= section <= upper_section)
-            assert!(journal.blobs.contains_key(&1)); // Section 1 (contains operation 8)
-            assert!(journal.blobs.contains_key(&2)); // Section 2
-            assert!(journal.blobs.contains_key(&3)); // Section 3 (contains operation 17)
-
-            // Verify sections beyond upper bound are removed (> upper_section)
-            assert!(!journal.blobs.contains_key(&4)); // Section 4 should be removed
-            assert!(!journal.blobs.contains_key(&5)); // Section 5 should be removed
-
-            // Verify data integrity in retained sections
-            let item = journal.get(1, 0).await.unwrap();
-            assert_eq!(item, 1000u64); // First item in section 1 (1*1000+0)
-            let item = journal.get(1, 1).await.unwrap();
-            assert_eq!(item, 1001); // Second item in section 1 (1*1000+1)
-            let item = journal.get(3, 0).await.unwrap();
-            assert_eq!(item, 3000); // First item in section 3 (3*1000+0)
-            let last_element_section = 17 / items_per_section;
-            let last_element_offset = (17 % items_per_section.get()) as u32;
-            let item = journal
-                .get(last_element_section, last_element_offset)
-                .await
-                .unwrap();
-            assert_eq!(item, 3002); // Last item in section 3 (3*1000+2)
-
-            // Verify that section 3 was properly truncated
-            let section_3_size = journal.size(3).await.unwrap();
-            assert_eq!(section_3_size, 3 * ITEM_ALIGNMENT);
-
-            // Verify that operations beyond upper_bound (17) are not accessible
-            // Reading beyond the truncated section should return an error
-            let result = journal.get(3, 3).await;
-            assert!(result.is_err()); // Operation 18 should be inaccessible (beyond upper_bound=17)
-
-            // Assert journal can accept new operations
-            let (offset, _) = journal.append(3, 999).await.unwrap();
-            assert_eq!(journal.get(3, offset).await.unwrap(), 999);
-
-            journal.destroy().await.unwrap();
+                // Should return UnexpectedData error since data exists beyond upper_bound
+                assert!(matches!(result, Err(Error::UnexpectedData(_))));
+            }
         });
     }
 
@@ -1139,7 +1010,7 @@ mod tests {
             // Initialize with sync boundaries beyond all existing data
             let lower_bound = 15; // section 3
             let upper_bound = 25; // section 5
-            let journal = init_journal::<deterministic::Context, u64>(
+            let (journal, size) = init_journal::<deterministic::Context, u64>(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -1148,6 +1019,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with stale data");
+            assert_eq!(size, 15);
 
             // Verify fresh journal (all old data destroyed)
             assert!(journal.blobs.is_empty());
@@ -1191,9 +1063,9 @@ mod tests {
             journal.close().await.unwrap();
 
             // Test sync boundaries exactly at section boundaries
-            let lower_bound = 10; // Exactly at section boundary (10/5 = 2)
-            let upper_bound = 19; // Exactly at section boundary (19/5 = 3)
-            let mut journal = init_journal(
+            let lower_bound = 15; // Exactly at section boundary (15/5 = 3)
+            let upper_bound = 24; // Exactly at section boundary (24/5 = 4)
+            let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -1202,6 +1074,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal at boundaries");
+            assert_eq!(size, 25);
 
             // Verify correct section range
             let lower_section = lower_bound / items_per_section; // 2
@@ -1210,18 +1083,18 @@ mod tests {
             // Verify sections 2, 3, 4 exist, others don't
             assert!(!journal.blobs.contains_key(&0));
             assert!(!journal.blobs.contains_key(&1));
-            assert!(journal.blobs.contains_key(&2));
+            assert!(!journal.blobs.contains_key(&2));
             assert!(journal.blobs.contains_key(&3));
-            assert!(!journal.blobs.contains_key(&4)); // Section 4 should not exist
+            assert!(journal.blobs.contains_key(&4));
 
             // Verify data integrity in retained sections
-            let item = journal.get(2, 0).await.unwrap();
-            assert_eq!(item, 200u64); // First item in section 2
+            let item = journal.get(3, 0).await.unwrap();
+            assert_eq!(item, 300u64); // First item in section 3
             let item = journal.get(3, 4).await.unwrap();
             assert_eq!(item, 304); // Last element
-            let next_element_section = 4;
+            let next_element_section = 5;
             let result = journal.get(next_element_section, 0).await;
-            assert!(matches!(result, Err(Error::SectionOutOfRange(4))));
+            assert!(matches!(result, Err(Error::SectionOutOfRange(5))));
 
             // Assert journal can accept new operations
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
@@ -1264,9 +1137,9 @@ mod tests {
             journal.close().await.unwrap();
 
             // Test sync boundaries within the same section
-            let lower_bound = 6; // operation 6 (section 1: 6/5 = 1)
-            let upper_bound = 8; // operation 8 (section 1: 8/5 = 1)
-            let journal = init_journal(
+            let lower_bound = 10; // operation 10 (section 2: 10/5 = 2)
+            let upper_bound = 14; // operation 14 (section 2: 14/5 = 2)
+            let (journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -1275,258 +1148,34 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with same-section bounds");
+            assert_eq!(size, 15);
 
-            // Both operations are in section 1, so section 0 should be pruned, section 1+ retained
-            let target_section = lower_bound / items_per_section; // 6/5 = 1
+            // Both operations are in section 2, so sections 0, 1 should be pruned, section 2 retained
+            let target_section = lower_bound / items_per_section; // 10/5 = 2
             assert_eq!(journal.oldest_section(), Some(target_section));
-
-            // Verify pruning and retention
-            assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
-            assert!(journal.blobs.contains_key(&1)); // Section 1 should be retained
-            assert!(!journal.blobs.contains_key(&2)); // Section 2 should be removed (> upper_section)
+            assert!(!journal.blobs.contains_key(&0));
+            assert!(!journal.blobs.contains_key(&1));
+            assert!(journal.blobs.contains_key(&2));
 
             // Verify data integrity
-            let item = journal.get(1, 0).await.unwrap();
-            assert_eq!(item, 100u64); // First item in section 1
-            let item = journal.get(1, 1).await.unwrap();
-            assert_eq!(item, 101); // Second item in section 1 (1*100+1)
-            let item = journal.get(1, 3).await.unwrap();
-            assert_eq!(item, 103); // Item at offset 3 in section 1 (1*100+3)
+            let item = journal.get(2, 0).await.unwrap();
+            assert_eq!(item, 200u64); // First item in section 2
+            let item = journal.get(2, 1).await.unwrap();
+            assert_eq!(item, 201); // Second item in section 2 (2*100+1)
+            let item = journal.get(2, 3).await.unwrap();
+            assert_eq!(item, 203); // Item at offset 3 in section 2 (2*100+3)
 
-            // Verify that section 1 was properly truncated
-            let section_1_size = journal.size(1).await.unwrap();
-            assert_eq!(section_1_size, 64); // Should be 4 operations * 16 bytes = 64 bytes
+            // Verify section 2 size
+            let section_2_size = journal.size(2).await.unwrap();
+            assert_eq!(section_2_size, 80); // Should be 5 operations * 16 bytes = 80 bytes
 
-            // Verify that operation beyond upper_bound (8) is not accessible
-            let result = journal.get(1, 4).await;
-            assert!(result.is_err()); // Operation 9 should be inaccessible (beyond upper_bound=8)
-
-            let result = journal.get(2, 0).await;
-            assert!(matches!(result, Err(Error::SectionOutOfRange(2)))); // Section 2 was removed, so no items
+            let result = journal.get(3, 0).await;
+            assert!(matches!(result, Err(Error::SectionOutOfRange(3)))); // Section 3 was never created
 
             // Assert journal can accept new operations
             let mut journal = journal;
-            let (offset, _) = journal.append(target_section, 999).await.unwrap();
-            assert_eq!(journal.get(target_section, offset).await.unwrap(), 999);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `compute_offset` correctly calculates byte boundaries for variable-sized items.
-    #[test_traced]
-    fn test_compute_offset() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = VConfig {
-                partition: "test_compute_offset".into(),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            // Create a journal and populate a section with 5 operations
-            let mut journal =
-                VJournal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create journal");
-
-            let section = 0;
-            for i in 0..5 {
-                journal.append(section, i as u64).await.unwrap();
-            }
-            journal.sync(section).await.unwrap();
-
-            let blob = journal.blobs.get(&section).unwrap();
-
-            // Helper function to compute byte size for N operations
-            let compute_offset = |operations_count: u32| async move {
-                compute_offset::<deterministic::Context, u64>(
-                    blob,
-                    &journal.cfg.codec_config,
-                    journal.cfg.compression.is_some(),
-                    operations_count,
-                )
-                .await
-                .unwrap()
-            };
-
-            // Test various operation counts (each u64 operation takes 16 bytes when aligned)
-            assert_eq!(compute_offset(0).await, 0); // 0 operations = 0 bytes
-            assert_eq!(compute_offset(1).await, 16); // 1 operation = 16 bytes
-            assert_eq!(compute_offset(3).await, 48); // 3 operations = 48 bytes
-            assert_eq!(compute_offset(5).await, 80); // 5 operations = 80 bytes
-
-            // Test requesting more operations than available (should return size of all available)
-            assert_eq!(compute_offset(10).await, 80); // Still 80 bytes (capped at available)
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test `rewind_upper` correctly removes items beyond sync boundaries.
-    #[test_traced]
-    fn test_rewind_upper() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = VConfig {
-                partition: "test_rewind_upper".into(),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            };
-            let items_per_section = 5;
-
-            // Helper to create a fresh journal with test data
-            let create_journal = || async {
-                let mut journal =
-                    VJournal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to create journal");
-
-                // Add operations to sections 0, 1, 2
-                for section in 0..3 {
-                    for i in 0..items_per_section {
-                        journal.append(section, section * 100 + i).await.unwrap();
-                    }
-                    journal.sync(section).await.unwrap();
-                }
-                journal
-            };
-
-            // Test 1: No truncation needed (upper_bound at section end)
-            {
-                let mut journal = create_journal().await;
-                let upper_bound = 9; // End of section 1 (section 1: ops 5-9)
-                rewind_upper(&mut journal, upper_bound, items_per_section)
-                    .await
-                    .unwrap();
-
-                // Section 1 should remain unchanged (5 operations = 80 bytes)
-                let section_1_size = journal.size(1).await.unwrap();
-                assert_eq!(section_1_size, 80);
-                journal.destroy().await.unwrap();
-            }
-
-            // Test 2: Truncation needed (upper_bound mid-section)
-            {
-                let mut journal = create_journal().await;
-                let upper_bound = 7; // Middle of section 1 (keep ops 5, 6, 7)
-                rewind_upper(&mut journal, upper_bound, items_per_section)
-                    .await
-                    .unwrap();
-
-                // Section 1 should now have only 3 operations (48 bytes)
-                let section_1_size = journal.size(1).await.unwrap();
-                assert_eq!(section_1_size, 48);
-
-                // Verify the remaining operations are accessible
-                assert_eq!(journal.get(1, 0).await.unwrap(), 100); // section 1, offset 0 = 1*100+0
-                assert_eq!(journal.get(1, 1).await.unwrap(), 101); // section 1, offset 1 = 1*100+1
-                assert_eq!(journal.get(1, 2).await.unwrap(), 102); // section 1, offset 2 = 1*100+2
-
-                // Verify truncated operations are not accessible
-                let result = journal.get(1, 3).await;
-                assert!(result.is_err());
-                journal.destroy().await.unwrap();
-            }
-
-            // Test 3: Non-existent section (should not error)
-            {
-                let mut journal = create_journal().await;
-                rewind_upper(
-                    &mut journal,
-                    99, // upper_bound that would be in a non-existent section
-                    items_per_section,
-                )
-                .await
-                .unwrap(); // Should not error
-                journal.destroy().await.unwrap();
-            }
-
-            // Test 4: Upper bound beyond section (no truncation)
-            {
-                let mut journal = create_journal().await;
-                let upper_bound = 15; // Beyond section 2
-                let original_section_2_size = journal.size(2).await.unwrap();
-                rewind_upper(&mut journal, upper_bound, items_per_section)
-                    .await
-                    .unwrap();
-
-                // Section 2 should remain unchanged
-                let section_2_size = journal.size(2).await.unwrap();
-                assert_eq!(section_2_size, original_section_2_size);
-                journal.destroy().await.unwrap();
-            }
-        });
-    }
-
-    /// Test intra-section pruning.
-    #[test_traced]
-    fn test_prune_mid_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = VConfig {
-                partition: "test_prune_mid_section".into(),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            };
-            let items_per_section = 3;
-
-            // Create journal with data across multiple sections
-            let mut journal =
-                VJournal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create journal");
-
-            // Section 0: items 0, 1, 2
-            // Section 1: items 3, 4, 5
-            // Section 2: items 6, 7, 8
-            for section in 0..3 {
-                for i in 0..items_per_section {
-                    let op_value = section * items_per_section + i;
-                    journal.append(section, op_value).await.unwrap();
-                }
-            }
-            journal.close().await.unwrap();
-
-            // Test with upper_bound in middle of section 1 (upper_bound = 4)
-            // Should keep: items 2, 3, 4 (sections 0 partially removed, 1 truncated, 2 removed)
-            let lower_bound = 2;
-            let upper_bound = 4;
-            let mut journal = init_journal(
-                context.clone(),
-                cfg.clone(),
-                lower_bound,
-                upper_bound,
-                NZU64!(items_per_section),
-            )
-            .await
-            .expect("Failed to initialize synced journal");
-
-            // Verify section 0 is partially present (only item 2)
-            assert!(journal.blobs.contains_key(&0));
-            assert_eq!(journal.get(0, 2).await.unwrap(), 2u64);
-
-            // Verify section 1 is truncated (items 3, 4 only)
-            assert!(journal.blobs.contains_key(&1));
-            assert_eq!(journal.get(1, 0).await.unwrap(), 3);
-            assert_eq!(journal.get(1, 1).await.unwrap(), 4);
-
-            // item 5 should be inaccessible (truncated)
-            let result = journal.get(1, 2).await;
-            assert!(result.is_err());
-
-            // Verify section 2 is completely removed
-            assert!(!journal.blobs.contains_key(&2));
-
-            // Test that new appends work correctly after truncation
-            let (offset, _) = journal.append(1, 999).await.unwrap();
-            assert_eq!(journal.get(1, offset).await.unwrap(), 999);
+            let (offset, _) = journal.append(3, 999).await.unwrap();
+            assert_eq!(journal.get(3, offset).await.unwrap(), 999);
 
             journal.destroy().await.unwrap();
         });
@@ -2924,13 +2573,13 @@ mod tests {
         });
     }
 
-    /// Test prune_journal with data that is a superset of sync range
+    /// Test prune_journal with data that extends beyond the sync range
     #[test_traced]
-    fn test_prune_journal_data_superset_of_range() {
+    fn test_prune_journal_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = VConfig {
-                partition: "test_prune_spanning".into(),
+                partition: "test_prune_exceeds".into(),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -2944,7 +2593,7 @@ mod tests {
             let mut metadata = Metadata::<deterministic::Context, U64, u64>::init(
                 context.clone(),
                 crate::metadata::Config {
-                    partition: "test_prune_spanning_metadata".into(),
+                    partition: "test_prune_exceeds_metadata".into(),
                     codec_config: (),
                 },
             )
@@ -2961,32 +2610,22 @@ mod tests {
             }
 
             let lower_bound = 7; // Middle of section 1
-            let upper_bound = 17; // Middle of section 3
-            write_oldest_retained_loc(&mut metadata, 5); // Start of section 1
+            let upper_bound = 17; // We have data beyond this bound already
 
-            let next_loc = prune_journal(
+            let result = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
                 upper_bound,
                 items_per_section,
             )
-            .await
-            .expect("Failed to prune journal");
+            .await;
 
-            // Should have data from location 5 to 17 (contiguity preserves section boundary)
-            assert_eq!(next_loc, 18);
-            let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
-            assert_eq!(new_oldest_retained_loc, 5); // Should be section boundary (start of section 1)
-
-            // Sections 0 and 4 should be removed
-            assert!(!journal.blobs.contains_key(&0));
-            assert!(!journal.blobs.contains_key(&4));
-
-            // Sections 1, 2, and 3 should remain
-            assert!(journal.blobs.contains_key(&1));
-            assert!(journal.blobs.contains_key(&2));
-            assert!(journal.blobs.contains_key(&3));
+            // Should return UnexpectedData error since data exists beyond upper_bound
+            assert!(matches!(
+                result,
+                Err(crate::journal::Error::UnexpectedData(_))
+            ));
         });
     }
 
@@ -3017,12 +2656,15 @@ mod tests {
             .await
             .expect("Failed to create metadata");
 
-            // Add data to sections 0-2 (locations 0-29)
+            // Add data to section 0 (locations 0-9) and partial section 1 (locations 10-17)
             let items_per_section = NZU64!(10);
-            for section in 0..3 {
-                for i in 0..items_per_section.get() {
-                    journal.append(section, section * 100 + i).await.unwrap();
-                }
+            // Add full section 0
+            for i in 0..items_per_section.get() {
+                journal.append(0, 0 * 100 + i).await.unwrap();
+            }
+            // Add partial section 1 (only up to location 17)
+            for i in 0..8 {
+                journal.append(1, 1 * 100 + i).await.unwrap();
             }
 
             let lower_bound = 12; // Within section 1
@@ -3040,7 +2682,6 @@ mod tests {
             .expect("Failed to prune journal");
 
             // Should keep all elements 10-17 from section 1
-            // The upper section pruning will truncate section 1 to only contain elements 10-17
             assert_eq!(next_loc, 18);
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
             assert_eq!(new_oldest_retained_loc, 10); // Section boundary (start of section 1)
@@ -3048,7 +2689,6 @@ mod tests {
             // Only section 1 should remain
             assert!(!journal.blobs.contains_key(&0));
             assert!(journal.blobs.contains_key(&1));
-            assert!(!journal.blobs.contains_key(&2));
         });
     }
 
@@ -3081,8 +2721,8 @@ mod tests {
 
             let items_per_section = NZU64!(5);
 
-            // Add data to sections 0-4 (locations 0-24)
-            for section in 0..5 {
+            // Add data to sections 0-3 (locations 0-19)
+            for section in 0..4 {
                 for i in 0..items_per_section.get() {
                     journal.append(section, section * 100 + i).await.unwrap();
                 }
@@ -3107,10 +2747,9 @@ mod tests {
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
             assert_eq!(new_oldest_retained_loc, lower_bound); // Should be lower_bound after pruning at start of section 2
 
-            // Sections 0, 1, and 4 should be removed
+            // Sections 0 and 1 should be removed
             assert!(!journal.blobs.contains_key(&0));
             assert!(!journal.blobs.contains_key(&1));
-            assert!(!journal.blobs.contains_key(&4));
 
             // Sections 2 and 3 should remain
             assert!(journal.blobs.contains_key(&2));

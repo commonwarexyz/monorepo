@@ -72,4 +72,6 @@ pub enum Error {
     InvalidSyncRange(u64, u64),
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
+    #[error("unexpected data beyond sync range: location={0}")]
+    UnexpectedData(u64),
 }
