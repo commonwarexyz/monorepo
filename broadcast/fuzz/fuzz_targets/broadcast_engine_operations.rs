@@ -258,10 +258,11 @@ fn fuzz(input: FuzzInput) {
                             let clamped_sender_idx = sender_idx % peers.len();
                             peers[clamped_sender_idx].clone()
                         });
-                        let dummy2 = mailbox
-                            .get(sender_key, commitment.into(), digest.map(|d| d.into()))
-                            .await;
-                        drop(dummy2);
+                        drop(
+                            mailbox
+                                .get(sender_key, commitment.into(), digest.map(|d| d.into()))
+                                .await,
+                        );
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {
