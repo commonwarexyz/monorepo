@@ -23,9 +23,11 @@ members = [
     "examples/vrf",
 
     # Fuzz builds
+    "broadcast/fuzz",
     "codec/fuzz",
     "coding/fuzz",
     "consensus/fuzz",
+    "collector/fuzz",
     "cryptography/fuzz",
     "runtime/fuzz",
     "stream/fuzz",
@@ -34,26 +36,34 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.0.62"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://commonware.xyz"
+
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.59", path = "broadcast" }
-commonware-codec = { version = "0.0.59", path = "codec", default-features = false }
-commonware-coding = { version = "0.0.59", path = "coding" }
-commonware-collector = { version = "0.0.59", path = "collector" }
-commonware-consensus = { version = "0.0.59", path = "consensus" }
-commonware-cryptography = { version = "0.0.59", path = "cryptography" }
-commonware-deployer = { version = "0.0.59", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.59", path = "macros" }
-commonware-p2p = { version = "0.0.59", path = "p2p" }
-commonware-resolver = { version = "0.0.59", path = "resolver" }
-commonware-runtime = { version = "0.0.59", path = "runtime" }
-commonware-storage = { version = "0.0.59", path = "storage" }
-commonware-stream = { version = "0.0.59", path = "stream" }
-commonware-utils = { version = "0.0.59", path = "utils", default-features = false }
+commonware-broadcast = { version = "0.0.62", path = "broadcast" }
+commonware-codec = { version = "0.0.62", path = "codec", default-features = false }
+commonware-coding = { version = "0.0.62", path = "coding" }
+commonware-collector = { version = "0.0.62", path = "collector" }
+commonware-consensus = { version = "0.0.62", path = "consensus" }
+commonware-cryptography = { version = "0.0.62", path = "cryptography", default-features = false }
+commonware-deployer = { version = "0.0.62", path = "deployer", default-features = false }
+commonware-macros = { version = "0.0.62", path = "macros" }
+commonware-p2p = { version = "0.0.62", path = "p2p" }
+commonware-resolver = { version = "0.0.62", path = "resolver" }
+commonware-runtime = { version = "0.0.62", path = "runtime" }
+commonware-storage = { version = "0.0.62", path = "storage", default-features = false }
+commonware-stream = { version = "0.0.62", path = "stream" }
+commonware-utils = { version = "0.0.62", path = "utils", default-features = false }
+anyhow = { version = "1.0.99", default-features = false }
 thiserror = { version = "2.0.12", default-features = false }
 bytes = { version = "1.7.1", default-features = false }
 sha2 = { version = "0.10.8", default-features = false }
 blake3 = { version = "1.8.2", default-features = false }
 rand = { version = "0.8.5", default-features = false }
+rand_core = "0.6.4"
 rand_distr = "0.4.3"
 futures = "0.3.31"
 futures-util = "0.3.31"

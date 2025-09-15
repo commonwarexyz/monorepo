@@ -1,12 +1,12 @@
 [package]
 name = "commonware-vrf"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.59"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"
 documentation = "https://docs.rs/commonware-vrf"
 
@@ -19,6 +19,7 @@ commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+rand_core = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 clap = { workspace = true }

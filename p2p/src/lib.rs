@@ -28,7 +28,7 @@ pub type Message<P> = (P, Bytes);
 pub type Channel = u32;
 
 /// Enum indicating the set of recipients to send a message to.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Recipients<P: PublicKey> {
     All,
     Some(Vec<P>),
@@ -38,7 +38,7 @@ pub enum Recipients<P: PublicKey> {
 /// Interface for sending messages to a set of recipients.
 pub trait Sender: Clone + Debug + Send + 'static {
     /// Error that can occur when sending a message.
-    type Error: Debug + StdError + Send;
+    type Error: Debug + StdError + Send + Sync;
 
     /// Public key type used to identify recipients.
     type PublicKey: PublicKey;
@@ -55,7 +55,7 @@ pub trait Sender: Clone + Debug + Send + 'static {
 /// Interface for receiving messages from arbitrary recipients.
 pub trait Receiver: Debug + Send + 'static {
     /// Error that can occur when receiving a message.
-    type Error: Debug + StdError + Send;
+    type Error: Debug + StdError + Send + Sync;
 
     /// Public key type used to identify recipients.
     type PublicKey: PublicKey;

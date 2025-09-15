@@ -415,7 +415,7 @@ mod tests {
         // Must be shorter than the maximum shutdown range to make progress after restarting
         let rebroadcast_timeout = NonZeroDuration::new_panic(Duration::from_millis(20));
 
-        let mut prev_ctx = None;
+        let mut prev_checkpoint = None;
         let all_validators = Arc::new(Mutex::new(Vec::new()));
 
         // Generate shares once
@@ -533,30 +533,30 @@ mod tests {
                     select! {
                         _ = context.sleep(shutdown_wait) => {
                             debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");
-                            (false, context) // Unclean shutdown
+                            false // Unclean shutdown
                         },
                         _ = completion => {
                             debug!("Shared reporter completed normally");
-                            (true, context) // Clean completion
+                            true // Clean completion
                         },
                     }
                 }
             };
 
-            let (complete, context) = if let Some(prev_ctx) = prev_ctx {
+            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
                 debug!(shutdown_count, "Restarting from previous context");
-                deterministic::Runner::from(prev_ctx)
+                deterministic::Runner::from(prev_checkpoint)
             } else {
                 debug!("Starting initial run");
                 deterministic::Runner::timed(Duration::from_secs(45))
             }
-            .start(f);
+            .start_and_recover(f);
             if complete && shutdown_count >= min_shutdowns {
                 debug!("Test completed successfully");
                 break;
             }
 
-            prev_ctx = Some(context.recover());
+            prev_checkpoint = Some(checkpoint);
             shutdown_count += 1;
         }
     }
@@ -565,6 +565,211 @@ mod tests {
     fn test_unclean_byzantine_shutdown() {
         unclean_byzantine_shutdown::<MinPk>();
         unclean_byzantine_shutdown::<MinSig>();
+    }
+
+    fn unclean_shutdown_with_unsigned_index<V: Variant>() {
+        // Test parameters
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let skip_index = 50u64; // Index where no one will sign
+        let window = 10u64;
+        let target_index = 100u64;
+        let namespace = b"my testing namespace";
+
+        // Generate shares once
+        let all_validators = Arc::new(Mutex::new(Vec::new()));
+        let mut rng = StdRng::seed_from_u64(0);
+        let (polynomial, mut shares_vec) =
+            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+        let identity = *poly::public::<V>(&polynomial);
+        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+        // First run: let validators skip signing at skip_index and reach beyond it
+        let f = |context: Context| {
+            let all_validators_clone = all_validators.clone();
+            let mut shares_vec_clone = shares_vec.clone();
+            let polynomial_clone = polynomial.clone();
+            async move {
+                let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                    context.with_label("simulation"),
+                    num_validators,
+                    &mut shares_vec_clone,
+                    RELIABLE_LINK,
+                )
+                .await;
+
+                // Store all validator public keys
+                {
+                    let mut pks_lock = all_validators_clone.lock().unwrap();
+                    *pks_lock = pks.clone();
+                }
+
+                // Create a shared reporter
+                let (reporter, mut reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+                    namespace,
+                    num_validators,
+                    polynomial_clone.clone(),
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+
+                // Start validator engines with NoSignature strategy for skip_index
+                let mut engine_monitors = HashMap::new();
+                let automatons =
+                    Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+                for (validator, _, share) in validators.iter() {
+                    let validator_context = context.with_label(&validator.to_string());
+                    let monitor = mocks::Monitor::new(111);
+                    engine_monitors.insert(validator.clone(), monitor.clone());
+                    let supervisor = {
+                        let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
+                        s.add_epoch(111, share.clone(), polynomial_clone.clone(), pks.to_vec());
+                        s
+                    };
+                    let blocker = oracle.control(validator.clone());
+
+                    // All validators use NoSignature strategy for skip_index
+                    let automaton = mocks::Application::new(Strategy::Skip { index: skip_index });
+                    automatons
+                        .lock()
+                        .unwrap()
+                        .insert(validator.clone(), automaton.clone());
+
+                    let engine = Engine::new(
+                        validator_context.with_label("engine"),
+                        Config {
+                            monitor,
+                            validators: supervisor,
+                            automaton,
+                            reporter: reporter_mailbox.clone(),
+                            blocker,
+                            namespace: namespace.to_vec(),
+                            priority_acks: false,
+                            rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
+                                100,
+                            )),
+                            epoch_bounds: (1, 1),
+                            window: std::num::NonZeroU64::new(window).unwrap(),
+                            activity_timeout: 100,
+                            journal_partition: format!("unsigned_index_test/{validator}"),
+                            journal_write_buffer: NZUsize!(4096),
+                            journal_replay_buffer: NZUsize!(4096),
+                            journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
+                            journal_compression: Some(3),
+                            journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        },
+                    );
+
+                    let (sender, receiver) = registrations.remove(validator).unwrap();
+                    engine.start((sender, receiver));
+                }
+
+                // Wait for validators to reach target_index (past skip_index)
+                loop {
+                    if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
+                        debug!(tip_index, skip_index, target_index, "reporter status");
+                        if tip_index >= skip_index + window - 1 {
+                            // max we can proceed before item confirmed
+                            return;
+                        }
+                    }
+                    context.sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        let (_, checkpoint) =
+            deterministic::Runner::timed(Duration::from_secs(60)).start_and_recover(f);
+
+        // Second run: restart and verify the skip_index gets confirmed
+        let f2 = move |context: Context| {
+            async move {
+                let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                    context.with_label("simulation"),
+                    num_validators,
+                    &mut shares_vec,
+                    RELIABLE_LINK,
+                )
+                .await;
+
+                // Create a shared reporter
+                let (reporter, mut reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+                    namespace,
+                    num_validators,
+                    polynomial.clone(),
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+
+                // Start validator engines with Correct strategy (will sign everything now)
+                let automatons =
+                    Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+                for (validator, _, share) in validators.iter() {
+                    let validator_context = context.with_label(&validator.to_string());
+                    let monitor = mocks::Monitor::new(111);
+                    let supervisor = {
+                        let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
+                        s.add_epoch(111, share.clone(), polynomial.clone(), pks.to_vec());
+                        s
+                    };
+
+                    let blocker = oracle.control(validator.clone());
+
+                    // Now all validators use Correct strategy
+                    let automaton = mocks::Application::new(Strategy::Correct);
+                    automatons
+                        .lock()
+                        .unwrap()
+                        .insert(validator.clone(), automaton.clone());
+
+                    let engine = Engine::new(
+                        validator_context.with_label("engine"),
+                        Config {
+                            monitor,
+                            validators: supervisor,
+                            automaton,
+                            reporter: reporter_mailbox.clone(),
+                            blocker,
+                            namespace: namespace.to_vec(),
+                            priority_acks: false,
+                            rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
+                                100,
+                            )),
+                            epoch_bounds: (1, 1),
+                            window: std::num::NonZeroU64::new(10).unwrap(),
+                            activity_timeout: 100,
+                            journal_partition: format!("unsigned_index_test/{validator}"),
+                            journal_write_buffer: NZUsize!(4096),
+                            journal_replay_buffer: NZUsize!(4096),
+                            journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
+                            journal_compression: Some(3),
+                            journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        },
+                    );
+
+                    let (sender, receiver) = registrations.remove(validator).unwrap();
+                    engine.start((sender, receiver));
+                }
+
+                // Wait for skip_index to be confirmed (should happen on replay)
+                loop {
+                    if let Some(tip_index) = reporter_mailbox.get_contiguous_tip().await {
+                        debug!(
+                            tip_index,
+                            skip_index, target_index, "reporter status on restart",
+                        );
+                        if tip_index >= target_index {
+                            break;
+                        }
+                    }
+                    context.sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        deterministic::Runner::from(checkpoint).start(f2);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unclean_shutdown_with_unsigned_index() {
+        unclean_shutdown_with_unsigned_index::<MinPk>();
+        unclean_shutdown_with_unsigned_index::<MinSig>();
     }
 
     fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {

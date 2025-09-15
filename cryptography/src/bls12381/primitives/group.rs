@@ -40,7 +40,7 @@ use core::{
     mem::MaybeUninit,
     ptr,
 };
-use rand::RngCore;
+use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -200,7 +200,7 @@ pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
-    pub fn from_rand<R: RngCore>(rng: &mut R) -> Self {
+    pub fn from_rand<R: CryptoRngCore>(rng: &mut R) -> Self {
         // Generate a random 64 byte buffer
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);

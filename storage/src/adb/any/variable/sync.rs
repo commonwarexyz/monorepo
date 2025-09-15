@@ -1,4 +1,7 @@
-use crate::journal::variable::{Config as VConfig, Journal as VJournal};
+use crate::journal::{
+    variable::{Config as VConfig, Journal as VJournal},
+    Error,
+};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use std::{num::NonZeroU64, ops::Bound};
@@ -41,12 +44,9 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<VJournal<E, V>, crate::journal::Error> {
+) -> Result<VJournal<E, V>, Error> {
     if lower_bound > upper_bound {
-        return Err(crate::journal::Error::InvalidSyncRange(
-            lower_bound,
-            upper_bound,
-        ));
+        return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
     }
 
     // Calculate the section ranges based on item locations
@@ -130,7 +130,7 @@ async fn truncate_upper_section<E: Storage + Metrics, V: Codec>(
     journal: &mut VJournal<E, V>,
     upper_bound: u64,
     items_per_section: u64,
-) -> Result<(), crate::journal::Error> {
+) -> Result<(), Error> {
     // Find which section contains the upper_bound item
     let upper_section = upper_bound / items_per_section;
     let Some(blob) = journal.blobs.get(&upper_section) else {
@@ -185,7 +185,7 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
     codec_config: &V::Cfg,
     compressed: bool,
     items_count: u32,
-) -> Result<u64, crate::journal::Error> {
+) -> Result<u64, Error> {
     use crate::journal::variable::{Journal, ITEM_ALIGNMENT};
 
     if items_count == 0 {
@@ -200,9 +200,7 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
             Ok((next_slot, _item_len, _item)) => {
                 current_offset = next_slot;
             }
-            Err(crate::journal::Error::Runtime(
-                commonware_runtime::Error::BlobInsufficientLength,
-            )) => {
+            Err(Error::Runtime(commonware_runtime::Error::BlobInsufficientLength)) => {
                 // This section has fewer than `items_count` items.
                 break;
             }
@@ -216,13 +214,14 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        adb::any::fixed::test::{PAGE_CACHE_SIZE, PAGE_SIZE},
-        journal::variable::ITEM_ALIGNMENT,
-    };
+    use crate::journal::variable::ITEM_ALIGNMENT;
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
+
+    // Use some jank sizes to exercise boundary conditions.
+    const PAGE_SIZE: usize = 101;
+    const PAGE_CACHE_SIZE: usize = 2;
 
     /// Test `init_journal` when there is no existing data on disk.
     #[test_traced]
@@ -253,7 +252,7 @@ mod tests {
 
             // Verify the journal is ready for sync items
             assert!(journal.blobs.is_empty()); // No sections created yet
-            assert_eq!(journal.oldest_allowed, None); // No pruning applied
+            assert_eq!(journal.oldest_section(), None); // No pruning applied
 
             // Verify that items can be appended starting from the sync position
             let lower_section = lower_bound / items_per_section; // 10/5 = 2
@@ -264,14 +263,11 @@ mod tests {
 
             // Verify the item can be retrieved
             let retrieved = journal.get(lower_section, offset).await.unwrap();
-            assert_eq!(retrieved, Some(42u64));
+            assert_eq!(retrieved, 42u64);
 
             // Append another element
             let (offset2, _) = journal.append(lower_section, 43u64).await.unwrap();
-            assert_eq!(
-                journal.get(lower_section, offset2).await.unwrap(),
-                Some(43u64)
-            );
+            assert_eq!(journal.get(lower_section, offset2).await.unwrap(), 43u64);
 
             journal.destroy().await.unwrap();
         });
@@ -323,7 +319,7 @@ mod tests {
             // Verify pruning: sections before lower_section are pruned
             let lower_section = lower_bound / items_per_section; // 8/5 = 1
             assert_eq!(lower_section, 1);
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify section 0 is pruned (< lower_section), section 1+ are retained (>= lower_section)
             assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
@@ -334,31 +330,28 @@ mod tests {
 
             // Verify data integrity: existing data in retained sections is accessible
             let item = journal.get(1, 0).await.unwrap();
-            assert_eq!(item, Some(10u64)); // First item in section 1 (1*10+0)
+            assert_eq!(item, 10u64); // First item in section 1 (1*10+0)
             let item = journal.get(1, 1).await.unwrap();
-            assert_eq!(item, Some(11)); // Second item in section 1 (1*10+1)
+            assert_eq!(item, 11); // Second item in section 1 (1*10+1)
             let item = journal.get(2, 0).await.unwrap();
-            assert_eq!(item, Some(20)); // First item in section 2 (2*10+0)
+            assert_eq!(item, 20); // First item in section 2 (2*10+0)
             let last_element_section = 19 / items_per_section;
             let last_element_offset = (19 % items_per_section.get()) as u32;
             let item = journal
                 .get(last_element_section, last_element_offset)
                 .await
                 .unwrap();
-            assert_eq!(item, Some(34)); // Last item in section 3 (3*10+4)
+            assert_eq!(item, 34); // Last item in section 3 (3*10+4)
             let next_element_section = 20 / items_per_section;
             let next_element_offset = (20 % items_per_section.get()) as u32;
-            let item = journal
-                .get(next_element_section, next_element_offset)
-                .await
-                .unwrap();
-            assert_eq!(item, None); // Next element should not exist
+            let result = journal.get(next_element_section, next_element_offset).await;
+            assert!(matches!(result, Err(Error::SectionOutOfRange(4)))); // Next element should not exist
 
             // Assert journal can accept new items
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
             assert_eq!(
                 journal.get(next_element_section, offset).await.unwrap(),
-                Some(999)
+                999
             );
 
             journal.destroy().await.unwrap();
@@ -387,10 +380,7 @@ mod tests {
                 NZU64!(5), // items_per_section
             )
             .await;
-            assert!(matches!(
-                result,
-                Err(crate::journal::Error::InvalidSyncRange(10, 5))
-            ));
+            assert!(matches!(result, Err(Error::InvalidSyncRange(10, 5))));
         });
     }
 
@@ -437,7 +427,7 @@ mod tests {
 
             // Verify pruning to lower bound
             let lower_section = lower_bound / items_per_section; // 5/5 = 1
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify section 0 is pruned, sections 1-3 are retained
             assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
@@ -447,32 +437,29 @@ mod tests {
 
             // Verify data integrity: existing data in retained sections is accessible
             let item = journal.get(1, 0).await.unwrap();
-            assert_eq!(item, Some(100u64)); // First item in section 1 (1*100+0)
+            assert_eq!(item, 100u64); // First item in section 1 (1*100+0)
             let item = journal.get(1, 1).await.unwrap();
-            assert_eq!(item, Some(101)); // Second item in section 1 (1*100+1)
+            assert_eq!(item, 101); // Second item in section 1 (1*100+1)
             let item = journal.get(2, 0).await.unwrap();
-            assert_eq!(item, Some(200)); // First item in section 2 (2*100+0)
+            assert_eq!(item, 200); // First item in section 2 (2*100+0)
             let last_element_section = 19 / items_per_section;
             let last_element_offset = (19 % items_per_section.get()) as u32;
             let item = journal
                 .get(last_element_section, last_element_offset)
                 .await
                 .unwrap();
-            assert_eq!(item, Some(304)); // Last item in section 3 (3*100+4)
+            assert_eq!(item, 304); // Last item in section 3 (3*100+4)
             let next_element_section = 20 / items_per_section;
             let next_element_offset = (20 % items_per_section.get()) as u32;
-            let item = journal
-                .get(next_element_section, next_element_offset)
-                .await
-                .unwrap();
-            assert_eq!(item, None); // Next element should not exist
+            let result = journal.get(next_element_section, next_element_offset).await;
+            assert!(matches!(result, Err(Error::SectionOutOfRange(4)))); // Next element should not exist
 
             // Assert journal can accept new operations
             let mut journal = journal;
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
             assert_eq!(
                 journal.get(next_element_section, offset).await.unwrap(),
-                Some(999)
+                999
             );
 
             journal.destroy().await.unwrap();
@@ -525,7 +512,7 @@ mod tests {
 
             // Verify pruning to lower bound and rewinding beyond upper bound
             let lower_section = lower_bound / items_per_section; // 8/5 = 1
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify section 0 is pruned (< lower_section)
             assert!(!journal.blobs.contains_key(&0));
@@ -541,18 +528,18 @@ mod tests {
 
             // Verify data integrity in retained sections
             let item = journal.get(1, 0).await.unwrap();
-            assert_eq!(item, Some(1000u64)); // First item in section 1 (1*1000+0)
+            assert_eq!(item, 1000u64); // First item in section 1 (1*1000+0)
             let item = journal.get(1, 1).await.unwrap();
-            assert_eq!(item, Some(1001)); // Second item in section 1 (1*1000+1)
+            assert_eq!(item, 1001); // Second item in section 1 (1*1000+1)
             let item = journal.get(3, 0).await.unwrap();
-            assert_eq!(item, Some(3000)); // First item in section 3 (3*1000+0)
+            assert_eq!(item, 3000); // First item in section 3 (3*1000+0)
             let last_element_section = 17 / items_per_section;
             let last_element_offset = (17 % items_per_section.get()) as u32;
             let item = journal
                 .get(last_element_section, last_element_offset)
                 .await
                 .unwrap();
-            assert_eq!(item, Some(3002)); // Last item in section 3 (3*1000+2)
+            assert_eq!(item, 3002); // Last item in section 3 (3*1000+2)
 
             // Verify that section 3 was properly truncated
             let section_3_size = journal.size(3).await.unwrap();
@@ -565,7 +552,7 @@ mod tests {
 
             // Assert journal can accept new operations
             let (offset, _) = journal.append(3, 999).await.unwrap();
-            assert_eq!(journal.get(3, offset).await.unwrap(), Some(999));
+            assert_eq!(journal.get(3, offset).await.unwrap(), 999);
 
             journal.destroy().await.unwrap();
         });
@@ -614,7 +601,7 @@ mod tests {
 
             // Verify fresh journal (all old data destroyed)
             assert!(journal.blobs.is_empty());
-            assert_eq!(journal.oldest_allowed, None);
+            assert_eq!(journal.oldest_section(), None);
 
             // Verify old sections don't exist
             assert!(!journal.blobs.contains_key(&0));
@@ -668,7 +655,7 @@ mod tests {
 
             // Verify correct section range
             let lower_section = lower_bound / items_per_section; // 2
-            assert_eq!(journal.oldest_allowed, Some(lower_section));
+            assert_eq!(journal.oldest_section(), Some(lower_section));
 
             // Verify sections 2, 3, 4 exist, others don't
             assert!(!journal.blobs.contains_key(&0));
@@ -679,18 +666,18 @@ mod tests {
 
             // Verify data integrity in retained sections
             let item = journal.get(2, 0).await.unwrap();
-            assert_eq!(item, Some(200u64)); // First item in section 2
+            assert_eq!(item, 200u64); // First item in section 2
             let item = journal.get(3, 4).await.unwrap();
-            assert_eq!(item, Some(304)); // Last element
+            assert_eq!(item, 304); // Last element
             let next_element_section = 4;
-            let item = journal.get(next_element_section, 0).await.unwrap();
-            assert_eq!(item, None); // Next element should not exist
+            let result = journal.get(next_element_section, 0).await;
+            assert!(matches!(result, Err(Error::SectionOutOfRange(4))));
 
             // Assert journal can accept new operations
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
             assert_eq!(
                 journal.get(next_element_section, offset).await.unwrap(),
-                Some(999)
+                999
             );
 
             journal.destroy().await.unwrap();
@@ -741,7 +728,7 @@ mod tests {
 
             // Both operations are in section 1, so section 0 should be pruned, section 1+ retained
             let target_section = lower_bound / items_per_section; // 6/5 = 1
-            assert_eq!(journal.oldest_allowed, Some(target_section));
+            assert_eq!(journal.oldest_section(), Some(target_section));
 
             // Verify pruning and retention
             assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
@@ -750,11 +737,11 @@ mod tests {
 
             // Verify data integrity
             let item = journal.get(1, 0).await.unwrap();
-            assert_eq!(item, Some(100u64)); // First item in section 1
+            assert_eq!(item, 100u64); // First item in section 1
             let item = journal.get(1, 1).await.unwrap();
-            assert_eq!(item, Some(101)); // Second item in section 1 (1*100+1)
+            assert_eq!(item, 101); // Second item in section 1 (1*100+1)
             let item = journal.get(1, 3).await.unwrap();
-            assert_eq!(item, Some(103)); // Item at offset 3 in section 1 (1*100+3)
+            assert_eq!(item, 103); // Item at offset 3 in section 1 (1*100+3)
 
             // Verify that section 1 was properly truncated
             let section_1_size = journal.size(1).await.unwrap();
@@ -764,16 +751,13 @@ mod tests {
             let result = journal.get(1, 4).await;
             assert!(result.is_err()); // Operation 9 should be inaccessible (beyond upper_bound=8)
 
-            let item = journal.get(2, 0).await.unwrap();
-            assert_eq!(item, None); // Section 2 was removed, so no items
+            let result = journal.get(2, 0).await;
+            assert!(matches!(result, Err(Error::SectionOutOfRange(2)))); // Section 2 was removed, so no items
 
             // Assert journal can accept new operations
             let mut journal = journal;
             let (offset, _) = journal.append(target_section, 999).await.unwrap();
-            assert_eq!(
-                journal.get(target_section, offset).await.unwrap(),
-                Some(999)
-            );
+            assert_eq!(journal.get(target_section, offset).await.unwrap(), 999);
 
             journal.destroy().await.unwrap();
         });
@@ -889,13 +873,13 @@ mod tests {
                 assert_eq!(section_1_size, 48);
 
                 // Verify the remaining operations are accessible
-                assert_eq!(journal.get(1, 0).await.unwrap(), Some(100)); // section 1, offset 0 = 1*100+0
-                assert_eq!(journal.get(1, 1).await.unwrap(), Some(101)); // section 1, offset 1 = 1*100+1
-                assert_eq!(journal.get(1, 2).await.unwrap(), Some(102)); // section 1, offset 2 = 1*100+2
+                assert_eq!(journal.get(1, 0).await.unwrap(), 100); // section 1, offset 0 = 1*100+0
+                assert_eq!(journal.get(1, 1).await.unwrap(), 101); // section 1, offset 1 = 1*100+1
+                assert_eq!(journal.get(1, 2).await.unwrap(), 102); // section 1, offset 2 = 1*100+2
 
                 // Verify truncated operations are not accessible
                 let result = journal.get(1, 3).await;
-                assert!(result.is_err()); // op at logical loc 8 should be gone
+                assert!(result.is_err());
                 journal.destroy().await.unwrap();
             }
 
@@ -976,12 +960,12 @@ mod tests {
 
             // Verify section 0 is partially present (only item 2)
             assert!(journal.blobs.contains_key(&0));
-            assert_eq!(journal.get(0, 2).await.unwrap(), Some(2u64));
+            assert_eq!(journal.get(0, 2).await.unwrap(), 2u64);
 
             // Verify section 1 is truncated (items 3, 4 only)
             assert!(journal.blobs.contains_key(&1));
-            assert_eq!(journal.get(1, 0).await.unwrap(), Some(3));
-            assert_eq!(journal.get(1, 1).await.unwrap(), Some(4));
+            assert_eq!(journal.get(1, 0).await.unwrap(), 3);
+            assert_eq!(journal.get(1, 1).await.unwrap(), 4);
 
             // item 5 should be inaccessible (truncated)
             let result = journal.get(1, 2).await;
@@ -992,7 +976,7 @@ mod tests {
 
             // Test that new appends work correctly after truncation
             let (offset, _) = journal.append(1, 999).await.unwrap();
-            assert_eq!(journal.get(1, offset).await.unwrap(), Some(999));
+            assert_eq!(journal.get(1, offset).await.unwrap(), 999);
 
             journal.destroy().await.unwrap();
         });

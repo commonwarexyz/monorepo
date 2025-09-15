@@ -1,12 +1,12 @@
 [package]
 name = "commonware-resolver"
-edition = "2021"
+edition.workspace = true
 publish = true
-version = "0.0.59"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+license.workspace = true
 description = "Resolve data identified by a fixed-length key."
 readme = "README.md"
-homepage = "https://commonware.xyz"
+homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/resolver"
 documentation = "https://docs.rs/commonware-resolver"
 
@@ -29,6 +29,12 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+commonware-resolver = { path = ".", features = ["mocks"] }
+
+# Tell cargo-udeps to ignore the use of commonware-resolver in [dev-dependencies],
+# which we use to enable the mocks feature in tests
+[package.metadata.cargo-udeps.ignore]
+development = ["commonware-resolver"]
 
 [lib]
 bench = false

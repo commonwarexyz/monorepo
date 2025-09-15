@@ -612,7 +612,7 @@ mod tests {
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
         let supervised = Arc::new(Mutex::new(Vec::new()));
-        let mut prev_ctx = None;
+        let mut prev_checkpoint = None;
 
         loop {
             let namespace = namespace.clone();
@@ -739,7 +739,7 @@ mod tests {
                             *shutdowns += 1;
                         }
                         supervised.lock().unwrap().push(supervisors);
-                        (false,context)
+                        false
                     },
                     _ = join_all(finalizers) => {
                         // Check supervisors for faults activity
@@ -750,24 +750,24 @@ mod tests {
                                 assert!(faults.is_empty());
                             }
                         }
-                        (true,context)
+                        true
                     }
                 }
             };
 
-            let (complete, context) = if let Some(prev_ctx) = prev_ctx {
-                deterministic::Runner::from(prev_ctx)
+            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
+                deterministic::Runner::from(prev_checkpoint)
             } else {
                 deterministic::Runner::timed(Duration::from_secs(30))
             }
-            .start(f);
+            .start_and_recover(f);
 
             // If we are done, break
             if complete {
                 break;
             }
 
-            prev_ctx = Some(context.recover());
+            prev_checkpoint = Some(checkpoint);
         }
     }
 

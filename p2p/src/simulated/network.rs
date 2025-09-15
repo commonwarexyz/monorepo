@@ -791,7 +791,6 @@ impl<P: PublicKey> Peer<P> {
 
 // A unidirectional link between two peers.
 // Messages can be sent over the link with a given latency, jitter, and success rate.
-#[derive(Clone)]
 struct Link {
     sampler: Normal<f64>,
     success_rate: f64,
@@ -811,15 +810,9 @@ impl Link {
         max_size: usize,
         received_messages: Family<metrics::Message, Counter>,
     ) -> Self {
-        let (inbox, mut outbox) = mpsc::unbounded();
-        let result = Self {
-            sampler,
-            success_rate,
-            inbox,
-        };
-
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
+        let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes, SystemTime)>();
         context
             .clone()
             .with_label("link")
@@ -850,7 +843,11 @@ impl Link {
                 }
             });
 
-        result
+        Self {
+            sampler,
+            success_rate,
+            inbox,
+        }
     }
 
     // Send a message over the link with receive timing.
