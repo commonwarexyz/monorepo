@@ -4,6 +4,8 @@ use crate::journal::{
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
+use commonware_utils::NZUsize;
+use futures::{pin_mut, StreamExt as _};
 use std::num::NonZeroU64;
 use tracing::debug;
 
@@ -32,10 +34,12 @@ use tracing::debug;
 /// - `items_per_section`: number of items per section
 ///
 /// # Returns
-/// A journal whose sections satisfy:
+/// (journal, size) where:
+/// - `journal` is a journal whose sections satisfy:
 /// - No section index < `lower_bound / items_per_section` exists.
 /// - No section index > `upper_bound / items_per_section` exists.
 /// - No item with location > `upper_bound` exists.
+/// - `size` is the next location that should be appended to by the sync engine.
 ///
 /// # Errors
 /// Returns [Error::UnexpectedData] if existing data extends beyond `upper_bound`.
@@ -45,7 +49,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<VJournal<E, V>, Error> {
+) -> Result<(VJournal<E, V>, u64), Error> {
     if lower_bound > upper_bound {
         return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
     }
@@ -72,7 +76,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     // No existing data
     let Some(last_section) = last_section else {
         debug!("no existing journal data, creating fresh journal");
-        return Ok(journal);
+        return Ok((journal, lower_bound));
     };
 
     // If all existing data is before our sync range, destroy and recreate fresh
@@ -82,7 +86,8 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
             lower_section, "existing journal data is stale, re-initializing"
         );
         journal.destroy().await?;
-        return VJournal::init(context, cfg).await;
+        let journal = VJournal::init(context, cfg).await?;
+        return Ok((journal, lower_bound));
     }
 
     // Prune sections below the lower bound.
@@ -97,48 +102,38 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     }
 
     // Check if there's data beyond upper_bound within the upper section
-    if let Some(_blob) = journal.blobs.get(&upper_section) {
-        let section_start = upper_section * items_per_section;
-        let section_end = section_start + items_per_section - 1;
+    let size = get_size(&journal, items_per_section, upper_bound).await?;
+    Ok((journal, size))
+}
 
-        // If upper_bound is not at the very end of the section, check the section size
-        if upper_bound < section_end {
-            // Count how many items are actually in this section
-            let mut item_count = 0u32;
-            let mut current_offset = 0u32;
-
-            loop {
-                use crate::journal::variable::Journal;
-                match Journal::<E, V>::read(
-                    journal.cfg.compression.is_some(),
-                    &journal.cfg.codec_config,
-                    _blob,
-                    current_offset,
-                )
-                .await
-                {
-                    Ok((next_slot, _item_len, _item)) => {
-                        item_count += 1;
-                        current_offset = next_slot;
-                    }
-                    Err(Error::Runtime(commonware_runtime::Error::BlobInsufficientLength)) => {
-                        break;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-
-            // Calculate how many items should be in the section up to upper_bound (inclusive)
-            let expected_items = (upper_bound - section_start + 1) as u32;
-
-            // If there are more items than expected, there's unexpected data
-            if item_count > expected_items {
-                return Err(Error::UnexpectedData(upper_bound + 1));
-            }
+/// Returns the size of the journal.
+///
+/// # Errors
+///
+/// Short-circuits and returns [Error::UnexpectedData] if the journal's size > upper_bound + 1.
+///
+/// # Panics
+///
+/// Panics if the journal is empty.
+pub(crate) async fn get_size<E: Storage + Metrics, V: Codec>(
+    journal: &VJournal<E, V>,
+    items_per_section: u64,
+    upper_bound: u64,
+) -> Result<u64, Error> {
+    let last_section = journal.blobs.last_key_value().map(|(&s, _)| s).unwrap();
+    let last_section_start = last_section * items_per_section;
+    let stream = journal.replay(last_section, 0, NZUsize!(1024)).await?;
+    pin_mut!(stream);
+    let mut size = last_section_start;
+    while let Some(item) = stream.next().await {
+        let (section, _offset, _size, _op) = item?;
+        assert_eq!(section, last_section);
+        size += 1;
+        if size > upper_bound + 1 {
+            return Err(Error::UnexpectedData(size));
         }
     }
-
-    Ok(journal)
+    Ok(size)
 }
 
 #[cfg(test)]
@@ -169,7 +164,7 @@ mod tests {
             let lower_bound = 10;
             let upper_bound = 25;
             let items_per_section = NZU64!(5);
-            let mut journal = init_journal(
+            let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -178,6 +173,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with sync boundaries");
+            assert_eq!(size, lower_bound);
 
             // Verify the journal is ready for sync items
             assert!(journal.blobs.is_empty()); // No sections created yet
@@ -235,7 +231,7 @@ mod tests {
             // lower_bound: 8 (section 1), upper_bound: 30 (section 6)
             let lower_bound = 8;
             let upper_bound = 30;
-            let mut journal = init_journal(
+            let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -244,6 +240,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with overlap");
+            assert_eq!(size, 20);
 
             // Verify pruning: sections before lower_section are pruned
             let lower_section = lower_bound / items_per_section; // 8/5 = 1
@@ -344,7 +341,7 @@ mod tests {
             // Initialize with sync boundaries that exactly match existing data
             let lower_bound = 5; // section 1
             let upper_bound = 19; // section 3
-            let journal = init_journal(
+            let (journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -353,6 +350,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with exact match");
+            assert_eq!(size, 20);
 
             // Verify pruning to lower bound
             let lower_section = lower_bound / items_per_section; // 5/5 = 1
@@ -476,7 +474,7 @@ mod tests {
             // Initialize with sync boundaries beyond all existing data
             let lower_bound = 15; // section 3
             let upper_bound = 25; // section 5
-            let journal = init_journal::<deterministic::Context, u64>(
+            let (journal, size) = init_journal::<deterministic::Context, u64>(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -485,6 +483,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with stale data");
+            assert_eq!(size, 15);
 
             // Verify fresh journal (all old data destroyed)
             assert!(journal.blobs.is_empty());
@@ -530,7 +529,7 @@ mod tests {
             // Test sync boundaries exactly at section boundaries
             let lower_bound = 15; // Exactly at section boundary (15/5 = 3)
             let upper_bound = 24; // Exactly at section boundary (24/5 = 4)
-            let mut journal = init_journal(
+            let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -539,6 +538,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal at boundaries");
+            assert_eq!(size, 25);
 
             // Verify correct section range
             let lower_section = lower_bound / items_per_section; // 2
@@ -603,7 +603,7 @@ mod tests {
             // Test sync boundaries within the same section
             let lower_bound = 10; // operation 10 (section 2: 10/5 = 2)
             let upper_bound = 14; // operation 14 (section 2: 14/5 = 2)
-            let journal = init_journal(
+            let (journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -612,6 +612,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with same-section bounds");
+            assert_eq!(size, 15);
 
             // Both operations are in section 2, so sections 0, 1 should be pruned, section 2 retained
             let target_section = lower_bound / items_per_section; // 10/5 = 2
