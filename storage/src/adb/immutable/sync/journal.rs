@@ -202,7 +202,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
 /// # Panics
 ///
 /// Panics if the journal is empty.
-pub(crate) async fn get_size<E: Storage + Metrics, V: Codec>(
+pub(super) async fn get_size<E: Storage + Metrics, V: Codec>(
     journal: &VJournal<E, V>,
     items_per_section: u64,
     upper_bound: u64,
