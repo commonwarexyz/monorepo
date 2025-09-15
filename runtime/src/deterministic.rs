@@ -39,7 +39,7 @@ use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     future::AbortHandle,
-    task::{waker_ref, ArcWake},
+    task::{waker, ArcWake},
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -230,20 +230,6 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
 }
 
-impl Executor {
-    /// Clear all tasks.
-    ///
-    /// We don't consume [Executor] because it must remain upgradable for any tasks
-    /// that interact with the runtime during drop.
-    fn clear(&self) {
-        // Drop all wakers
-        self.sleeping.lock().unwrap().clear();
-
-        // Drop all outstanding tasks
-        self.tasks.clear();
-    }
-}
-
 /// An artifact that can be used to recover the state of the runtime.
 ///
 /// This is useful when mocking unclean shutdown (while retaining deterministic behavior).
@@ -344,7 +330,7 @@ impl Runner {
                 }
             }
 
-            // Snapshot available tasks
+            // Drain all ready tasks
             let mut queue = executor.tasks.drain();
 
             // Shuffle tasks (if more than one)
@@ -360,46 +346,55 @@ impl Runner {
             // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = queue.len(), "starting loop");
             let mut output = None;
-            for task in queue {
+            for id in queue {
+                // Lookup the task (it may have completed already)
+                let Some(task) = executor.tasks.get(id) else {
+                    trace!(id, "skipping missing task");
+                    continue;
+                };
+
                 // Record task for auditing
                 executor.auditor.event(b"process_task", |hasher| {
                     hasher.update(task.id.to_be_bytes());
                     hasher.update(task.label.name().as_bytes());
                 });
-                trace!(id = task.id, "processing task");
-
-                // Record task poll
                 executor.metrics.task_polls.get_or_create(&task.label).inc();
+                trace!(id, "processing task");
 
                 // Prepare task for polling
-                let waker = waker_ref(&task);
+                let waker = waker(Arc::new(TaskWaker {
+                    id,
+                    tasks: Arc::downgrade(&executor.tasks),
+                }));
                 let mut cx = task::Context::from_waker(&waker);
-                match &task.operation {
-                    Operation::Root => {
+
+                // Poll the task
+                match &task.mode {
+                    Mode::Root => {
                         // Poll the root task
                         if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
-                            trace!(id = task.id, "root task is complete");
+                            trace!(id, "root task is complete");
                             output = Some(result);
                             break;
                         }
                     }
-                    Operation::Work(future) => {
+                    Mode::Work(future) => {
                         // Get the future (if it still exists)
                         let mut fut_opt = future.lock().unwrap();
                         let Some(fut) = fut_opt.as_mut() else {
-                            trace!(id = task.id, "skipping already complete task");
+                            trace!(id, "skipping already complete task");
 
-                            // Remove the future from pending
-                            executor.tasks.pending.lock().unwrap().remove(&task.id);
+                            // Remove the future
+                            executor.tasks.remove(id);
                             continue;
                         };
 
                         // Poll the task
                         if fut.as_mut().poll(&mut cx).is_ready() {
-                            trace!(id = task.id, "task is complete");
+                            trace!(id, "task is complete");
 
-                            // Remove the future from pending and drop
-                            executor.tasks.pending.lock().unwrap().remove(&task.id);
+                            // Remove the future
+                            executor.tasks.remove(id);
                             *fut_opt = None;
                             continue;
                         }
@@ -407,7 +402,7 @@ impl Runner {
                 }
 
                 // Try again later if task is still pending
-                trace!(id = task.id, "task is still pending");
+                trace!(id, "task is still pending");
             }
 
             // If the root task has completed, exit as soon as possible
@@ -430,7 +425,7 @@ impl Runner {
             trace!(now = current.epoch_millis(), "time advanced");
 
             // Skip time if there is nothing to do
-            if executor.tasks.len() == 0 {
+            if executor.tasks.ready() == 0 {
                 let mut skip = None;
                 {
                     let sleeping = executor.sleeping.lock().unwrap();
@@ -451,37 +446,40 @@ impl Runner {
             }
 
             // Wake all sleeping tasks that are ready
-            let mut to_wake = Vec::new();
-            let mut remaining;
             {
                 let mut sleeping = executor.sleeping.lock().unwrap();
                 while let Some(next) = sleeping.peek() {
                     if next.time <= current {
                         let sleeper = sleeping.pop().unwrap();
-                        to_wake.push(sleeper.waker);
+                        sleeper.waker.wake();
                     } else {
                         break;
                     }
                 }
-                remaining = sleeping.len();
-            }
-            for waker in to_wake {
-                waker.wake();
             }
 
-            // Account for remaining tasks
-            remaining += executor.tasks.len();
-
-            // If there are no tasks to run and no tasks sleeping, the executor is stalled
+            // If there are no tasks to run after advancing time, the executor is stalled
             // and will never finish.
-            if remaining == 0 {
+            if executor.tasks.ready() == 0 {
                 panic!("runtime stalled");
             }
             iter += 1;
         };
 
-        // Clear remaining tasks from the executor
-        executor.clear();
+        // Clear remaining tasks from the executor.
+        //
+        // It is critical that we wait to drop the strong
+        // reference to executor until after we have dropped
+        // all tasks (as they may attempt to upgrade their weak
+        // reference to the executor during drop).
+        executor.sleeping.lock().unwrap().clear(); // included in tasks
+        let tasks = executor.tasks.clear();
+        for task in tasks {
+            let Mode::Work(future) = &task.mode else {
+                continue;
+            };
+            *future.lock().unwrap() = None;
+        }
 
         // Assert the context doesn't escape the start() function (behavior
         // is undefined in this case)
@@ -526,44 +524,47 @@ impl crate::Runner for Runner {
     }
 }
 
-/// The operation that a task is performing.
-enum Operation {
+/// The mode of a [Task].
+enum Mode {
     Root,
     Work(Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>),
 }
 
-/// A task that is being executed by the runtime.
+/// A future being executed by the [Executor].
 struct Task {
     id: u128,
     label: Label,
-    tasks: Weak<Tasks>,
 
-    operation: Operation,
+    mode: Mode,
 }
 
-impl ArcWake for Task {
+/// A waker for a [Task].
+struct TaskWaker {
+    id: u128,
+
+    tasks: Weak<Tasks>,
+}
+
+impl ArcWake for TaskWaker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         // Upgrade the weak reference to re-enqueue this task.
         // If upgrade fails, the task queue has been dropped and no action is required.
         //
         // This can happen if some data is passed into the runtime and it drops after the runtime exits.
         if let Some(tasks) = arc_self.tasks.upgrade() {
-            tasks.enqueue(arc_self.clone());
-        } else if let Operation::Work(future) = &arc_self.operation {
-            // Drop the future to release captured resources
-            *future.lock().unwrap() = None;
+            tasks.queue(arc_self.id);
         }
     }
 }
 
-/// A task queue that is used to manage the tasks that are being executed by the runtime.
+/// A collection of [Task]s that are being executed by the [Executor].
 struct Tasks {
-    /// The current task counter.
+    /// The next task id.
     counter: Mutex<u128>,
-    /// The queue of tasks that are waiting to be executed.
-    queue: Mutex<Vec<Arc<Task>>>,
-    /// Incomplete tasks that may still be referenced by external wakers.
-    pending: Mutex<BTreeMap<u128, Weak<Task>>>,
+    /// Tasks ready to be polled.
+    ready: Mutex<Vec<u128>>,
+    /// All running tasks.
+    running: Mutex<BTreeMap<u128, Arc<Task>>>,
 }
 
 impl Tasks {
@@ -571,8 +572,8 @@ impl Tasks {
     fn new() -> Self {
         Self {
             counter: Mutex::new(0),
-            queue: Mutex::new(Vec::new()),
-            pending: Mutex::new(BTreeMap::new()),
+            ready: Mutex::new(Vec::new()),
+            running: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -592,22 +593,12 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label: Label::root(),
-            tasks: Arc::downgrade(arc_self),
-            operation: Operation::Root,
+            mode: Mode::Root,
         });
-
-        // Track as pending until completion
-        arc_self
-            .pending
-            .lock()
-            .unwrap()
-            .insert(id, Arc::downgrade(&task));
-
-        // Add to queue
-        arc_self.queue.lock().unwrap().push(task);
+        arc_self.register(id, task);
     }
 
-    /// Register a new task to be executed.
+    /// Register a non-root task to be executed.
     fn register_work(
         arc_self: &Arc<Self>,
         label: Label,
@@ -617,59 +608,63 @@ impl Tasks {
         let task = Arc::new(Task {
             id,
             label,
-            tasks: Arc::downgrade(arc_self),
-            operation: Operation::Work(Mutex::new(Some(future))),
+            mode: Mode::Work(Mutex::new(Some(future))),
         });
+        arc_self.register(id, task);
+    }
 
-        // Track as pending until completion
-        arc_self
-            .pending
-            .lock()
-            .unwrap()
-            .insert(id, Arc::downgrade(&task));
+    /// Register a new task to be executed.
+    fn register(&self, id: u128, task: Arc<Task>) {
+        // Track as running until completion
+        self.running.lock().unwrap().insert(id, task);
 
-        // Add to queue
-        arc_self.queue.lock().unwrap().push(task);
+        // Add to ready
+        self.queue(id);
     }
 
     /// Enqueue an already registered task to be executed.
-    fn enqueue(&self, task: Arc<Task>) {
-        let mut queue = self.queue.lock().unwrap();
-        queue.push(task);
+    fn queue(&self, id: u128) {
+        let mut ready = self.ready.lock().unwrap();
+        ready.push(id);
     }
 
-    /// Dequeue all tasks that are ready to execute.
-    fn drain(&self) -> Vec<Arc<Task>> {
-        let mut queue = self.queue.lock().unwrap();
+    /// Drain all ready tasks.
+    fn drain(&self) -> Vec<u128> {
+        let mut queue = self.ready.lock().unwrap();
         let len = queue.len();
         replace(&mut *queue, Vec::with_capacity(len))
     }
 
-    /// Get the number of tasks in the queue.
-    fn len(&self) -> usize {
-        self.queue.lock().unwrap().len()
+    /// The number of ready tasks.
+    fn ready(&self) -> usize {
+        self.ready.lock().unwrap().len()
     }
 
-    /// Drop all active tasks.
-    fn clear(&self) {
-        // Clear pending tasks
-        let pending: BTreeMap<u128, Weak<Task>> = {
-            let mut pending = self.pending.lock().unwrap();
-            take(&mut *pending)
-        };
-        for (_, task) in pending {
-            let Some(task) = task.upgrade() else {
-                continue;
-            };
-            let Operation::Work(future) = &task.operation else {
-                continue;
-            };
-            *future.lock().unwrap() = None;
-        }
+    /// Lookup a task.
+    ///
+    /// We must return cloned here because we cannot hold the running lock while polling a task (will
+    /// deadlock if [Self::register_work] is called).
+    fn get(&self, id: u128) -> Option<Arc<Task>> {
+        let running = self.running.lock().unwrap();
+        running.get(&id).cloned()
+    }
 
-        // Clear queue (already dropped any future it may contain
-        // when iterating over pending)
-        self.queue.lock().unwrap().clear();
+    /// Remove a task.
+    fn remove(&self, id: u128) {
+        self.running.lock().unwrap().remove(&id);
+    }
+
+    /// Clear all tasks.
+    fn clear(&self) -> Vec<Arc<Task>> {
+        // Clear ready
+        self.ready.lock().unwrap().clear();
+
+        // Clear running tasks
+        let running: BTreeMap<u128, Arc<Task>> = {
+            let mut running = self.running.lock().unwrap();
+            take(&mut *running)
+        };
+        running.into_values().collect()
     }
 }
 
