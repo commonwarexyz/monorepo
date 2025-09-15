@@ -6,9 +6,10 @@ use commonware_broadcast::{
     buffered::{Config, Engine, Mailbox},
     Broadcaster,
 };
-use commonware_codec::RangeCfg;
+use commonware_codec::{Encode, RangeCfg, ReadRangeExt};
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
+    sha256::Digest,
     Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer,
 };
 use commonware_p2p::{simulated::Network, Recipients};
@@ -31,11 +32,9 @@ pub struct FuzzMessage {
 }
 
 impl Digestible for FuzzMessage {
-    type Digest = commonware_cryptography::sha256::Digest;
+    type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        let mut combined = self.commitment.clone();
-        combined.extend_from_slice(&self.content);
-        Sha256::hash(&combined)
+        Sha256::hash(&self.encode())
     }
 }
 
@@ -61,9 +60,7 @@ impl commonware_codec::EncodeSize for FuzzMessage {
 
 impl commonware_codec::Read for FuzzMessage {
     type Cfg = RangeCfg;
-
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        use commonware_codec::ReadRangeExt;
         let commitment = Vec::<u8>::read_range(buf, *range)?;
         let content = Vec::<u8>::read_range(buf, *range)?;
         Ok(Self {
@@ -110,10 +107,7 @@ pub struct FuzzInput {
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let num_peers = u.int_in_range(1..=5)?;
-        let peer_seeds = (0..num_peers)
-            .map(|_| u64::arbitrary(u))
-            .collect::<Result<Vec<_>, _>>()?;
-        //anywhere from 30 to 100% success rate
+        let peer_seeds = (0..num_peers).collect::<Vec<_>>(); // avoid duplicate seeds
         let network_success_rate = u.int_in_range(30..=100)? as f64 / 100.0;
         let network_latency_ms = u.int_in_range(1..=100)?;
         let network_jitter_ms = u.int_in_range(0..=50)?;
@@ -147,9 +141,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
             let mut shuffled_peers = peers.to_vec();
             shuffled_peers.shuffle(&mut rng);
 
-            let count = (seed % peers.len() as u64) as usize;
-            let count = if count == 0 { 1 } else { count }; // Ensure at least 1 peer
-
+            let count = ((seed % peers.len() as u64) as usize).max(1);
             let peer_slice = shuffled_peers.into_iter().take(count).collect();
             Recipients::Some(peer_slice)
         }
@@ -163,6 +155,7 @@ fn fuzz(input: FuzzInput) {
 
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
+        // Create network
         let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
@@ -174,14 +167,16 @@ fn fuzz(input: FuzzInput) {
         // Create peers
         let mut peers = Vec::new();
         let mut mailboxes: BTreeMap<PublicKey, Mailbox<PublicKey, FuzzMessage>> = BTreeMap::new();
-
         for (i, &seed) in input.peer_seeds.iter().enumerate() {
+            // Create peer
             let crypto = PrivateKey::from_seed(seed);
             let public_key = crypto.public_key();
             peers.push(public_key.clone());
 
-            let (sender, receiver) = oracle.register(public_key.clone(), i as u32).await.unwrap();
+            // Create channel
+            let (sender, receiver) = oracle.register(public_key.clone(), 0).await.unwrap();
 
+            // Create mailbox
             let config = Config {
                 public_key: public_key.clone(),
                 mailbox_size: 1024,
@@ -190,6 +185,7 @@ fn fuzz(input: FuzzInput) {
                 codec_config: RangeCfg::from(..),
             };
 
+            // Create engine
             let engine_context = context.with_label(&format!("peer_{i}"));
             let (engine, mailbox) =
                 Engine::<_, PublicKey, FuzzMessage>::new(engine_context, config);
@@ -214,10 +210,6 @@ fn fuzz(input: FuzzInput) {
 
         // Execute fuzzed actions
         for action in input.actions {
-            if peers.is_empty() {
-                break;
-            }
-
             match action {
                 BroadcastAction::SendMessage {
                     peer_index,
