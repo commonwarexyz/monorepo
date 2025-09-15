@@ -372,17 +372,16 @@ impl Runner {
                     hasher.update(task.id.to_be_bytes());
                     hasher.update(task.label.name().as_bytes());
                 });
-                trace!(id = task.id, "processing task");
+                trace!(id, "processing task");
 
                 // Record task poll
                 executor.metrics.task_polls.get_or_create(&task.label).inc();
 
                 // Prepare task for polling
-                let enq = Arc::new(TaskWaker {
-                    id: task.id,
+                let waker = waker(Arc::new(TaskWaker {
+                    id,
                     tasks: Arc::downgrade(&executor.tasks),
-                });
-                let waker = waker(enq);
+                }));
                 let mut cx = task::Context::from_waker(&waker);
 
                 // Poll the task
@@ -390,7 +389,7 @@ impl Runner {
                     Operation::Root => {
                         // Poll the root task
                         if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
-                            trace!(id = task.id, "root task is complete");
+                            trace!(id, "root task is complete");
                             output = Some(result);
                             break;
                         }
@@ -399,10 +398,10 @@ impl Runner {
                         // Get the future (if it still exists)
                         let mut fut_opt = future.lock().unwrap();
                         let Some(fut) = fut_opt.as_mut() else {
-                            trace!(id = task.id, "skipping already complete task");
+                            trace!(id, "skipping already complete task");
 
                             // Remove the future from pending
-                            executor.tasks.remove_pending(task.id);
+                            executor.tasks.remove(id);
                             continue;
                         };
 
@@ -411,7 +410,7 @@ impl Runner {
                             trace!(id = task.id, "task is complete");
 
                             // Remove the future from pending and drop
-                            executor.tasks.remove_pending(task.id);
+                            executor.tasks.remove(id);
                             *fut_opt = None;
                             continue;
                         }
@@ -419,7 +418,7 @@ impl Runner {
                 }
 
                 // Try again later if task is still pending
-                trace!(id = task.id, "task is still pending");
+                trace!(id, "task is still pending");
             }
 
             // If the root task has completed, exit as soon as possible
@@ -656,13 +655,16 @@ impl Tasks {
     }
 
     /// Lookup a task by id.
+    ///
+    /// We must return cloned here because we cannot hold the pending lock while polling a task (will
+    /// deadlock if [Self::register_work] is called).
     fn get(&self, id: u128) -> Option<Arc<Task>> {
         let pending = self.pending.lock().unwrap();
         pending.get(&id).cloned()
     }
 
     /// Remove a task from the pending map.
-    fn remove_pending(&self, id: u128) {
+    fn remove(&self, id: u128) {
         self.pending.lock().unwrap().remove(&id);
     }
 
