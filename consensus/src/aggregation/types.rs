@@ -360,7 +360,7 @@ mod tests {
         },
         Hasher, Sha256,
     };
-    use commonware_runtime::deterministic;
+    use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
     fn test_ack_namespace() {
@@ -372,8 +372,8 @@ mod tests {
     #[test]
     fn test_codec() {
         let namespace = b"test";
-        let mut context = deterministic::Context::default();
-        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut context, None, 4, 3);
+        let mut rng = StdRng::seed_from_u64(0);
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
         let polynomial = evaluate_all::<MinSig>(&public, 4);
         let item = Item {
             index: 100,

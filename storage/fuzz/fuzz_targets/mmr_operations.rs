@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::{hasher::Standard, mem::Mmr};
+use commonware_storage::mmr::{mem::Mmr, StandardHasher as Standard};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -297,7 +297,7 @@ fn fuzz(input: FuzzInput) {
                         // Check if the element is pruned
                         let is_pruned = reference.is_leaf_pruned(pos);
 
-                        match mmr.proof(pos).await {
+                        match mmr.proof(pos) {
                             Ok(proof) => {
                                 // If we got a proof for a pruned element, it might be pinned
                                 // Verify the proof with the actual data we stored

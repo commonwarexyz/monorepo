@@ -411,26 +411,29 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         Ok(Some(oldest_blob_index * self.cfg.items_per_blob.get()))
     }
 
-    /// Read the item at the given position in the journal. Returns ItemPruned if a pruned item is
-    /// requested.
+    /// Read the item at position `pos` in the journal.
     ///
+    /// # Errors
     ///
-    /// # Panics
-    ///
-    /// Panics if `item_pos` exceeds log size.
-    pub async fn read(&self, item_pos: u64) -> Result<A, Error> {
-        let blob_index = item_pos / self.cfg.items_per_blob.get();
-        assert!(blob_index <= self.tail_index);
+    ///  - [Error::ItemPruned] if the item at position `pos` is pruned.
+    ///  - [Error::ItemOutOfRange] if the item at position `pos` does not exist.
+    pub async fn read(&self, pos: u64) -> Result<A, Error> {
+        let blob_index = pos / self.cfg.items_per_blob.get();
+        if blob_index > self.tail_index {
+            return Err(Error::ItemOutOfRange(pos));
+        }
+
+        let offset = (pos % self.cfg.items_per_blob.get()) * Self::CHUNK_SIZE_U64;
 
         let blob = if blob_index == self.tail_index {
+            if offset >= self.tail.size().await {
+                return Err(Error::ItemOutOfRange(pos));
+            }
             &self.tail
         } else {
-            self.blobs
-                .get(&blob_index)
-                .ok_or(Error::ItemPruned(item_pos))?
+            self.blobs.get(&blob_index).ok_or(Error::ItemPruned(pos))?
         };
 
-        let offset = (item_pos % self.cfg.items_per_blob.get()) * Self::CHUNK_SIZE_U64;
         let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
         Self::verify_integrity(read.as_ref())
     }
@@ -699,7 +702,7 @@ mod tests {
             let item2 = journal.read(2).await.expect("failed to read data 2");
             assert_eq!(item2, test_digest(2));
             let err = journal.read(3).await.expect_err("expected read to fail");
-            assert!(matches!(err, Error::Runtime(_)));
+            assert!(matches!(err, Error::ItemOutOfRange(3)));
 
             // Sync the journal
             journal.sync().await.expect("failed to sync journal");

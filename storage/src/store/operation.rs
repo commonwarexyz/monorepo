@@ -65,6 +65,16 @@ pub enum Keyless<V: Codec> {
     Commit(Option<V>),
 }
 
+impl<V: Codec> Keyless<V> {
+    /// Returns the value (if any) wrapped by this operation.
+    pub fn into_value(self) -> Option<V> {
+        match self {
+            Keyless::Append(value) => Some(value),
+            Keyless::Commit(value) => value,
+        }
+    }
+}
+
 /// An operation applied to an authenticated database with a variable size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Variable<K: Array, V: Codec> {

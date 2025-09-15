@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-bridge"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "clap",
@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1016,8 +1016,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-broadcast-fuzz"
+version = "0.0.62"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-runtime",
+ "libfuzzer-sys",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "commonware-chat"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "chrono",
  "clap",
@@ -1038,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "paste",
@@ -1047,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-fuzz"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1059,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1073,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding-fuzz"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "arbitrary",
  "commonware-coding",
@@ -1083,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1104,8 +1119,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-collector-fuzz"
+version = "0.0.62"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-collector",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-runtime",
+ "futures",
+ "libfuzzer-sys",
+ "rand 0.8.5",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "commonware-consensus"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1130,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "blake3",
  "blst",
@@ -1153,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography-fuzz"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -1170,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1189,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-estimator"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "clap",
@@ -1213,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1235,7 +1267,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "chrono",
@@ -1260,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "futures",
  "futures-timer",
@@ -1273,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1312,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bimap",
  "bytes",
@@ -1335,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "async-lock",
  "axum",
@@ -1366,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime-fuzz"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "arbitrary",
  "commonware-runtime",
@@ -1376,13 +1408,15 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
+ "cfg-if",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
+ "commonware-storage",
  "commonware-utils",
  "crc32fast",
  "criterion",
@@ -1400,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage-fuzz"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1414,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1434,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream-fuzz"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "arbitrary",
  "chacha20poly1305",
@@ -1449,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-sync"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "clap",
@@ -1471,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1484,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils-fuzz"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1497,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.60"
+version = "0.0.62"
 dependencies = [
  "bytes",
  "clap",

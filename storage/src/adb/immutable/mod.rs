@@ -6,10 +6,9 @@ use crate::{
     index::Index,
     journal::{fixed, variable},
     mmr::{
-        hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
-        verification::Proof,
+        Proof, StandardHasher as Standard,
     },
     store::operation::Variable,
     translator::Translator,
@@ -459,7 +458,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let offset = self.locations.read(loc).await?;
         let section = loc / self.log_items_per_section;
-        let op = self.log.get(section, offset).await?.expect("invalid loc");
+        let op = self.log.get(section, offset).await?;
 
         Ok(op.into_value())
     }
@@ -489,7 +488,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         let section = loc / self.log_items_per_section;
-        let Some(Variable::Set(k, v)) = self.log.get(section, offset).await? else {
+        let Variable::Set(k, v) = self.log.get(section, offset).await? else {
             panic!("didn't find Set operation at location {loc} and offset {offset}");
         };
 
@@ -605,9 +604,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         for loc in start_loc..=end_loc {
             let section = loc / self.log_items_per_section;
             let offset = self.locations.read(loc).await?;
-            let Some(op) = self.log.get(section, offset).await? else {
-                panic!("no log item at location {loc}");
-            };
+            let op = self.log.get(section, offset).await?;
             ops.push(op);
         }
 
@@ -659,7 +656,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         };
         let section = last_commit / self.log_items_per_section;
         let offset = self.locations.read(last_commit).await?;
-        let Some(Variable::Commit(metadata)) = self.log.get(section, offset).await? else {
+        let Variable::Commit(metadata) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
