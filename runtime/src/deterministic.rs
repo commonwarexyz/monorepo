@@ -361,11 +361,12 @@ impl Runner {
             trace!(iter, tasks = queue.len(), "starting loop");
             let mut output = None;
             for id in queue {
-                // Lookup the task by id (it may have completed already)
+                // Lookup the task by (it may have completed already)
                 let Some(task) = executor.tasks.get(id) else {
                     trace!(id, "skipping missing task");
                     continue;
                 };
+
                 // Record task for auditing
                 executor.auditor.event(b"process_task", |hasher| {
                     hasher.update(task.id.to_be_bytes());
@@ -378,11 +379,13 @@ impl Runner {
 
                 // Prepare task for polling
                 let enq = Arc::new(TaskWaker {
-                    tasks: Arc::downgrade(&executor.tasks),
                     id: task.id,
+                    tasks: Arc::downgrade(&executor.tasks),
                 });
                 let waker = waker(enq);
                 let mut cx = task::Context::from_waker(&waker);
+
+                // Poll the task
                 match &task.operation {
                     Operation::Root => {
                         // Poll the root task
@@ -551,8 +554,9 @@ struct Task {
 
 /// A waker for some task tracked by the runtime.
 struct TaskWaker {
-    tasks: Weak<Tasks>,
     id: u128,
+
+    tasks: Weak<Tasks>,
 }
 
 impl ArcWake for TaskWaker {
