@@ -445,7 +445,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             let Ok(digest) = digest else {
                 error!(
                     pos,
-                    err = %digest.err().unwrap(),
+                    err = %digest.expect_err("digest is Err in else branch"),
                     "could not convert node from metadata bytes to digest"
                 );
                 return Err(Error::MissingNode(pos));

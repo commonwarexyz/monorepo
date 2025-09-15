@@ -144,6 +144,7 @@ pub struct HasherFork<'a, H: CHasher> {
 /// node reached in the base tree.
 fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
     let leading_zeros = (peak_node_pos + 1).leading_zeros();
+    assert!(leading_zeros >= height, "destination_pos > u64::MAX");
     let mut peak_pos = u64::MAX >> leading_zeros;
     let mut base_pos = u64::MAX >> (leading_zeros - height);
     let mut peak_height = peak_pos.trailing_ones() - 1;
@@ -444,7 +445,10 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
         let size = self.size();
         let peak_futures = PeakIterator::new(size).map(|(peak_pos, _)| self.get_node(peak_pos));
         let peaks = try_join_all(peak_futures).await?;
-        let unwrapped_peaks = peaks.iter().map(|p| p.as_ref().unwrap());
+        let unwrapped_peaks = peaks.iter().map(|p| {
+            p.as_ref()
+                .expect("peak should be non-none, are the trees unaligned?")
+        });
         let digest = hasher.root(self.base_mmr.size(), unwrapped_peaks);
 
         Ok(digest)
