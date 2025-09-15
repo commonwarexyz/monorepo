@@ -259,16 +259,13 @@ fn fuzz(input: FuzzInput) {
                     let receiver_idx_u8 = receiver_idx as u8;
 
                     if let Some(state) = networks.get_mut(&receiver_idx_u8) {
-                        let channels_with_pending: Vec<u8> = pending_by_receiver
-                            .iter()
-                            .filter_map(|((to_idx, ch), senders)| {
-                                if *to_idx == receiver_idx_u8 && !senders.is_empty() {
-                                    Some(*ch)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
+                        let mut ch_set = std::collections::HashSet::new();
+                        for ((to_idx, ch), senders) in pending_by_receiver.iter() {
+                            if *to_idx == receiver_idx_u8 && !senders.is_empty() {
+                                ch_set.insert(*ch);
+                            }
+                        }
+                        let channels_with_pending: Vec<u8> = ch_set.into_iter().collect();
 
                         if channels_with_pending.is_empty() {
                             continue;
