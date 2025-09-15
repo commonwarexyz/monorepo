@@ -16,10 +16,12 @@ use std::{
     time::Duration,
 };
 
+const CHANNEL_SIZE: usize = 8;
 const MAX_OPERATIONS: usize = 50;
 const MAX_PEERS: usize = 16;
 const MIN_SLEEP_DURATION: u64 = 100;
 const MAX_SLEEP_DURATION: u64 = 3000;
+const MIN_MESSAGE_SIZE: usize = 1;
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Arbitrary)]
@@ -89,7 +91,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.seed);
-    let mut max_msg_size: Option<usize> = None;
+    let mut network_msg_size: Option<usize> = None;
     let peer_number = input.peer_number;
 
     let executor = deterministic::Runner::seeded(input.seed);
@@ -116,9 +118,9 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
                 SimulatedOperation::CreateNetwork { max_size } => {
-                    let max_msg_size = Some((max_size as usize).clamp(1, MAX_MESSAGE_SIZE));
+                    network_msg_size = Option::from((max_size as usize).clamp(MIN_MESSAGE_SIZE, MAX_MESSAGE_SIZE));
                     let config = Config {
-                        max_size: max_msg_size.unwrap(),
+                        max_size: network_msg_size.unwrap(),
                     };
                     if let Some(handle) = network_handle.take() {
                         handle.abort();
@@ -159,13 +161,17 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let from_idx = (peer_idx as usize) % peers.len();
                     let to_idx = (to_idx as usize) % peers.len();
-                    if max_msg_size.is_none() {
+                    let Some(max_size) = network_msg_size else {
+                        continue;
+                    };
+                    if max_size <= CHANNEL_SIZE {
                         continue;
                     }
-                    let msg_size = min(msg_size, max_msg_size.unwrap() as u32);
+                    let max_user_msg_size = max_size - CHANNEL_SIZE;
+                    let msg_size = min(msg_size as usize, max_user_msg_size);
 
                     if let Some((ref mut sender, _)) = channels.get_mut(&(from_idx, channel_id)) {
-                        let mut bytes = vec![0u8; msg_size as usize];
+                        let mut bytes = vec![0u8; msg_size];
                         rng.fill(&mut bytes[..]);
                         let message = Bytes::from(bytes);
 
@@ -295,7 +301,7 @@ fn fuzz(input: FuzzInput) {
                     if let Some(handle) = network_handle.take() {
                         handle.abort();
                     }
-                    max_msg_size = None;
+                    network_msg_size = None;
                     oracle = None;
                     channels.clear();
                     registered_peer_channels.clear();
