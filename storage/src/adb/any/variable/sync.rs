@@ -2002,11 +2002,11 @@ mod tests {
             let items_per_section = NZU64!(10);
             // Add full section 0
             for i in 0..items_per_section.get() {
-                journal.append(0, 0 * 100 + i).await.unwrap();
+                journal.append(0, i).await.unwrap();
             }
             // Add partial section 1 (only up to location 17)
             for i in 0..8 {
-                journal.append(1, 1 * 100 + i).await.unwrap();
+                journal.append(1, 100 + i).await.unwrap();
             }
 
             let lower_bound = 12; // Within section 1
