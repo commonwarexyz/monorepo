@@ -649,7 +649,7 @@ impl Tasks {
 
     /// Drop all active tasks.
     fn clear(&self) {
-        // Drop pending tasks
+        // Clear pending tasks
         let pending: BTreeMap<u128, Weak<Task>> = {
             let mut pending = self.pending.lock().unwrap();
             take(&mut *pending)
@@ -664,7 +664,7 @@ impl Tasks {
             *future.lock().unwrap() = None;
         }
 
-        // Clear the pending queue (already dropped any future it may contain
+        // Clear queue (already dropped any future it may contain
         // when iterating over pending)
         self.queue.lock().unwrap().clear();
     }
