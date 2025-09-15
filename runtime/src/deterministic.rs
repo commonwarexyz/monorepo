@@ -574,10 +574,10 @@ impl ArcWake for TaskWaker {
 struct Tasks {
     /// The current task counter.
     counter: Mutex<u128>,
-    /// The queue of tasks that are waiting to be executed.
-    queue: Mutex<Vec<u128>>,
-    /// Incomplete tasks that may still be referenced by external wakers.
-    pending: Mutex<BTreeMap<u128, Arc<Task>>>,
+    /// The queue of tasks that are ready to be polled.
+    ready: Mutex<Vec<u128>>,
+    /// All tasks that are still running.
+    running: Mutex<BTreeMap<u128, Arc<Task>>>,
 }
 
 impl Tasks {
@@ -585,8 +585,8 @@ impl Tasks {
     fn new() -> Self {
         Self {
             counter: Mutex::new(0),
-            queue: Mutex::new(Vec::new()),
-            pending: Mutex::new(BTreeMap::new()),
+            ready: Mutex::new(Vec::new()),
+            running: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -610,10 +610,10 @@ impl Tasks {
         });
 
         // Track as pending until completion
-        arc_self.pending.lock().unwrap().insert(id, task);
+        arc_self.running.lock().unwrap().insert(id, task);
 
-        // Add to queue
-        arc_self.queue.lock().unwrap().push(id);
+        // Add to ready
+        arc_self.ready.lock().unwrap().push(id);
     }
 
     /// Register a new task to be executed.
@@ -630,61 +630,61 @@ impl Tasks {
         });
 
         // Track as pending until completion
-        arc_self.pending.lock().unwrap().insert(id, task);
+        arc_self.running.lock().unwrap().insert(id, task);
 
-        // Add to queue
-        arc_self.queue.lock().unwrap().push(id);
+        // Add to ready
+        arc_self.ready.lock().unwrap().push(id);
     }
 
     /// Enqueue an already registered task to be executed.
     fn enqueue(&self, id: u128) {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.ready.lock().unwrap();
         queue.push(id);
     }
 
     /// Dequeue all tasks that are ready to execute.
     fn drain(&self) -> Vec<u128> {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.ready.lock().unwrap();
         let len = queue.len();
         replace(&mut *queue, Vec::with_capacity(len))
     }
 
-    /// Get the number of tasks in the queue.
+    /// Get the number of ready tasks.
     fn len(&self) -> usize {
-        self.queue.lock().unwrap().len()
+        self.ready.lock().unwrap().len()
     }
 
     /// Lookup a task by id.
     ///
-    /// We must return cloned here because we cannot hold the pending lock while polling a task (will
+    /// We must return cloned here because we cannot hold the running lock while polling a task (will
     /// deadlock if [Self::register_work] is called).
     fn get(&self, id: u128) -> Option<Arc<Task>> {
-        let pending = self.pending.lock().unwrap();
-        pending.get(&id).cloned()
+        let running = self.running.lock().unwrap();
+        running.get(&id).cloned()
     }
 
     /// Remove a task from the pending map.
     fn remove(&self, id: u128) {
-        self.pending.lock().unwrap().remove(&id);
+        self.running.lock().unwrap().remove(&id);
     }
 
-    /// Drop all active tasks.
+    /// Drop all running tasks.
     fn clear(&self) {
         // Clear pending tasks
-        let pending: BTreeMap<u128, Arc<Task>> = {
-            let mut pending = self.pending.lock().unwrap();
-            take(&mut *pending)
+        let running: BTreeMap<u128, Arc<Task>> = {
+            let mut running = self.running.lock().unwrap();
+            take(&mut *running)
         };
-        for (_, task) in pending {
+        for (_, task) in running {
             let Operation::Work(future) = &task.operation else {
                 continue;
             };
             *future.lock().unwrap() = None;
         }
 
-        // Clear queue (already dropped any future it may contain
+        // Clear ready (already dropped any future it may contain
         // when iterating over pending)
-        self.queue.lock().unwrap().clear();
+        self.ready.lock().unwrap().clear();
     }
 }
 
