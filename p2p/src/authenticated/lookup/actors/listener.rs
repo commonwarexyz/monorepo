@@ -75,7 +75,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Perform handshake
-        let (peer, send, recv) = match listen(context, &mut tracker, stream_cfg, stream, sink).await
+        let (peer, send, recv) = match listen(
+            context,
+            |peer| tracker.listenable(peer),
+            stream_cfg,
+            stream,
+            sink,
+        )
+        .await
         {
             Ok(connection) => connection,
             Err(err) => {

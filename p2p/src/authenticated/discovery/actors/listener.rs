@@ -74,7 +74,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
-        let (peer, send, recv) = match listen(context, &mut tracker, stream_cfg, stream, sink).await
+        let (peer, send, recv) = match listen(
+            context,
+            |peer| tracker.listenable(peer),
+            stream_cfg,
+            stream,
+            sink,
+        )
+        .await
         {
             Ok(x) => x,
             Err(err) => {

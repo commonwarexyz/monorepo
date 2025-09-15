@@ -10,7 +10,6 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
-use commonware_stream::Bouncer;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -199,12 +198,6 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
         .await
         .unwrap();
         rx.await.unwrap()
-    }
-}
-
-impl<E: Spawner + Metrics, C: PublicKey> Bouncer<C> for Mailbox<Message<E, C>> {
-    fn allows_peer(&mut self, peer: C) -> impl Future<Output = bool> + Send {
-        self.listenable(peer)
     }
 }
 

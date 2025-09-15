@@ -14,12 +14,12 @@ use commonware_cryptography::{
         group::G2,
         variant::{MinSig, Variant},
     },
-    ed25519::{self, PublicKey},
+    ed25519::{self},
     sha256::Digest as Sha256Digest,
     Digest, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
-use commonware_stream::{listen, Bouncer, Config as StreamConfig};
+use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{from_hex, union};
 use futures::{
     channel::{mpsc, oneshot},
@@ -27,21 +27,10 @@ use futures::{
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
 use tracing::{debug, info};
-
-struct ValidatorSet {
-    validators: HashSet<PublicKey>,
-}
-
-impl Bouncer<PublicKey> for ValidatorSet {
-    fn allows_peer(&mut self, peer: PublicKey) -> impl Future<Output = bool> + Send {
-        async move { self.validators.contains(&peer) }
-    }
-}
 
 #[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
@@ -248,8 +237,9 @@ fn main() {
 
             let (peer, mut sender, mut receiver) = match listen(
                 context.clone(),
-                &mut ValidatorSet {
-                    validators: validators.clone(),
+                |peer| {
+                    let out = validators.contains(&peer);
+                    async move { out }
                 },
                 config.clone(),
                 stream,
