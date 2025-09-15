@@ -403,11 +403,15 @@ where
 ///
 /// 1. Remove all sections before the one containing lower_bound
 /// 2. Prune the lower section, if needed, to make contiguous with range starting at lower_bound
-/// 3. Remove all sections after the one containing upper_bound  
 ///
 /// Returns the next logical location for writing. Updates metadata with the new
 /// oldest_retained_loc (either at section boundaries for contiguous cases or at
 /// lower_bound for rebuilt sections).
+///
+/// # Errors
+///
+/// Returns [crate::journal::Error::InvalidSyncRange] if lower_bound > upper_bound.
+/// Returns [crate::journal::Error::UnexpectedData] if journal contains data beyond upper_bound.
 pub async fn prune_journal<E, V>(
     journal: &mut VJournal<E, V>,
     metadata: &mut Metadata<E, U64, u64>,
