@@ -1037,6 +1037,16 @@ broadcast{1}
             ("echo.lazy", include_str!("../echo.lazy"), true),
             ("simplex.lazy", include_str!("../simplex.lazy"), true),
             (
+                "alpenglow_slow.lazy",
+                include_str!("../alpenglow_slow.lazy"),
+                true,
+            ),
+            (
+                "simplex_with_delay.lazy",
+                include_str!("../simplex_with_delay.lazy"),
+                true,
+            ),
+            (
                 "simplex_with_certificates.lazy",
                 include_str!("../simplex_with_certificates.lazy"),
                 true,
