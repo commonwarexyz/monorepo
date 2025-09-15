@@ -39,7 +39,7 @@ use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     future::AbortHandle,
-    task::{waker_ref, ArcWake},
+    task::{waker, ArcWake},
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -382,7 +382,7 @@ impl Runner {
                     id: task.id,
                     tasks: Arc::downgrade(&executor.tasks),
                 });
-                let waker = waker_ref(&enq);
+                let waker = waker(enq);
                 let mut cx = task::Context::from_waker(&waker);
 
                 // Poll the task
