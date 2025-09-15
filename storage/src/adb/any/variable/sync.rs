@@ -100,7 +100,6 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
         return Err(Error::UnexpectedData(loc));
     }
 
-    // Check if there's data beyond upper_bound within the upper section
     let size = get_size(&journal, items_per_section, upper_bound).await?;
     Ok((journal, size))
 }
