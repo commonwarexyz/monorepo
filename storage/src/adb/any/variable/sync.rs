@@ -41,6 +41,7 @@ use tracing::debug;
 /// - `size` is the next location that should be appended to by the sync engine.
 ///
 /// # Errors
+/// Returns [Error::InvalidSyncRange] if lower_bound > upper_bound.
 /// Returns [Error::UnexpectedData] if existing data extends beyond `upper_bound`.
 pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     context: E,
@@ -96,7 +97,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
 
     // Check if data exceeds the sync range
     if last_section > upper_section {
-        let loc = (upper_section + 1) * items_per_section;
+        let loc = upper_section * items_per_section;
         return Err(Error::UnexpectedData(loc));
     }
 
