@@ -47,6 +47,7 @@ jobs:
         RUSTDOCFLAGS: "-D warnings"
 
   Tests:
+    name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/2)"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -54,23 +55,49 @@ jobs:
         include:
           - os: ubuntu-latest
             flags: "--features commonware-runtime/iouring-storage"
+            partition: 1
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-storage"
+            partition: 2
           - os: ubuntu-latest
             flags: "--features commonware-runtime/iouring-network"
+            partition: 1
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-network"
+            partition: 2
           - os: ubuntu-latest
             flags: "--no-default-features"
+            partition: 1
+          - os: ubuntu-latest
+            flags: "--no-default-features"
+            partition: 2
           - os: ubuntu-latest
             flags: ""
+            partition: 1
+          - os: ubuntu-latest
+            flags: ""
+            partition: 2
           - os: windows-latest
             flags: ""
+            partition: 1
+          - os: windows-latest
+            flags: ""
+            partition: 2
           - os: macos-latest
             flags: ""
+            partition: 1
+          - os: macos-latest
+            flags: ""
+            partition: 2
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Run setup
       uses: ./.github/actions/setup
+    - name: Install nextest
+      uses: taiki-e/install-action@cargo-nextest
     - name: Run tests
-      run: cargo test ${{ matrix.flags }} --verbose
+      run: cargo nextest run ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
 
   Dependencies:
     runs-on: ubuntu-latest

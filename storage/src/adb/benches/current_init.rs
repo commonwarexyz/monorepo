@@ -17,7 +17,6 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Instant,
 };
-use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
@@ -66,7 +65,6 @@ fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
 fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64, threads: usize) {
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
-        info!("starting DB generation...");
         let pool = if threads == 1 {
             None
         } else {
@@ -99,11 +97,6 @@ fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64, threa
             }
         }
         db.commit().await.unwrap();
-        info!(
-            op_count = db.op_count(),
-            inactivity_floor_loc = db.inactivity_floor_loc(),
-            "DB generated.",
-        );
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         db.close().await.unwrap();
     });
@@ -120,7 +113,6 @@ type CurrentDb = Current<
 
 /// Benchmark the initialization of a large randomly generated current db.
 fn bench_current_init(c: &mut Criterion) {
-    tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
 
@@ -128,7 +120,6 @@ fn bench_current_init(c: &mut Criterion) {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
             for (multithreaded_name, threads) in [("off", SINGLE_THREADED), ("on", MULTI_THREADED)]
             {
-                info!(elements, operations, threads, "benchmarking current init");
                 gen_random_current(cfg.clone(), elements, operations, threads);
 
                 c.bench_function(
@@ -164,7 +155,6 @@ fn bench_current_init(c: &mut Criterion) {
 
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
-                    info!("cleaning up db...");
                     let pool = if threads == 1 {
                         None
                     } else {
