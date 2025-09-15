@@ -97,7 +97,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
 
     // Check if data exceeds the sync range
     if last_section > upper_section {
-        let loc = upper_section * items_per_section;
+        let loc = last_section * items_per_section;
         return Err(Error::UnexpectedData(loc));
     }
 
