@@ -108,7 +108,10 @@ use commonware_runtime::{
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
-use futures::stream::{self, Stream, StreamExt};
+use futures::{
+    pin_mut,
+    stream::{self, Stream, StreamExt},
+};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -813,6 +816,23 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Returns the number of the oldest section in the journal.
     pub fn oldest_section(&self) -> Option<u64> {
         self.blobs.first_key_value().map(|(section, _)| *section)
+    }
+
+    /// Returns the number of items in the given section.
+    pub(crate) async fn items_in_section(&self, section: u64) -> Result<u64, Error> {
+        let stream = self
+            .replay(section, 0, commonware_utils::NZUsize!(1024))
+            .await?;
+        pin_mut!(stream);
+        let mut items = 0;
+        while let Some(result) = stream.next().await {
+            let (got_section, _, _, _) = result?;
+            if got_section != section {
+                break;
+            }
+            items += 1;
+        }
+        Ok(items)
     }
 
     /// Removes any underlying blobs created by the journal.

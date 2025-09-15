@@ -8,17 +8,16 @@
 //! - No pruning/bound checks are done here; the sync engine handles range validation.
 
 use crate::{
-    adb::sync, 
+    adb::sync,
     journal::{
-        variable::{self, Config as VConfig, Journal as VJournal}, 
-        Error
-    }, 
-    store::operation::Variable
+        variable::{self, Config as VConfig, Journal as VJournal},
+        Error,
+    },
+    store::operation::Variable,
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
-use commonware_utils::{Array, NZUsize};
-use futures::{pin_mut, StreamExt};
+use commonware_utils::Array;
 use std::num::NonZeroU64;
 use tracing::debug;
 
@@ -210,16 +209,10 @@ pub(crate) async fn get_size<E: Storage + Metrics, V: Codec>(
 ) -> Result<u64, Error> {
     let last_section = journal.blobs.last_key_value().map(|(&s, _)| s).unwrap();
     let last_section_start = last_section * items_per_section;
-    let stream = journal.replay(last_section, 0, NZUsize!(1024)).await?;
-    pin_mut!(stream);
-    let mut size = last_section_start;
-    while let Some(item) = stream.next().await {
-        let (section, _offset, _size, _op) = item?;
-        assert_eq!(section, last_section);
-        size += 1;
-        if size > upper_bound + 1 {
-            return Err(Error::UnexpectedData(size));
-        }
+    let items_in_last_section = journal.items_in_section(last_section).await?;
+    let size = last_section_start + items_in_last_section as u64;
+    if size > upper_bound + 1 {
+        return Err(Error::UnexpectedData(size));
     }
     Ok(size)
 }

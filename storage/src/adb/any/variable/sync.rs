@@ -275,34 +275,6 @@ where
     }
 }
 
-/// Count the actual number of items in a journal section.
-async fn count_items_in_section<E: Storage + Metrics, V: Codec>(
-    blob: &commonware_runtime::buffer::Append<E::Blob>,
-    codec_config: &V::Cfg,
-    compressed: bool,
-) -> Result<u32, crate::journal::Error> {
-    let mut current_offset = 0u32;
-    let mut item_count = 0u32;
-
-    loop {
-        match VJournal::<E, V>::read(compressed, codec_config, blob, current_offset).await {
-            Ok((next_slot, _item_len, _item)) => {
-                current_offset = next_slot;
-                item_count += 1;
-            }
-            Err(crate::journal::Error::Runtime(
-                commonware_runtime::Error::BlobInsufficientLength,
-            )) => {
-                // Reached the end of the section
-                break;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    Ok(item_count)
-}
-
 /// Prune items before `lower_bound` from the section containing it.
 ///
 /// This function handles the case where the lower bound of our sync range falls
@@ -507,13 +479,7 @@ where
         return Err(crate::journal::Error::UnexpectedData(loc));
     }
 
-    let last_blob = journal.blobs.get(&last_section).unwrap();
-    let items_in_last_section = count_items_in_section::<E, V>(
-        last_blob,
-        &journal.cfg.codec_config,
-        journal.cfg.compression.is_some(),
-    )
-    .await?;
+    let items_in_last_section = journal.items_in_section(last_section).await?;
     let last_section_start = if last_section == lower_section {
         read_oldest_retained_loc(metadata)
     } else {
