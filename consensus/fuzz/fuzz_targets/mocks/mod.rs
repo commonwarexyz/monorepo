@@ -71,8 +71,8 @@ pub type ReplicaState = (
 pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
     let threshold = quorum(n) as usize;
 
-    // Invariant: agreement
-    // Finalized digests must be the same
+    // Invariant: agreement (global)
+    // All replicas that finalized a given view must have the same digest (payload) for that view.
     {
         let all_views: HashSet<u64> = replicas
             .iter()
@@ -103,7 +103,8 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
         }
     }
 
-    // Invariant: safe_finalization = no_nullification_in_finalized_view and no_notarization_in_finalized_view
+    // Invariant: Safe finalization (global)
+    // If any replica finalized view v, no replica may have nullification for view v.
     {
         let finalized_views: HashMap<View, Sha256Digest> = replicas
             .iter()
@@ -115,7 +116,7 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
             .collect();
 
         // Invariant: no_nullification_in_finalized_view
-        // If there is a finalized block in a view v, there is no nullification in the same view.
+        // If any replica finalized view v, no replica may have a nullification for view v.
 
         for finalized_view in finalized_views.keys() {
             for (replica_idx, (_, nullifications, _)) in replicas.iter().enumerate() {
@@ -127,7 +128,7 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
         }
 
         // Invariant: no_notarization_in_finalized_view
-        // If there is a finalized block in a view v, there is no notarization for another block in the same view.
+        // If any replica finalized view v for a digest, no replica may have a notarization for another digest for this view v.
 
         for (replica_idx, (notarizations, _, _)) in replicas.iter().enumerate() {
             for (&notarized_view, notarized_data) in notarizations.iter() {
@@ -144,6 +145,7 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: no two quorum notarizations for different payloads in the same view
+    // In any view, there cannot be quorum notarizations for multiple digests (payloads).
     {
         let mut per_view: HashMap<View, HashSet<Sha256Digest>> = HashMap::new();
         for (notarizations, _, _) in replicas.iter() {
@@ -163,7 +165,7 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
         }
     }
 
-    // Invariant: if a view is nullified anywhere, nobody should finalize that view.
+    // Invariant: If any replica nullified view v, no replica may finalize v.
     {
         let nullified: HashSet<View> = replicas
             .iter()
