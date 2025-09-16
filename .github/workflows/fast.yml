@@ -11,7 +11,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.57
-  NIGHTLY_VERSION: nightly-2025-08-10
+  NIGHTLY_VERSION: nightly
 
 jobs:
   Lint:
