@@ -78,9 +78,9 @@ jobs:
       uses: ./.github/actions/setup
     - name: Test benchmarks
       run: |
-        cargo bench ${{ matrix.cargo_flags }} \
+        cargo test ${{ matrix.cargo_flags }} \
           --benches -p ${{ matrix.package }} \
-          -- --test --verbose
+          -- --verbose
 
   Fuzz:
     runs-on: ubuntu-latest

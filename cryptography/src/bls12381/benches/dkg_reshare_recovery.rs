@@ -12,7 +12,13 @@ use std::{collections::HashMap, hint::black_box};
 
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
-    for &n in &[5, 10, 20, 50, 100, 250, 500] {
+
+    #[cfg(debug_assertions)]
+    const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
+    #[cfg(not(debug_assertions))]
+    const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50, 100, 250, 500];
+
+    for &n in CONTRIBUTORS {
         // Perform DKG
         //
         // We do this once outside of the benchmark to reduce the overhead
