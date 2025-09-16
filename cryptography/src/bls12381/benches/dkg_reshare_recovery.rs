@@ -10,7 +10,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::HashMap, hint::black_box};
 
-// Configure contributors based on environment
+// Configure contributors based on context
 #[cfg(test)]
 const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
 #[cfg(not(test))]

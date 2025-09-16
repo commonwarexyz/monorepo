@@ -13,7 +13,7 @@ use std::{collections::HashMap, hint::black_box};
 /// Concurrency isn't used in DKG recovery, so we set it to 1.
 const CONCURRENCY: usize = 1;
 
-// Configure contributors based on environment
+// Configure contributors based on context
 #[cfg(test)]
 const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
 #[cfg(not(test))]
