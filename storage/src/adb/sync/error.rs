@@ -34,7 +34,7 @@ pub enum EngineError<D: Digest> {
     PinnedNodes(String),
 }
 
-/// Error type for [crate::adb::sync::Database] operations.
+/// Error type for database operations.
 /// This can occur because the underlying storage failed or encountered invalid data.
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseError {
