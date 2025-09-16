@@ -37,6 +37,7 @@ test-case = { workspace = true }
 [features]
 default = ["std"]
 std = ["tracing", "commonware-runtime", "rayon", "thiserror/std", "bytes/std", "commonware-codec/std", "commonware-cryptography/std", "commonware-utils/std", "futures", "futures-util", "zstd", "prometheus-client", "crc32fast/std"]
+fuzzing = []
 
 [lib]
 bench = false
