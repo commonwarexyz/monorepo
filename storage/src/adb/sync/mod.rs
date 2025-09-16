@@ -32,7 +32,6 @@ where
     DB: Database,
     DB::Op: Encode,
     R: resolver::Resolver<Op = DB::Op, Digest = DB::Digest>,
-    crate::adb::Error: From<<DB::Journal as Journal>::Error>,
 {
     Engine::new(config).await?.sync().await
 }

@@ -50,6 +50,12 @@ pub enum DatabaseError {
     },
 }
 
+impl<T: Into<crate::adb::Error>> From<T> for DatabaseError {
+    fn from(err: T) -> Self {
+        Self::Storage(err.into())
+    }
+}
+
 /// Errors that can occur during database synchronization.
 #[derive(Debug, thiserror::Error)]
 pub enum Error<T, U, D>
@@ -69,45 +75,6 @@ where
     Engine(EngineError<D>),
 }
 
-impl DatabaseError {
-    pub fn storage(err: impl Into<crate::adb::Error>) -> Self {
-        Self::Storage(err.into())
-    }
-}
-
-impl From<crate::adb::Error> for DatabaseError {
-    fn from(err: crate::adb::Error) -> Self {
-        Self::Storage(err)
-    }
-}
-
-impl From<crate::journal::Error> for DatabaseError {
-    fn from(err: crate::journal::Error) -> Self {
-        Self::Storage(crate::adb::Error::Journal(err))
-    }
-}
-
-impl From<crate::mmr::Error> for DatabaseError {
-    fn from(err: crate::mmr::Error) -> Self {
-        Self::Storage(crate::adb::Error::Mmr(err))
-    }
-}
-
-impl<T, U, D> Error<T, U, D>
-where
-    T: std::error::Error + Send + 'static,
-    U: std::error::Error + Send + 'static,
-    D: Digest,
-{
-    pub fn resolver(err: impl Into<U>) -> Self {
-        Self::Resolver(err.into())
-    }
-
-    pub fn database(err: impl Into<T>) -> Self {
-        Self::Database(err.into())
-    }
-}
-
 impl<U, D> From<DatabaseError> for Error<DatabaseError, U, D>
 where
     U: std::error::Error + Send + 'static,
@@ -115,5 +82,16 @@ where
 {
     fn from(err: DatabaseError) -> Self {
         Self::Database(err)
+    }
+}
+
+impl<U, D, E> From<E> for Error<DatabaseError, U, D>
+where
+    U: std::error::Error + Send + 'static,
+    D: Digest,
+    E: Into<crate::adb::Error>,
+{
+    fn from(err: E) -> Self {
+        Self::Database(DatabaseError::Storage(err.into()))
     }
 }
