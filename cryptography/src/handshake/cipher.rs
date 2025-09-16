@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use chacha20poly1305::{aead::AeadMut as _, ChaCha20Poly1305, KeyInit as _};
 use rand_core::CryptoRngCore;
 
