@@ -265,10 +265,10 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     fn debug_put_result(result: Result<(), archive::Error>, round: Round, name: &str) {
         match result {
             Ok(_) => {
-                debug!(?round, "{name} cached");
+                debug!(?round, name, "cached");
             }
             Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(?round, "{name} already pruned");
+                debug!(?round, name, "already pruned");
             }
             Err(e) => {
                 panic!("failed to insert {name}: {e}");
