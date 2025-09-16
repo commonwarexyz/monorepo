@@ -10,16 +10,11 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::HashMap, hint::black_box};
 
-// Configure contributors and concurrency based on environment
-cfg_if::cfg_if! {
-    if #[cfg(test)] {
-        const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
-        const CONCURRENCY: &[usize] = &[1];
-    } else {
-        const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50, 100, 250, 500];
-        const CONCURRENCY: &[usize] = &[1, 8];
-    }
-}
+// Configure contributors based on environment
+#[cfg(test)]
+const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
+#[cfg(not(test))]
+const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50, 100, 250, 500];
 
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
     for &n in CONTRIBUTORS {
@@ -76,7 +71,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
             );
         }
 
-        for &concurrency in CONCURRENCY {
+        for concurrency in [1, 8] {
             c.bench_function(
                 &format!("{}/conc={} n={} t={}", module_path!(), concurrency, n, t),
                 |b| {
