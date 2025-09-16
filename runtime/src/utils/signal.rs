@@ -230,8 +230,7 @@ impl Default for Stopper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::task::noop_waker;
-    use std::task::{Context, Poll};
+    use futures::executor::block_on;
 
     #[test]
     fn signal_polling_after_completion_panics() {
@@ -241,13 +240,10 @@ mod tests {
         // Resolve the signal before polling it.
         let _completion = signaler.signal(5);
 
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
         // First poll returns the resolved value.
-        assert!(matches!(signal.as_mut().poll(&mut cx), Poll::Ready(Ok(5))));
+        assert!(matches!(block_on(&mut signal), Ok(5)));
 
         // Polling again reproduces the panic "Shared future polled again after completion".
-        let _ = signal.as_mut().poll(&mut cx);
+        block_on(signal).expect("should be able to poll again");
     }
 }
