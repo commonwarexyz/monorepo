@@ -1,5 +1,5 @@
 use crate::{
-    adb::sync::error::DatabaseError,
+    adb::sync::DatabaseError,
     journal::{
         variable::{Config as VConfig, Journal as VJournal},
         Error,

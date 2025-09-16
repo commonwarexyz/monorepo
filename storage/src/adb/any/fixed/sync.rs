@@ -37,7 +37,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, adb::sync::error::DatabaseError> {
+    ) -> Result<Self::Journal, adb::sync::DatabaseError> {
         let journal_config = fixed::Config {
             partition: config.log_journal_partition.clone(),
             items_per_blob: config.log_items_per_blob,
@@ -62,7 +62,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, adb::sync::error::DatabaseError> {
+    ) -> Result<Self, adb::sync::DatabaseError> {
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
@@ -137,7 +137,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, adb::sync::error::DatabaseError> {
+    ) -> Result<Self::Journal, adb::sync::DatabaseError> {
         let size = journal.size().await.map_err(adb::Error::from)?;
 
         if size <= lower_bound {
@@ -178,9 +178,9 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     cfg: fixed::Config,
     lower_bound: u64,
     upper_bound: u64,
-) -> Result<fixed::Journal<E, A>, crate::adb::sync::error::DatabaseError> {
+) -> Result<fixed::Journal<E, A>, crate::adb::sync::DatabaseError> {
     if lower_bound > upper_bound {
-        return Err(crate::adb::sync::error::DatabaseError::InvalidTarget {
+        return Err(crate::adb::sync::DatabaseError::InvalidTarget {
             lower_bound_pos: lower_bound,
             upper_bound_pos: upper_bound,
         });
@@ -2054,7 +2054,7 @@ mod tests {
 
             // Verify that we get the expected error
             match result {
-                Err(crate::adb::sync::error::DatabaseError::InvalidTarget {
+                Err(crate::adb::sync::DatabaseError::InvalidTarget {
                     lower_bound_pos,
                     upper_bound_pos,
                 }) => {

@@ -6,8 +6,8 @@ use commonware_codec::Encode;
 pub mod engine;
 pub(crate) use engine::Engine;
 
-pub mod error;
-pub use error::{EngineError, Error};
+mod error;
+pub use error::{DatabaseError, EngineError, Error};
 
 mod gaps;
 mod journal;
