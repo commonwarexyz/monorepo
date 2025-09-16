@@ -10,19 +10,24 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::HashMap, hint::black_box};
 
+// Configure contributors and concurrency based on environment
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
+        const CONCURRENCY: &[usize] = &[1];
+    } else {
+        const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50, 100, 250, 500];
+        const CONCURRENCY: &[usize] = &[1, 8];
+    }
+}
+
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
-
-    #[cfg(debug_assertions)]
-    const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
-    #[cfg(not(debug_assertions))]
-    const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50, 100, 250, 500];
-
     for &n in CONTRIBUTORS {
         // Perform DKG
         //
         // We do this once outside of the benchmark to reduce the overhead
         // of each sample (which can be large as `n` grows).
+        let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors
         let mut contributors = (0..n)
@@ -71,7 +76,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
             );
         }
 
-        for concurrency in [1, 8] {
+        for &concurrency in CONCURRENCY {
             c.bench_function(
                 &format!("{}/conc={} n={} t={}", module_path!(), concurrency, n, t),
                 |b| {
