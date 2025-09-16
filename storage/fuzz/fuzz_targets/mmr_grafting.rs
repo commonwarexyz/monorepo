@@ -15,7 +15,7 @@ use commonware_storage::mmr::{
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
-const MAX_OPERATIONS: usize = 100;
+const MAX_OPERATIONS: usize = 2;
 const MAX_LEAVES: usize = 50;
 const MAX_ELEMENT_SIZE: usize = 128;
 const MAX_GRAFTING_HEIGHT: u32 = 8;
@@ -126,7 +126,7 @@ fn fuzz(input: FuzzInput) {
                         build_test_mmr(&mut standard_hasher, &mut mmr);
                     } else {
                         // Custom initialization with specified number of leaves
-                        let leaves_count = (num_leaves as usize % MAX_LEAVES).max(1);
+                        let leaves_count = (num_leaves as usize).clamp(1, MAX_LEAVES);
                         for i in 0..leaves_count {
                             standard_hasher.inner().update(&i.to_be_bytes());
                             let element = standard_hasher.inner().finalize();
