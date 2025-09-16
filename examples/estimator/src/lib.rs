@@ -1037,13 +1037,13 @@ broadcast{1}
             ("echo.lazy", include_str!("../echo.lazy"), true),
             ("simplex.lazy", include_str!("../simplex.lazy"), true),
             (
-                "alpenglow_slow.lazy",
-                include_str!("../alpenglow_slow.lazy"),
+                "simplex_with_delay.lazy",
+                include_str!("../simplex_with_delay.lazy"),
                 true,
             ),
             (
-                "simplex_with_delay.lazy",
-                include_str!("../simplex_with_delay.lazy"),
+                "simplex_with_sizes.lazy",
+                include_str!("../simplex_with_sizes.lazy"),
                 true,
             ),
             (
@@ -1051,7 +1051,22 @@ broadcast{1}
                 include_str!("../simplex_with_certificates.lazy"),
                 true,
             ),
+            (
+                "simplex_with_coding.lazy",
+                include_str!("../simplex_with_coding.lazy"),
+                true,
+            ),
             ("minimmit.lazy", include_str!("../minimmit.lazy"), true),
+            (
+                "minimmit_with_sizes.lazy",
+                include_str!("../minimmit_with_sizes.lazy"),
+                true,
+            ),
+            (
+                "minimmit_with_coding.lazy",
+                include_str!("../minimmit_with_coding.lazy"),
+                true,
+            ),
             ("hotstuff.lazy", include_str!("../hotstuff.lazy"), true),
         ];
 
