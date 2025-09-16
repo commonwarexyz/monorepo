@@ -21,7 +21,7 @@ use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Type alias for sync engine errors
-type Error<DB, R> = SyncError<<R as Resolver>::Error, <DB as Database>::Digest>;
+type Error<DB, R> = adb::sync::Error<<R as Resolver>::Error, <DB as Database>::Digest>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]

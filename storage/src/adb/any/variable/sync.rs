@@ -1,5 +1,5 @@
 use crate::{
-    adb::sync::DatabaseError,
+    adb::sync,
     journal::{
         variable::{Config as VConfig, Journal as VJournal},
         Error,
@@ -47,9 +47,9 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<VJournal<E, V>, DatabaseError> {
+) -> Result<VJournal<E, V>, sync::DatabaseError> {
     if lower_bound > upper_bound {
-        return Err(DatabaseError::InvalidTarget {
+        return Err(sync::DatabaseError::InvalidTarget {
             lower_bound_pos: lower_bound,
             upper_bound_pos: upper_bound,
         });
@@ -87,7 +87,8 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
             lower_section, "existing journal data is stale, re-initializing"
         );
         journal.destroy().await?;
-        return VJournal::init(context, cfg).await.map_err(Into::into);
+        let journal = VJournal::init(context, cfg).await?;
+        return Ok(journal);
     }
 
     // Prune sections below the lower bound.
@@ -118,8 +119,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
                 journal
                     .context
                     .remove(&journal.cfg.partition, Some(&name))
-                    .await
-                    .map_err(|e| DatabaseError::Storage(e.into()))?;
+                    .await?;
                 journal.tracked.dec();
             }
         }
@@ -388,7 +388,7 @@ mod tests {
             )
             .await;
             match result {
-                Err(DatabaseError::InvalidTarget {
+                Err(sync::DatabaseError::InvalidTarget {
                     lower_bound_pos,
                     upper_bound_pos,
                 }) => {

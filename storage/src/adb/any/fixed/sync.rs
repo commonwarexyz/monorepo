@@ -138,17 +138,17 @@ where
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, adb::sync::DatabaseError> {
-        let size = journal.size().await.map_err(adb::Error::from)?;
+        let size = journal.size().await?;
 
         if size <= lower_bound {
             // Close the existing journal before creating a new one
-            journal.close().await.map_err(adb::Error::from)?;
+            journal.close().await?;
 
             // Create a new journal with the new bounds
             Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Just prune to the lower bound
-            journal.prune(lower_bound).await.map_err(adb::Error::from)?;
+            journal.prune(lower_bound).await?;
             Ok(journal)
         }
     }
@@ -178,9 +178,9 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     cfg: fixed::Config,
     lower_bound: u64,
     upper_bound: u64,
-) -> Result<fixed::Journal<E, A>, crate::adb::sync::DatabaseError> {
+) -> Result<fixed::Journal<E, A>, adb::sync::DatabaseError> {
     if lower_bound > upper_bound {
-        return Err(crate::adb::sync::DatabaseError::InvalidTarget {
+        return Err(adb::sync::DatabaseError::InvalidTarget {
             lower_bound_pos: lower_bound,
             upper_bound_pos: upper_bound,
         });
@@ -263,8 +263,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
     // Create the tail blob with the correct size to reflect the position
     let (tail_blob, tail_actual_size) = context
         .open(&cfg.partition, &tail_index.to_be_bytes())
-        .await
-        .map_err(crate::journal::Error::Runtime)?;
+        .await?;
     assert_eq!(
         tail_actual_size, 0,
         "Expected empty blob for fresh initialization"
@@ -272,9 +271,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
 
     let tail = Append::new(tail_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
     if tail_items > 0 {
-        tail.resize(tail_size)
-            .await
-            .map_err(crate::journal::Error::Runtime)?;
+        tail.resize(tail_size).await?;
     }
 
     // Initialize metrics
