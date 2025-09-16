@@ -58,15 +58,14 @@ impl<T: Into<crate::adb::Error>> From<T> for DatabaseError {
 
 /// Errors that can occur during database synchronization.
 #[derive(Debug, thiserror::Error)]
-pub enum Error<T, U, D>
+pub enum Error<U, D>
 where
-    T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
     /// Database error
     #[error("database error: {0}")]
-    Database(T),
+    Database(DatabaseError),
     /// Resolver error
     #[error("resolver error: {0:?}")]
     Resolver(U),
@@ -75,23 +74,13 @@ where
     Engine(EngineError<D>),
 }
 
-impl<U, D> From<DatabaseError> for Error<DatabaseError, U, D>
+impl<T, U, D> From<T> for Error<U, D>
 where
     U: std::error::Error + Send + 'static,
     D: Digest,
+    T: Into<DatabaseError>,
 {
-    fn from(err: DatabaseError) -> Self {
-        Self::Database(err)
-    }
-}
-
-impl<U, D, E> From<E> for Error<DatabaseError, U, D>
-where
-    U: std::error::Error + Send + 'static,
-    D: Digest,
-    E: Into<crate::adb::Error>,
-{
-    fn from(err: E) -> Self {
-        Self::Database(DatabaseError::Storage(err.into()))
+    fn from(err: T) -> Self {
+        Self::Database(err.into())
     }
 }

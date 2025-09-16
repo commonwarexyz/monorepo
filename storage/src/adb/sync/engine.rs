@@ -4,7 +4,7 @@ use crate::{
     adb::{
         self,
         sync::{
-            error::{self, EngineError},
+            error::EngineError,
             requests::Requests,
             resolver::{FetchResult, Resolver},
             target::validate_update,
@@ -21,8 +21,7 @@ use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Type alias for sync engine errors
-type Error<DB, R> =
-    SyncError<error::DatabaseError, <R as Resolver>::Error, <DB as Database>::Digest>;
+type Error<DB, R> = SyncError<<R as Resolver>::Error, <DB as Database>::Digest>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]

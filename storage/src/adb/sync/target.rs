@@ -42,12 +42,11 @@ impl<D: Digest> Read for Target<D> {
 }
 
 /// Validate a target update against the current target
-pub fn validate_update<T, U, D>(
+pub fn validate_update<U, D>(
     old_target: &Target<D>,
     new_target: &Target<D>,
-) -> Result<(), sync::Error<T, U, D>>
+) -> Result<(), sync::Error<U, D>>
 where
-    T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
@@ -108,7 +107,7 @@ mod tests {
         assert_eq!(target.upper_bound_ops, deserialized.upper_bound_ops);
     }
 
-    type TestError = sync::Error<std::io::Error, std::io::Error, sha256::Digest>;
+    type TestError = sync::Error<std::io::Error, sha256::Digest>;
 
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
