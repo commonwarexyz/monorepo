@@ -12,7 +12,7 @@ use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
         dial_end, dial_start, listen_end, listen_start, Context, Error as HandshakeError, Msg1,
-        Msg2, Msg3, RecvCipher, SendCipher,
+        Msg2, Msg3, RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD,
     },
     Signer,
 };
@@ -207,7 +207,12 @@ pub struct Sender<O> {
 impl<O: Sink> Sender<O> {
     pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let c = self.cipher.send(msg)?;
-        send_frame(&mut self.sink, &c, self.max_message_size).await?;
+        send_frame(
+            &mut self.sink,
+            &c,
+            self.max_message_size + CIPHERTEXT_OVERHEAD,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -220,7 +225,11 @@ pub struct Receiver<I> {
 
 impl<I: Stream> Receiver<I> {
     pub async fn recv(&mut self) -> Result<Bytes, Error> {
-        let c = recv_frame(&mut self.stream, self.max_message_size).await?;
+        let c = recv_frame(
+            &mut self.stream,
+            self.max_message_size + CIPHERTEXT_OVERHEAD,
+        )
+        .await?;
         Ok(self.cipher.recv(&c)?.into())
     }
 }

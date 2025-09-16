@@ -15,7 +15,7 @@ mod key_exchange;
 use key_exchange::{EphemeralPublicKey, SecretKey};
 
 mod cipher;
-pub use cipher::{RecvCipher, SendCipher};
+pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD};
 
 const NAMESPACE: &'static [u8] = b"commonware/handshake";
 const LABEL_CIPHER_L2D: &'static [u8] = b"cipher_l2d";
@@ -178,8 +178,8 @@ pub fn dial_start<S: Signer, P: PublicKey>(
     let epk = esk.public();
     let mut transcript = Transcript::new(NAMESPACE);
     let sig = transcript
-        .commit(peer_identity.encode())
         .commit(current_time.encode())
+        .commit(peer_identity.encode())
         .commit(epk.encode())
         .sign(&my_identity);
     transcript.commit(my_identity.public_key().encode());
