@@ -232,18 +232,16 @@ pub fn check_invariants(n: u32, replicas: Vec<ReplicaState>) {
         }
 
         // Invariant: valid_last_finalized
-        // notarization.view >= finalization.view
-        {
-            let last_notarized_view = notarizations.keys().max();
-            let last_finalizied_view = finalizations.keys().max();
-
-            if let Some(last_finalizied_view) = last_finalizied_view {
-                if let Some(last_notarized_view) = last_notarized_view {
-                    assert!(
-                        last_notarized_view >= last_finalizied_view,
-                        "notarization view {last_notarized_view} >= finalization view {last_finalizied_view}"
-                    );
-                }
+        for (&v, fin) in finalizations.iter() {
+            match notarizations.get(&v) {
+                Some(notar) => assert_eq!(
+                    notar.payload, fin.payload,
+                    "Replica finalized view {v} with payload {:?} but its local notarization has {:?}",
+                    fin.payload, notar.payload
+                ),
+                None => panic!(
+                    "Replica finalized view {v} but has no local notarization for that view"
+                ),
             }
         }
 

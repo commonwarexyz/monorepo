@@ -49,7 +49,7 @@ static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
 fn fuzzer(input: FuzzInput) {
     // Create context
     let n = 4;
-    let required_containers = 10;
+    let required_containers = 30;
     let namespace = b"consensus_fuzz".to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
