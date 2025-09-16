@@ -24,7 +24,7 @@ const LABEL_CONFIRMATION_L2D: &'static [u8] = b"confirmation_l2d";
 const LABEL_CONFIRMATION_D2L: &'static [u8] = b"confirmation_d2l";
 
 pub struct Msg1<S> {
-    time_ms: u64,
+    time_ms: i64,
     epk: EphemeralPublicKey,
     sig: S,
 }
@@ -59,7 +59,7 @@ impl<S: Read> Read for Msg1<S> {
 }
 
 pub struct Msg2<S> {
-    time_ms: u64,
+    time_ms: i64,
     epk: EphemeralPublicKey,
     sig: S,
     confirmation: Summary,
@@ -132,7 +132,7 @@ pub struct DialState<P> {
     esk: SecretKey,
     peer_identity: P,
     transcript: Transcript,
-    ok_timestamps: Range<u64>,
+    ok_timestamps: Range<i64>,
 }
 
 pub struct ListenState {
@@ -142,16 +142,16 @@ pub struct ListenState {
 }
 
 pub struct Context<S, P> {
-    current_time: u64,
-    ok_timestamps: Range<u64>,
+    current_time: i64,
+    ok_timestamps: Range<i64>,
     my_identity: S,
     peer_identity: P,
 }
 
 impl<S, P> Context<S, P> {
     pub fn new(
-        current_time_ms: u64,
-        ok_timestamps: Range<u64>,
+        current_time_ms: i64,
+        ok_timestamps: Range<i64>,
         my_identity: S,
         peer_identity: P,
     ) -> Self {
