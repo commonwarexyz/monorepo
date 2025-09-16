@@ -377,7 +377,6 @@ mod test {
             let mut noise = Transcript::new(b"test").noise(b"NOISE");
             noise.fill_bytes(&mut s_prime[..i]);
             noise.fill_bytes(&mut s_prime[i..]);
-            dbg!(i);
             assert_eq!(s, s_prime);
         }
     }
