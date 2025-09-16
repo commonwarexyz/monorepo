@@ -57,6 +57,8 @@ jobs:
           - os: ubuntu-latest
             flags: "--features commonware-runtime/iouring-network"
           - os: ubuntu-latest
+            flags: "--no-default-features"
+          - os: ubuntu-latest
             flags: ""
           - os: windows-latest
             flags: ""
@@ -152,14 +154,8 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y gcc-arm-none-eabi
-    - name: Build and test codec
-      run: cargo build -p commonware-codec --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_codec.rlib && cargo test -p commonware-codec --no-default-features --verbose
-    - name: Build utils
-      run: cargo build -p commonware-utils --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_utils.rlib
-    - name: Build cryptography
-      run: cargo build -p commonware-cryptography --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_cryptography.rlib
-    - name: Build storage
-      run: cargo build -p commonware-storage --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_storage.rlib
+    - name: Check no_std compatibility
+      run: ./.github/scripts/check_no_std.sh
 
   Unsafe:
     runs-on: ubuntu-latest

@@ -29,6 +29,8 @@ jobs:
           - os: ubuntu-latest
             flags: "--features commonware-runtime/iouring-network"
           - os: ubuntu-latest
+            flags: "--no-default-features"
+          - os: ubuntu-latest
             flags: ""
           - os: windows-latest
             flags: ""
