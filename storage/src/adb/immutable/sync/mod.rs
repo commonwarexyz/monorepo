@@ -74,7 +74,6 @@ where
     type Op = Variable<K, V>;
     type Journal = journal::Journal<E, K, V>;
     type Hasher = H;
-    type Error = crate::adb::Error;
     type Config = immutable::Config<T, V::Cfg>;
     type Digest = H::Digest;
     type Context = E;
@@ -84,7 +83,7 @@ where
         config: &Self::Config,
         lower_bound_loc: u64,
         upper_bound_loc: u64,
-    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+    ) -> Result<Self::Journal, sync::error::DatabaseError<Self::Digest>> {
         // Open the journal and discard operations outside the sync range.
         let journal = init_journal(
             context.with_label("log"),
@@ -140,7 +139,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, sync::error::DatabaseError<Self::Digest>> {
         let journal = journal.into_inner();
         let sync_config = Config {
             db_config,
@@ -150,7 +149,9 @@ where
             pinned_nodes,
             apply_batch_size,
         };
-        Self::init_synced(context, sync_config).await
+        Self::init_synced(context, sync_config)
+            .await
+            .map_err(Into::into)
     }
 
     fn root(&self) -> Self::Digest {
@@ -164,15 +165,13 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, Self::Error> {
+    ) -> Result<Self::Journal, sync::error::DatabaseError<Self::Digest>> {
         let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
         if size <= lower_bound {
             // Close existing journal and create new one
             journal.close().await.map_err(crate::adb::Error::from)?;
-            Self::create_journal(context, config, lower_bound, upper_bound)
-                .await
-                .map_err(crate::adb::Error::from)
+            Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Extract the Variable journal to perform section-based pruning
             let mut variable_journal = journal.into_inner();

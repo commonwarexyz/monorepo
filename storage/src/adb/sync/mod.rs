@@ -6,7 +6,7 @@ use commonware_codec::Encode;
 pub mod engine;
 pub(crate) use engine::Engine;
 
-mod error;
+pub mod error;
 pub use error::{EngineError, Error};
 
 mod gaps;
@@ -27,11 +27,12 @@ mod requests;
 /// Create/open a database and sync it to a target state
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
-) -> Result<DB, Error<DB::Error, R::Error, DB::Digest>>
+) -> Result<DB, Error<error::DatabaseError<DB::Digest>, R::Error, DB::Digest>>
 where
     DB: Database,
     DB::Op: Encode,
     R: resolver::Resolver<Op = DB::Op, Digest = DB::Digest>,
+    crate::adb::Error: From<<DB::Journal as Journal>::Error>,
 {
     Engine::new(config).await?.sync().await
 }

@@ -1,5 +1,5 @@
 use crate::{
-    adb::{self, any, sync},
+    adb::{self, any},
     index::Index,
     journal::fixed,
     mmr::{
@@ -29,7 +29,6 @@ where
     type Op = Fixed<K, V>;
     type Journal = fixed::Journal<E, Fixed<K, V>>;
     type Hasher = H;
-    type Error = adb::Error;
     type Config = adb::any::fixed::Config<T>;
     type Digest = H::Digest;
 
@@ -38,7 +37,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+    ) -> Result<Self::Journal, adb::sync::error::DatabaseError<Self::Digest>> {
         let journal_config = fixed::Config {
             partition: config.log_journal_partition.clone(),
             items_per_blob: config.log_items_per_blob,
@@ -53,6 +52,7 @@ where
             upper_bound,
         )
         .await
+        .map_err(Into::into)
     }
 
     async fn from_sync_result(
@@ -63,7 +63,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, adb::sync::error::DatabaseError<Self::Digest>> {
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
@@ -87,7 +87,7 @@ where
 
         // Convert MMR size to number of operations.
         let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
-            return Err(adb::Error::Mmr(crate::mmr::Error::InvalidSize(mmr.size())));
+            return Err(crate::mmr::Error::InvalidSize(mmr.size()).into());
         };
 
         // Apply the missing operations from the log to the MMR.
@@ -139,7 +139,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, Self::Error> {
+    ) -> Result<Self::Journal, adb::sync::error::DatabaseError<Self::Digest>> {
         let size = journal.size().await.map_err(adb::Error::from)?;
 
         if size <= lower_bound {
@@ -147,9 +147,7 @@ where
             journal.close().await.map_err(adb::Error::from)?;
 
             // Create a new journal with the new bounds
-            Self::create_journal(context, config, lower_bound, upper_bound)
-                .await
-                .map_err(adb::Error::from)
+            Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Just prune to the lower bound
             journal.prune(lower_bound).await.map_err(adb::Error::from)?;

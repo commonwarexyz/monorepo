@@ -4,7 +4,7 @@ use crate::{
     adb::{
         self,
         sync::{
-            error::EngineError,
+            error::{self, EngineError},
             requests::Requests,
             resolver::{FetchResult, Resolver},
             target::validate_update,
@@ -21,8 +21,11 @@ use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Type alias for sync engine errors
-type Error<DB, R> =
-    SyncError<<DB as Database>::Error, <R as Resolver>::Error, <DB as Database>::Digest>;
+type Error<DB, R> = SyncError<
+    error::DatabaseError<<DB as Database>::Digest>,
+    <R as Resolver>::Error,
+    <DB as Database>::Digest,
+>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
@@ -154,6 +157,7 @@ where
     DB: Database,
     R: Resolver<Op = DB::Op, Digest = DB::Digest>,
     DB::Op: Encode,
+    crate::adb::Error: From<<DB::Journal as Journal>::Error>,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
         &self.journal
@@ -165,6 +169,7 @@ where
     DB: Database,
     R: Resolver<Op = DB::Op, Digest = DB::Digest>,
     DB::Op: Encode,
+    crate::adb::Error: From<<DB::Journal as Journal>::Error>,
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
@@ -229,7 +234,9 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_requests.len());
 
-        let log_size = self.journal.size().await.map_err(SyncError::database)?;
+        let log_size = self.journal.size().await.map_err(|e| {
+            SyncError::Database(error::DatabaseError::Storage(crate::adb::Error::from(e)))
+        })?;
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
@@ -313,7 +320,9 @@ where
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
     pub async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
-        let mut next_loc = self.journal.size().await.map_err(SyncError::database)?;
+        let mut next_loc = self.journal.size().await.map_err(|e| {
+            SyncError::Database(error::DatabaseError::Storage(crate::adb::Error::from(e)))
+        })?;
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
@@ -361,7 +370,9 @@ where
         I: IntoIterator<Item = DB::Op>,
     {
         for op in operations {
-            self.journal.append(op).await.map_err(SyncError::database)?;
+            self.journal.append(op).await.map_err(|e| {
+                SyncError::Database(error::DatabaseError::Storage(crate::adb::Error::from(e)))
+            })?;
             // No need to sync here -- the journal will periodically sync its storage
             // and we will also sync when we're done applying all operations.
         }
@@ -370,7 +381,9 @@ where
 
     /// Check if sync is complete based on the current journal size and target
     pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
-        let journal_size = self.journal.size().await.map_err(SyncError::database)?;
+        let journal_size = self.journal.size().await.map_err(|e| {
+            SyncError::Database(error::DatabaseError::Storage(crate::adb::Error::from(e)))
+        })?;
 
         // Calculate the target journal size (upper bound is inclusive)
         let target_journal_size = self.target.upper_bound_ops + 1;
