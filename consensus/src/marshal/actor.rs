@@ -605,10 +605,11 @@ impl<
                                     debug!(?round, ?commitment, "received notarization");
 
                                     // If there exists a finalization certificate for this block, we
-                                    // should finalize it. This could happen if a finalization
-                                    // is received via the consensus engine and we haven't yet
-                                    // resolved the request for the full block before we resolved
-                                    // the request for its notarization.
+                                    // should finalize it. While not necessary, this could finalize
+                                    // the block faster in the case where a notarization then a
+                                    // finalization is received via the consensus engine and we
+                                    // haven't yet resolved the request for the block before we
+                                    // resolved the request for its notarization.
                                     let height = block.height();
                                     if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
                                         self.finalize(height, commitment, block.clone(), Some(finalization), &mut notifier_tx).await;
