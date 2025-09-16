@@ -1,3 +1,5 @@
+//! Consensus types shared across the crate.
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use std::fmt::Display;
@@ -72,10 +74,29 @@ impl Display for Round {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{DecodeExt, Encode, EncodeSize};
 
     #[test]
     fn test_round_cmp() {
         assert!(Round::from((1, 2)) < Round::from((1, 3)));
         assert!(Round::from((1, 2)) < Round::from((2, 1)));
+    }
+
+    #[test]
+    fn test_round_encode_decode_roundtrip() {
+        let r = Round::new(42, 1_000_000);
+        let encoded = r.encode();
+        assert_eq!(encoded.len(), r.encode_size());
+        let decoded = Round::decode(encoded).unwrap();
+        assert_eq!(r, decoded);
+    }
+
+    #[test]
+    fn test_round_conversions() {
+        let r: Round = (5u64, 6u64).into();
+        assert_eq!(r.epoch(), 5);
+        assert_eq!(r.view(), 6);
+        let tuple: (Epoch, View) = r.into();
+        assert_eq!(tuple, (5, 6));
     }
 }

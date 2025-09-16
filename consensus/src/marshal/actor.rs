@@ -375,9 +375,12 @@ impl<
                             // the request as we wouldn't know when to drop it, and the request may
                             // never complete if the block is not finalized.
                             if let Some(round) = round {
-                                // While this is unlikely to be necessary, we skip fetching blocks
-                                // for rounds that have already been finalized with something else.
                                 if round < self.last_processed_round {
+                                    // At this point, we have failed to find the block locally, and
+                                    // we know that its round is less than the last processed round.
+                                    // This means that something else was finalized in that round,
+                                    // so we drop the response to indicate that the block may never
+                                    // be available.
                                     continue;
                                 }
                                 // Attempt to fetch the block (with notarization) from the resolver.

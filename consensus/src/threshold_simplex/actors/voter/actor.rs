@@ -926,6 +926,9 @@ impl<
                 return None;
             };
 
+            // Sanity-check the epoch is correct. It should have already been checked.
+            assert_eq!(proposal.epoch(), self.epoch, "proposal epoch mismatch");
+
             // Check parent validity
             if proposal.view() <= proposal.parent {
                 debug!(

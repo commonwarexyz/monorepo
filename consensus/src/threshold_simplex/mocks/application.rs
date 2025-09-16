@@ -1,3 +1,6 @@
+//! Mock application used by threshold-simplex tests to produce and verify payloads,
+//! simulating proposal/verification latency and broadcasting via a mock relay.
+
 use super::relay::Relay;
 use crate::{
     threshold_simplex::types::Context,
