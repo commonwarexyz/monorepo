@@ -1,9 +1,15 @@
 use alloc::vec::Vec;
-use chacha20poly1305::{aead::AeadMut as _, ChaCha20Poly1305, KeyInit as _};
+use chacha20poly1305::{
+    aead::{generic_array::typenum::Unsigned, Aead},
+    AeadCore, ChaCha20Poly1305, KeyInit as _,
+};
 use rand_core::CryptoRngCore;
 
 // Intentionally avoid depending directly on super, to depend on the sibling.
 use super::error::Error;
+
+/// The amount of overhead in a ciphertext, compared to the plain message.
+pub const CIPHERTEXT_OVERHEAD: usize = <ChaCha20Poly1305 as AeadCore>::TagSize::USIZE as usize;
 
 struct CounterNonce {
     inner: u128,
