@@ -37,7 +37,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, adb::sync::error::DatabaseError<Self::Digest>> {
+    ) -> Result<Self::Journal, adb::sync::error::DatabaseError> {
         let journal_config = fixed::Config {
             partition: config.log_journal_partition.clone(),
             items_per_blob: config.log_items_per_blob,
@@ -52,7 +52,6 @@ where
             upper_bound,
         )
         .await
-        .map_err(Into::into)
     }
 
     async fn from_sync_result(
@@ -63,7 +62,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, adb::sync::error::DatabaseError<Self::Digest>> {
+    ) -> Result<Self, adb::sync::error::DatabaseError> {
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
@@ -82,8 +81,7 @@ where
                 pinned_nodes,
             },
         )
-        .await
-        .map_err(adb::Error::Mmr)?;
+        .await?;
 
         // Convert MMR size to number of operations.
         let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
@@ -139,7 +137,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, adb::sync::error::DatabaseError<Self::Digest>> {
+    ) -> Result<Self::Journal, adb::sync::error::DatabaseError> {
         let size = journal.size().await.map_err(adb::Error::from)?;
 
         if size <= lower_bound {
@@ -180,12 +178,12 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     cfg: fixed::Config,
     lower_bound: u64,
     upper_bound: u64,
-) -> Result<fixed::Journal<E, A>, crate::journal::Error> {
+) -> Result<fixed::Journal<E, A>, crate::adb::sync::error::DatabaseError> {
     if lower_bound > upper_bound {
-        return Err(crate::journal::Error::InvalidSyncRange(
-            lower_bound,
-            upper_bound,
-        ));
+        return Err(crate::adb::sync::error::DatabaseError::InvalidTarget {
+            lower_bound_pos: lower_bound,
+            upper_bound_pos: upper_bound,
+        });
     }
 
     let mut journal = fixed::Journal::<E, A>::init(context.clone(), cfg.clone()).await?;
@@ -2056,9 +2054,12 @@ mod tests {
 
             // Verify that we get the expected error
             match result {
-                Err(journal::Error::InvalidSyncRange(lb, ub)) => {
-                    assert_eq!(lb, lower_bound);
-                    assert_eq!(ub, upper_bound);
+                Err(crate::adb::sync::error::DatabaseError::InvalidTarget {
+                    lower_bound_pos,
+                    upper_bound_pos,
+                }) => {
+                    assert_eq!(lower_bound_pos, lower_bound);
+                    assert_eq!(upper_bound_pos, upper_bound);
                 }
                 _ => panic!("Expected InvalidSyncRange error"),
             }

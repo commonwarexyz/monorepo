@@ -25,7 +25,7 @@ pub trait Database: Sized {
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, DatabaseError<Self::Digest>>>;
+    ) -> impl Future<Output = Result<Self::Journal, DatabaseError>>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -36,7 +36,7 @@ pub trait Database: Sized {
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, DatabaseError<Self::Digest>>>;
+    ) -> impl Future<Output = Result<Self, DatabaseError>>;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
@@ -54,5 +54,5 @@ pub trait Database: Sized {
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, DatabaseError<Self::Digest>>>;
+    ) -> impl Future<Output = Result<Self::Journal, DatabaseError>>;
 }

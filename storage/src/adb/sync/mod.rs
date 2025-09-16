@@ -27,7 +27,7 @@ mod requests;
 /// Create/open a database and sync it to a target state
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
-) -> Result<DB, Error<error::DatabaseError<DB::Digest>, R::Error, DB::Digest>>
+) -> Result<DB, Error<error::DatabaseError, R::Error, DB::Digest>>
 where
     DB: Database,
     DB::Op: Encode,

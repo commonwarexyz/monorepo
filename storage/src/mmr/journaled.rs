@@ -332,7 +332,10 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///    - Rewinds the journal to size `upper_bound+1`
     ///    - Sets in-memory MMR size to `upper_bound+1`
     ///    - Prunes the journal to `lower_bound`
-    pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
+    pub async fn init_sync(
+        context: E,
+        cfg: SyncConfig<H::Digest>,
+    ) -> Result<Self, crate::adb::sync::error::DatabaseError> {
         let journal = init_journal(
             context.with_label("mmr_journal"),
             JConfig {
@@ -353,7 +356,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
         };
-        let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+        let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg)
+            .await
+            .map_err(|e| crate::adb::sync::error::DatabaseError::Storage(e.into()))?;
 
         // Write the pruning boundary.
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
@@ -387,7 +392,10 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound)
                 .await?;
         }
-        metadata.sync().await?;
+        metadata
+            .sync()
+            .await
+            .map_err(|e| crate::adb::sync::error::DatabaseError::Storage(e.into()))?;
 
         Ok(Self {
             mem_mmr,

@@ -40,6 +40,9 @@ pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
 
+    #[error("runtime error: {0}")]
+    Runtime(#[from] commonware_runtime::Error),
+
     #[error("operation pruned: {0}")]
     OperationPruned(u64),
 

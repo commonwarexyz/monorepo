@@ -1,6 +1,9 @@
-use crate::journal::{
-    variable::{Config as VConfig, Journal as VJournal},
-    Error,
+use crate::{
+    adb::sync::error::DatabaseError,
+    journal::{
+        variable::{Config as VConfig, Journal as VJournal},
+        Error,
+    },
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
@@ -44,9 +47,12 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<VJournal<E, V>, Error> {
+) -> Result<VJournal<E, V>, DatabaseError> {
     if lower_bound > upper_bound {
-        return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
+        return Err(DatabaseError::InvalidTarget {
+            lower_bound_pos: lower_bound,
+            upper_bound_pos: upper_bound,
+        });
     }
 
     // Calculate the section ranges based on item locations
@@ -81,7 +87,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
             lower_section, "existing journal data is stale, re-initializing"
         );
         journal.destroy().await?;
-        return VJournal::init(context, cfg).await;
+        return VJournal::init(context, cfg).await.map_err(Into::into);
     }
 
     // Prune sections below the lower bound.
@@ -112,7 +118,8 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
                 journal
                     .context
                     .remove(&journal.cfg.partition, Some(&name))
-                    .await?;
+                    .await
+                    .map_err(|e| DatabaseError::Storage(e.into()))?;
                 journal.tracked.dec();
             }
         }
@@ -380,7 +387,16 @@ mod tests {
                 NZU64!(5), // items_per_section
             )
             .await;
-            assert!(matches!(result, Err(Error::InvalidSyncRange(10, 5))));
+            match result {
+                Err(DatabaseError::InvalidTarget {
+                    lower_bound_pos,
+                    upper_bound_pos,
+                }) => {
+                    assert_eq!(lower_bound_pos, 10);
+                    assert_eq!(upper_bound_pos, 5);
+                }
+                _ => panic!("Expected InvalidSyncRange error"),
+            }
         });
     }
 
