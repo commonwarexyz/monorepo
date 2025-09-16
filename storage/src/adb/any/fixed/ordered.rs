@@ -1,6 +1,6 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
-//! with a key. Its implementation is based on an [Mmr] over a log of state-change operations backed
-//! by a [Journal].
+//! with a key over an ordered key space. Its implementation is based on an [Mmr] over a log of
+//! state-change operations backed by a [Journal].
 //!
 //! In the [Any] db, it is not possible to prove whether the value of a key is the currently active
 //! one, only that it was associated with the key at some point in the past. This type of
@@ -8,79 +8,45 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::Error,
-    index::{Cursor, Index as _, Unordered as Index},
+    adb::{
+        any::fixed::{Config, SNAPSHOT_READ_BUFFER_SIZE},
+        Error,
+    },
+    index::{Cursor, Index as _, Ordered as Index},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
-        bitmap::Bitmap,
-        iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
+        iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
         Proof, StandardHasher as Standard,
     },
-    store::operation::Fixed as Operation,
+    store::operation::FixedOrdered as Operation,
     translator::Translator,
 };
 use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
 use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
 };
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 use tracing::{debug, warn};
 
-pub mod ordered;
-pub mod sync;
+/// The return type of the `Any::update_loc` method.
+enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
+    /// The key already exists in the snapshot. The wrapped value is its next-key.
+    Exists(K),
 
-/// Indicator that the generic parameter N is unused by the call. N is only
-/// needed if the caller is providing the optional bitmap.
-const UNUSED_N: usize = 0;
-
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot.
-const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
-
-/// Configuration for an `Any` authenticated db.
-#[derive(Clone)]
-pub struct Config<T: Translator> {
-    /// The name of the [Storage] partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
-
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the [Storage] partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the [Storage] partition used to persist the (pruned) log of operations.
-    pub log_journal_partition: String,
-
-    /// The items per blob configuration value used by the log journal.
-    pub log_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: NonZeroUsize,
-
-    /// The translator used by the compressed index.
-    pub translator: T,
-
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    /// The key did not already exist in the snapshot. The wrapped values are the immediately
+    /// preceding key that does exist in the snapshot, plus its value and next-key.
+    NotExists((K, V, K)),
 }
-
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub struct Any<
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Array + Ord,
     V: CodecFixed<Cfg = ()>,
     H: CHasher,
     T: Translator,
@@ -140,13 +106,7 @@ impl<
         let (inactivity_floor_loc, mmr, log) =
             Self::init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        Self::build_snapshot_from_log(
-            inactivity_floor_loc,
-            &log,
-            &mut snapshot,
-            None::<&mut Bitmap<H, UNUSED_N>>,
-        )
-        .await?;
+        Self::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot).await?;
 
         let db = Any {
             mmr,
@@ -195,52 +155,52 @@ impl<
 
         // Back up over / discard any uncommitted operations in the log.
         let mut log_size = log.size().await?;
-        let mut rewind_leaf_loc = log_size;
+        let mut rewind_leaf_num = log_size;
         let mut inactivity_floor_loc = 0;
-        while rewind_leaf_loc > 0 {
-            if let Operation::CommitFloor(loc) = log.read(rewind_leaf_loc - 1).await? {
+        while rewind_leaf_num > 0 {
+            if let Operation::CommitFloor(loc) = log.read(rewind_leaf_num - 1).await? {
                 inactivity_floor_loc = loc;
                 break;
             }
-            rewind_leaf_loc -= 1;
+            rewind_leaf_num -= 1;
         }
-        if rewind_leaf_loc != log_size {
-            let op_count = log_size - rewind_leaf_loc;
+        if rewind_leaf_num != log_size {
+            let op_count = log_size - rewind_leaf_num;
             warn!(
                 log_size,
                 op_count, "rewinding over uncommitted log operations"
             );
-            log.rewind(rewind_leaf_loc).await?;
+            log.rewind(rewind_leaf_num).await?;
             log.sync().await?;
-            log_size = rewind_leaf_loc;
+            log_size = rewind_leaf_num;
         }
 
         // Pop any MMR elements that are ahead of the last log commit point.
-        let mut next_mmr_leaf_loc = leaf_pos_to_loc(mmr.size()).unwrap();
-        if next_mmr_leaf_loc > log_size {
-            let op_count = next_mmr_leaf_loc - log_size;
+        let mut next_mmr_leaf_num = leaf_pos_to_num(mmr.size()).unwrap();
+        if next_mmr_leaf_num > log_size {
+            let op_count = next_mmr_leaf_num - log_size;
             warn!(log_size, op_count, "popping uncommitted MMR operations");
             mmr.pop(op_count as usize).await?;
-            next_mmr_leaf_loc = log_size;
+            next_mmr_leaf_num = log_size;
         }
 
         // If the MMR is behind, replay log operations to catch up.
-        if next_mmr_leaf_loc < log_size {
-            let op_count = log_size - next_mmr_leaf_loc;
+        if next_mmr_leaf_num < log_size {
+            let op_count = log_size - next_mmr_leaf_num;
             warn!(
                 log_size,
                 op_count, "MMR lags behind log, replaying log to catch up"
             );
-            while next_mmr_leaf_loc < log_size {
-                let op = log.read(next_mmr_leaf_loc).await?;
+            while next_mmr_leaf_num < log_size {
+                let op = log.read(next_mmr_leaf_num).await?;
                 mmr.add_batched(hasher, &op.encode()).await?;
-                next_mmr_leaf_loc += 1;
+                next_mmr_leaf_num += 1;
             }
             mmr.sync(hasher).await.map_err(Error::Mmr)?;
         }
 
         // At this point the MMR and log should be consistent.
-        assert_eq!(log.size().await?, leaf_pos_to_loc(mmr.size()).unwrap());
+        assert_eq!(log.size().await?, leaf_pos_to_num(mmr.size()).unwrap());
 
         Ok((inactivity_floor_loc, mmr, log))
     }
@@ -248,20 +208,11 @@ impl<
     /// Builds the database's snapshot by replaying the log starting at the inactivity floor.
     /// Assumes the log and mmr have the same number of operations and are not pruned beyond the
     /// inactivity floor.
-    ///
-    /// If a bitmap is provided, then a bit is appended for each operation in the operation log,
-    /// with its value reflecting its activity status. The caller is responsible for syncing any
-    /// changes made to the bitmap.
     pub(crate) async fn build_snapshot_from_log<const N: usize>(
         inactivity_floor_loc: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
-        mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<(), Error> {
-        if let Some(ref bitmap) = bitmap {
-            assert_eq!(inactivity_floor_loc, bitmap.bit_count());
-        }
-
         let stream = log
             .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), inactivity_floor_loc)
             .await?;
@@ -271,73 +222,152 @@ impl<
                 Err(e) => {
                     return Err(Error::Journal(e));
                 }
-                Ok((i, op)) => {
-                    match op {
-                        Operation::Delete(key) => {
-                            let result =
-                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
-                            if let Some(ref mut bitmap) = bitmap {
-                                // Mark previous location (if any) of the deleted key as inactive.
-                                if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc, false);
-                                }
-                            }
-                        }
-                        Operation::Update(key, _) => {
-                            let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, i).await?;
-                            if let Some(ref mut bitmap) = bitmap {
-                                if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc, false);
-                                }
-                                bitmap.append(true);
-                            }
-                        }
-                        Operation::CommitFloor(_) => {}
+                Ok((i, op)) => match op {
+                    Operation::Delete(key) => {
+                        Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
                     }
-                    if let Some(ref mut bitmap) = bitmap {
-                        // If we reach this point and a bit hasn't been added for the operation, then it's
-                        // an inactive operation and we need to tag it as such in the bitmap.
-                        if bitmap.bit_count() == i {
-                            bitmap.append(false);
-                        }
+                    Operation::Update(key, _, _) => {
+                        Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, i).await?;
                     }
-                }
+                    Operation::CommitFloor(_) => {}
+                },
             }
         }
 
         Ok(())
     }
 
-    /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
-    /// insert it if the key isn't already present.
+    async fn last_key_in_iter(
+        log: &Journal<E, Operation<K, V>>,
+        iter: impl Iterator<Item = &u64>,
+    ) -> Result<Option<(u64, K, V, K)>, Error> {
+        let mut last_key = None;
+        for &loc in iter {
+            let (k, v, next_key) = Self::get_update_op(log, loc).await?;
+            if let Some((_, ref other_key, _, _)) = last_key {
+                if k > *other_key {
+                    last_key = Some((loc, k, v, next_key));
+                }
+            } else {
+                last_key = Some((loc, k, v, next_key));
+            }
+        }
+        Ok(last_key)
+    }
+
+    /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+    /// its location to `new_loc`.
+    async fn update_known_loc(
+        snapshot: &mut Index<T, u64>,
+        key: &K,
+        old_loc: u64,
+        new_loc: u64,
+    ) -> Result<(), Error> {
+        let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+        while let Some(&cursor_loc) = cursor.next() {
+            if cursor_loc == old_loc {
+                cursor.update(new_loc);
+                return Ok(());
+            }
+        }
+        unreachable!("prev_key with given old_loc should have been found");
+    }
+
+    /// Find the previous key to `key` in the snapshot and update its location to `new_loc`,
+    /// returning an UpdateLocResult indicating the specific outcome. Do not call this method on an
+    /// empty snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the snapshot is empty.
+    async fn update_loc_prev(
+        snapshot: &mut Index<T, u64>,
+        log: &Journal<E, Operation<K, V>>,
+        key: &K,
+        next_loc: u64,
+    ) -> Result<UpdateLocResult<K, V>, Error> {
+        assert_ne!(snapshot.keys(), 0);
+
+        let iter = snapshot.prev_translated_key_values(key);
+        if let Some(prev_key) = Self::last_key_in_iter(log, iter).await? {
+            Self::update_known_loc(snapshot, &prev_key.1, prev_key.0, next_loc).await?;
+            return Ok(UpdateLocResult::NotExists((
+                prev_key.1, prev_key.2, prev_key.3,
+            )));
+        }
+
+        // Unusual case where there is no previous key, in which case we cycle around to the greatest key.
+        let iter = snapshot.last_translated_key_values();
+        let last_key = Self::last_key_in_iter(log, iter).await?;
+        let Some(last_key) = last_key else {
+            panic!("no last key found in non-empty snapshot");
+        };
+
+        Self::update_known_loc(snapshot, &last_key.1, last_key.0, next_loc).await?;
+
+        Ok(UpdateLocResult::NotExists((
+            last_key.1, last_key.2, last_key.3,
+        )))
+    }
+
+    /// Update the location of `key` to `new_loc` in the snapshot and return an UpdateLocResult
+    /// indicating the specific outcome.
     async fn update_loc(
         snapshot: &mut Index<T, u64>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
-        new_loc: u64,
-    ) -> Result<Option<u64>, Error> {
-        // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
-        // cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-            return Ok(None);
-        };
+        next_loc: u64,
+    ) -> Result<UpdateLocResult<K, V>, Error> {
+        let mut best_prev_key = None;
 
-        // Iterate over conflicts in the snapshot.
-        while let Some(&loc) = cursor.next() {
-            let (k, _) = Self::get_update_op(log, loc).await?;
-            if k == *key {
-                // Found the key in the snapshot.
-                assert!(new_loc > loc);
-                cursor.update(new_loc);
-                return Ok(Some(loc));
+        {
+            // If the translated key is not in the snapshot, insert the new location and return the
+            // previous key info.
+            let Some(mut cursor) = snapshot.get_mut_or_insert(key, next_loc) else {
+                return Self::update_loc_prev(snapshot, log, key, next_loc + 1).await;
+            };
+
+            // Iterate over conflicts in the snapshot to try and find the key, or its predecessor if it
+            // doesn't exist.
+            while let Some(&loc) = cursor.next() {
+                let (k, v, next_key) = Self::get_update_op(log, loc).await?;
+                if k == *key {
+                    // Found the key in the snapshot.  Update its location and return its next-key.
+                    assert!(next_loc > loc);
+                    cursor.update(next_loc);
+                    return Ok(UpdateLocResult::Exists(next_key));
+                }
+                if k > *key {
+                    continue;
+                }
+                if let Some((_, ref other_key, _, _)) = best_prev_key {
+                    if k > *other_key {
+                        best_prev_key = Some((loc, k, v, next_key));
+                    }
+                } else {
+                    best_prev_key = Some((loc, k, v, next_key));
+                }
             }
+
+            // The key wasn't in the snapshot, so add it to the cursor.
+            cursor.insert(next_loc);
         }
 
-        // The key wasn't in the snapshot, so add it to the cursor.
-        cursor.insert(new_loc);
+        if let Some((loc, prev_key, v, next_key)) = best_prev_key {
+            // The previous key was found within the current index entry.
+            let mut cursor = snapshot
+                .get_mut(&prev_key)
+                .expect("prev_key already known to exist");
+            while let Some(&cursor_loc) = cursor.next() {
+                if cursor_loc == loc {
+                    cursor.update(next_loc + 1);
+                    return Ok(UpdateLocResult::NotExists((prev_key, v, next_key)));
+                }
+            }
+            unreachable!("prev_key should have been found");
+        }
 
-        Ok(None)
+        Self::update_loc_prev(snapshot, log, key, next_loc + 1).await
     }
 
     /// Get the update operation corresponding to a location from the snapshot.
@@ -347,12 +377,15 @@ impl<
     /// Panics if the location does not reference an update operation. This should never happen
     /// unless the snapshot is buggy, or this method is being used to look up an operation
     /// independent of the snapshot contents.
-    async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
-        let Operation::Update(k, v) = log.read(loc).await? else {
+    async fn get_update_op(
+        log: &Journal<E, Operation<K, V>>,
+        loc: u64,
+    ) -> Result<(K, V, K), Error> {
+        let Operation::Update(k, v, next_key) = log.read(loc).await? else {
             panic!("location does not reference update operation. loc={loc}");
         };
 
-        Ok((k, v))
+        Ok((k, v, next_key))
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -376,7 +409,7 @@ impl<
     /// value.
     pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
         for &loc in self.snapshot.get(key) {
-            let (k, v) = Self::get_update_op(&self.log, loc).await?;
+            let (k, v, _) = Self::get_update_op(&self.log, loc).await?;
             if k == *key {
                 return Ok(Some((v, loc)));
             }
@@ -388,7 +421,7 @@ impl<
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> u64 {
-        leaf_pos_to_loc(self.mmr.size()).unwrap()
+        leaf_pos_to_num(self.mmr.size()).unwrap()
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -397,29 +430,38 @@ impl<
         self.inactivity_floor_loc
     }
 
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
+    /// Updates `key` to have value `value` while maintaining appropriate next_key spans. The
+    /// operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update_return_loc(key, value).await?;
+        let (loc, prev_key, value, next_key) = self.key_or_prev_active_key(&key).await?;
+        if prev_key == key {
+            self.update_loc(&mut self.snapshot, &self.log, &key, loc)
+                .await?;
+            return Ok(());
+        }
 
         Ok(())
     }
 
-    /// Updates `key` to have value `value`, returning the old location of the key if it was
-    /// previously assigned some value, and None otherwise.
-    pub(crate) async fn update_return_loc(
-        &mut self,
-        key: K,
-        value: V,
-    ) -> Result<Option<u64>, Error> {
+    pub(crate) async fn update_if_active(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
         let res =
             Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
-        let op = Operation::Update(key, value);
+        let op = match res {
+            Some((_, next_key)) => Operation::Update(key, value, next_key),
+            None => {
+                // This key was not previously active, so we need to compute its next_key and make
+                // it the next_key of the previous key.
+                let (loc, prev_key, v) = self.prev_active_key(&key).await?;
+                return Ok((loc, Some((prev_key, v))));
+            }
+        };
+
         self.apply_op(op).await?;
 
-        Ok(res)
+        Ok(())
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
@@ -449,7 +491,7 @@ impl<
         };
         // Iterate over all conflicting keys in the snapshot.
         while let Some(&loc) = cursor.next() {
-            let (k, _) = Self::get_update_op(log, loc).await?;
+            let (k, _, _) = Self::get_update_op(log, loc).await?;
             if k == *key {
                 // The key is in the snapshot, so delete it.
                 //
@@ -510,23 +552,27 @@ impl<
             .await
     }
 
-    /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
-    /// operations.
+    /// Analogous to proof, but with respect to the state of the MMR when it had `size` elements.
     pub async fn historical_proof(
         &self,
-        op_count: u64,
+        size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_loc = std::cmp::min(
+            size.saturating_sub(1),
+            start_loc.saturating_add(max_ops.get()) - 1,
+        );
+        let end_pos = leaf_num_to_pos(end_loc);
+        let mmr_size = leaf_num_to_pos(size);
 
-        let mmr_size = leaf_loc_to_pos(op_count);
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_loc..end_loc)
+            .historical_range_proof(mmr_size, start_pos, end_pos)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
-        let futures = (start_loc..end_loc)
+        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
+        let futures = (start_loc..=end_loc)
             .map(|i| self.log.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -656,7 +702,7 @@ impl<
         );
 
         self.mmr
-            .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(target_prune_loc))
+            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(target_prune_loc))
             .await?;
 
         Ok(())
@@ -796,12 +842,13 @@ pub(super) mod test {
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
-            let key = Digest::random(&mut rng);
             if i % 10 == 0 && i > 0 {
                 ops.push(Operation::Delete(prev_key));
             } else {
+                let key = Digest::random(&mut rng);
+                let next_key = Digest::random(&mut rng); // TODO??
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(key, value));
+                ops.push(Operation::Update(key, value, next_key));
                 prev_key = key;
             }
         }
@@ -812,8 +859,8 @@ pub(super) mod test {
     pub(super) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
-                Operation::Update(key, value) => {
-                    db.update(key, value).await.unwrap();
+                Operation::Update(key, value, next_key) => {
+                    db.update(key, value, next_key).await.unwrap();
                 }
                 Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
@@ -1067,7 +1114,7 @@ pub(super) mod test {
             let max_ops = NZU64!(4);
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
-            let start_loc = leaf_pos_to_loc(start_pos).unwrap();
+            let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(100).await.unwrap();
             db.sync().await.unwrap();
@@ -1356,8 +1403,8 @@ pub(super) mod test {
                     .unwrap();
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
-            let mut snapshot: Index<_, u64> =
-                Index::<_, u64>::init(context.with_label("snapshot"), TwoCap);
+            let mut snapshot: Index<TwoCap, u64> =
+                Index::init(context.with_label("snapshot"), TwoCap);
             AnyTest::build_snapshot_from_log::<SHA256_SIZE>(
                 inactivity_floor_loc,
                 &log,
@@ -1452,7 +1499,7 @@ pub(super) mod test {
                 .historical_proof(original_op_count, 5, NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(historical_proof.size, leaf_loc_to_pos(original_op_count));
+            assert_eq!(historical_proof.size, leaf_num_to_pos(original_op_count));
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -1482,7 +1529,7 @@ pub(super) mod test {
 
             // Test singleton database
             let (single_proof, single_ops) = db.historical_proof(1, 0, NZU64!(1)).await.unwrap();
-            assert_eq!(single_proof.size, leaf_loc_to_pos(1));
+            assert_eq!(single_proof.size, leaf_num_to_pos(1));
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
@@ -1508,7 +1555,7 @@ pub(super) mod test {
 
             // Test proof at minimum historical position
             let (min_proof, min_ops) = db.historical_proof(3, 0, NZU64!(3)).await.unwrap();
-            assert_eq!(min_proof.size, leaf_loc_to_pos(3));
+            assert_eq!(min_proof.size, leaf_num_to_pos(3));
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
@@ -1537,7 +1584,7 @@ pub(super) mod test {
                     .await
                     .unwrap();
 
-                assert_eq!(historical_proof.size, leaf_loc_to_pos(end_loc));
+                assert_eq!(historical_proof.size, leaf_num_to_pos(end_loc));
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
@@ -1579,7 +1626,7 @@ pub(super) mod test {
             db.commit().await.unwrap();
 
             let (proof, ops) = db.historical_proof(5, 1, NZU64!(10)).await.unwrap();
-            assert_eq!(proof.size, leaf_loc_to_pos(5));
+            assert_eq!(proof.size, leaf_num_to_pos(5));
             assert_eq!(ops.len(), 4);
 
             let mut hasher = Standard::<Sha256>::new();

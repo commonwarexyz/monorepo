@@ -239,9 +239,8 @@ impl<
         Bitmap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
-    /// Updates `key` to have value `value`. If the key already has this same value, then this is a
-    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
-    /// next successful `commit`.
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let update_result = self.any.update_return_loc(key, value).await?;
         if let Some(old_loc) = update_result {
