@@ -212,7 +212,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             .verified_blocks
             .put_sync(round.view(), commitment, block)
             .await;
-        Self::debug_put_result(result, round, "verified");
+        Self::handle_result(result, round, "verified");
     }
 
     /// Add a notarized block to the prunable archive.
@@ -224,7 +224,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             .notarized_blocks
             .put_sync(round.view(), commitment, block)
             .await;
-        Self::debug_put_result(result, round, "notarized");
+        Self::handle_result(result, round, "notarized");
     }
 
     /// Add a notarization to the prunable archive.
@@ -241,7 +241,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             .notarizations
             .put_sync(round.view(), commitment, notarization)
             .await;
-        Self::debug_put_result(result, round, "notarization");
+        Self::handle_result(result, round, "notarization");
     }
 
     /// Add a finalization to the prunable archive.
@@ -258,11 +258,11 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             .finalizations
             .put_sync(round.view(), commitment, finalization)
             .await;
-        Self::debug_put_result(result, round, "finalization");
+        Self::handle_result(result, round, "finalization");
     }
 
     /// Helper to debug cache results.
-    fn debug_put_result(result: Result<(), archive::Error>, round: Round, name: &str) {
+    fn handle_result(result: Result<(), archive::Error>, round: Round, name: &str) {
         match result {
             Ok(_) => {
                 debug!(?round, name, "cached");
