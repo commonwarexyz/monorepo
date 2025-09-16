@@ -1468,6 +1468,7 @@ dependencies = [
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
+ "rand_core 0.6.4",
 ]
 
 [[package]]

@@ -37,9 +37,6 @@ pub async fn recv_frame<T: Stream>(
     if len > max_message_size {
         return Err(Error::RecvTooLarge(len));
     }
-    if len == 0 {
-        return Err(Error::StreamClosed);
-    }
 
     // Read the rest of the message
     let read = stream.recv(vec![0; len]).await.map_err(Error::RecvFailed)?;
@@ -168,22 +165,6 @@ mod tests {
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::RecvTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
-        });
-    }
-
-    #[test]
-    fn test_read_zero_size() {
-        let (mut sink, mut stream) = mocks::Channel::init();
-
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            // Manually insert a frame that gives zero as the size
-            let mut buf = BytesMut::with_capacity(4);
-            buf.put_u32(0);
-            sink.send(buf).await.unwrap();
-
-            let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
-            assert!(matches!(&result, Err(Error::StreamClosed)));
         });
     }
 
