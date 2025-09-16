@@ -3,20 +3,8 @@
 use crate::adb::sync::Target;
 use commonware_cryptography::Digest;
 
-/// Errors that can occur during database synchronization.
 #[derive(Debug, thiserror::Error)]
-pub enum Error<T, U, D>
-where
-    T: std::error::Error + Send + 'static,
-    U: std::error::Error + Send + 'static,
-    D: Digest,
-{
-    /// Database error
-    #[error("database error: {0}")]
-    Database(T),
-    /// Resolver error
-    #[error("resolver error: {0:?}")]
-    Resolver(U),
+pub enum EngineError<D: Digest> {
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch { expected: D, actual: D },
@@ -44,6 +32,25 @@ where
     /// Error extracting pinned nodes
     #[error("error extracting pinned nodes: {0}")]
     PinnedNodes(String),
+}
+
+/// Errors that can occur during database synchronization.
+#[derive(Debug, thiserror::Error)]
+pub enum Error<T, U, D>
+where
+    T: std::error::Error + Send + 'static,
+    U: std::error::Error + Send + 'static,
+    D: Digest,
+{
+    /// Database error
+    #[error("database error: {0}")]
+    Database(T),
+    /// Resolver error
+    #[error("resolver error: {0:?}")]
+    Resolver(U),
+    /// Engine error
+    #[error("engine error: {0}")]
+    Engine(EngineError<D>),
 }
 
 impl<T, U, D> Error<T, U, D>

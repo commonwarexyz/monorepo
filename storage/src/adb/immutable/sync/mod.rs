@@ -695,10 +695,10 @@ mod tests {
             let result: Result<ImmutableSyncTest, _> = sync::sync(config).await;
             assert!(matches!(
                 result,
-                Err(sync::Error::InvalidTarget {
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget {
                     lower_bound_pos: 31,
                     upper_bound_pos: 30,
-                })
+                }))
             ));
         });
     }
@@ -930,7 +930,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             let target_db =
@@ -989,7 +991,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             let target_db =
@@ -1126,7 +1130,10 @@ mod tests {
                 .unwrap();
 
             let result = client.step().await;
-            assert!(matches!(result, Err(sync::Error::InvalidTarget { .. })));
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
+            ));
 
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
