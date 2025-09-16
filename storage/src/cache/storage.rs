@@ -285,6 +285,14 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         Ok(())
     }
 
+    /// Stores an item in the [Cache] and syncs it, plus any other pending writes, to disk.
+    ///
+    /// If the index already exists, the cache is just synced.
+    pub async fn put_sync(&mut self, index: u64, value: V) -> Result<(), Error> {
+        self.put(index, value).await?;
+        self.sync().await
+    }
+
     /// Close the [Cache].
     ///
     /// Any pending writes will be synced prior to closing.
