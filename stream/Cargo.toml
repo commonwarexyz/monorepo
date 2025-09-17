@@ -31,8 +31,3 @@ criterion = { workspace = true }
 
 [lib]
 bench = false
-
-[[bench]]
-name="public_key"
-harness = false
-path = "src/public_key/benches/bench.rs"

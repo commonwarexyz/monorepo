@@ -9,7 +9,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use std::{future::Future, net::SocketAddr};
+use std::net::SocketAddr;
 
 /// Messages that can be sent to the tracker actor.
 pub enum Message<E: Spawner + Metrics, C: PublicKey> {
