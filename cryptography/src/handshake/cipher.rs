@@ -1,3 +1,5 @@
+#![no_std]
+extern crate alloc;
 use alloc::vec::Vec;
 use chacha20poly1305::{
     aead::{generic_array::typenum::Unsigned, Aead},

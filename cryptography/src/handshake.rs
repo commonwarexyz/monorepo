@@ -299,3 +299,54 @@ pub fn listen_end(state: ListenState, msg: Msg3) -> Result<(SendCipher, RecvCiph
     }
     Ok((state.send, state.recv))
 }
+
+#[cfg(test)]
+mod test {
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    use super::*;
+    use crate::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+
+    #[test]
+    fn test_can_setup_and_send_messages() -> Result<(), Error> {
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let dialer_crypto = PrivateKey::from_rng(&mut rng);
+        let listener_crypto = PrivateKey::from_rng(&mut rng);
+
+        let (d_state, msg1) = dial_start(
+            &mut rng,
+            Context {
+                current_time: 0,
+                ok_timestamps: 0..1,
+                my_identity: dialer_crypto.clone(),
+                peer_identity: listener_crypto.public_key(),
+            },
+        );
+        let (l_state, msg2) = listen_start(
+            &mut rng,
+            Context {
+                current_time: 0,
+                ok_timestamps: 0..1,
+                my_identity: listener_crypto,
+                peer_identity: dialer_crypto.public_key(),
+            },
+            msg1,
+        )?;
+        let (msg3, mut d_send, mut d_recv) = dial_end(d_state, msg2)?;
+        let (mut l_send, mut l_recv) = listen_end(l_state, msg3)?;
+
+        let m1: &'static [u8] = b"message 1";
+
+        let c1 = d_send.send(m1)?;
+        let m1_prime = l_recv.recv(&c1)?;
+        assert_eq!(m1, &m1_prime);
+
+        let m2: &'static [u8] = b"message 2";
+        let c2 = l_send.send(m2)?;
+        let m2_prime = d_recv.recv(&c2)?;
+        assert_eq!(m2, &m2_prime);
+
+        Ok(())
+    }
+}
