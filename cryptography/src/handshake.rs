@@ -10,13 +10,13 @@
 //! A three-message handshake is used to authenticate peers and establish a shared secret. The
 //! **dialer** initiates the connection, and the **listener** responds.
 //!
-//! [Msg1] The dialer starts by sending a signed message with their ephemeral key.
+//! [Syn] The dialer starts by sending a signed message with their ephemeral key.
 //!
-//! [Msg2] The listener responds by sending back their ephemeral key, along with a signature over the
+//! [SynAck] The listener responds by sending back their ephemeral key, along with a signature over the
 //! protocol transcript thus far. They can also derive a shared secret, which they use to generate
 //! a confirmation tag, also sent to the dialer.
 //!
-//! [Msg3] The dialer verifies the signed message, then derives the same secret, and uses
+//! [Ack] The dialer verifies the signed message, then derives the same secret, and uses
 //! that to send their own confirmation back to the listener.
 //!
 //! The listener then verifies this confirmation.
@@ -57,19 +57,19 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 
 /// First handshake message sent by the dialer.
 /// Contains dialer's ephemeral key and timestamp signature.
-pub struct Msg1<S> {
+pub struct Syn<S> {
     time_ms: i64,
     epk: EphemeralPublicKey,
     sig: S,
 }
 
-impl<S: EncodeSize> EncodeSize for Msg1<S> {
+impl<S: EncodeSize> EncodeSize for Syn<S> {
     fn encode_size(&self) -> usize {
         self.time_ms.encode_size() + self.epk.encode_size() + self.sig.encode_size()
     }
 }
 
-impl<S: Write> Write for Msg1<S> {
+impl<S: Write> Write for Syn<S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.time_ms.write(buf);
         self.epk.write(buf);
@@ -77,7 +77,7 @@ impl<S: Write> Write for Msg1<S> {
     }
 }
 
-impl<S: Read> Read for Msg1<S> {
+impl<S: Read> Read for Syn<S> {
     type Cfg = S::Cfg;
 
     fn read_cfg(
@@ -94,14 +94,14 @@ impl<S: Read> Read for Msg1<S> {
 
 /// Second handshake message sent by the listener.
 /// Contains listener's ephemeral key, signature, and confirmation tag.
-pub struct Msg2<S> {
+pub struct SynAck<S> {
     time_ms: i64,
     epk: EphemeralPublicKey,
     sig: S,
     confirmation: Summary,
 }
 
-impl<S: EncodeSize> EncodeSize for Msg2<S> {
+impl<S: EncodeSize> EncodeSize for SynAck<S> {
     fn encode_size(&self) -> usize {
         self.time_ms.encode_size()
             + self.epk.encode_size()
@@ -110,7 +110,7 @@ impl<S: EncodeSize> EncodeSize for Msg2<S> {
     }
 }
 
-impl<S: Write> Write for Msg2<S> {
+impl<S: Write> Write for SynAck<S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.time_ms.write(buf);
         self.epk.write(buf);
@@ -119,7 +119,7 @@ impl<S: Write> Write for Msg2<S> {
     }
 }
 
-impl<S: Read> Read for Msg2<S> {
+impl<S: Read> Read for SynAck<S> {
     type Cfg = S::Cfg;
 
     fn read_cfg(
@@ -137,23 +137,23 @@ impl<S: Read> Read for Msg2<S> {
 
 /// Third handshake message sent by the dialer.
 /// Contains dialer's confirmation tag to complete the handshake.
-pub struct Msg3 {
+pub struct Ack {
     confirmation: Summary,
 }
 
-impl EncodeSize for Msg3 {
+impl EncodeSize for Ack {
     fn encode_size(&self) -> usize {
         self.confirmation.encode_size()
     }
 }
 
-impl Write for Msg3 {
+impl Write for Ack {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.confirmation.write(buf);
     }
 }
 
-impl Read for Msg3 {
+impl Read for Ack {
     type Cfg = ();
 
     fn read_cfg(
@@ -214,7 +214,7 @@ impl<S, P> Context<S, P> {
 pub fn dial_start<S: Signer, P: PublicKey>(
     rng: impl CryptoRngCore,
     ctx: Context<S, P>,
-) -> (DialState<P>, Msg1<<S as Signer>::Signature>) {
+) -> (DialState<P>, Syn<<S as Signer>::Signature>) {
     let Context {
         current_time,
         ok_timestamps,
@@ -237,7 +237,7 @@ pub fn dial_start<S: Signer, P: PublicKey>(
             transcript,
             ok_timestamps,
         },
-        Msg1 {
+        Syn {
             time_ms: current_time,
             epk,
             sig,
@@ -249,8 +249,8 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 /// Verifies the listener's response and returns final message and ciphers.
 pub fn dial_end<P: PublicKey>(
     state: DialState<P>,
-    msg: Msg2<<P as Verifier>::Signature>,
-) -> Result<(Msg3, SendCipher, RecvCipher), Error> {
+    msg: SynAck<<P as Verifier>::Signature>,
+) -> Result<(Ack, SendCipher, RecvCipher), Error> {
     let DialState {
         esk,
         peer_identity,
@@ -280,7 +280,7 @@ pub fn dial_end<P: PublicKey>(
     }
 
     Ok((
-        Msg3 {
+        Ack {
             confirmation: confirmation_d2l,
         },
         send,
@@ -293,8 +293,8 @@ pub fn dial_end<P: PublicKey>(
 pub fn listen_start<S: Signer, P: PublicKey>(
     rng: &mut impl CryptoRngCore,
     ctx: Context<S, P>,
-    msg: Msg1<<P as Verifier>::Signature>,
-) -> Result<(ListenState, Msg2<<S as Signer>::Signature>), Error> {
+    msg: Syn<<P as Verifier>::Signature>,
+) -> Result<(ListenState, SynAck<<S as Signer>::Signature>), Error> {
     let Context {
         current_time,
         my_identity,
@@ -335,7 +335,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
             send,
             recv,
         },
-        Msg2 {
+        SynAck {
             time_ms: current_time,
             epk,
             sig,
@@ -346,7 +346,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
 
 /// Completes the handshake as the listener.
 /// Verifies the dialer's confirmation and returns established ciphers.
-pub fn listen_end(state: ListenState, msg: Msg3) -> Result<(SendCipher, RecvCipher), Error> {
+pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCipher), Error> {
     if msg.confirmation != state.confirmation {
         return Err(Error::HandshakeFailed);
     }

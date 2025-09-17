@@ -67,8 +67,8 @@ use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
-        dial_end, dial_start, listen_end, listen_start, Context, Error as HandshakeError, Msg1,
-        Msg2, Msg3, RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD,
+        dial_end, dial_start, listen_end, listen_start, Ack, Context, Error as HandshakeError,
+        RecvCipher, SendCipher, Syn, SynAck, CIPHERTEXT_OVERHEAD,
     },
     Signer,
 };
@@ -180,7 +180,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     send_frame(&mut sink, &msg1.encode(), config.max_message_size).await?;
 
     let msg2_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-    let msg2 = Msg2::<S::Signature>::decode(msg2_bytes)?;
+    let msg2 = SynAck::<S::Signature>::decode(msg2_bytes)?;
 
     let (msg3, send, recv) = dial_end(state, msg2)?;
     send_frame(&mut sink, &msg3.encode(), config.max_message_size).await?;
@@ -222,7 +222,7 @@ pub async fn listen<
     }
 
     let msg1_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-    let msg1 = Msg1::<S::Signature>::decode(msg1_bytes)?;
+    let msg1 = Syn::<S::Signature>::decode(msg1_bytes)?;
 
     let (current_time, ok_timestamps) = config.time_information(&ctx);
     let (state, msg2) = listen_start(
@@ -238,7 +238,7 @@ pub async fn listen<
     send_frame(&mut sink, &msg2.encode(), config.max_message_size).await?;
 
     let msg3_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-    let msg3 = Msg3::decode(msg3_bytes)?;
+    let msg3 = Ack::decode(msg3_bytes)?;
 
     let (send, recv) = listen_end(state, msg3)?;
 
