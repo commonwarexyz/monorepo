@@ -233,3 +233,77 @@ impl<I: Stream> Receiver<I> {
         Ok(self.cipher.recv(&c)?.into())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+    use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _};
+
+    const NAMESPACE: &'static [u8] = b"fuzz_transport";
+    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB buffer
+
+    #[test]
+    fn test_can_setup_and_send_messages() -> Result<(), Error> {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
+
+            let dialer_config = Config {
+                signing_key: dialer_crypto.clone(),
+                namespace: NAMESPACE.to_vec(),
+                max_message_size: MAX_MESSAGE_SIZE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1),
+            };
+
+            let listener_config = Config {
+                signing_key: listener_crypto.clone(),
+                namespace: NAMESPACE.to_vec(),
+                max_message_size: MAX_MESSAGE_SIZE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1),
+            };
+
+            let listener_handle = context.clone().spawn(move |context| async move {
+                listen(
+                    context,
+                    |_| async { true },
+                    listener_config,
+                    listener_stream,
+                    listener_sink,
+                )
+                .await
+            });
+
+            let (mut dialer_sender, mut dialer_receiver) = dial(
+                context.clone(),
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await?;
+
+            let (listener_peer, mut listener_sender, mut listener_receiver) =
+                listener_handle.await.unwrap()?;
+            assert_eq!(listener_peer, dialer_crypto.public_key());
+            let messages: Vec<&'static [u8]> = vec![b"A", b"B", b"C"];
+            for msg in &messages {
+                dialer_sender.send(msg).await?;
+                let msg2 = listener_receiver.recv().await?;
+                assert_eq!(msg, &msg2);
+                listener_sender.send(msg).await?;
+                let msg3 = dialer_receiver.recv().await?;
+                assert_eq!(msg, &msg3);
+            }
+            Ok(())
+        })
+    }
+}
