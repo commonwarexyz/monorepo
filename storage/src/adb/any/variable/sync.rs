@@ -1,5 +1,5 @@
 use crate::{
-    adb::sync,
+    adb,
     journal::{
         variable::{Config as VConfig, Journal as VJournal},
         Error,
@@ -47,13 +47,11 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<VJournal<E, V>, sync::DatabaseError> {
-    if lower_bound > upper_bound {
-        return Err(sync::DatabaseError::InvalidTarget {
-            lower_bound_pos: lower_bound,
-            upper_bound_pos: upper_bound,
-        });
-    }
+) -> Result<VJournal<E, V>, adb::Error> {
+    assert!(
+        lower_bound <= upper_bound,
+        "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
+    );
 
     // Calculate the section ranges based on item locations
     let items_per_section = items_per_section.get();
@@ -366,6 +364,7 @@ mod tests {
     }
 
     /// Test `init_journal` with invalid parameters.
+    #[should_panic]
     #[test_traced]
     fn test_init_journal_invalid_parameters() {
         let executor = deterministic::Runner::default();
@@ -378,8 +377,7 @@ mod tests {
                 buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
-            // Test invalid bounds: lower > upper
-            let result = init_journal::<deterministic::Context, u64>(
+            let _result = init_journal::<deterministic::Context, u64>(
                 context.clone(),
                 cfg.clone(),
                 10,        // lower_bound
@@ -387,16 +385,6 @@ mod tests {
                 NZU64!(5), // items_per_section
             )
             .await;
-            match result {
-                Err(sync::DatabaseError::InvalidTarget {
-                    lower_bound_pos,
-                    upper_bound_pos,
-                }) => {
-                    assert_eq!(lower_bound_pos, 10);
-                    assert_eq!(upper_bound_pos, 5);
-                }
-                _ => panic!("Expected InvalidSyncRange error"),
-            }
         });
     }
 

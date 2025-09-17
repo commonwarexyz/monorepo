@@ -335,7 +335,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<H::Digest>,
-    ) -> Result<Self, crate::adb::sync::DatabaseError> {
+    ) -> Result<Self, crate::adb::Error> {
         let journal = init_journal(
             context.with_label("mmr_journal"),
             JConfig {

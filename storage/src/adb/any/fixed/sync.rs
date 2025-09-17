@@ -37,7 +37,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, adb::sync::DatabaseError> {
+    ) -> Result<Self::Journal, adb::Error> {
         let journal_config = fixed::Config {
             partition: config.log_journal_partition.clone(),
             items_per_blob: config.log_items_per_blob,
@@ -62,7 +62,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, adb::sync::DatabaseError> {
+    ) -> Result<Self, adb::Error> {
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
@@ -137,7 +137,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, adb::sync::DatabaseError> {
+    ) -> Result<Self::Journal, adb::Error> {
         let size = journal.size().await?;
 
         if size <= lower_bound {
@@ -178,13 +178,11 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     cfg: fixed::Config,
     lower_bound: u64,
     upper_bound: u64,
-) -> Result<fixed::Journal<E, A>, adb::sync::DatabaseError> {
-    if lower_bound > upper_bound {
-        return Err(adb::sync::DatabaseError::InvalidTarget {
-            lower_bound_pos: lower_bound,
-            upper_bound_pos: upper_bound,
-        });
-    }
+) -> Result<fixed::Journal<E, A>, adb::Error> {
+    assert!(
+        lower_bound <= upper_bound,
+        "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
+    );
 
     let mut journal = fixed::Journal::<E, A>::init(context.clone(), cfg.clone()).await?;
     let journal_size = journal.size().await?;
@@ -2027,7 +2025,7 @@ mod tests {
         });
     }
 
-    /// Test `init_sync` returns InvalidSyncRange when lower_bound > upper_bound.
+    #[should_panic]
     #[test_traced]
     fn test_init_sync_invalid_range() {
         let executor = deterministic::Runner::default();
@@ -2041,25 +2039,13 @@ mod tests {
 
             let lower_bound = 6;
             let upper_bound = 5;
-            let result = init_journal::<Context, Digest>(
+            let _result = init_journal::<Context, Digest>(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
                 upper_bound,
             )
             .await;
-
-            // Verify that we get the expected error
-            match result {
-                Err(crate::adb::sync::DatabaseError::InvalidTarget {
-                    lower_bound_pos,
-                    upper_bound_pos,
-                }) => {
-                    assert_eq!(lower_bound_pos, lower_bound);
-                    assert_eq!(upper_bound_pos, upper_bound);
-                }
-                _ => panic!("Expected InvalidSyncRange error"),
-            }
         });
     }
 

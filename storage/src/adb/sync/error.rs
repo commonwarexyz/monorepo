@@ -34,28 +34,6 @@ pub enum EngineError<D: Digest> {
     PinnedNodes(String),
 }
 
-/// Error type for database operations.
-/// This can occur because the underlying storage failed or encountered invalid data.
-#[derive(Debug, thiserror::Error)]
-pub enum DatabaseError {
-    /// Underlying storage operation failed
-    #[error("storage error: {0}")]
-    Storage(crate::adb::Error),
-
-    /// Invalid target parameters
-    #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
-    InvalidTarget {
-        lower_bound_pos: u64,
-        upper_bound_pos: u64,
-    },
-}
-
-impl<T: Into<crate::adb::Error>> From<T> for DatabaseError {
-    fn from(err: T) -> Self {
-        Self::Storage(err.into())
-    }
-}
-
 /// Errors that can occur during database synchronization.
 #[derive(Debug, thiserror::Error)]
 pub enum Error<U, D>
@@ -65,7 +43,7 @@ where
 {
     /// Database error
     #[error("database error: {0}")]
-    Database(DatabaseError),
+    Database(crate::adb::Error),
 
     /// Resolver error
     #[error("resolver error: {0:?}")]
@@ -80,7 +58,7 @@ impl<T, U, D> From<T> for Error<U, D>
 where
     U: std::error::Error + Send + 'static,
     D: Digest,
-    T: Into<DatabaseError>,
+    T: Into<crate::adb::Error>,
 {
     fn from(err: T) -> Self {
         Self::Database(err.into())

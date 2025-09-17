@@ -3,6 +3,7 @@ use crate::{
         any::variable::sync::init_journal,
         immutable,
         sync::{self, Journal as _},
+        Error,
     },
     journal::variable,
     mmr::StandardHasher as Standard,
@@ -83,7 +84,7 @@ where
         config: &Self::Config,
         lower_bound_loc: u64,
         upper_bound_loc: u64,
-    ) -> Result<Self::Journal, sync::DatabaseError> {
+    ) -> Result<Self::Journal, Error> {
         // Open the journal and discard operations outside the sync range.
         let journal = init_journal(
             context.with_label("log"),
@@ -139,7 +140,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, sync::DatabaseError> {
+    ) -> Result<Self, Error> {
         let journal = journal.into_inner();
         let sync_config = Config {
             db_config,
@@ -163,7 +164,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, sync::DatabaseError> {
+    ) -> Result<Self::Journal, Error> {
         let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
         if size <= lower_bound {

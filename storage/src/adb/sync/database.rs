@@ -1,4 +1,4 @@
-use crate::adb::sync::{error::DatabaseError, Journal};
+use crate::adb::sync::Journal;
 use commonware_cryptography::Digest;
 use std::future::Future;
 
@@ -25,7 +25,7 @@ pub trait Database: Sized {
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, DatabaseError>>;
+    ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -36,7 +36,7 @@ pub trait Database: Sized {
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, DatabaseError>>;
+    ) -> impl Future<Output = Result<Self, crate::adb::Error>>;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
@@ -54,5 +54,5 @@ pub trait Database: Sized {
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, DatabaseError>>;
+    ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 }

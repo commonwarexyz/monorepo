@@ -198,7 +198,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn init_synced(
         context: E,
         mut cfg: sync::Config<E, K, V, T, H::Digest, <Variable<K, V> as Read>::Cfg>,
-    ) -> Result<Self, crate::adb::sync::DatabaseError> {
+    ) -> Result<Self, Error> {
         // Initialize MMR for sync
         let mut mmr = Mmr::init_sync(
             context.with_label("mmr"),
