@@ -107,7 +107,7 @@ use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
 };
-use commonware_utils::hex;
+use commonware_utils::{hex, NZUsize};
 use futures::{
     pin_mut,
     stream::{self, Stream, StreamExt},
@@ -121,6 +121,9 @@ use std::{
 };
 use tracing::{debug, trace, warn};
 use zstd::{bulk::compress, decode_all};
+
+/// The size of the read buffer to use for replaying log operations.
+const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -820,9 +823,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Returns the number of items in the given section.
     pub(crate) async fn items_in_section(&self, section: u64) -> Result<u64, Error> {
-        let stream = self
-            .replay(section, 0, commonware_utils::NZUsize!(1024))
-            .await?;
+        let stream = self.replay(section, 0, REPLAY_BUFFER_SIZE).await?;
         pin_mut!(stream);
         let mut items = 0;
         while let Some(result) = stream.next().await {

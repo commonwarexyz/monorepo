@@ -20,10 +20,14 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{sequence::prefixed_u64::U64, Array};
+use commonware_utils::{sequence::prefixed_u64::U64, Array, NZUsize};
+use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
 use std::num::NonZeroU64;
 use tracing::debug;
+
+/// The size of the read buffer to use for replaying log operations.
+const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 
 /// Wraps a [VJournal] to provide a sync-compatible interface.
 pub struct Journal<E, K, V>
@@ -309,9 +313,7 @@ where
     let mut loc = oldest_retained_loc;
 
     {
-        let stream = journal
-            .replay(lower_section, 0, commonware_utils::NZUsize!(1024))
-            .await?;
+        let stream = journal.replay(lower_section, 0, REPLAY_BUFFER_SIZE).await?;
         pin_mut!(stream);
 
         while let Some(result) = stream.next().await {
