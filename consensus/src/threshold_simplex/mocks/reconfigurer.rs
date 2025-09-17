@@ -1,18 +1,19 @@
-//! Byzantine participant that sends conflicting notarize/finalize messages.
+//! Byzantine participant that behaves correctly except increments the epoch by 1
+//! in all outgoing votes (notarize/finalize/nullify). This helps ensure peers
+//! reject messages from an unexpected epoch.
 
 use crate::{
-    threshold_simplex::types::{Finalize, Notarize, Proposal, Voter},
-    types::View,
+    threshold_simplex::types::{Finalize, Notarize, Nullify, Voter},
+    types::{Epoch, View},
     ThresholdSupervisor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
-    Digest, Hasher,
+    Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Spawner};
-use rand::{CryptoRng, Rng};
+use commonware_runtime::{Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -21,8 +22,8 @@ pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
     pub namespace: Vec<u8>,
 }
 
-pub struct Conflicter<
-    E: Clock + Rng + CryptoRng + Spawner,
+pub struct Reconfigurer<
+    E: Spawner,
     V: Variant,
     H: Hasher,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
@@ -35,11 +36,11 @@ pub struct Conflicter<
 }
 
 impl<
-        E: Clock + Rng + CryptoRng + Spawner,
+        E: Spawner,
         V: Variant,
         H: Hasher,
         S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Conflicter<E, V, H, S>
+    > Reconfigurer<E, V, H, S>
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
@@ -55,7 +56,7 @@ impl<
         self.context.spawn_ref()(self.run(pending_network))
     }
 
-    async fn run(mut self, pending_network: (impl Sender, impl Receiver)) {
+    async fn run(self, pending_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
@@ -70,35 +71,40 @@ impl<
             // Process message
             match msg {
                 Voter::Notarize(notarize) => {
-                    // Notarize random digest
-                    let view = notarize.view();
-                    let share = self.supervisor.share(view).unwrap();
-                    let payload = H::Digest::random(&mut self.context);
-                    let proposal =
-                        Proposal::new(notarize.proposal.round, notarize.proposal.parent, payload);
-                    let n = Notarize::<V, _>::sign(&self.namespace, share, proposal);
-                    let msg = Voter::Notarize(n).encode().into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    // Build identical proposal but with epoch incremented by 1
+                    let share = self.supervisor.share(notarize.view()).unwrap();
+                    let mut proposal = notarize.proposal.clone();
+                    let old_round = proposal.round;
+                    let new_epoch: Epoch = old_round.epoch().saturating_add(1);
+                    proposal.round = (new_epoch, old_round.view()).into();
 
-                    // Notarize received digest
-                    let n = Notarize::<V, _>::sign(&self.namespace, share, notarize.proposal);
+                    // Sign and broadcast
+                    let n = Notarize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Voter::Finalize(finalize) => {
-                    // Finalize random digest
-                    let view = finalize.view();
-                    let share = self.supervisor.share(view).unwrap();
-                    let payload = H::Digest::random(&mut self.context);
-                    let proposal =
-                        Proposal::new(finalize.proposal.round, finalize.proposal.parent, payload);
+                    // Build identical proposal but with epoch incremented by 1
+                    let share = self.supervisor.share(finalize.view()).unwrap();
+                    let mut proposal = finalize.proposal.clone();
+                    let old_round = proposal.round;
+                    let new_epoch: Epoch = old_round.epoch().saturating_add(1);
+                    proposal.round = (new_epoch, old_round.view()).into();
+
+                    // Sign and broadcast
                     let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
+                }
+                Voter::Nullify(nullify) => {
+                    // Re-sign nullify for the next epoch
+                    let share = self.supervisor.share(nullify.view()).unwrap();
+                    let old_round = nullify.round;
+                    let new_epoch: Epoch = old_round.epoch().saturating_add(1);
+                    let new_round = (new_epoch, old_round.view()).into();
 
-                    // Finalize provided digest
-                    let f = Finalize::<V, _>::sign(&self.namespace, share, finalize.proposal);
-                    let msg = Voter::Finalize(f).encode().into();
+                    let n = Nullify::<V>::sign(&self.namespace, share, new_round);
+                    let msg = Voter::<V, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,
