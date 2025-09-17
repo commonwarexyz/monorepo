@@ -11,7 +11,7 @@ use commonware_codec::{
     error::Error as CodecError,
     EncodeSize, FixedSize,
 };
-use commonware_utils::BitVec;
+use commonware_utils::bitmap::BitMap;
 use core::num::{NonZeroU8, NonZeroUsize};
 
 /// The length of a half of a [Digest].
@@ -28,7 +28,7 @@ const FULL_DIGEST_LEN: usize = Digest::SIZE;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BloomFilter {
     hashers: u8,
-    bits: BitVec,
+    bits: BitMap,
 }
 
 impl BloomFilter {
@@ -36,7 +36,7 @@ impl BloomFilter {
     pub fn new(hashers: NonZeroU8, bits: NonZeroUsize) -> Self {
         Self {
             hashers: hashers.get(),
-            bits: BitVec::zeroes(bits.get()),
+            bits: BitMap::zeroes(bits.get()),
         }
     }
 
@@ -65,7 +65,7 @@ impl BloomFilter {
     pub fn insert(&mut self, item: &[u8]) {
         let indices = self.indices(item, self.bits.len());
         for index in indices {
-            self.bits.set(index);
+            self.bits.set(index, true);
         }
     }
 
@@ -75,7 +75,7 @@ impl BloomFilter {
     pub fn contains(&self, item: &[u8]) -> bool {
         let indices = self.indices(item, self.bits.len());
         for index in indices {
-            if !self.bits.get(index).expect("index out of bounds") {
+            if !self.bits.get(index) {
                 return false;
             }
         }
@@ -101,7 +101,7 @@ impl Read for BloomFilter {
         if !hashers_cfg.contains(&(hashers as usize)) {
             return Err(CodecError::Invalid("BloomFilter", "invalid hashers"));
         }
-        let bits = BitVec::read_cfg(buf, bits_cfg)?;
+        let bits = BitMap::read_cfg(buf, bits_cfg)?;
         Ok(Self { hashers, bits })
     }
 }

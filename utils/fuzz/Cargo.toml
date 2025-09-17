@@ -32,8 +32,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "bitvec"
-path = "fuzz_targets/bitvec.rs"
+name = "bitmap"
+path = "fuzz_targets/bitmap.rs"
 test = false
 doc = false
 bench = false

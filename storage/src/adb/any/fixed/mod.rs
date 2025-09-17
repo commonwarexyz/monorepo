@@ -12,7 +12,7 @@ use crate::{
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
-        bitmap::Bitmap,
+        bitmap::MerkleizedBitMap,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
         Proof, StandardHasher as Standard,
@@ -143,7 +143,7 @@ impl<
             inactivity_floor_loc,
             &log,
             &mut snapshot,
-            None::<&mut Bitmap<H, UNUSED_N>>,
+            None::<&mut MerkleizedBitMap<H, UNUSED_N>>,
         )
         .await?;
 
@@ -255,10 +255,10 @@ impl<
         inactivity_floor_loc: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
-        mut bitmap: Option<&mut Bitmap<H, N>>,
+        mut bitmap: Option<&mut MerkleizedBitMap<H, N>>,
     ) -> Result<(), Error> {
         if let Some(ref bitmap) = bitmap {
-            assert_eq!(inactivity_floor_loc, bitmap.bit_count());
+            assert_eq!(inactivity_floor_loc, bitmap.len() as u64);
         }
 
         let stream = log
@@ -278,7 +278,7 @@ impl<
                             if let Some(ref mut bitmap) = bitmap {
                                 // Mark previous location (if any) of the deleted key as inactive.
                                 if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc, false);
+                                    bitmap.set_bit(old_loc as usize, false);
                                 }
                             }
                         }
@@ -287,9 +287,9 @@ impl<
                                 Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, i).await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc, false);
+                                    bitmap.set_bit(old_loc as usize, false);
                                 }
-                                bitmap.append(true);
+                                bitmap.push(true);
                             }
                         }
                         Operation::CommitFloor(_) => {}
@@ -297,8 +297,8 @@ impl<
                     if let Some(ref mut bitmap) = bitmap {
                         // If we reach this point and a bit hasn't been added for the operation, then it's
                         // an inactive operation and we need to tag it as such in the bitmap.
-                        if bitmap.bit_count() == i {
-                            bitmap.append(false);
+                        if bitmap.len() as u64 == i {
+                            bitmap.push(false);
                         }
                     }
                 }
@@ -1345,9 +1345,9 @@ pub(super) mod test {
             // Close the db, then replay its operations with a bitmap.
             db.close().await.unwrap();
             // Initialize the bitmap based on the current db's inactivity floor.
-            let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
+            let mut bitmap = MerkleizedBitMap::<_, SHA256_SIZE>::new();
             for _ in 0..inactivity_floor_loc {
-                bitmap.append(false);
+                bitmap.push(false);
             }
             bitmap.sync(&mut hasher).await.unwrap();
 
@@ -1383,7 +1383,7 @@ pub(super) mod test {
 
             // Check the bitmap state matches that of the snapshot.
             let items = db.log.size().await.unwrap();
-            assert_eq!(bitmap.bit_count(), items);
+            assert_eq!(bitmap.len() as u64, items);
             let mut active_positions = HashSet::new();
             // This loop checks that the expected true bits are true in the bitmap.
             for pos in db.inactivity_floor_loc..items {
@@ -1397,7 +1397,7 @@ pub(super) mod test {
                     if *loc == pos {
                         // Found an active op.
                         active_positions.insert(pos);
-                        assert!(bitmap.get_bit(pos));
+                        assert!(bitmap.get_bit(pos as usize));
                         break;
                     }
                 }
@@ -1405,7 +1405,7 @@ pub(super) mod test {
             // This loop checks that the expected false bits are false in the bitmap.
             for pos in db.inactivity_floor_loc..items {
                 if !active_positions.contains(&pos) {
-                    assert!(!bitmap.get_bit(pos));
+                    assert!(!bitmap.get_bit(pos as usize));
                 }
             }
 
