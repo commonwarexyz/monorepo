@@ -111,15 +111,10 @@ jobs:
       run: echo "rust_version=$(rustc +${{ env.NIGHTLY_VERSION }} --version)" >> "$GITHUB_OUTPUT"
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Cache cargo-udeps
-      id: cargo-udeps-cache
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/bin/cargo-udeps
-        key: ${{ runner.os }}-${{ env.UDEPS_VERSION }}-cargo-udeps-${{ steps.rust-version.outputs.rust_version }}
     - name: Install cargo-udeps
-      if: steps.cargo-udeps-cache.outputs.cache-hit != 'true'
-      run: cargo +${{ env.NIGHTLY_VERSION }} install cargo-udeps --version ${{ env.UDEPS_VERSION }}
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
       run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets
 
