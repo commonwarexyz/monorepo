@@ -12,8 +12,6 @@ pub trait Database: Sized {
     type PinnedNodes;
     /// The underlying storage of the Database populated by the sync engine
     type Journal: Journal<Data = Self::Data>;
-    /// Error type returned by the [Database]
-    type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
     /// Configuration options for the [Database]
     type Config;
     /// Runtime context required for the [Database]
@@ -37,7 +35,7 @@ pub trait Database: Sized {
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, <Self::Journal as Journal>::Error>>;
+    ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -48,7 +46,7 @@ pub trait Database: Sized {
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, Self::Error>>;
+    ) -> impl Future<Output = Result<Self, crate::adb::Error>>;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
@@ -66,7 +64,7 @@ pub trait Database: Sized {
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, Self::Error>>;
+    ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 
     /// Verify a proof that the given data is in the database with the given root
     /// starting at the given location.
@@ -82,5 +80,5 @@ pub trait Database: Sized {
         proof: &Self::Proof,
         start_loc: u64,
         data_len: u64,
-    ) -> Result<Self::PinnedNodes, Self::Error>;
+    ) -> Result<Self::PinnedNodes, crate::adb::Error>;
 }
