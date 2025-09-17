@@ -299,6 +299,8 @@ impl Read for Summary {
 
 #[cfg(test)]
 mod test {
+    use commonware_codec::{DecodeExt as _, Encode};
+
     use super::*;
 
     #[test]
@@ -394,5 +396,11 @@ mod test {
         let s1 = Transcript::new(s.hash.as_bytes()).summarize();
         let s2 = Transcript::resume(s).summarize();
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn test_summary_encode_roundtrip() {
+        let s = Transcript::new(b"test").summarize();
+        assert_eq!(&s, &Summary::decode(s.encode()).unwrap());
     }
 }
