@@ -101,15 +101,15 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
         return Err(adb::Error::UnexpectedData(loc));
     }
 
-    let size = get_size(&journal, items_per_section, upper_bound).await?;
+    let size = get_size(&journal, items_per_section).await?;
+    if size > upper_bound + 1 {
+        return Err(adb::Error::UnexpectedData(size));
+    }
+
     Ok((journal, size))
 }
 
-/// Returns the size of the journal.
-///
-/// # Errors
-///
-/// Returns [adb::Error::UnexpectedData] if the journal's size > upper_bound + 1.
+/// Returns the number of items in the journal.
 ///
 /// # Panics
 ///
@@ -117,7 +117,6 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
 pub(crate) async fn get_size<E: Storage + Metrics, V: Codec>(
     journal: &VJournal<E, V>,
     items_per_section: u64,
-    upper_bound: u64,
 ) -> Result<u64, adb::Error> {
     let last_section = journal.blobs.last_key_value().map(|(&s, _)| s).unwrap();
     let last_section_start = last_section * items_per_section;
@@ -128,9 +127,6 @@ pub(crate) async fn get_size<E: Storage + Metrics, V: Codec>(
         let (section, _offset, _size, _op) = item?;
         assert_eq!(section, last_section);
         size += 1;
-        if size > upper_bound + 1 {
-            return Err(adb::Error::UnexpectedData(size));
-        }
     }
     Ok(size)
 }

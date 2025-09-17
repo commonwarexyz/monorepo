@@ -128,12 +128,10 @@ where
                 .map_err(crate::adb::Error::from)?;
 
             // Get the size of the journal
-            let size = get_size(
-                &variable_journal,
-                config.log_items_per_section.get(),
-                upper_bound,
-            )
-            .await?;
+            let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
+            if size > upper_bound + 1 {
+                return Err(crate::adb::Error::UnexpectedData(size));
+            }
 
             Ok(journal::Journal::new(
                 variable_journal,
