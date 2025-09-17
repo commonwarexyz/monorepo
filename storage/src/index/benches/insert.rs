@@ -1,6 +1,9 @@
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::Metrics;
-use commonware_storage::{index::Index, translator::TwoCap};
+use commonware_storage::{
+    index::{Index as _, Unordered as Index},
+    translator::TwoCap,
+};
 use criterion::{criterion_group, Criterion};
 use prometheus_client::registry::Metric;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -30,6 +33,7 @@ impl Metrics for DummyMetrics {
     fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
 }
 
+// TODO: Also benchmark OrderedIndex.
 fn bench_insert(c: &mut Criterion) {
     for items in N_ITEMS {
         let label = format!("{}/items={}", module_path!(), items,);
