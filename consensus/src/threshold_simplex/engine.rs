@@ -1,9 +1,9 @@
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
-    types::{Activity, Context, View},
+    types::{Activity, Context},
 };
-use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
+use crate::{types::View, Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Signer,
@@ -77,6 +77,7 @@ impl<
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
                 supervisor: cfg.supervisor.clone(),
+                epoch: cfg.epoch,
                 namespace: cfg.namespace.clone(),
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
@@ -96,6 +97,7 @@ impl<
                 supervisor: cfg.supervisor.clone(),
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
+                epoch: cfg.epoch,
                 namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
@@ -115,6 +117,7 @@ impl<
                 crypto: cfg.crypto.public_key(),
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
                 activity_timeout: cfg.activity_timeout,
                 fetch_timeout: cfg.fetch_timeout,
