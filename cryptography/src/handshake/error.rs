@@ -1,5 +1,4 @@
 use core::ops::Range;
-
 use thiserror::Error;
 
 /// Errors relating to the handshake, or to encryption.

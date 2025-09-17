@@ -31,15 +31,13 @@
 //! The protocol includes timestamp validation to protect against replay attacks and clock skew:
 //! - Messages with timestamps too old are rejected to prevent replay attacks
 //! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
-use core::ops::Range;
-
-use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
-use rand_core::CryptoRngCore;
-
 use crate::{
     transcript::{Summary, Transcript},
     PublicKey, Signer, Verifier,
 };
+use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
+use core::ops::Range;
+use rand_core::CryptoRngCore;
 
 mod error;
 pub use error::Error;
@@ -356,11 +354,10 @@ pub fn listen_end(state: ListenState, msg: Msg3) -> Result<(SendCipher, RecvCiph
 
 #[cfg(test)]
 mod test {
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
-
     use super::*;
     use crate::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
 
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {

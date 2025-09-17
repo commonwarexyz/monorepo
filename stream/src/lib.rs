@@ -62,6 +62,7 @@
 
 pub mod utils;
 
+use crate::utils::codec::{recv_frame, send_frame};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
@@ -76,8 +77,6 @@ use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
-
-use crate::utils::codec::{recv_frame, send_frame};
 
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]

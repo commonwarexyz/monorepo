@@ -4,6 +4,7 @@
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
 
+use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, Write};
@@ -12,8 +13,6 @@ use rand_core::{
     CryptoRng, CryptoRngCore, RngCore,
 };
 use zeroize::ZeroizeOnDrop;
-
-use crate::{Signer, Verifier};
 
 /// Provides an implementation of [CryptoRngCore].
 ///
