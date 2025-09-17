@@ -1,7 +1,10 @@
-use commonware_cryptography::handshake::{
-    dial_end, dial_start, listen_end, listen_start, Context, Error, RecvCipher, SendCipher,
+use commonware_cryptography::{
+    ed25519::PrivateKey,
+    handshake::{
+        dial_end, dial_start, listen_end, listen_start, Context, Error, RecvCipher, SendCipher,
+    },
+    PrivateKeyExt as _, Signer,
 };
-use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
 use criterion::criterion_main;
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha8Rng;
