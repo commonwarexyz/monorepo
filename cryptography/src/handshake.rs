@@ -22,9 +22,10 @@
 //! The listener then verifies this confirmation.
 //!
 //! The shared secret can then be used to derive to AEAD keys, for the sending data ([SendCipher])
-//! and receiving data ([RecvCipher]). These use ChaCha20-Poly1305 as the AEAD. A 12 byte counter
-//! is used as a nonce, with every call to [SendCipher::send] or [RecvCipher::recv] incrementing
-//! this counter. Note that this guarantees that messages sent are received in order.
+//! and receiving data ([RecvCipher]). These use ChaCha20-Poly1305 as the AEAD. Each direction has
+//! a 12 byte counter to used as a nonce, with every call to [SendCipher::send] on one end,
+//! or [RecvCipher::recv] on the other end incrementing this counter.
+//! Note that this guarantees that messages sent are received in order.
 //!
 //! # Security Features
 //!
