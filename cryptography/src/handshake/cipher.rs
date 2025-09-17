@@ -6,6 +6,7 @@ use chacha20poly1305::{
     AeadCore, ChaCha20Poly1305, KeyInit as _,
 };
 use rand_core::CryptoRngCore;
+use zeroize::ZeroizeOnDrop;
 
 // Intentionally avoid depending directly on super, to depend on the sibling.
 use super::error::Error;
@@ -17,11 +18,17 @@ struct CounterNonce {
     inner: u128,
 }
 
+// We don't need to zeroize nonces.
+impl ZeroizeOnDrop for CounterNonce {}
+
 impl CounterNonce {
+    /// Creates a new counter nonce starting at zero.
     pub fn new() -> Self {
         Self { inner: 0 }
     }
 
+    /// Increments the counter and returns the current value as bytes.
+    /// Returns an error if the counter would overflow.
     pub fn inc(&mut self) -> Result<[u8; 16], Error> {
         if self.inner >= 1 << 96 {
             return Err(Error::MessageLimitReached);
@@ -32,12 +39,14 @@ impl CounterNonce {
     }
 }
 
+#[derive(ZeroizeOnDrop)]
 pub struct SendCipher {
     nonce: CounterNonce,
     inner: ChaCha20Poly1305,
 }
 
 impl SendCipher {
+    /// Creates a new sending cipher with a random key.
     pub fn new(mut rng: impl CryptoRngCore) -> Self {
         let mut key = [0u8; 32];
         rng.fill_bytes(&mut key[..]);
@@ -47,6 +56,7 @@ impl SendCipher {
         }
     }
 
+    /// Encrypts data and returns the ciphertext.
     pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
         self.inner
             .encrypt((&self.nonce.inc()?[..12]).into(), data)
@@ -54,12 +64,14 @@ impl SendCipher {
     }
 }
 
+#[derive(ZeroizeOnDrop)]
 pub struct RecvCipher {
     nonce: CounterNonce,
     inner: ChaCha20Poly1305,
 }
 
 impl RecvCipher {
+    /// Creates a new receiving cipher with a random key.
     pub fn new(mut rng: impl CryptoRngCore) -> Self {
         let mut key = [0u8; 32];
         rng.fill_bytes(&mut key[..]);
@@ -69,6 +81,7 @@ impl RecvCipher {
         }
     }
 
+    /// Decrypts ciphertext and returns the original data.
     pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
         self.inner
             .decrypt((&self.nonce.inc()?[..12]).into(), encrypted_data)

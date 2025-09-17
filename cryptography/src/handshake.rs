@@ -1,3 +1,36 @@
+//! This module provides an authenticated key exchange protocol, or handshake.
+//!
+//! # Design
+//!
+//! The **dialer** and the **listener** both have a public identity, known to each other in advance.
+//! The goal of the handshake is to establish a shared, encrypted, and authenticated communication
+//! channel between these two parties. No third party should be able to read messages, or send
+//! messates along the channel.
+//!
+//! A three-message handshake is used to authenticate peers and establish a shared secret. The
+//! **dialer** initiates the connection, and the **listener** responds.
+//!
+//! [Msg1] The dialer starts by sending a signed message with their ephemeral key.
+//!
+//! [Msg2] The listener responds by sending back their ephemeral key, along with a signature over the
+//! protocol transcript thus far. They can also derive a shared secret, which they use to generate
+//! a confirmation tag, also sent to the dialer.
+//!
+//! [Msg3] The dialer verifies the signed message, then derives the same secret, and uses
+//! that to send their own confirmation back to the listener.
+//!
+//! The listener then verifies this confirmation.
+//!
+//! The shared secret can then be used to derive to AEAD keys, for the sending data ([SendCipher])
+//! and receiving data ([RecvCipher]). These use ChaCha20-Poly1305 as the AEAD. A 12 byte counter
+//! is used as a nonce, with every call to [SendCipher::send] or [RecvCipher::recv] incrementing
+//! this counter. Note that this guarantees that messages sent are received in order.
+//!
+//! # Security Features
+//!
+//! The protocol includes timestamp validation to protect against replay attacks and clock skew:
+//! - Messages with timestamps too old are rejected to prevent replay attacks
+//! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
 use core::ops::Range;
 
 use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
@@ -23,6 +56,8 @@ const LABEL_CIPHER_D2L: &'static [u8] = b"cipher_d2l";
 const LABEL_CONFIRMATION_L2D: &'static [u8] = b"confirmation_l2d";
 const LABEL_CONFIRMATION_D2L: &'static [u8] = b"confirmation_d2l";
 
+/// First handshake message sent by the dialer.
+/// Contains dialer's ephemeral key and timestamp signature.
 pub struct Msg1<S> {
     time_ms: i64,
     epk: EphemeralPublicKey,
@@ -58,6 +93,8 @@ impl<S: Read> Read for Msg1<S> {
     }
 }
 
+/// Second handshake message sent by the listener.
+/// Contains listener's ephemeral key, signature, and confirmation tag.
 pub struct Msg2<S> {
     time_ms: i64,
     epk: EphemeralPublicKey,
@@ -99,6 +136,8 @@ impl<S: Read> Read for Msg2<S> {
     }
 }
 
+/// Third handshake message sent by the dialer.
+/// Contains dialer's confirmation tag to complete the handshake.
 pub struct Msg3 {
     confirmation: Summary,
 }
@@ -128,6 +167,8 @@ impl Read for Msg3 {
     }
 }
 
+/// State maintained by the dialer during handshake.
+/// Tracks ephemeral secret, peer identity, and protocol transcript.
 pub struct DialState<P> {
     esk: SecretKey,
     peer_identity: P,
@@ -135,12 +176,16 @@ pub struct DialState<P> {
     ok_timestamps: Range<i64>,
 }
 
+/// State maintained by the listener during handshake.
+/// Tracks expected confirmation and derived ciphers.
 pub struct ListenState {
     confirmation: Summary,
     send: SendCipher,
     recv: RecvCipher,
 }
 
+/// Handshake context containing timing and identity information.
+/// Used by both dialer and listener to initialize handshake state.
 pub struct Context<S, P> {
     current_time: i64,
     ok_timestamps: Range<i64>,
@@ -149,6 +194,7 @@ pub struct Context<S, P> {
 }
 
 impl<S, P> Context<S, P> {
+    /// Creates a new handshake context.
     pub fn new(
         current_time_ms: i64,
         ok_timestamps: Range<i64>,
@@ -164,6 +210,8 @@ impl<S, P> Context<S, P> {
     }
 }
 
+/// Initiates a handshake as the dialer.
+/// Returns the dialer state and the first message to send.
 pub fn dial_start<S: Signer, P: PublicKey>(
     rng: impl CryptoRngCore,
     ctx: Context<S, P>,
@@ -198,6 +246,8 @@ pub fn dial_start<S: Signer, P: PublicKey>(
     )
 }
 
+/// Completes a handshake as the dialer.
+/// Verifies the listener's response and returns final message and ciphers.
 pub fn dial_end<P: PublicKey>(
     state: DialState<P>,
     msg: Msg2<<P as Verifier>::Signature>,
@@ -239,6 +289,8 @@ pub fn dial_end<P: PublicKey>(
     ))
 }
 
+/// Processes the first handshake message as the listener.
+/// Verifies the dialer's message and returns state and response.
 pub fn listen_start<S: Signer, P: PublicKey>(
     rng: &mut impl CryptoRngCore,
     ctx: Context<S, P>,
@@ -293,6 +345,8 @@ pub fn listen_start<S: Signer, P: PublicKey>(
     ))
 }
 
+/// Completes the handshake as the listener.
+/// Verifies the dialer's confirmation and returns established ciphers.
 pub fn listen_end(state: ListenState, msg: Msg3) -> Result<(SendCipher, RecvCipher), Error> {
     if msg.confirmation != state.confirmation {
         return Err(Error::HandshakeFailed);
