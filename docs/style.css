@@ -1,3 +1,17 @@
+@font-face {
+    font-family: 'JetBrains Mono';
+    src: url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+  }
+  
+  @font-face {
+    font-family: 'JetBrains Mono';
+    src: url('./fonts/JetBrainsMono-Bold.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+  }
+
 * {
     box-sizing: border-box;
 }
@@ -15,7 +29,7 @@ body {
     min-height: 100vh;
     background-color: white;
     color: black;
-    font-family: 'Consolas', monospace;
+    font-family: 'JetBrains Mono', monospace;
     max-width: 800px;
     margin: 0 auto;
     padding: 10px 10px 0 10px;
@@ -78,7 +92,7 @@ button {
     margin-bottom: 5px;
     background-color: -webkit-link;
     color: white;
-    font-family: 'Consolas', monospace;
+    font-family: 'JetBrains Mono', monospace;
     border-width: 0;
 }
 
@@ -270,7 +284,7 @@ pre {
     padding: 15px;
     overflow-x: auto;
     margin: 15px 0;
-    font-family: 'Consolas', monospace;
+    font-family: 'JetBrains Mono', monospace;
     font-size: 0.9em;
     line-height: 1.4;
 }
@@ -278,7 +292,7 @@ pre {
 code {
     background-color: #f5f5f5;
     padding: 2px 4px;
-    font-family: 'Consolas', monospace;
+    font-family: 'JetBrains Mono', monospace;
     font-size: 0.9em;
 }
 
