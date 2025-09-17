@@ -17,7 +17,6 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Instant,
 };
-use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
@@ -64,7 +63,6 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg, (
 fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
-        info!("starting DB generation...");
         let pool = create_pool(ctx.clone(), THREADS).unwrap();
         let any_cfg = any_cfg(pool);
         let mut db = AnyDb::init(ctx, any_cfg).await.unwrap();
@@ -93,11 +91,6 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
             }
         }
         db.commit(None).await.unwrap();
-        info!(
-            op_count = db.op_count(),
-            oldest_retained_loc = db.oldest_retained_loc().unwrap(),
-            "DB generated.",
-        );
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         db.close().await.unwrap();
     });
@@ -107,12 +100,10 @@ type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>
 
 /// Benchmark the initialization of a large randomly generated any db.
 fn bench_variable_init(c: &mut Criterion) {
-    tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "benchmarking variable::Any init");
             gen_random_any(cfg.clone(), elements, operations);
 
             c.bench_function(
@@ -141,7 +132,6 @@ fn bench_variable_init(c: &mut Criterion) {
 
             let runner = Runner::new(cfg.clone());
             runner.start(|ctx| async move {
-                info!("cleaning up db...");
                 let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
                 let any_cfg = any_cfg(pool);
                 // Clean up the database after the benchmark.

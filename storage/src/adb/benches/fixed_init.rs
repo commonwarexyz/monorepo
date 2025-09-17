@@ -14,7 +14,6 @@ use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::Instant;
-use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
@@ -57,7 +56,6 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
 fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
-        info!("starting DB generation...");
         let pool = create_pool(ctx.clone(), THREADS).unwrap();
         let any_cfg = any_cfg(pool);
         let mut db = Any::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
@@ -86,11 +84,6 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
             }
         }
         db.commit().await.unwrap();
-        info!(
-            op_count = db.op_count(),
-            inactivity_floor_loc = db.inactivity_floor_loc(),
-            "DB generated.",
-        );
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         db.close().await.unwrap();
     });
@@ -100,12 +93,10 @@ type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest
 
 /// Benchmark the initialization of a large randomly generated any db.
 fn bench_fixed_init(c: &mut Criterion) {
-    tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "benchmarking fixed::Any init",);
             gen_random_any(cfg.clone(), elements, operations);
 
             c.bench_function(
@@ -134,7 +125,6 @@ fn bench_fixed_init(c: &mut Criterion) {
 
             let runner = Runner::new(cfg.clone());
             runner.start(|ctx| async move {
-                info!("cleaning up db...");
                 let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
                 let any_cfg = any_cfg(pool);
                 // Clean up the database after the benchmark.
