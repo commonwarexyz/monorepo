@@ -110,15 +110,13 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
 }
 
 /// Returns the number of items in the journal.
-///
-/// # Panics
-///
-/// Panics if the journal is empty.
 pub(crate) async fn get_size<E: Storage + Metrics, V: Codec>(
     journal: &VJournal<E, V>,
     items_per_section: u64,
 ) -> Result<u64, adb::Error> {
-    let last_section = journal.blobs.last_key_value().map(|(&s, _)| s).unwrap();
+    let Some(last_section) = journal.blobs.last_key_value().map(|(&s, _)| s) else {
+        return Ok(0);
+    };
     let last_section_start = last_section * items_per_section;
     let stream = journal.replay(last_section, 0, NZUsize!(1024)).await?;
     pin_mut!(stream);
