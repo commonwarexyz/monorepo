@@ -19,7 +19,7 @@ pub type View = u64;
 pub struct Round(Epoch, View);
 
 impl Round {
-    pub fn new(epoch: Epoch, view: View) -> Self {
+    pub const fn new(epoch: Epoch, view: View) -> Self {
         Self(epoch, view)
     }
 

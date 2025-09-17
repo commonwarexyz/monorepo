@@ -13,7 +13,6 @@ use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use tracing::debug;
 
 /// Instance of `threshold-simplex` consensus engine.
 pub struct Engine<
@@ -44,6 +43,21 @@ pub struct Engine<
 
     resolver: resolver::Actor<E, C::PublicKey, B, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
+}
+
+/// RAII guard for actor task handles that ensures all actors are aborted on drop.
+struct ActorTasks {
+    voter: Handle<()>,
+    batcher: Handle<()>,
+    resolver: Handle<()>,
+}
+
+impl Drop for ActorTasks {
+    fn drop(&mut self) {
+        self.voter.abort();
+        self.batcher.abort();
+        self.resolver.abort();
+    }
 }
 
 impl<
@@ -178,44 +192,35 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
-        // Start the batcher
+        // Start the actors
         let (pending_sender, pending_receiver) = pending_network;
-        let mut batcher_task = self
-            .batcher
-            .start(self.voter_mailbox.clone(), pending_receiver);
-
-        // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_task =
-            self.resolver
-                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
-
-        // Start the voter
         let (recovered_sender, recovered_receiver) = recovered_network;
-        let mut voter_task = self.voter.start(
-            self.batcher_mailbox,
-            self.resolver_mailbox,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
-        );
 
-        // Wait for the resolver or voter to finish
+        // Own all handles under a guard so aborting/dropping the engine cancels children.
+        let mut tasks = ActorTasks {
+            batcher: self
+                .batcher
+                .start(self.voter_mailbox.clone(), pending_receiver),
+            resolver: self
+                .resolver
+                .start(self.voter_mailbox, resolver_sender, resolver_receiver),
+            voter: self.voter.start(
+                self.batcher_mailbox,
+                self.resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            ),
+        };
+
+        // Wait for any actor to finish
         select! {
-            _ = &mut voter_task => {
-                debug!("voter finished");
-                resolver_task.abort();
-                batcher_task.abort();
+            _ = &mut tasks.voter => {
             },
-            _ = &mut batcher_task => {
-                debug!("batcher finished");
-                voter_task.abort();
-                resolver_task.abort();
+            _ = &mut tasks.batcher => {
             },
-            _ = &mut resolver_task => {
-                debug!("resolver finished");
-                voter_task.abort();
-                batcher_task.abort();
+            _ = &mut tasks.resolver => {
             },
         }
     }

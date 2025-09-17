@@ -1225,6 +1225,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-epocher"
+version = "0.0.58"
+dependencies = [
+ "axum",
+ "bytes",
+ "clap",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "rand 0.8.5",
+ "reqwest",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-estimator"
 version = "0.0.62"
 dependencies = [

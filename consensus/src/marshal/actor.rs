@@ -25,7 +25,7 @@ use commonware_storage::archive::{immutable, Archive as _, Identifier as Archive
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
-    try_join, StreamExt,
+    join, try_join, StreamExt,
 };
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
@@ -359,6 +359,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 resolver.fetch(Request::<B>::Block(commitment)).await;
                             }
                         }
+<<<<<<< HEAD
                         Message::GetBlock { identifier, response } => {
                             match identifier {
                                 BlockID::Commitment(commitment) => {
@@ -377,6 +378,26 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     let _ = response.send(block);
                                 }
                             }
+=======
+                        Message::Get { commitment, response } => {
+                            let result = self.find_block(&mut buffer, commitment).await;
+                            let _ = response.send(result);
+>>>>>>> 93732d46 (add example)
+                        }
+                        Message::GetByHeight { height, response } => {
+                            let result = self.get_finalized_block(height).await;
+                            let _ = response.send(result);
+                        }
+                        Message::GetFinalization { height, response } => {
+                            let (f, b) = join!(
+                                self.get_finalization_by_height(height),
+                                self.get_finalized_block(height),
+                            );
+                            let result = match (f, b) {
+                                (Some(f), Some(b)) => Some((f, b)),
+                                _ => None,
+                            };
+                            let _ = response.send(result);
                         }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
