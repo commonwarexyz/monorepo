@@ -36,6 +36,16 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 /// timing itself since any::init is single threaded.
 const THREADS: usize = 8;
 
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        const ELEMENTS: [u64; 1] = [NUM_ELEMENTS];
+        const OPERATIONS: [u64; 1] = [NUM_OPERATIONS];
+    } else {
+        const ELEMENTS: [u64; 2] = [NUM_ELEMENTS, NUM_ELEMENTS * 2];
+        const OPERATIONS: [u64; 2] = [NUM_OPERATIONS, NUM_OPERATIONS * 2];
+    }
+}
+
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -102,8 +112,8 @@ type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>
 fn bench_variable_init(c: &mut Criterion) {
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
-    for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
-        for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
+    for elements in ELEMENTS {
+        for operations in OPERATIONS {
             gen_random_any(cfg.clone(), elements, operations);
 
             c.bench_function(

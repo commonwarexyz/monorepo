@@ -41,6 +41,16 @@ const MULTI_THREADED: usize = 8;
 /// current::grafting_height()) and a multiple of digest size.
 const CHUNK_SIZE: usize = 32;
 
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        const ELEMENTS: [u64; 1] = [NUM_ELEMENTS];
+        const OPERATIONS: [u64; 1] = [NUM_OPERATIONS];
+    } else {
+        const ELEMENTS: [u64; 2] = [NUM_ELEMENTS, NUM_ELEMENTS * 2];
+        const OPERATIONS: [u64; 2] = [NUM_OPERATIONS, NUM_OPERATIONS * 2];
+    }
+}
+
 fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
     CConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -115,9 +125,8 @@ type CurrentDb = Current<
 fn bench_current_init(c: &mut Criterion) {
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
-
-    for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
-        for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
+    for elements in ELEMENTS {
+        for operations in OPERATIONS {
             for (multithreaded_name, threads) in [("off", SINGLE_THREADED), ("on", MULTI_THREADED)]
             {
                 gen_random_current(cfg.clone(), elements, operations, threads);
