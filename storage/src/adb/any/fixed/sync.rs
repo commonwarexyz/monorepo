@@ -1,5 +1,5 @@
 use crate::{
-    adb::{self, any, sync},
+    adb::{self, any},
     index::Index,
     journal::fixed,
     mmr::{
@@ -29,7 +29,6 @@ where
     type Op = Fixed<K, V>;
     type Journal = fixed::Journal<E, Fixed<K, V>>;
     type Hasher = H;
-    type Error = adb::Error;
     type Config = adb::any::fixed::Config<T>;
     type Digest = H::Digest;
 
@@ -38,7 +37,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+    ) -> Result<Self::Journal, adb::Error> {
         let journal_config = fixed::Config {
             partition: config.log_journal_partition.clone(),
             items_per_blob: config.log_items_per_blob,
@@ -63,7 +62,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, adb::Error> {
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
@@ -82,12 +81,11 @@ where
                 pinned_nodes,
             },
         )
-        .await
-        .map_err(adb::Error::Mmr)?;
+        .await?;
 
         // Convert MMR size to number of operations.
         let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
-            return Err(adb::Error::Mmr(crate::mmr::Error::InvalidSize(mmr.size())));
+            return Err(crate::mmr::Error::InvalidSize(mmr.size()).into());
         };
 
         // Apply the missing operations from the log to the MMR.
@@ -139,20 +137,18 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, Self::Error> {
-        let size = journal.size().await.map_err(adb::Error::from)?;
+    ) -> Result<Self::Journal, adb::Error> {
+        let size = journal.size().await?;
 
         if size <= lower_bound {
             // Close the existing journal before creating a new one
-            journal.close().await.map_err(adb::Error::from)?;
+            journal.close().await?;
 
             // Create a new journal with the new bounds
-            Self::create_journal(context, config, lower_bound, upper_bound)
-                .await
-                .map_err(adb::Error::from)
+            Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Just prune to the lower bound
-            journal.prune(lower_bound).await.map_err(adb::Error::from)?;
+            journal.prune(lower_bound).await?;
             Ok(journal)
         }
     }
@@ -182,13 +178,11 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     cfg: fixed::Config,
     lower_bound: u64,
     upper_bound: u64,
-) -> Result<fixed::Journal<E, A>, crate::journal::Error> {
-    if lower_bound > upper_bound {
-        return Err(crate::journal::Error::InvalidSyncRange(
-            lower_bound,
-            upper_bound,
-        ));
-    }
+) -> Result<fixed::Journal<E, A>, adb::Error> {
+    assert!(
+        lower_bound <= upper_bound,
+        "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
+    );
 
     let mut journal = fixed::Journal::<E, A>::init(context.clone(), cfg.clone()).await?;
     let journal_size = journal.size().await?;
@@ -267,8 +261,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
     // Create the tail blob with the correct size to reflect the position
     let (tail_blob, tail_actual_size) = context
         .open(&cfg.partition, &tail_index.to_be_bytes())
-        .await
-        .map_err(crate::journal::Error::Runtime)?;
+        .await?;
     assert_eq!(
         tail_actual_size, 0,
         "Expected empty blob for fresh initialization"
@@ -276,9 +269,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
 
     let tail = Append::new(tail_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
     if tail_items > 0 {
-        tail.resize(tail_size)
-            .await
-            .map_err(crate::journal::Error::Runtime)?;
+        tail.resize(tail_size).await?;
     }
 
     // Initialize metrics
@@ -552,10 +543,10 @@ mod tests {
             let result: Result<AnyTest, _> = sync::sync(config).await;
             assert!(matches!(
                 result,
-                Err(sync::Error::InvalidTarget {
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget {
                     lower_bound_pos: 31,
                     upper_bound_pos: 30,
-                }),
+                })),
             ));
         });
     }
@@ -847,7 +838,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             Arc::try_unwrap(target_db)
@@ -908,7 +901,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             Arc::try_unwrap(target_db)
@@ -1045,7 +1040,10 @@ mod tests {
                 .unwrap();
 
             let result = client.step().await;
-            assert!(matches!(result, Err(sync::Error::InvalidTarget { .. })));
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
+            ));
 
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -2027,7 +2025,7 @@ mod tests {
         });
     }
 
-    /// Test `init_sync` returns InvalidSyncRange when lower_bound > upper_bound.
+    #[should_panic]
     #[test_traced]
     fn test_init_sync_invalid_range() {
         let executor = deterministic::Runner::default();
@@ -2041,22 +2039,13 @@ mod tests {
 
             let lower_bound = 6;
             let upper_bound = 5;
-            let result = init_journal::<Context, Digest>(
+            let _result = init_journal::<Context, Digest>(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
                 upper_bound,
             )
             .await;
-
-            // Verify that we get the expected error
-            match result {
-                Err(journal::Error::InvalidSyncRange(lb, ub)) => {
-                    assert_eq!(lb, lower_bound);
-                    assert_eq!(ub, upper_bound);
-                }
-                _ => panic!("Expected InvalidSyncRange error"),
-            }
         });
     }
 

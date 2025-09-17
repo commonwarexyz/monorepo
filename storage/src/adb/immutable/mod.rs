@@ -216,8 +216,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
-        .await
-        .map_err(Error::Mmr)?;
+        .await?;
 
         // Initialize locations journal for sync
         let mut locations = init_journal(
@@ -428,8 +427,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.locations.prune(self.oldest_retained_loc).await?;
         self.mmr
             .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
-            .await
-            .map_err(Error::Mmr)
+            .await?;
+        Ok(())
     }
 
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
