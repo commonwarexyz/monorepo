@@ -50,11 +50,11 @@ use key_exchange::{EphemeralPublicKey, SecretKey};
 mod cipher;
 pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD};
 
-const NAMESPACE: &'static [u8] = b"commonware/handshake";
-const LABEL_CIPHER_L2D: &'static [u8] = b"cipher_l2d";
-const LABEL_CIPHER_D2L: &'static [u8] = b"cipher_d2l";
-const LABEL_CONFIRMATION_L2D: &'static [u8] = b"confirmation_l2d";
-const LABEL_CONFIRMATION_D2L: &'static [u8] = b"confirmation_d2l";
+const NAMESPACE: &[u8] = b"commonware/handshake";
+const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
+const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
+const LABEL_CONFIRMATION_L2D: &[u8] = b"confirmation_l2d";
+const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 
 /// First handshake message sent by the dialer.
 /// Contains dialer's ephemeral key and timestamp signature.

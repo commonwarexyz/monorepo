@@ -12,7 +12,7 @@ use zeroize::ZeroizeOnDrop;
 use super::error::Error;
 
 /// The amount of overhead in a ciphertext, compared to the plain message.
-pub const CIPHERTEXT_OVERHEAD: usize = <ChaCha20Poly1305 as AeadCore>::TagSize::USIZE as usize;
+pub const CIPHERTEXT_OVERHEAD: usize = <ChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
 
 struct CounterNonce {
     inner: u128,
