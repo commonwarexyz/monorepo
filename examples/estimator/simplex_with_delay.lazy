@@ -1,15 +1,15 @@
-# Simplex (with message sizes)
+# Simplex
 
-## Propose a block (10KB proposal)
-propose{0, size=10240}
+## Propose a block
+propose{0}
 
 ## Multicast notarize
 wait{0, threshold=1, delay=(0.1,1)}
-broadcast{1, size=100}
+broadcast{1}
 
 ## Multicast finalize after observing 2f+1 notarize
 wait{1, threshold=67%, delay=(0.1,1)}
-broadcast{2, size=100}
+broadcast{2}
 
 ## Wait for 2f+1 finalize
 wait{2, threshold=67%, delay=(0.1,1)}

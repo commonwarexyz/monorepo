@@ -1,0 +1,14 @@
+# Minimmit (with Coding over 50 Replicas)
+
+## Propose a block (1MB proposal any f + 1 of 5f + 1 can recover)
+propose{0, size=104858}
+
+## Multicast notarize (Shard + 32B digest + 8B view)
+wait{0, threshold=1}
+broadcast{1, size=104898}
+
+## Wait for 2f+1 to notarize
+wait{1, threshold=41%}
+
+## Wait for n-f to finalize
+wait{1, threshold=81%}

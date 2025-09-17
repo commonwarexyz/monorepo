@@ -54,7 +54,8 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, types::Epoch, Config, Engine};
+    use super::{mocks, Config, Engine};
+    use crate::types::Epoch;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -154,6 +155,7 @@ mod tests {
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
+                disconnect_on_block: true,
             },
         );
         network.start();
@@ -374,7 +376,7 @@ mod tests {
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let shutdowns = Arc::new(Mutex::new(0u64));
-        let mut prev_ctx = None;
+        let mut prev_checkpoint = None;
 
         while completed.lock().unwrap().len() != num_validators as usize {
             let completed = completed.clone();
@@ -387,6 +389,7 @@ mod tests {
                     context.with_label("network"),
                     commonware_p2p::simulated::Config {
                         max_size: 1024 * 1024,
+                        disconnect_on_block: true,
                     },
                 );
                 network.start();
@@ -459,18 +462,16 @@ mod tests {
                 }
                 context.sleep(Duration::from_millis(1000)).await;
                 *shutdowns.lock().unwrap() += 1;
-
-                context
             };
 
-            let context = if let Some(prev_ctx) = prev_ctx {
-                deterministic::Runner::from(prev_ctx)
+            let (_, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
+                deterministic::Runner::from(prev_checkpoint)
             } else {
                 deterministic::Runner::timed(Duration::from_secs(45))
             }
-            .start(f);
+            .start_and_recover(f);
 
-            prev_ctx = Some(context.recover());
+            prev_checkpoint = Some(checkpoint);
         }
     }
 
@@ -802,6 +803,7 @@ mod tests {
                 context.with_label("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
             network.start();

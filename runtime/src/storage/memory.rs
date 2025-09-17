@@ -1,19 +1,19 @@
 use commonware_utils::{hex, StableBuf};
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     sync::{Arc, Mutex, RwLock},
 };
 
 /// In-memory storage implementation for the commonware runtime.
 #[derive(Clone)]
 pub struct Storage {
-    partitions: Arc<Mutex<HashMap<String, Partition>>>,
+    partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
 }
 
 impl Default for Storage {
     fn default() -> Self {
         Self {
-            partitions: Arc::new(Mutex::new(HashMap::new())),
+            partitions: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -69,11 +69,11 @@ impl crate::Storage for Storage {
     }
 }
 
-type Partition = HashMap<Vec<u8>, Vec<u8>>;
+type Partition = BTreeMap<Vec<u8>, Vec<u8>>;
 
 #[derive(Clone)]
 pub struct Blob {
-    partitions: Arc<Mutex<HashMap<String, Partition>>>,
+    partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     partition: String,
     name: Vec<u8>,
     content: Arc<RwLock<Vec<u8>>>,
@@ -81,7 +81,7 @@ pub struct Blob {
 
 impl Blob {
     fn new(
-        partitions: Arc<Mutex<HashMap<String, Partition>>>,
+        partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
         partition: String,
         name: &[u8],
         content: Vec<u8>,
