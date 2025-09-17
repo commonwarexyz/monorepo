@@ -75,3 +75,8 @@ path = "src/blake3/benches/bench.rs"
 name = "lthash"
 harness = false
 path = "src/lthash/benches/bench.rs"
+
+[[bench]]
+name = "handshake"
+harness = false
+path = "src/handshake/benches/bench.rs"
