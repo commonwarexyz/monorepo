@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        any::variable::sync::init_journal,
+        any::variable::sync::{get_size, init_journal},
         immutable,
         sync::{self, Journal as _},
         Error,
@@ -13,56 +13,9 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{Array, NZUsize};
-use futures::{pin_mut, StreamExt};
-use std::num::NonZeroU64;
+use commonware_utils::Array;
 
 mod journal;
-
-// Compute the next append location (size) by scanning the variable journal and
-// counting only items whose logical location is within [lower_bound, upper_bound].
-async fn compute_size<E, K, V>(
-    journal: &variable::Journal<E, Variable<K, V>>,
-    items_per_section: NonZeroU64,
-    lower_bound: u64,
-    upper_bound: u64,
-) -> Result<u64, crate::journal::Error>
-where
-    E: Storage + Metrics,
-    K: Array,
-    V: Codec,
-{
-    let items_per_section = items_per_section.get();
-    let mut size = lower_bound;
-    let mut current_section: Option<u64> = None;
-    let mut index_in_section: u64 = 0;
-    let stream = journal.replay(0, 0, NZUsize!(1024)).await?;
-    pin_mut!(stream);
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok((section, _offset, _size, _op)) => {
-                if current_section != Some(section) {
-                    current_section = Some(section);
-                    index_in_section = 0;
-                }
-                let loc = section
-                    .saturating_mul(items_per_section)
-                    .saturating_add(index_in_section);
-                if loc < lower_bound {
-                    index_in_section = index_in_section.saturating_add(1);
-                    continue;
-                }
-                if loc > upper_bound {
-                    return Ok(size);
-                }
-                size = loc.saturating_add(1);
-                index_in_section = index_in_section.saturating_add(1);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(size)
-}
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
@@ -86,7 +39,7 @@ where
         upper_bound_loc: u64,
     ) -> Result<Self::Journal, Error> {
         // Open the journal and discard operations outside the sync range.
-        let journal = init_journal(
+        let (journal, size) = init_journal(
             context.with_label("log"),
             variable::Config {
                 partition: config.log_journal_partition.clone(),
@@ -98,15 +51,6 @@ where
             lower_bound_loc,
             upper_bound_loc,
             config.log_items_per_section,
-        )
-        .await?;
-
-        // Compute next append location based on logical locations within [lower_bound, upper_bound]
-        let size = compute_size(
-            &journal,
-            config.log_items_per_section,
-            lower_bound_loc,
-            upper_bound_loc,
         )
         .await?;
 
@@ -183,15 +127,11 @@ where
                 .await
                 .map_err(crate::adb::Error::from)?;
 
-            // Compute next append location based on logical locations within [lower_bound, upper_bound]
-            let size = compute_size(
-                &variable_journal,
-                config.log_items_per_section,
-                lower_bound,
-                upper_bound,
-            )
-            .await
-            .map_err(crate::adb::Error::from)?;
+            // Get the size of the journal
+            let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
+            if size > upper_bound + 1 {
+                return Err(crate::adb::Error::UnexpectedData(size));
+            }
 
             Ok(journal::Journal::new(
                 variable_journal,

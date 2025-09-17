@@ -166,9 +166,8 @@ where
 ///    - Prunes the journal to `lower_bound`
 ///    - Reuses existing journal data overlapping with the sync range
 ///
-/// 3. **Prune and Rewind**: existing_size > upper_bound + 1
-///    - Prunes the journal to `lower_bound`
-///    - Rewinds the journal to size `upper_bound + 1`
+/// 3. **Unexpected Data**: existing_size > upper_bound + 1
+///    - Returns [adb::Error::UnexpectedData]
 ///
 /// # Invariants
 ///
@@ -203,16 +202,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
         journal.prune(lower_bound).await?;
         journal
     } else {
-        debug!(
-                journal_size,
-                lower_bound,
-                upper_bound,
-                "Existing journal data exceeds sync range, pruning to lower bound and rewinding to upper bound"
-            );
-        journal.prune(lower_bound).await?;
-        journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
-        journal.sync().await?;
-        journal
+        return Err(adb::Error::UnexpectedData(journal_size));
     };
     let journal_size = journal.size().await?;
     assert!(journal_size <= upper_bound + 1);
@@ -1956,13 +1946,13 @@ mod tests {
     }
 
     /// Test `init_sync` when existing data exceeds the sync target range.
-    /// This tests the "prune and rewind" scenario where existing data goes beyond the upper bound.
+    /// This tests that UnexpectedData error is returned when existing data goes beyond the upper bound.
     #[test_traced]
-    fn test_init_sync_existing_data_with_rewind() {
+    fn test_init_sync_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = fixed::Config {
-                partition: "test_rewind".into(),
+                partition: "test_unexpected_data".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
                 buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
@@ -1981,47 +1971,20 @@ mod tests {
             assert_eq!(initial_size, 30);
             journal.close().await.unwrap();
 
-            // Initialize with sync boundaries that require both pruning and rewinding
-            // Lower bound: 8 (prune operations 0-7)
-            // Upper bound: 22 (rewind operations 23-29)
+            // Initialize with sync boundaries where existing data exceeds the upper bound
             let lower_bound = 8;
-            let upper_bound = 22;
-            let expected_final_size = upper_bound + 1; // upper_bound is inclusive
-            let mut journal = init_journal(context.clone(), cfg.clone(), lower_bound, upper_bound)
-                .await
-                .expect("Failed to initialize journal with rewind");
+            for upper_bound in 9..29 {
+                let result = init_journal::<Context, Digest>(
+                    context.clone(),
+                    cfg.clone(),
+                    lower_bound,
+                    upper_bound,
+                )
+                .await;
 
-            // Verify the journal has been rewound to the upper bound + 1
-            assert_eq!(journal.size().await.unwrap(), expected_final_size);
-
-            // Verify the journal has been pruned to the lower bound
-            assert_eq!(
-                journal.oldest_retained_pos().await.unwrap(),
-                Some(lower_bound)
-            );
-
-            // Verify operations before the lower bound are pruned
-            for i in 0..lower_bound {
-                let result = journal.read(i).await;
-                assert!(matches!(result, Err(journal::Error::ItemPruned(_))),);
+                assert!(matches!(result, Err(adb::Error::UnexpectedData(_))));
             }
-
-            // Verify operations from lower bound to upper bound (inclusive) are readable
-            for i in lower_bound..expected_final_size {
-                let result = journal.read(i).await;
-                assert!(result.is_ok(),);
-                assert_eq!(result.unwrap(), test_digest(i));
-            }
-
-            // Verify that new operations can be appended from the sync position
-            let append_pos = journal.append(test_digest(777)).await.unwrap();
-            assert_eq!(append_pos, expected_final_size);
-
-            // Verify the appended operation is readable
-            let read_value = journal.read(append_pos).await.unwrap();
-            assert_eq!(read_value, test_digest(777));
-
-            journal.destroy().await.unwrap();
+            context.remove(&cfg.partition, None).await.unwrap();
         });
     }
 
