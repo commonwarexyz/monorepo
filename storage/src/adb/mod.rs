@@ -49,6 +49,9 @@ pub enum Error {
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
     KeyNotFound,
+
+    #[error("unexpected data at location: {0}")]
+    UnexpectedData(u64),
 }
 
 /// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &
