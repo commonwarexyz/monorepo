@@ -1,5 +1,8 @@
-use super::types::{Activity, Context, View};
-use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
+use super::types::{Activity, Context};
+use crate::{
+    types::{Epoch, View},
+    Automaton, Relay, Reporter, ThresholdSupervisor,
+};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Signer,
@@ -52,6 +55,9 @@ pub struct Config<
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.
     pub mailbox_size: usize,
+
+    /// Epoch for the consensus engine. Each running engine should have a unique epoch.
+    pub epoch: Epoch,
 
     /// Prefix for all signed messages to prevent replay attacks.
     pub namespace: Vec<u8>,
