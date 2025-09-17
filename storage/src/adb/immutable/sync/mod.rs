@@ -2,6 +2,7 @@ use crate::{
     adb::{
         immutable,
         sync::{self, Journal as _},
+        Error,
     },
     journal::variable,
     mmr::StandardHasher as Standard,
@@ -26,7 +27,6 @@ where
     type Op = Variable<K, V>;
     type Journal = journal::Journal<E, K, V>;
     type Hasher = H;
-    type Error = crate::adb::Error;
     type Config = immutable::Config<T, V::Cfg>;
     type Digest = H::Digest;
     type Context = E;
@@ -36,7 +36,7 @@ where
         config: &Self::Config,
         lower_bound_loc: u64,
         upper_bound_loc: u64,
-    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+    ) -> Result<Self::Journal, Error> {
         // Open the journal and discard operations outside the sync range.
         let (journal, size) = journal::init_journal(
             context.with_label("log"),
@@ -83,7 +83,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, Error> {
         let journal = journal.into_inner();
         let sync_config = Config {
             db_config,
@@ -107,15 +107,13 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, Self::Error> {
+    ) -> Result<Self::Journal, Error> {
         let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
         if size <= lower_bound {
             // Close existing journal and create new one
             journal.close().await.map_err(crate::adb::Error::from)?;
-            Self::create_journal(context, config, lower_bound, upper_bound)
-                .await
-                .map_err(crate::adb::Error::from)
+            Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Extract the Variable journal to perform section-based pruning
             let mut variable_journal = journal.into_inner();
@@ -129,13 +127,11 @@ where
                 .map_err(crate::adb::Error::from)?;
 
             // Get the size of the journal
-            let size = journal::get_size(
-                &variable_journal,
-                config.log_items_per_section.get(),
-                upper_bound,
-            )
-            .await
-            .map_err(crate::adb::Error::from)?;
+            let size =
+                journal::get_size(&variable_journal, config.log_items_per_section.get()).await?;
+            if size > upper_bound + 1 {
+                return Err(crate::adb::Error::UnexpectedData(size));
+            }
 
             Ok(journal::Journal::new(
                 variable_journal,
@@ -637,10 +633,10 @@ mod tests {
             let result: Result<ImmutableSyncTest, _> = sync::sync(config).await;
             assert!(matches!(
                 result,
-                Err(sync::Error::InvalidTarget {
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget {
                     lower_bound_pos: 31,
                     upper_bound_pos: 30,
-                })
+                }))
             ));
         });
     }
@@ -872,7 +868,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             let target_db =
@@ -931,7 +929,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             let target_db =
@@ -1068,7 +1068,10 @@ mod tests {
                 .unwrap();
 
             let result = client.step().await;
-            assert!(matches!(result, Err(sync::Error::InvalidTarget { .. })));
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
+            ));
 
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));

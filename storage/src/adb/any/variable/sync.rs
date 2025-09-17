@@ -117,7 +117,6 @@ where
     type Op = Variable<K, V>;
     type Journal = Journal<E, K, V>;
     type Hasher = H;
-    type Error = adb::Error;
     type Config = any::variable::Config<T, V::Cfg>;
     type Digest = H::Digest;
     type Context = E;
@@ -127,7 +126,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+    ) -> Result<Self::Journal, adb::Error> {
         // Initialize the variable journal
         let mut journal = VJournal::init(
             context.clone(),
@@ -162,7 +161,8 @@ where
         .await?;
 
         // Create the sync journal wrapper
-        Journal::new(journal, config.log_items_per_section, metadata, size).await
+        let journal = Journal::new(journal, config.log_items_per_section, metadata, size).await?;
+        Ok(journal)
     }
 
     async fn from_sync_result(
@@ -173,7 +173,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         _apply_batch_size: usize,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, adb::Error> {
         // Initialize MMR for sync with proper bounds and pinned nodes
         let mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
@@ -191,8 +191,7 @@ where
                 pinned_nodes,
             },
         )
-        .await
-        .map_err(adb::Error::Mmr)?;
+        .await?;
 
         // Initialize locations journal
         let locations = crate::adb::any::fixed::sync::init_journal(
@@ -206,8 +205,7 @@ where
             lower_bound,
             upper_bound,
         )
-        .await
-        .map_err(adb::Error::Journal)?;
+        .await?;
 
         // Create the database instance
         let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
@@ -243,15 +241,13 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, Self::Error> {
+    ) -> Result<Self::Journal, adb::Error> {
         let size = journal.size().await.map_err(adb::Error::from)?;
         if size <= lower_bound {
             let (log, metadata) = journal.into_inner();
             log.close().await.map_err(adb::Error::from)?;
             metadata.close().await.map_err(adb::Error::from)?;
-            return Self::create_journal(context, config, lower_bound, upper_bound)
-                .await
-                .map_err(adb::Error::from);
+            return Self::create_journal(context, config, lower_bound, upper_bound).await;
         }
 
         let (mut journal, mut metadata) = journal.into_inner();
@@ -408,27 +404,28 @@ where
 /// oldest_retained_loc (either at section boundaries for contiguous cases or at
 /// lower_bound for rebuilt sections).
 ///
+/// # Warning
+///
+/// Panics if lower_bound > upper_bound.
+///
 /// # Errors
 ///
-/// Returns [crate::journal::Error::InvalidSyncRange] if lower_bound > upper_bound.
-/// Returns [crate::journal::Error::UnexpectedData] if journal contains data beyond upper_bound.
+/// Returns [adb::Error::UnexpectedData] if journal contains data beyond upper_bound.
 pub async fn prune_journal<E, V>(
     journal: &mut VJournal<E, V>,
     metadata: &mut Metadata<E, U64, u64>,
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<u64, crate::journal::Error>
+) -> Result<u64, adb::Error>
 where
     E: Storage + Metrics + Clock,
     V: Codec,
 {
-    if lower_bound > upper_bound {
-        return Err(crate::journal::Error::InvalidSyncRange(
-            lower_bound,
-            upper_bound,
-        ));
-    }
+    assert!(
+        lower_bound <= upper_bound,
+        "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
+    );
 
     let oldest_retained_loc = read_oldest_retained_loc(metadata);
     let items_per_section = items_per_section.get();
@@ -480,7 +477,7 @@ where
     // Check if data exceeds the sync range
     if last_section > upper_section {
         let loc = last_section * items_per_section;
-        return Err(crate::journal::Error::UnexpectedData(loc));
+        return Err(crate::adb::Error::UnexpectedData(loc));
     }
 
     let items_in_last_section = journal.items_in_section(last_section).await?;
@@ -493,7 +490,7 @@ where
 
     // Check if the computed next location exceeds the upper bound
     if next_loc > upper_bound + 1 {
-        return Err(crate::journal::Error::UnexpectedData(next_loc));
+        return Err(crate::adb::Error::UnexpectedData(next_loc));
     }
 
     Ok(next_loc)
@@ -880,10 +877,7 @@ mod tests {
             let result: Result<AnyTest, _> = sync::sync(config).await;
             assert!(matches!(
                 result,
-                Err(sync::Error::InvalidTarget {
-                    lower_bound_pos: 31,
-                    upper_bound_pos: 30,
-                }),
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
             ));
         });
     }
@@ -1163,7 +1157,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             Arc::try_unwrap(target_db)
@@ -1224,7 +1220,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             Arc::try_unwrap(target_db)
@@ -1361,7 +1359,10 @@ mod tests {
                 .unwrap();
 
             let result = client.step().await;
-            assert!(matches!(result, Err(sync::Error::InvalidTarget { .. })));
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
+            ));
 
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -1968,10 +1969,7 @@ mod tests {
             .await;
 
             // Should return UnexpectedData error since data exists beyond upper_bound
-            assert!(matches!(
-                result,
-                Err(crate::journal::Error::UnexpectedData(_))
-            ));
+            assert!(matches!(result, Err(adb::Error::UnexpectedData(_))));
         });
     }
 
@@ -2104,6 +2102,7 @@ mod tests {
     }
 
     /// Test prune_journal with invalid bounds (lower > upper)
+    #[should_panic]
     #[test_traced]
     fn test_prune_journal_invalid_bounds() {
         let executor = deterministic::Runner::default();
@@ -2135,7 +2134,7 @@ mod tests {
             write_oldest_retained_loc(&mut metadata, 0);
             let items_per_section = NZU64!(5);
 
-            let result = prune_journal(
+            let _result = prune_journal(
                 &mut journal,
                 &mut metadata,
                 lower_bound,
@@ -2143,12 +2142,6 @@ mod tests {
                 items_per_section,
             )
             .await;
-
-            // Should return an error for invalid bounds
-            assert!(matches!(
-                result,
-                Err(crate::journal::Error::InvalidSyncRange(_, _))
-            ));
         });
     }
 

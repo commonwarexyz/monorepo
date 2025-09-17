@@ -1,5 +1,5 @@
-use super::types::{Activity, Context, Epoch};
-use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
+use super::types::{Activity, Context};
+use crate::{types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};

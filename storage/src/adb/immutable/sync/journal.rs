@@ -8,11 +8,8 @@
 //! - No pruning/bound checks are done here; the sync engine handles range validation.
 
 use crate::{
-    adb::sync,
-    journal::{
-        variable::{self, Config as VConfig, Journal as VJournal},
-        Error,
-    },
+    adb::{self, sync},
+    journal::variable::{self, Config as VConfig, Journal as VJournal},
     store::operation::Variable,
 };
 use commonware_codec::Codec;
@@ -110,7 +107,7 @@ where
 ///   empty journal.
 /// - Overlap within [`lower_bound`, `upper_bound`]:
 ///   - Prunes sections strictly below `lower_bound / items_per_section` (section-aligned).
-/// - Unexpected data beyond `upper_bound`: returns [Error::UnexpectedData].
+/// - Unexpected data beyond `upper_bound`: returns [adb::Error::UnexpectedData].
 ///
 /// Note that lower-bound pruning is section-aligned. This means the first retained section may
 /// still contain items whose locations are < `lower_bound`. Callers should ignore these.
@@ -129,19 +126,23 @@ where
 /// - No item with location > `upper_bound` exists.
 /// - `size` is the next location that should be appended to by the sync engine.
 ///
+/// # Warning
+///
+///  Panics if lower_bound > upper_bound.
+///
 /// # Errors
-/// Returns [Error::InvalidSyncRange] if lower_bound > upper_bound.
-/// Returns [Error::UnexpectedData] if existing data extends beyond `upper_bound`.
+/// Returns [adb::Error::UnexpectedData] if existing data extends beyond upper_bound.
 pub(super) async fn init_journal<E: Storage + Metrics, V: Codec>(
     context: E,
     cfg: VConfig<V::Cfg>,
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<(VJournal<E, V>, u64), Error> {
-    if lower_bound > upper_bound {
-        return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
-    }
+) -> Result<(VJournal<E, V>, u64), adb::Error> {
+    assert!(
+        lower_bound <= upper_bound,
+        "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
+    );
 
     // Calculate the section ranges based on item locations
     let items_per_section = items_per_section.get();
@@ -187,18 +188,17 @@ pub(super) async fn init_journal<E: Storage + Metrics, V: Codec>(
     // Check if data exceeds the sync range
     if last_section > upper_section {
         let loc = last_section * items_per_section;
-        return Err(Error::UnexpectedData(loc));
+        return Err(adb::Error::UnexpectedData(loc));
     }
 
-    let size = get_size(&journal, items_per_section, upper_bound).await?;
+    let size = get_size(&journal, items_per_section).await?;
+    if size > upper_bound + 1 {
+        return Err(adb::Error::UnexpectedData(size));
+    }
     Ok((journal, size))
 }
 
-/// Returns the size of the journal.
-///
-/// # Errors
-///
-/// Returns [Error::UnexpectedData] if the journal's size > upper_bound + 1.
+/// Returns the number of items in the journal.
 ///
 /// # Panics
 ///
@@ -206,21 +206,20 @@ pub(super) async fn init_journal<E: Storage + Metrics, V: Codec>(
 pub(super) async fn get_size<E: Storage + Metrics, V: Codec>(
     journal: &VJournal<E, V>,
     items_per_section: u64,
-    upper_bound: u64,
-) -> Result<u64, Error> {
-    let last_section = journal.blobs.last_key_value().map(|(&s, _)| s).unwrap();
+) -> Result<u64, adb::Error> {
+    let Some(last_section) = journal.blobs.last_key_value().map(|(&s, _)| s) else {
+        return Err(adb::Error::UnexpectedData(0));
+    };
     let last_section_start = last_section * items_per_section;
     let items_in_last_section = journal.items_in_section(last_section).await?;
     let size = last_section_start + items_in_last_section as u64;
-    if size > upper_bound + 1 {
-        return Err(Error::UnexpectedData(size));
-    }
     Ok(size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::Error;
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
@@ -367,6 +366,7 @@ mod tests {
     }
 
     /// Test `init_journal` with invalid parameters.
+    #[should_panic]
     #[test_traced]
     fn test_init_journal_invalid_parameters() {
         let executor = deterministic::Runner::default();
@@ -380,7 +380,7 @@ mod tests {
             };
 
             // Test invalid bounds: lower > upper
-            let result = init_journal::<deterministic::Context, u64>(
+            let _result = init_journal::<deterministic::Context, u64>(
                 context.clone(),
                 cfg.clone(),
                 10,        // lower_bound
@@ -388,7 +388,6 @@ mod tests {
                 NZU64!(5), // items_per_section
             )
             .await;
-            assert!(matches!(result, Err(Error::InvalidSyncRange(10, 5))));
         });
     }
 
@@ -476,7 +475,7 @@ mod tests {
     }
 
     /// Test `init_journal` when existing data exceeds the sync target range.
-    /// This tests that UnexpectedData error is returned when existing data goes beyond the upper bound.
+
     #[test_traced]
     fn test_init_journal_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
@@ -508,20 +507,17 @@ mod tests {
             journal.close().await.unwrap();
 
             // Initialize with sync boundaries that are exceeded by existing data
-            let lower_bound = 8; // section 1
-            for upper_bound in 9..28 {
-                let result = init_journal::<deterministic::Context, u64>(
-                    context.clone(),
-                    cfg.clone(),
-                    lower_bound,
-                    upper_bound,
-                    items_per_section,
-                )
-                .await;
-
-                // Should return UnexpectedData error since data exists beyond upper_bound
-                assert!(matches!(result, Err(Error::UnexpectedData(_))));
-            }
+            let lower_bound = 8;
+            let upper_bound = 28;
+            let result = init_journal::<deterministic::Context, u64>(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await;
+            assert!(matches!(result, Err(adb::Error::UnexpectedData(_))));
         });
     }
 

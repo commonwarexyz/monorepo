@@ -1,4 +1,4 @@
-use crate::adb::sync;
+use crate::adb::sync::{self, error::EngineError};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
@@ -42,33 +42,32 @@ impl<D: Digest> Read for Target<D> {
 }
 
 /// Validate a target update against the current target
-pub fn validate_update<T, U, D>(
+pub fn validate_update<U, D>(
     old_target: &Target<D>,
     new_target: &Target<D>,
-) -> Result<(), sync::Error<T, U, D>>
+) -> Result<(), sync::Error<U, D>>
 where
-    T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
     if new_target.lower_bound_ops > new_target.upper_bound_ops {
-        return Err(sync::Error::InvalidTarget {
+        return Err(sync::Error::Engine(EngineError::InvalidTarget {
             lower_bound_pos: new_target.lower_bound_ops,
             upper_bound_pos: new_target.upper_bound_ops,
-        });
+        }));
     }
 
     if new_target.lower_bound_ops < old_target.lower_bound_ops
         || new_target.upper_bound_ops < old_target.upper_bound_ops
     {
-        return Err(sync::Error::SyncTargetMovedBackward {
+        return Err(sync::Error::Engine(EngineError::SyncTargetMovedBackward {
             old: old_target.clone(),
             new: new_target.clone(),
-        });
+        }));
     }
 
     if new_target.root == old_target.root {
-        return Err(sync::Error::SyncTargetRootUnchanged);
+        return Err(sync::Error::Engine(EngineError::SyncTargetRootUnchanged));
     }
 
     Ok(())
@@ -108,7 +107,7 @@ mod tests {
         assert_eq!(target.upper_bound_ops, deserialized.upper_bound_ops);
     }
 
-    type TestError = sync::Error<std::io::Error, std::io::Error, sha256::Digest>;
+    type TestError = sync::Error<std::io::Error, sha256::Digest>;
 
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
@@ -119,13 +118,13 @@ mod tests {
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
         Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 200, upper_bound_ops: 100 },
-        Err(TestError::InvalidTarget { lower_bound_pos: 200, upper_bound_pos: 100 });
+        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: 200, upper_bound_pos: 100 }));
         "invalid bounds - lower > upper"
     )]
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
         Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 50 },
-        Err(TestError::SyncTargetMovedBackward {
+        Err(TestError::Engine(EngineError::SyncTargetMovedBackward {
             old: Target {
                 root: sha256::Digest::from([0; 32]),
                 lower_bound_ops: 0,
@@ -136,13 +135,13 @@ mod tests {
                 lower_bound_ops: 0,
                 upper_bound_ops: 50,
             },
-        });
+        }));
         "moves backward"
     )]
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
-        Err(TestError::SyncTargetRootUnchanged);
+        Err(TestError::Engine(EngineError::SyncTargetRootUnchanged));
         "same root"
     )]
     fn test_validate_update(
@@ -161,23 +160,26 @@ mod tests {
             }
             (Err(actual_err), Err(expected_err)) => match (actual_err, expected_err) {
                 (
-                    TestError::InvalidTarget {
+                    TestError::Engine(EngineError::InvalidTarget {
                         lower_bound_pos: a_lower,
                         upper_bound_pos: a_upper,
-                    },
-                    TestError::InvalidTarget {
+                    }),
+                    TestError::Engine(EngineError::InvalidTarget {
                         lower_bound_pos: e_lower,
                         upper_bound_pos: e_upper,
-                    },
+                    }),
                 ) => {
                     assert_eq!(a_lower, e_lower);
                     assert_eq!(a_upper, e_upper);
                 }
                 (
-                    TestError::SyncTargetMovedBackward { .. },
-                    TestError::SyncTargetMovedBackward { .. },
+                    TestError::Engine(EngineError::SyncTargetMovedBackward { .. }),
+                    TestError::Engine(EngineError::SyncTargetMovedBackward { .. }),
                 ) => {}
-                (TestError::SyncTargetRootUnchanged, TestError::SyncTargetRootUnchanged) => {}
+                (
+                    TestError::Engine(EngineError::SyncTargetRootUnchanged),
+                    TestError::Engine(EngineError::SyncTargetRootUnchanged),
+                ) => {}
                 _ => panic!("Error type mismatch: got {actual_err:?}, expected {expected_err:?}"),
             },
         }

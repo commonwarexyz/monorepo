@@ -36,6 +36,8 @@ where
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
     #[error("invalid blob name: {0}")]
@@ -68,10 +70,4 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
-    #[error("invalid sync range: lower_bound={0} upper_bound={1}")]
-    InvalidSyncRange(u64, u64),
-    #[error("metadata error: {0}")]
-    Metadata(#[from] crate::metadata::Error),
-    #[error("unexpected data beyond sync range: location={0}")]
-    UnexpectedData(u64),
 }
