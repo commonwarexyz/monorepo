@@ -1,6 +1,9 @@
-use crate::journal::{
-    variable::{Config as VConfig, Journal as VJournal},
-    Error,
+use crate::{
+    adb,
+    journal::{
+        variable::{Config as VConfig, Journal as VJournal},
+        Error,
+    },
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
@@ -44,10 +47,11 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     lower_bound: u64,
     upper_bound: u64,
     items_per_section: NonZeroU64,
-) -> Result<VJournal<E, V>, Error> {
-    if lower_bound > upper_bound {
-        return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
-    }
+) -> Result<VJournal<E, V>, adb::Error> {
+    assert!(
+        lower_bound <= upper_bound,
+        "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
+    );
 
     // Calculate the section ranges based on item locations
     let items_per_section = items_per_section.get();
@@ -81,7 +85,8 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
             lower_section, "existing journal data is stale, re-initializing"
         );
         journal.destroy().await?;
-        return VJournal::init(context, cfg).await;
+        let journal = VJournal::init(context, cfg).await?;
+        return Ok(journal);
     }
 
     // Prune sections below the lower bound.
@@ -359,6 +364,7 @@ mod tests {
     }
 
     /// Test `init_journal` with invalid parameters.
+    #[should_panic]
     #[test_traced]
     fn test_init_journal_invalid_parameters() {
         let executor = deterministic::Runner::default();
@@ -371,8 +377,7 @@ mod tests {
                 buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
-            // Test invalid bounds: lower > upper
-            let result = init_journal::<deterministic::Context, u64>(
+            let _result = init_journal::<deterministic::Context, u64>(
                 context.clone(),
                 cfg.clone(),
                 10,        // lower_bound
@@ -380,7 +385,6 @@ mod tests {
                 NZU64!(5), // items_per_section
             )
             .await;
-            assert!(matches!(result, Err(Error::InvalidSyncRange(10, 5))));
         });
     }
 
