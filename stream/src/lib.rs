@@ -41,8 +41,8 @@
 //!   signatures.
 //! - **Forward Secrecy**: Ephemeral encryption keys ensure that any compromise of long-term static keys
 //!   doesn't expose the contents of previous sessions.
-//! - **Session Uniqueness**: A listener's [handshake::Hello] is bound to the dialer's [handshake::Hello] message and
-//!   [handshake::Confirmation]s are bound to the complete handshake transcript, preventing replay attacks and ensuring
+//! - **Session Uniqueness**: A listener's [commonware_cryptography::handshake::SynAck] is bound to the dialer's [commonware_cryptography::handshake::Syn] message and
+//!   [commonware_cryptography::handshake::Ack]s are bound to the complete handshake transcript, preventing replay attacks and ensuring
 //!   message integrity.
 //! - **Handshake Timeout**: A configurable deadline is enforced for handshake completion to protect
 //!   against malicious peers that create connections but abandon handshakes.

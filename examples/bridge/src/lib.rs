@@ -84,7 +84,7 @@
 //!
 //! ## Start Indexer
 //!
-//! The `indexer` is a simple service that uses [commonware_stream::public_key] to accept blocks and finality certificates from a known set of participants outside
+//! The `indexer` is a simple service that uses [commonware_stream] to accept blocks and finality certificates from a known set of participants outside
 //! of the p2p instances maintained by each network.
 //!
 //! ```sh
