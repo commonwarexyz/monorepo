@@ -35,7 +35,7 @@ impl<D: Digest> Read for Target<D> {
         let upper_bound_ops = u64::read(buf)?;
         if lower_bound_ops > upper_bound_ops {
             return Err(CodecError::Invalid(
-                "Target",
+                "storage::adb::sync::target",
                 "lower_bound_ops > upper_bound_ops",
             ));
         }
