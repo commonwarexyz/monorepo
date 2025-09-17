@@ -33,6 +33,12 @@ impl<D: Digest> Read for Target<D> {
         let root = D::read(buf)?;
         let lower_bound_ops = u64::read(buf)?;
         let upper_bound_ops = u64::read(buf)?;
+        if lower_bound_ops > upper_bound_ops {
+            return Err(CodecError::Invalid(
+                "storage::adb::sync::Target",
+                "lower_bound_ops > upper_bound_ops",
+            ));
+        }
         Ok(Self {
             root,
             lower_bound_ops,
@@ -105,6 +111,24 @@ mod tests {
         assert_eq!(target.root, deserialized.root);
         assert_eq!(target.lower_bound_ops, deserialized.lower_bound_ops);
         assert_eq!(target.upper_bound_ops, deserialized.upper_bound_ops);
+    }
+
+    #[test]
+    fn test_sync_target_read_invalid_bounds() {
+        let target = Target {
+            root: sha256::Digest::from([42; 32]),
+            lower_bound_ops: 100, // greater than upper_bound_ops
+            upper_bound_ops: 50,
+        };
+
+        let mut buffer = Vec::new();
+        target.write(&mut buffer);
+
+        let mut cursor = Cursor::new(buffer);
+        assert!(matches!(
+            Target::<sha256::Digest>::read(&mut cursor),
+            Err(CodecError::Invalid(_, "lower_bound_ops > upper_bound_ops"))
+        ));
     }
 
     type TestError = sync::Error<std::io::Error, sha256::Digest>;
