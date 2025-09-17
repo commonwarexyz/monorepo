@@ -7,7 +7,7 @@
 use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
-use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
 use rand_core::{
     impls::{next_u32_via_fill, next_u64_via_fill},
     CryptoRng, CryptoRngCore, RngCore,
@@ -277,10 +277,8 @@ pub struct Summary {
     hash: blake3::Hash,
 }
 
-impl EncodeSize for Summary {
-    fn encode_size(&self) -> usize {
-        blake3::OUT_LEN
-    }
+impl FixedSize for Summary {
+    const SIZE: usize = blake3::OUT_LEN;
 }
 
 impl Write for Summary {
