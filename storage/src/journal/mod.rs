@@ -68,8 +68,4 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
-    #[error("invalid sync range: lower_bound={0} upper_bound={1}")]
-    InvalidSyncRange(u64, u64),
-    #[error("unexpected data beyond sync range: location={0}")]
-    UnexpectedData(u64),
 }

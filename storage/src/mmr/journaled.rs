@@ -332,7 +332,10 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///    - Rewinds the journal to size `upper_bound+1`
     ///    - Sets in-memory MMR size to `upper_bound+1`
     ///    - Prunes the journal to `lower_bound`
-    pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
+    pub async fn init_sync(
+        context: E,
+        cfg: SyncConfig<H::Digest>,
+    ) -> Result<Self, crate::adb::Error> {
         let journal = init_journal(
             context.with_label("mmr_journal"),
             JConfig {
@@ -445,7 +448,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             let Ok(digest) = digest else {
                 error!(
                     pos,
-                    err = %digest.err().unwrap(),
+                    err = %digest.expect_err("digest is Err in else branch"),
                     "could not convert node from metadata bytes to digest"
                 );
                 return Err(Error::MissingNode(pos));
