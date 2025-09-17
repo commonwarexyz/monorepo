@@ -488,7 +488,7 @@ where
     } else {
         last_section * items_per_section
     };
-    let next_loc = last_section_start + items_in_last_section as u64;
+    let next_loc = last_section_start + items_in_last_section;
 
     // Check if the computed next location exceeds the upper bound
     if next_loc > upper_bound + 1 {

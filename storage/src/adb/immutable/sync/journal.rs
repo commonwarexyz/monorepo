@@ -212,7 +212,7 @@ pub(super) async fn get_size<E: Storage + Metrics, V: Codec>(
     };
     let last_section_start = last_section * items_per_section;
     let items_in_last_section = journal.items_in_section(last_section).await?;
-    let size = last_section_start + items_in_last_section as u64;
+    let size = last_section_start + items_in_last_section;
     Ok(size)
 }
 
