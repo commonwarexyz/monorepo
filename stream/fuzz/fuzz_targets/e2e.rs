@@ -11,7 +11,7 @@ use futures::future::{select, Either};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-const NAMESPACE: &'static [u8] = b"fuzz_transport";
+const NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: usize = 2048;
 
 #[derive(Debug)]
@@ -69,10 +69,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         } else {
             Vec::new()
         };
-        let messages = u
-            .arbitrary_iter()?
-            .into_iter()
-            .collect::<Result<Vec<Message>, _>>()?;
+        let messages = u.arbitrary_iter()?.collect::<Result<Vec<Message>, _>>()?;
         Ok(Self {
             setup_corruption,
             messages,
@@ -134,55 +131,55 @@ fn fuzz(input: FuzzInput) {
             )
             .await
         });
-        let adversary_handle: Handle<
-            Result<(bool, mocks::Stream, mocks::Sink, mocks::Stream, mocks::Sink), Error>,
-        > = context.clone().spawn(move |_context| async move {
-            let mut corruption_i = 0;
+        let adversary_handle: Handle<Result<_, Error>> =
+            context.clone().spawn(move |_context| async move {
+                let mut corruption_i = 0;
 
-            let announce = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE).await?;
-            send_frame(&mut adversary_d_sink, &announce, MAX_MESSAGE_SIZE).await?;
+                let announce = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_d_sink, &announce, MAX_MESSAGE_SIZE).await?;
 
-            let mut m1 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
-                .await?
-                .to_vec();
-            for byte in m1.iter_mut() {
-                if corruption_i < setup_corruption.len() {
-                    *byte ^= setup_corruption[corruption_i];
-                    corruption_i += 1;
+                let mut m1 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
+                    .await?
+                    .to_vec();
+                for byte in m1.iter_mut() {
+                    if corruption_i < setup_corruption.len() {
+                        *byte ^= setup_corruption[corruption_i];
+                        corruption_i += 1;
+                    }
                 }
-            }
-            send_frame(&mut adversary_d_sink, &m1, MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_d_sink, &m1, MAX_MESSAGE_SIZE).await?;
 
-            let mut m2 = recv_frame(&mut adversary_l_stream, MAX_MESSAGE_SIZE)
-                .await?
-                .to_vec();
-            for byte in m2.iter_mut() {
-                if corruption_i < setup_corruption.len() {
-                    *byte ^= setup_corruption[corruption_i];
-                    corruption_i += 1;
+                let mut m2 = recv_frame(&mut adversary_l_stream, MAX_MESSAGE_SIZE)
+                    .await?
+                    .to_vec();
+                for byte in m2.iter_mut() {
+                    if corruption_i < setup_corruption.len() {
+                        *byte ^= setup_corruption[corruption_i];
+                        corruption_i += 1;
+                    }
                 }
-            }
-            send_frame(&mut adversary_l_sink, &m2, MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_l_sink, &m2, MAX_MESSAGE_SIZE).await?;
 
-            let mut m3 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
-                .await?
-                .to_vec();
-            for byte in m3.iter_mut() {
-                if corruption_i < setup_corruption.len() {
-                    *byte ^= setup_corruption[corruption_i];
-                    corruption_i += 1;
+                let mut m3 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
+                    .await?
+                    .to_vec();
+                for byte in m3.iter_mut() {
+                    if corruption_i < setup_corruption.len() {
+                        *byte ^= setup_corruption[corruption_i];
+                        corruption_i += 1;
+                    }
                 }
-            }
-            let sent_corrupted_data = setup_corruption.iter().take(corruption_i).any(|x| *x != 0);
-            send_frame(&mut adversary_d_sink, &m3, MAX_MESSAGE_SIZE).await?;
-            Ok((
-                sent_corrupted_data,
-                adversary_d_stream,
-                adversary_d_sink,
-                adversary_l_stream,
-                adversary_l_sink,
-            ))
-        });
+                let sent_corrupted_data =
+                    setup_corruption.iter().take(corruption_i).any(|x| *x != 0);
+                send_frame(&mut adversary_d_sink, &m3, MAX_MESSAGE_SIZE).await?;
+                Ok((
+                    sent_corrupted_data,
+                    adversary_d_stream,
+                    adversary_d_sink,
+                    adversary_l_stream,
+                    adversary_l_sink,
+                ))
+            });
         // We need to do a selection to correctly assert the errors, avoiding deadlock.
         //
         // A deadlock might happen if one side asserts an error, and then we're foolishly waiting
