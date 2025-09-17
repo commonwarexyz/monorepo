@@ -9,7 +9,7 @@
 
 use crate::{
     adb::Error,
-    index::Index,
+    index::{Cursor, Index as _, Unordered as Index},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
@@ -1355,8 +1355,8 @@ pub(super) mod test {
                     .unwrap();
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
-            let mut snapshot: Index<TwoCap, u64> =
-                Index::init(context.with_label("snapshot"), TwoCap);
+            let mut snapshot: Index<_, u64> =
+                Index::<_, u64>::init(context.with_label("snapshot"), TwoCap);
             AnyTest::build_snapshot_from_log::<SHA256_SIZE>(
                 inactivity_floor_loc,
                 &log,

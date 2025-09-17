@@ -14,7 +14,7 @@ pub trait Translator: Clone + BuildHasher {
     /// Although [Translator] is a [BuildHasher], the `Key` type must still implement [Hash] for
     /// compatibility with any hash table that wraps [Translator]. We also require [Ord] for
     /// compatibility with ordered collections.
-    type Key: Ord + Eq + Hash + Copy;
+    type Key: Ord + Hash + Copy;
 
     /// Transform a key into its new representation.
     fn transform(&self, key: &[u8]) -> Self::Key;
