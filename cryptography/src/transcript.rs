@@ -299,9 +299,8 @@ impl Read for Summary {
 
 #[cfg(test)]
 mod test {
-    use commonware_codec::{DecodeExt as _, Encode};
-
     use super::*;
+    use commonware_codec::{DecodeExt as _, Encode};
 
     #[test]
     fn test_namespace_affects_summary() {
