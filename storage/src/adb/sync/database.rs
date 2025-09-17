@@ -4,14 +4,24 @@ use std::future::Future;
 
 /// A database that can be synced
 pub trait Database: Sized {
-    type Op;
-    type Journal: Journal<Op = Self::Op>;
+    /// The increment of data synced by the [Database]
+    type Data;
+    /// A proof over Data received from the Resolver
+    type Proof;
+    /// Pinned nodes derived from the Data received from the Resolver
+    type PinnedNodes;
+    /// The underlying storage of the Database populated by the sync engine
+    type Journal: Journal<Data = Self::Data>;
+    /// Configuration options for the [Database]
     type Config;
-    type Digest: Digest;
+    /// Runtime context required for the [Database]
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
         + Clone;
+    /// Digest type for MMR nodes
+    type Digest: Digest;
+    /// Used to hash MMR nodes and data
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Create/open a journal for syncing range [lower_bound, upper_bound].
@@ -32,7 +42,7 @@ pub trait Database: Sized {
         context: Self::Context,
         config: Self::Config,
         journal: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        pinned_nodes: Option<Self::PinnedNodes>,
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
@@ -55,4 +65,20 @@ pub trait Database: Sized {
         lower_bound: u64,
         upper_bound: u64,
     ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
+
+    /// Verify a proof that the given data is in the database with the given root
+    /// starting at the given location.
+    fn verify_proof(
+        proof: &Self::Proof,
+        data: &[Self::Data],
+        start_loc: u64,
+        root: Self::Digest,
+    ) -> bool;
+
+    /// Extract pinned nodes from a proof
+    fn extract_pinned_nodes(
+        proof: &Self::Proof,
+        start_loc: u64,
+        data_len: u64,
+    ) -> Result<Self::PinnedNodes, crate::adb::Error>;
 }
