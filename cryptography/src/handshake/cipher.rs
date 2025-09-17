@@ -1,11 +1,9 @@
-#![no_std]
-extern crate alloc;
-use alloc::vec::Vec;
 use chacha20poly1305::{
     aead::{generic_array::typenum::Unsigned, Aead},
     AeadCore, ChaCha20Poly1305, KeyInit as _,
 };
 use rand_core::CryptoRngCore;
+use std::vec::Vec;
 use zeroize::ZeroizeOnDrop;
 
 // Intentionally avoid depending directly on super, to depend on the sibling.

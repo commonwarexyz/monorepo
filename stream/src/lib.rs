@@ -304,7 +304,7 @@ mod test {
     use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
     use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _};
 
-    const NAMESPACE: &'static [u8] = b"fuzz_transport";
+    const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB buffer
 
     #[test]
