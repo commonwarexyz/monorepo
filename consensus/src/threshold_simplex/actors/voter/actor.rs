@@ -7,10 +7,11 @@ use crate::{
         min_active,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, Proposal, View, Voter,
+            Nullification, Nullify, Proposal, Voter,
         },
     },
-    Automaton, Relay, Reporter, ThresholdSupervisor, Viewable, LATENCY,
+    types::{Epoch, Round as Rnd, View},
+    Automaton, Epochable, Relay, Reporter, ThresholdSupervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -78,7 +79,7 @@ struct Round<
     start: SystemTime,
     supervisor: S,
 
-    view: View,
+    round: Rnd,
     quorum: u32,
 
     // Leader is set as soon as we know the seed for the view.
@@ -141,15 +142,15 @@ impl<
         context: &E,
         supervisor: S,
         recover_latency: histogram::Timed<E>,
-        view: View,
+        round: Rnd,
     ) -> Self {
-        let participants = supervisor.participants(view).unwrap().len();
+        let participants = supervisor.participants(round.view()).unwrap().len();
         let quorum = quorum(participants as u32);
         Self {
             start: context.current(),
             supervisor,
 
-            view,
+            round,
             quorum,
 
             leader: None,
@@ -184,8 +185,12 @@ impl<
     }
 
     pub fn set_leader(&mut self, seed: V::Signature) {
-        let leader = ThresholdSupervisor::leader(&self.supervisor, self.view, seed).unwrap();
-        let leader_index = self.supervisor.is_participant(self.view, &leader).unwrap();
+        let leader =
+            ThresholdSupervisor::leader(&self.supervisor, self.round.view(), seed).unwrap();
+        let leader_index = self
+            .supervisor
+            .is_participant(self.round.view(), &leader)
+            .unwrap();
         self.leader = Some((leader, leader_index));
     }
 
@@ -326,7 +331,7 @@ impl<
         if self.nullifies.len() < threshold as usize {
             return None;
         }
-        debug!(view = self.view, "broadcasting nullification");
+        debug!(round = ?self.round, "broadcasting nullification");
 
         // Recover threshold signature
         let mut timer = self.recover_latency.timer();
@@ -341,7 +346,7 @@ impl<
         timer.observe();
 
         // Construct nullification
-        let nullification = Nullification::new(self.view, view_signature, seed_signature);
+        let nullification = Nullification::new(self.round, view_signature, seed_signature);
         self.broadcast_nullification = true;
         Some(nullification)
     }
@@ -451,6 +456,7 @@ pub struct Actor<
 
     genesis: Option<D>,
 
+    epoch: Epoch,
     namespace: Vec<u8>,
 
     leader_timeout: Duration,
@@ -558,6 +564,7 @@ impl<
 
                 genesis: None,
 
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
                 leader_timeout: cfg.leader_timeout,
@@ -715,7 +722,7 @@ impl<
         // Request proposal from application
         debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
-            view: self.view,
+            round: Rnd::new(self.epoch, self.view),
             parent: (parent_view, parent_payload),
         };
         Some((context.clone(), self.automaton.propose(context).await))
@@ -811,7 +818,7 @@ impl<
 
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
-        let nullify = Nullify::sign(&self.namespace, share, self.view);
+        let nullify = Nullify::sign(&self.namespace, share, Rnd::new(self.epoch, self.view));
 
         // Handle the nullify
         if !retry {
@@ -841,12 +848,12 @@ impl<
 
     async fn handle_nullify(&mut self, nullify: Nullify<V>) {
         // Check to see if nullify is for proposal in view
-        let view = nullify.view;
+        let view = nullify.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            view,
+            Rnd::new(self.epoch, view),
         ));
 
         // Handle nullify
@@ -864,7 +871,7 @@ impl<
 
     async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
         // Store the proposal
-        let round = self.views.get_mut(&proposal.view).expect("view missing");
+        let round = self.views.get_mut(&proposal.view()).expect("view missing");
 
         // Check if view timed out
         if round.broadcast_nullify {
@@ -919,10 +926,13 @@ impl<
                 return None;
             };
 
+            // Sanity-check the epoch is correct. It should have already been checked.
+            assert_eq!(proposal.epoch(), self.epoch, "proposal epoch mismatch");
+
             // Check parent validity
-            if proposal.view <= proposal.parent {
+            if proposal.view() <= proposal.parent {
                 debug!(
-                    view = proposal.view,
+                    round = ?proposal.round,
                     parent = proposal.parent,
                     "dropping peer proposal because parent is invalid"
                 );
@@ -930,7 +940,7 @@ impl<
             }
             if proposal.parent < self.last_finalized {
                 debug!(
-                    view = proposal.view,
+                    round = ?proposal.round,
                     parent = proposal.parent,
                     last_finalized = self.last_finalized,
                     "dropping peer proposal because parent is less than last finalized"
@@ -981,12 +991,12 @@ impl<
         // Request verification
         debug!(?proposal, "requested proposal verification",);
         let context = Context {
-            view: proposal.view,
+            round: proposal.round,
             parent: (proposal.parent, *parent_payload),
         };
         let proposal = proposal.clone();
         let payload = proposal.payload;
-        let round = self.views.get_mut(&context.view).unwrap();
+        let round = self.views.get_mut(&context.view()).unwrap();
         round.requested_proposal_verify = true;
         Some((
             context.clone(),
@@ -1048,7 +1058,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            view,
+            Rnd::new(self.epoch, view),
         ));
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
@@ -1104,7 +1114,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            view,
+            Rnd::new(self.epoch, view),
         ));
 
         // Handle notarize
@@ -1159,7 +1169,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            view,
+            Rnd::new(self.epoch, view),
         ));
 
         // Store notarization
@@ -1184,7 +1194,7 @@ impl<
             self.activity_timeout,
             self.last_finalized,
             self.view,
-            nullification.view,
+            nullification.view(),
             true,
         ) {
             return Action::Skip;
@@ -1192,7 +1202,7 @@ impl<
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&nullification.view) {
+        if let Some(ref round) = self.views.get_mut(&nullification.view()) {
             if round.broadcast_nullification {
                 return Action::Skip;
             }
@@ -1211,12 +1221,12 @@ impl<
 
     async fn handle_nullification(&mut self, nullification: Nullification<V>) {
         // Create round (if it doesn't exist)
-        let view = nullification.view;
+        let view = nullification.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            nullification.view,
+            Rnd::new(self.epoch, view),
         ));
 
         // Store nullification
@@ -1242,7 +1252,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            view,
+            Rnd::new(self.epoch, view),
         ));
 
         // Handle finalize
@@ -1297,7 +1307,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
-            view,
+            Rnd::new(self.epoch, view),
         ));
 
         // Store finalization
@@ -1658,7 +1668,7 @@ impl<
             wrap::<_, _, Voter<V, D>>((), recovered_sender, recovered_receiver);
 
         // Compute genesis
-        let genesis = self.automaton.genesis().await;
+        let genesis = self.automaton.genesis(self.epoch).await;
         self.genesis = Some(genesis);
 
         // Add initial view
@@ -1878,26 +1888,27 @@ impl<
                     let proposed = match proposed {
                         Ok(proposed) => proposed,
                         Err(err) => {
-                            debug!(?err, view = context.view, "failed to propose container");
+                            debug!(?err, round = ?context.round, "failed to propose container");
                             continue;
                         }
                     };
 
                     // If we have already moved to another view, drop the response as we will
                     // not broadcast it
-                    if self.view != context.view {
-                        debug!(view = context.view, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
+                    let our_round = Rnd::new(self.epoch, self.view);
+                    if our_round != context.round {
+                        debug!(round = ?context.round, ?our_round, reason = "no longer in required view", "dropping requested proposal");
                         continue;
                     }
 
                     // Construct proposal
                     let proposal = Proposal::new(
-                        context.view,
+                        context.round,
                         context.parent.0,
                         proposed,
                     );
                     if !self.our_proposal(proposal).await {
-                        warn!(view = context.view, "failed to record our container");
+                        warn!(round = ?context.round, "failed to record our container");
                         continue;
                     }
                     view = self.view;
@@ -1914,18 +1925,18 @@ impl<
                     match verified {
                         Ok(verified) => {
                             if !verified {
-                                debug!(view = context.view, "proposal failed verification");
+                                debug!(round = ?context.round, "proposal failed verification");
                                 continue;
                             }
                         },
                         Err(err) => {
-                            debug!(?err, view = context.view, "failed to verify proposal");
+                            debug!(?err, round = ?context.round, "failed to verify proposal");
                             continue;
                         }
                     };
 
                     // Handle verified proposal
-                    view = context.view;
+                    view = context.view();
                     if !self.verified(view).await {
                         continue;
                     }
@@ -1983,16 +1994,23 @@ impl<
                 },
                 msg = recovered_receiver.recv() => {
                     // Break if there is an internal error
-                    let Ok((s, msg)) = msg else {
+                    let Ok((sender, msg)) = msg else {
                         break;
                     };
 
-                    // Skip if there is a decoding error
+                    // Block if there is a decoding error
                     let Ok(msg) = msg else {
-                        warn!(sender = ?s, "blocking peer");
-                        self.blocker.block(s).await;
+                        warn!(?sender, "blocking peer for decoding error");
+                        self.blocker.block(sender).await;
                         continue;
                     };
+
+                    // Block if the epoch is not the current epoch
+                    if msg.epoch() != self.epoch {
+                        warn!(?sender, "blocking peer for epoch mismatch");
+                        self.blocker.block(sender).await;
+                        continue;
+                    }
 
                     // Process message
                     //
@@ -2002,37 +2020,37 @@ impl<
                     let action = match msg {
                         Voter::Notarization(notarization) => {
                             self.inbound_messages
-                                .get_or_create(&Inbound::notarization(&s))
+                                .get_or_create(&Inbound::notarization(&sender))
                                 .inc();
                             self.notarization(notarization).await
                         }
                         Voter::Nullification(nullification) => {
                             self.inbound_messages
-                                .get_or_create(&Inbound::nullification(&s))
+                                .get_or_create(&Inbound::nullification(&sender))
                                 .inc();
                             self.nullification(nullification).await
                         }
                         Voter::Finalization(finalization) => {
                             self.inbound_messages
-                                .get_or_create(&Inbound::finalization(&s))
+                                .get_or_create(&Inbound::finalization(&sender))
                                 .inc();
                             self.finalization(finalization).await
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
-                            warn!(sender=?s, "blocking peer");
-                            self.blocker.block(s).await;
+                            warn!(?sender, "blocking peer for invalid message type");
+                            self.blocker.block(sender).await;
                             continue;
                         }
                     };
                     match action {
                         Action::Process => {}
                         Action::Skip => {
-                            trace!(sender=?s, view, "dropped useless");
+                            trace!(?sender, view, "dropped useless");
                             continue;
                         }
                         Action::Block => {
-                            warn!(sender=?s, view, "blocking peer");
-                            self.blocker.block(s).await;
+                            warn!(?sender, view, "blocking peer");
+                            self.blocker.block(sender).await;
                             continue;
                         }
                     }

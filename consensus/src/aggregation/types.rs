@@ -1,5 +1,6 @@
 //! Types used in [aggregation](super).
 
+use crate::{types::Epoch, Epochable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
@@ -71,13 +72,15 @@ impl Error {
     }
 }
 
-/// Epoch represents a configuration period in the aggregation protocol.
-/// Validators may change between epochs, requiring new threshold signatures.
-pub type Epoch = u64;
-
 /// Index represents the sequential position of items being aggregated.
 /// Indices are monotonically increasing within each epoch.
 pub type Index = u64;
+
+impl Epochable for Index {
+    type Epoch = ();
+
+    fn epoch(&self) -> Self::Epoch {}
+}
 
 /// Suffix used to identify an acknowledgment (ack) namespace for domain separation.
 /// Used when signing and verifying acks to prevent signature reuse across different message types.
@@ -360,7 +363,7 @@ mod tests {
         },
         Hasher, Sha256,
     };
-    use commonware_runtime::deterministic;
+    use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
     fn test_ack_namespace() {
@@ -372,8 +375,8 @@ mod tests {
     #[test]
     fn test_codec() {
         let namespace = b"test";
-        let mut context = deterministic::Context::default();
-        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut context, None, 4, 3);
+        let mut rng = StdRng::seed_from_u64(0);
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
         let polynomial = evaluate_all::<MinSig>(&public, 4);
         let item = Item {
             index: 100,

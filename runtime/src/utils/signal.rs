@@ -43,6 +43,10 @@ use std::{
 /// a performance regression from introducing `Signaler`, it is recommended
 /// to wait on a reference to `Signal` (i.e. `&mut signal`).
 ///
+/// _Note: Polling the same `Signal` after it has resolved will always panic.
+/// When waiting on a reference to a `Signal`, ensure it is either fused
+/// or not polled again after it has yielded a result._
+///
 /// ```rust
 /// use commonware_macros::select;
 /// use commonware_runtime::{Clock, Spawner, Runner, deterministic, Metrics, signal::Signaler};

@@ -1,7 +1,7 @@
 mod actor;
 mod ingress;
 
-use crate::Supervisor;
+use crate::{types::Epoch, Supervisor};
 pub use actor::Actor;
 use commonware_cryptography::PublicKey;
 use governor::Quota;
@@ -14,6 +14,7 @@ pub struct Config<C: PublicKey, S: Supervisor<PublicKey = C>> {
     pub crypto: C,
     pub supervisor: S,
 
+    pub epoch: Epoch,
     pub namespace: Vec<u8>,
     pub max_participants: usize,
     pub mailbox_size: usize,

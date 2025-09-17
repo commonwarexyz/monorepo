@@ -1,8 +1,12 @@
+//! Mock `ThresholdSupervisor` and `Monitor` for tests: tracks participants/leaders,
+//! verifies activities, records votes/faults, and exposes a simple subscription.
+
 use crate::{
     threshold_simplex::types::{
         Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
-        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, Seedable, View,
+        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, Seedable,
     },
+    types::View,
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};

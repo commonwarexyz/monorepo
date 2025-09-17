@@ -33,6 +33,11 @@ type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
     pub max_size: usize,
+
+    /// True if peers should disconnect upon being blocked. While production networking would
+    /// typically disconnect, for testing purposes it may be useful to keep peers connected,
+    /// allowing byzantine actors the ability to continue sending messages.
+    pub disconnect_on_block: bool,
 }
 
 /// Implementation of a simulated network.
@@ -41,6 +46,11 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
 
     // Maximum size of a message that can be sent over the network
     max_size: usize,
+
+    // True if peers should disconnect upon being blocked.
+    // While production networking would typically disconnect, for testing purposes it may be useful
+    // to keep peers connected, allowing byzantine actors the ability to continue sending messages.
+    disconnect_on_block: bool,
 
     // Next socket address to assign to a new peer
     // Incremented for each new peer
@@ -95,6 +105,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             Self {
                 context,
                 max_size: cfg.max_size,
+                disconnect_on_block: cfg.disconnect_on_block,
                 next_addr,
                 ingress: oracle_receiver,
                 sender,
@@ -348,7 +359,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             // Determine if the sender or recipient has blocked the other
             let o_r = (origin.clone(), recipient.clone());
             let r_o = (recipient.clone(), origin.clone());
-            if self.blocks.contains(&o_r) || self.blocks.contains(&r_o) {
+            if self.disconnect_on_block
+                && (self.blocks.contains(&o_r) || self.blocks.contains(&r_o))
+            {
                 trace!(?origin, ?recipient, reason = "blocked", "dropping message");
                 continue;
             }
@@ -781,7 +794,6 @@ impl<P: PublicKey> Peer<P> {
 
 // A unidirectional link between two peers.
 // Messages can be sent over the link with a given latency, jitter, and success rate.
-#[derive(Clone)]
 struct Link {
     sampler: Normal<f64>,
     success_rate: f64,
@@ -801,15 +813,9 @@ impl Link {
         max_size: usize,
         received_messages: Family<metrics::Message, Counter>,
     ) -> Self {
-        let (inbox, mut outbox) = mpsc::unbounded();
-        let result = Self {
-            sampler,
-            success_rate,
-            inbox,
-        };
-
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
+        let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes, SystemTime)>();
         context
             .clone()
             .with_label("link")
@@ -840,7 +846,11 @@ impl Link {
                 }
             });
 
-        result
+        Self {
+            sampler,
+            success_rate,
+            inbox,
+        }
     }
 
     // Send a message over the link with receive timing.
@@ -871,6 +881,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
             };
             let network_context = context.with_label("network");
             let (network, mut oracle) = Network::new(network_context.clone(), cfg);
@@ -915,6 +926,7 @@ mod tests {
     fn test_get_next_socket() {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
+            disconnect_on_block: true,
         };
         let runner = deterministic::Runner::default();
 

@@ -119,21 +119,23 @@ impl<
         const N: usize,
     > Current<E, K, V, H, T, N>
 {
-    // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal with
-    // respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over the structure.
-    const _CHUNK_SIZE_ASSERT: () = assert!(
-        N.is_multiple_of(H::Digest::SIZE),
-        "chunk size must be some multiple of the digest size",
-    );
-
-    // A compile-time assertion that chunk size is a power of 2, which is necessary to allow the status bitmap tree to
-    // be aligned with the underlying operations MMR.
-    const _CHUNK_SIZE_IS_POW_OF_2_ASSERT: () =
-        assert!(N.is_power_of_two(), "chunk size must be a power of 2");
-
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
     pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal
+            // with respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over
+            // the structure.
+            assert!(
+                N.is_multiple_of(H::Digest::SIZE),
+                "chunk size must be some multiple of the digest size",
+            );
+            // A compile-time assertion that chunk size is a power of 2, which is necessary to allow the status bitmap
+            // tree to be aligned with the underlying operations MMR.
+            assert!(N.is_power_of_two(), "chunk size must be a power of 2");
+        }
+
         // Initialize the MMR journal and metadata.
         let cfg = AConfig {
             mmr_journal_partition: config.mmr_journal_partition,
