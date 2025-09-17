@@ -24,79 +24,28 @@ jobs:
     timeout-minutes: 180
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-storage"
-            partition: 1
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-storage"
-            partition: 2
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-storage"
-            partition: 3
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-storage"
-            partition: 4
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-network"
-            partition: 1
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-network"
-            partition: 2
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-network"
-            partition: 3
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-network"
-            partition: 4
-          - os: ubuntu-latest
-            flags: "--no-default-features"
-            partition: 1
-          - os: ubuntu-latest
-            flags: "--no-default-features"
-            partition: 2
-          - os: ubuntu-latest
-            flags: "--no-default-features"
-            partition: 3
-          - os: ubuntu-latest
-            flags: "--no-default-features"
-            partition: 4
-          - os: ubuntu-latest
-            flags: ""
-            partition: 1
-          - os: ubuntu-latest
-            flags: ""
-            partition: 2
-          - os: ubuntu-latest
-            flags: ""
-            partition: 3
-          - os: ubuntu-latest
-            flags: ""
-            partition: 4
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        partition: [1, 2, 3, 4]
+        flags:
+          - "--features commonware-runtime/iouring-storage"
+          - "--features commonware-runtime/iouring-network"
+          - "--no-default-features"
+          - ""
+        exclude:
+          # Only run io_uring features on Ubuntu
           - os: windows-latest
-            flags: ""
-            partition: 1
+            flags: "--features commonware-runtime/iouring-storage"
+          - os: macos-latest
+            flags: "--features commonware-runtime/iouring-storage"
           - os: windows-latest
-            flags: ""
-            partition: 2
+            flags: "--features commonware-runtime/iouring-network"
+          - os: macos-latest
+            flags: "--features commonware-runtime/iouring-network"
+          # Only run --no-default-features on Ubuntu
           - os: windows-latest
-            flags: ""
-            partition: 3
-          - os: windows-latest
-            flags: ""
-            partition: 4
+            flags: "--no-default-features"
           - os: macos-latest
-            flags: ""
-            partition: 1
-          - os: macos-latest
-            flags: ""
-            partition: 2
-          - os: macos-latest
-            flags: ""
-            partition: 3
-          - os: macos-latest
-            flags: ""
-            partition: 4
+            flags: "--no-default-features"
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -106,6 +55,20 @@ jobs:
       uses: taiki-e/install-action@cargo-nextest
     - name: Run ignored tests
       run: cargo nextest run ${{ matrix.flags }} --partition hash:${{matrix.partition}}/4 --verbose -- --ignored
+
+  Tests-Gate:
+    name: "Slow-Tests"
+    runs-on: ubuntu-latest
+    needs: Tests
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.Tests.result }}" != "success" ]; then
+            echo "Tests failed or were cancelled"
+            exit 1
+          fi
+          echo "All tests passed successfully!"
 
   Benchmarks:
     runs-on: ubuntu-latest

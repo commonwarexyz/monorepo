@@ -52,43 +52,28 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-storage"
-            partition: 1
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-storage"
-            partition: 2
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-network"
-            partition: 1
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-network"
-            partition: 2
-          - os: ubuntu-latest
-            flags: "--no-default-features"
-            partition: 1
-          - os: ubuntu-latest
-            flags: "--no-default-features"
-            partition: 2
-          - os: ubuntu-latest
-            flags: ""
-            partition: 1
-          - os: ubuntu-latest
-            flags: ""
-            partition: 2
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        partition: [1, 2]
+        flags:
+          - "--features commonware-runtime/iouring-storage"
+          - "--features commonware-runtime/iouring-network"
+          - "--no-default-features"
+          - ""
+        exclude:
+          # Only run io_uring features on Ubuntu
           - os: windows-latest
-            flags: ""
-            partition: 1
+            flags: "--features commonware-runtime/iouring-storage"
+          - os: macos-latest
+            flags: "--features commonware-runtime/iouring-storage"
           - os: windows-latest
-            flags: ""
-            partition: 2
+            flags: "--features commonware-runtime/iouring-network"
           - os: macos-latest
-            flags: ""
-            partition: 1
+            flags: "--features commonware-runtime/iouring-network"
+          # Only run --no-default-features on Ubuntu
+          - os: windows-latest
+            flags: "--no-default-features"
           - os: macos-latest
-            flags: ""
-            partition: 2
+            flags: "--no-default-features"
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -98,6 +83,20 @@ jobs:
       uses: taiki-e/install-action@cargo-nextest
     - name: Run tests
       run: cargo nextest run ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
+
+  Tests-Gate:
+    name: "Fast-Tests"
+    runs-on: ubuntu-latest
+    needs: Tests
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.Tests.result }}" != "success" ]; then
+            echo "Tests failed or were cancelled"
+            exit 1
+          fi
+          echo "All tests passed successfully!"
 
   Dependencies:
     runs-on: ubuntu-latest

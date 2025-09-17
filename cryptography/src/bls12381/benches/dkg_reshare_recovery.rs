@@ -8,7 +8,6 @@ use commonware_cryptography::{
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use std::{collections::HashMap, hint::black_box};
 
 // Configure contributors based on context
@@ -50,18 +49,15 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
         for (dealer_idx, dealer) in contributors.iter().take(t as usize).enumerate() {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
-            players
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(player_idx, player)| {
-                    player
-                        .share(
-                            dealer.clone(),
-                            commitment.clone(),
-                            shares[player_idx].clone(),
-                        )
-                        .unwrap();
-                });
+            for (player_idx, player) in players.iter_mut().enumerate() {
+                player
+                    .share(
+                        dealer.clone(),
+                        commitment.clone(),
+                        shares[player_idx].clone(),
+                    )
+                    .unwrap();
+            }
             commitments.insert(dealer_idx as u32, commitment);
         }
 
