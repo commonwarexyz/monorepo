@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  QUINT_VERSION: "0.27.0"
+  QUINT_VERSION: "0.28.0"
 
 permissions:
   contents: read
