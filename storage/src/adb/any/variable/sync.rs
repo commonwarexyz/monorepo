@@ -5,9 +5,13 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::NZUsize;
+use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
 use std::num::NonZeroU64;
 use tracing::debug;
+
+/// The size of the read buffer to use for replaying log operations.
+const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 
 /// Initialize a Variable journal for use in state sync.
 ///
@@ -118,7 +122,7 @@ pub(crate) async fn get_size<E: Storage + Metrics, V: Codec>(
         return Ok(0);
     };
     let last_section_start = last_section * items_per_section;
-    let stream = journal.replay(last_section, 0, NZUsize!(1024)).await?;
+    let stream = journal.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
     pin_mut!(stream);
     let mut size = last_section_start;
     while let Some(item) = stream.next().await {
