@@ -14,7 +14,7 @@
 //! - [crate::threshold_simplex]: Provides consensus messages
 //! - Application: Provides verified blocks
 //! - [commonware_broadcast::buffered]: Provides uncertified blocks received from the network
-//! - [commonware_resolver::p2p]: Provides a backfill mechanism for missing blocks
+//! - [commonware_resolver::Resolver]: Provides a backfill mechanism for missing blocks
 //!
 //! # Design
 //!
@@ -50,8 +50,6 @@
 //! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
 //! - No state sync supported. Will attempt to sync every block in the history of the chain.
 //! - Stores the entire history of the chain, which requires indefinite amounts of disk space.
-//! - Uses [`resolver::p2p`](`commonware_resolver::p2p`) for backfilling rather than a general
-//!   [`Resolver`](`commonware_resolver::Resolver`).
 //! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
 //!   uncertified blocks from the network.
 
@@ -64,6 +62,7 @@ pub mod finalizer;
 pub use finalizer::Finalizer;
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
+pub mod resolver;
 
 #[cfg(test)]
 pub mod mocks;
@@ -74,6 +73,7 @@ mod tests {
         actor,
         config::Config,
         mocks::{application::Application, block::Block},
+        resolver::p2p as resolver,
     };
     use crate::{
         threshold_simplex::types::{
@@ -100,8 +100,11 @@ mod tests {
         Digestible, Hasher as _, PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::test_traced;
-    use commonware_p2p::simulated::{self, Link, Network, Oracle};
-    use commonware_resolver::p2p as resolver;
+    use commonware_p2p::{
+        simulated::{self, Link, Network, Oracle},
+        utils::requester,
+    };
+    use commonware_resolver::p2p;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use governor::Quota;
@@ -140,7 +143,7 @@ mod tests {
     async fn setup_validator(
         context: deterministic::Context,
         oracle: &mut Oracle<P>,
-        coordinator: resolver::mocks::Coordinator<P>,
+        coordinator: p2p::mocks::Coordinator<P>,
         secret: E,
         identity: <V as Variant>::Public,
     ) -> (
@@ -148,11 +151,8 @@ mod tests {
         crate::marshal::ingress::mailbox::Mailbox<V, B>,
     ) {
         let config = Config {
-            public_key: secret.public_key(),
             identity,
-            coordinator,
             mailbox_size: 100,
-            backfill_quota: Quota::per_second(NonZeroU32::new(5).unwrap()),
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
             max_repair: 10,
@@ -170,24 +170,41 @@ mod tests {
             immutable_items_per_section: NZU64!(10),
         };
 
-        let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
-        let application = Application::<B>::default();
+        // Create the resolver
+        let backfill = oracle.register(secret.public_key(), 1).await.unwrap();
+        let resolver_cfg = resolver::Config {
+            public_key: secret.public_key(),
+            coordinator,
+            mailbox_size: config.mailbox_size,
+            requester_config: requester::Config {
+                public_key: secret.public_key(),
+                rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+            },
+            fetch_retry_timeout: Duration::from_millis(100),
+            priority_requests: false,
+            priority_responses: false,
+        };
+        let resolver = resolver::init(&context, resolver_cfg, backfill);
 
         // Create a buffered broadcast engine and get its mailbox
         let broadcast_config = buffered::Config {
             public_key: secret.public_key(),
-            mailbox_size: 100,
+            mailbox_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = oracle.register(secret.public_key(), 1).await.unwrap();
+        let network = oracle.register(secret.public_key(), 2).await.unwrap();
         broadcast_engine.start(network);
 
-        // Start the actor
-        let backfill = oracle.register(secret.public_key(), 2).await.unwrap();
-        actor.start(application.clone(), buffer, backfill);
+        let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
+        let application = Application::<B>::default();
+
+        // Start the application
+        actor.start(application.clone(), buffer, resolver);
 
         (application, mailbox)
     }
@@ -328,7 +345,7 @@ mod tests {
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             for (i, secret) in schemes.iter().enumerate() {
                 let (application, actor) = setup_validator(
@@ -432,7 +449,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -481,7 +498,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -550,7 +567,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -611,7 +628,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
