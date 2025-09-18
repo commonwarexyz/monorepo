@@ -354,27 +354,35 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             },
         );
 
-        for (flow_id, plan) in outcome.plans {
-            let bandwidth::FlowPlan {
-                origin,
-                recipient,
-                latency,
-                deliver,
-                segment,
-                ready_time,
-            } = plan;
+        for (flow_id, assignment) in outcome.plans {
+            let (origin, recipient, latency, deliver) = {
+                let meta = self
+                    .flow_meta
+                    .get(&flow_id)
+                    .expect("missing metadata for scheduled flow");
+                (
+                    meta.origin.clone(),
+                    meta.recipient.clone(),
+                    meta.latency,
+                    meta.deliver,
+                )
+            };
 
             if let Some(peer) = self.peers.get_mut(&origin) {
-                peer.egress
-                    .reset_flow_segment(flow_id, segment.clone(), ready_time, None);
+                peer.egress.reset_flow_segment(
+                    flow_id,
+                    assignment.segment.clone(),
+                    assignment.ready_time,
+                    None,
+                );
             }
 
             if deliver {
                 if let Some(peer) = self.peers.get_mut(&recipient) {
                     peer.ingress.reset_flow_segment(
                         flow_id,
-                        segment.clone(),
-                        ready_time,
+                        assignment.segment.clone(),
+                        assignment.ready_time,
                         Some(latency),
                     );
                 }
@@ -382,7 +390,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             if let Some(meta) = self.flow_meta.get_mut(&flow_id) {
                 if meta.first_segment_start.is_none() {
-                    if let Some(segment) = segment.as_ref() {
+                    if let Some(segment) = assignment.segment.as_ref() {
                         meta.first_segment_start = Some(segment.start_time());
                     }
                 }

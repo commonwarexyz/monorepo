@@ -211,28 +211,20 @@ pub(super) struct Transfer<P> {
 }
 
 #[derive(Clone, Debug)]
-/// Planner output for a single flow (before latency is applied to the receiver).
-pub(super) struct FlowPlan<P> {
-    pub origin: P,
-    pub recipient: P,
-    pub latency: Duration,
-    pub deliver: bool,
+/// Planner output for a single flow.
+pub(super) struct FlowAssignment {
     pub segment: Option<Segment>,
     pub ready_time: SystemTime,
 }
 
-pub(super) struct PlanOutcome<P> {
-    pub plans: BTreeMap<u64, FlowPlan<P>>,
+pub(super) struct PlanOutcome {
+    pub plans: BTreeMap<u64, FlowAssignment>,
     pub next_event: Option<SystemTime>,
 }
 
 /// Planner-internal representation of a transfer while rates are being derived.
-struct FlowState<P> {
+struct PlannerFlow {
     id: u64,
-    origin: P,
-    recipient: P,
-    latency: Duration,
-    deliver: bool,
     ready_time: SystemTime,
     remaining: u128,
     sender_resource: Option<usize>,
@@ -292,9 +284,9 @@ fn div_ceil_or_max(num: u128, denom: u128) -> u128 {
 
 /// Core progressive-filling loop. Returns the instantaneous rate (bytes/sec) for
 /// each active flow expressed as a `Ratio<num, den>` where `num / den == Bps`.
-fn compute_rates<P: Clone + Ord>(
+fn compute_rates(
     active: &BTreeSet<usize>,
-    flows: &[FlowState<P>],
+    flows: &[PlannerFlow],
     resources: &[Ratio],
 ) -> Vec<Option<Ratio>> {
     let mut rates = vec![None; flows.len()];
@@ -431,7 +423,7 @@ pub(super) fn plan_transmissions<P, E, I>(
     transfers: &[Transfer<P>],
     mut egress_limit: E,
     mut ingress_limit: I,
-) -> PlanOutcome<P>
+) -> PlanOutcome
 where
     P: Clone + Ord,
     E: FnMut(&P) -> Option<u128>,
@@ -447,7 +439,7 @@ where
     let mut resource_indices: BTreeMap<ResourceKey<P>, Option<usize>> = BTreeMap::new();
     let mut resources: Vec<Ratio> = Vec::new();
 
-    let mut flows: Vec<FlowState<P>> = Vec::with_capacity(transfers.len());
+    let mut flows: Vec<PlannerFlow> = Vec::with_capacity(transfers.len());
     for transfer in transfers.iter() {
         // Egress is always considered; ingress only matters when the transfer
         // should be delivered (i.e. not dropped due to link failure).
@@ -471,12 +463,8 @@ where
             None
         };
 
-        flows.push(FlowState {
+        flows.push(PlannerFlow {
             id: transfer.id,
-            origin: transfer.origin.clone(),
-            recipient: transfer.recipient.clone(),
-            latency: transfer.latency,
-            deliver: transfer.deliver,
             ready_time: transfer.ready_time,
             remaining: transfer.remaining,
             sender_resource: sender_idx,
@@ -621,15 +609,13 @@ where
         plans: flows
             .into_iter()
             .map(|flow| {
-                let plan = FlowPlan {
-                    origin: flow.origin.clone(),
-                    recipient: flow.recipient.clone(),
-                    latency: flow.latency,
-                    deliver: flow.deliver,
-                    segment: flow.segment,
-                    ready_time: flow.ready_time,
-                };
-                (flow.id, plan)
+                (
+                    flow.id,
+                    FlowAssignment {
+                        segment: flow.segment,
+                        ready_time: flow.ready_time,
+                    },
+                )
             })
             .collect(),
         next_event,
@@ -711,14 +697,9 @@ mod tests {
                 .expect("planner must produce a next event while work remains");
 
             let mut progressed = false;
-            for (id, plan) in outcome.plans {
-                let FlowPlan {
-                    segment,
-                    ready_time,
-                    ..
-                } = plan;
+            for (id, assignment) in outcome.plans {
                 let entry = state.get_mut(&id).expect("missing transfer state for plan");
-                if let Some(segment) = segment {
+                if let Some(segment) = assignment.segment {
                     let transferred = segment.bytes;
                     if transferred > 0 {
                         plans.entry(id).or_default().push(segment);
@@ -726,7 +707,7 @@ mod tests {
                         progressed = true;
                     }
                 }
-                entry.ready_time = ready_time;
+                entry.ready_time = assignment.ready_time;
             }
 
             if !progressed && next_event == now {
