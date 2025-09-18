@@ -19,20 +19,20 @@
 //! ## Core Model
 //!
 //! The bandwidth model is built on an event-based timeline. Instead of simulating
-//! continuous data flow, the scheduler maintains the set of in-flight transfers
-//! for each peer and recomputes a fair division of NIC capacity whenever the set
-//! of ready transfers changes.
+//! continuous data flow, the scheduler calculates the key points in time where
+//! bandwidth availability changes for a peer. When the set of active transfers changes,
+//! a fair division of capacity is computed and schedules are updated accordingly.
 //!
-//! When a new message is enqueued the scheduler performs the following steps:
+//! Each peer has a schedule for its egress (upload) and ingress (download)
+//! bandwidth. When a new message is enqueued the scheduler performs the following steps:
 //!
-//! 1. **Collect Ready Flows:** Gather every transfer that is still in flight on
-//!    the sender (and, if applicable, the receiver) and clip away any work that
-//!    finished before the current time.
+//! 1. **Gather Transfers:** Collect all active transfers on the sender and
+//!    receiver (if the transfer will be delivered). Prune any transfers that finished before
+//!    the current time.
 //!
-//! 2. **Generalised Processor Sharing:** Run a GPS loop that allocates the NIC's
-//!    available rate equally across all ready transfers, emitting segments for
-//!    each flow so that multiple messages progress together. Limited capacity is
-//!    redistributed as flows complete.
+//! 2. **Allocate Capacity:** Allocate available bandwidth equally across all active transfers,
+//!    emitting segments for each transfer so that multiple messages progress together. Limited capacity is
+//!    redistributed as transfers complete.
 //!
 //! 3. **Apply Latency:** The same segments are written to the receiver schedule
 //!    offset by the sampled latency, ensuring ingress capacity is only consumed
