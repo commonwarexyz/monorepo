@@ -11,6 +11,9 @@ use zeroize::ZeroizeOnDrop;
 /// The amount of overhead in a ciphertext, compared to the plain message.
 pub const CIPHERTEXT_OVERHEAD: usize = <ChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
 
+/// How many bytes are in a nonce.
+const NONCE_SIZE_BYTES: usize = <ChaCha20Poly1305 as AeadCore>::NonceSize::USIZE;
+
 struct CounterNonce {
     inner: u128,
 }
@@ -26,8 +29,8 @@ impl CounterNonce {
 
     /// Increments the counter and returns the current value as bytes.
     /// Returns an error if the counter would overflow.
-    pub fn inc(&mut self) -> Result<[u8; 16], Error> {
-        if self.inner >= 1 << 96 {
+    pub fn inc(&mut self) -> Result<[u8; 128 / 8], Error> {
+        if self.inner >= 1 << (8 * NONCE_SIZE_BYTES) {
             return Err(Error::MessageLimitReached);
         }
         let out = self.inner.to_le_bytes();
@@ -56,7 +59,7 @@ impl SendCipher {
     /// Encrypts data and returns the ciphertext.
     pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
         self.inner
-            .encrypt((&self.nonce.inc()?[..12]).into(), data)
+            .encrypt((&self.nonce.inc()?[..NONCE_SIZE_BYTES]).into(), data)
             .map_err(|_| Error::EncryptionFailed)
     }
 }
@@ -81,7 +84,10 @@ impl RecvCipher {
     /// Decrypts ciphertext and returns the original data.
     pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
         self.inner
-            .decrypt((&self.nonce.inc()?[..12]).into(), encrypted_data)
+            .decrypt(
+                (&self.nonce.inc()?[..NONCE_SIZE_BYTES]).into(),
+                encrypted_data,
+            )
             .map_err(|_| Error::DecryptionFailed)
     }
 }
