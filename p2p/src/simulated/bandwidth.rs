@@ -6,7 +6,7 @@
 //! algorithm using exact rational arithmetic so the resulting plan is
 //! deterministic and work-conserving.
 
-use commonware_utils::{ceil_div_u128, Ratio};
+use commonware_utils::{ceil_div, Ratio};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -523,7 +523,7 @@ where
                     let numerator = remaining
                         .saturating_mul(rate.den)
                         .saturating_mul(NS_PER_SEC);
-                    let ns = ceil_div_u128(numerator, rate.num);
+                    let ns = ceil_div(numerator, rate.num);
                     finish_ns[idx] = Some(ns);
                     let finish_time = time
                         .checked_add(ns_to_duration(ns))

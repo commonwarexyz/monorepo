@@ -38,7 +38,7 @@ impl Ratio {
             self.den = other.den;
             return;
         }
-        let lcm = lcm_u128(self.den, other.den);
+        let lcm = lcm(self.den, other.den);
         let lhs = self.num * (lcm / self.den);
         let rhs = other.num * (lcm / other.den);
         self.num = lhs + rhs;
@@ -54,7 +54,7 @@ impl Ratio {
         if other.num == 0 {
             return;
         }
-        let lcm = lcm_u128(self.den, other.den);
+        let lcm = lcm(self.den, other.den);
         let lhs = self.num * (lcm / self.den);
         let rhs = other.num * (lcm / other.den);
         self.num = lhs.saturating_sub(rhs);
@@ -67,7 +67,7 @@ impl Ratio {
         if self.is_zero() || value == 0 {
             return Ratio::zero();
         }
-        let gcd = gcd_u128(value, self.den);
+        let gcd = gcd(value, self.den);
         let num = self.num * (value / gcd);
         let den = self.den / gcd;
         let mut result = Ratio { num, den };
@@ -80,7 +80,7 @@ impl Ratio {
         if self.is_zero() {
             return Ratio::zero();
         }
-        let gcd = gcd_u128(self.num, value);
+        let gcd = gcd(self.num, value);
         let num = self.num / gcd;
         let den = self.den * (value / gcd);
         let mut result = Ratio { num, den };
@@ -93,14 +93,14 @@ impl Ratio {
             self.den = 1;
             return;
         }
-        let gcd = gcd_u128(self.num, self.den);
+        let gcd = gcd(self.num, self.den);
         self.num /= gcd;
         self.den /= gcd;
     }
 }
 
 /// Integer division that rounds up.
-pub fn ceil_div_u128(num: u128, denom: u128) -> u128 {
+pub fn ceil_div(num: u128, denom: u128) -> u128 {
     if denom == 0 {
         return u128::MAX;
     }
@@ -111,7 +111,7 @@ pub fn ceil_div_u128(num: u128, denom: u128) -> u128 {
 }
 
 /// Greatest common divisor using Euclid's algorithm.
-pub fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+pub fn gcd(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
         let tmp = b;
         b = a % b;
@@ -121,9 +121,9 @@ pub fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
 }
 
 /// Least common multiple.
-pub fn lcm_u128(a: u128, b: u128) -> u128 {
+pub fn lcm(a: u128, b: u128) -> u128 {
     if a == 0 || b == 0 {
         return 0;
     }
-    (a / gcd_u128(a, b)) * b
+    (a / gcd(a, b)) * b
 }
