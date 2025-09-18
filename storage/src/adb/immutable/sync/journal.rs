@@ -14,7 +14,8 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{Array, NZUsize};
+use core::num::NonZeroUsize;
 use std::num::NonZeroU64;
 use tracing::debug;
 
@@ -198,6 +199,9 @@ pub(super) async fn init_journal<E: Storage + Metrics, V: Codec>(
     Ok((journal, size))
 }
 
+/// The size of the read buffer to use for replaying log operations.
+const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
+
 /// Returns the number of items in the journal.
 ///
 /// # Panics
@@ -211,7 +215,9 @@ pub(super) async fn get_size<E: Storage + Metrics, V: Codec>(
         return Err(adb::Error::UnexpectedData(0));
     };
     let last_section_start = last_section * items_per_section;
-    let items_in_last_section = journal.items_in_section(last_section).await?;
+    let items_in_last_section = journal
+        .items_in_section(last_section, REPLAY_BUFFER_SIZE)
+        .await?;
     let size = last_section_start + items_in_last_section;
     Ok(size)
 }

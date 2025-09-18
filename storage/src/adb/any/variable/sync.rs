@@ -482,7 +482,9 @@ where
         return Err(crate::adb::Error::UnexpectedData(loc));
     }
 
-    let items_in_last_section = journal.items_in_section(last_section).await?;
+    let items_in_last_section = journal
+        .items_in_section(last_section, REPLAY_BUFFER_SIZE)
+        .await?;
     let last_section_start = if last_section == lower_section {
         read_oldest_retained_loc(metadata)
     } else {
