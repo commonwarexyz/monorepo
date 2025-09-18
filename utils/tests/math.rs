@@ -1,4 +1,4 @@
-use commonware_utils::{ceil_div, gcd, lcm, Ratio};
+use commonware_utils::{gcd, lcm, Ratio};
 
 #[test]
 fn ratio_add_sub_round_trip() {
@@ -31,12 +31,4 @@ fn gcd_and_lcm_match_known_values() {
     assert_eq!(gcd(0, 5), 5);
     assert_eq!(lcm(12, 18), 36);
     assert_eq!(lcm(0, 7), 0);
-}
-
-#[test]
-fn ceil_div_handles_edges() {
-    assert_eq!(ceil_div(0, 5), 0);
-    assert_eq!(ceil_div(10, 5), 2);
-    assert_eq!(ceil_div(11, 5), 3);
-    assert_eq!(ceil_div(1, 0), u128::MAX);
 }

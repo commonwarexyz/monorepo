@@ -37,7 +37,7 @@ pub mod futures;
 mod stable_buf;
 pub use stable_buf::StableBuf;
 pub mod math;
-pub use math::{ceil_div, gcd, lcm, Ratio};
+pub use math::{gcd, lcm, Ratio};
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {

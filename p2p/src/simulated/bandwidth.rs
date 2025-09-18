@@ -6,7 +6,7 @@
 //! algorithm using exact rational arithmetic so the resulting plan is
 //! deterministic and work-conserving.
 
-use commonware_utils::{ceil_div, Ratio};
+use commonware_utils::Ratio;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -284,6 +284,17 @@ fn ns_to_duration(ns: u128) -> Duration {
     Duration::new(secs, nanos)
 }
 
+fn div_ceil_or_max(num: u128, denom: u128) -> u128 {
+    // `denom` reflects the instantaneous rate allocated to a flow. If contention
+    // evaporates we treat the horizon as effectively infinite so callers can
+    // clamp the finishing time to their own limits; returning `u128::MAX` lets
+    // the planner detect that scenario without introducing special cases.
+    if denom == 0 {
+        return u128::MAX;
+    }
+    num.div_ceil(denom)
+}
+
 /// Core progressive-filling loop. Returns the instantaneous rate (bytes/sec) for
 /// each active flow expressed as a `Ratio<num, den>` where `num / den == Bps`.
 fn compute_rates<P: Clone + Ord>(
@@ -523,7 +534,7 @@ where
                     let numerator = remaining
                         .saturating_mul(rate.den)
                         .saturating_mul(NS_PER_SEC);
-                    let ns = ceil_div(numerator, rate.num);
+                    let ns = div_ceil_or_max(numerator, rate.num);
                     finish_ns[idx] = Some(ns);
                     let finish_time = time
                         .checked_add(ns_to_duration(ns))

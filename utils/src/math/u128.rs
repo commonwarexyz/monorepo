@@ -99,17 +99,6 @@ impl Ratio {
     }
 }
 
-/// Integer division that rounds up.
-pub fn ceil_div(num: u128, denom: u128) -> u128 {
-    if denom == 0 {
-        return u128::MAX;
-    }
-    if num == 0 {
-        return 0;
-    }
-    (num + denom - 1) / denom
-}
-
 /// Greatest common divisor using Euclid's algorithm.
 pub fn gcd(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
