@@ -303,3 +303,107 @@ ol ul,
 ul ol {
     margin: 5px 0;
 }
+
+/* Podcast-specific styles */
+details.podcast-episode {
+    margin-bottom: 20px;
+    border: 1px solid #ddd;
+    padding: 8px;
+}
+
+details.podcast-episode summary.podcast-title {
+    cursor: pointer;
+    outline: none;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+    list-style: none;
+    font-weight: bold;
+    font-size: 1em;
+    margin-bottom: 8px;
+}
+
+.podcast-episode-title {
+    color: -webkit-link;
+    text-decoration: underline;
+}
+
+.podcast-episode-title:hover {
+    color: blue;
+}
+
+.podcast-meta {
+    font-size: 0.8em;
+    color: gray;
+    font-style: italic;
+    font-weight: normal;
+}
+
+.podcast-content {
+    margin-top: 15px;
+}
+
+.podcast-content .video-container {
+    margin: 15px 0 10px 0;
+}
+
+.podcast-content p {
+    margin-bottom: 10px;
+    line-height: 1.3;
+}
+
+.podcast-content .meta {
+    margin-bottom: 15px;
+}
+
+.podcast-links {
+    display: flex;
+    gap: 15px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+}
+
+.podcast-links a {
+    color: -webkit-link;
+    text-decoration: underline;
+    font-size: 0.9em;
+}
+
+.podcast-links a:hover {
+    color: blue;
+}
+
+.subscribe-links {
+    display: flex;
+    gap: 15px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+}
+
+.subscribe-links a {
+    color: -webkit-link;
+    text-decoration: underline;
+    font-weight: bold;
+}
+
+.subscribe-links a:hover {
+    color: blue;
+}
+
+/* Mobile-specific podcast improvements */
+@media (max-width: 600px) {
+    .podcast-episode {
+        margin-bottom: 30px;
+        padding-bottom: 20px;
+    }
+    
+    .podcast-links,
+    .subscribe-links {
+        gap: 10px;
+    }
+    
+    .podcast-links a,
+    .subscribe-links a {
+        font-size: 0.85em;
+    }
+}
