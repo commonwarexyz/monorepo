@@ -38,8 +38,7 @@
 //!    transfer in lock-step until some resource saturates, freeze the flows that
 //!    touch that resource, and repeat. The result is a max-min fair allocation
 //!    that is automatically capped by whichever side (egress or ingress) is
-//!    slower. This computation uses integer arithmetic (`u128` ratios) to avoid
-//!    rounding artefacts.
+//!    slower.
 //!
 //! 3. **Write Schedules:** The planner emits piecewise-constant segments for
 //!    each transfer. We store those segments on the sender immediately and on
