@@ -6,6 +6,7 @@
 //! algorithm using exact rational arithmetic so the resulting plan is
 //! deterministic and work-conserving.
 
+use commonware_utils::{ceil_div_u128, Ratio};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -201,97 +202,6 @@ enum ResourceKey<P> {
 }
 
 #[derive(Clone, Debug)]
-/// Helper that stores rates as reduced fractions to avoid precision loss.
-struct Ratio {
-    num: u128,
-    den: u128,
-}
-
-impl Ratio {
-    fn zero() -> Self {
-        Self { num: 0, den: 1 }
-    }
-
-    fn from_int(value: u128) -> Self {
-        Self { num: value, den: 1 }
-    }
-
-    fn is_zero(&self) -> bool {
-        self.num == 0
-    }
-
-    fn cmp(&self, other: &Self) -> Ordering {
-        (self.num * other.den).cmp(&(other.num * self.den))
-    }
-
-    fn add_assign(&mut self, other: &Self) {
-        if other.is_zero() {
-            return;
-        }
-        if self.is_zero() {
-            self.num = other.num;
-            self.den = other.den;
-            return;
-        }
-        let lcm = lcm_u128(self.den, other.den);
-        let lhs = self.num * (lcm / self.den);
-        let rhs = other.num * (lcm / other.den);
-        self.num = lhs + rhs;
-        self.den = lcm;
-        self.reduce();
-    }
-
-    fn sub_assign(&mut self, other: &Self) {
-        if other.is_zero() {
-            return;
-        }
-        if other.num == 0 {
-            return;
-        }
-        let lcm = lcm_u128(self.den, other.den);
-        let lhs = self.num * (lcm / self.den);
-        let rhs = other.num * (lcm / other.den);
-        self.num = lhs.saturating_sub(rhs);
-        self.den = lcm;
-        self.reduce();
-    }
-
-    fn mul_int(&self, value: u128) -> Self {
-        if self.is_zero() || value == 0 {
-            return Ratio::zero();
-        }
-        let gcd = gcd_u128(value, self.den);
-        let num = self.num * (value / gcd);
-        let den = self.den / gcd;
-        let mut result = Ratio { num, den };
-        result.reduce();
-        result
-    }
-
-    fn div_int(&self, value: u128) -> Self {
-        if self.is_zero() {
-            return Ratio::zero();
-        }
-        let gcd = gcd_u128(self.num, value);
-        let num = self.num / gcd;
-        let den = self.den * (value / gcd);
-        let mut result = Ratio { num, den };
-        result.reduce();
-        result
-    }
-
-    fn reduce(&mut self) {
-        if self.num == 0 {
-            self.den = 1;
-            return;
-        }
-        let gcd = gcd_u128(self.num, self.den);
-        self.num /= gcd;
-        self.den /= gcd;
-    }
-}
-
-#[derive(Clone, Debug)]
 /// Transfer snapshot supplied to the planner. `ready_time` denotes the first
 /// instant at which the sender can resume transmitting bytes.
 pub(super) struct Transfer<P> {
@@ -364,33 +274,6 @@ fn ns_to_duration(ns: u128) -> Duration {
         Duration::from_nanos(ns as u64)
     }
 }
-
-fn ceil_div_u128(num: u128, denom: u128) -> u128 {
-    if denom == 0 {
-        return u128::MAX;
-    }
-    if num == 0 {
-        return 0;
-    }
-    (num + denom - 1) / denom
-}
-
-fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
-    while b != 0 {
-        let tmp = b;
-        b = a % b;
-        a = tmp;
-    }
-    a
-}
-
-fn lcm_u128(a: u128, b: u128) -> u128 {
-    if a == 0 || b == 0 {
-        return 0;
-    }
-    (a / gcd_u128(a, b)) * b
-}
-
 /// Core progressive-filling loop. Returns the instantaneous rate (bytes/sec) for
 /// each active flow expressed as a `Ratio<num, den>` where `num / den == Bps`.
 fn compute_rates<P: Clone + Ord>(

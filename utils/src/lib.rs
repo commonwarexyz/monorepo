@@ -36,6 +36,8 @@ pub use priority_set::PrioritySet;
 pub mod futures;
 mod stable_buf;
 pub use stable_buf::StableBuf;
+pub mod math;
+pub use math::{ceil_div_u128, gcd_u128, lcm_u128, Ratio};
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
