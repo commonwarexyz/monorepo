@@ -20,11 +20,11 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{btree_map::Entry, BTreeMap, HashMap, HashSet, VecDeque},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
 };
-use tracing::{error, trace};
+use tracing::{error, info, trace};
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
@@ -74,6 +74,16 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map of peers blocking each other
     blocks: HashSet<(P, P)>,
 
+    // Sequence management for bandwidth scheduling and FIFO delivery
+    next_flow_id: u64,
+    assign_sequences: BTreeMap<(P, P), u64>,
+    active_flows: BTreeMap<(P, P), u64>,
+    pending_transmissions: BTreeMap<(P, P), VecDeque<QueuedTransmission>>,
+    flow_complete_tx: mpsc::UnboundedSender<(P, P)>,
+    flow_complete_rx: mpsc::UnboundedReceiver<(P, P)>,
+    expected_sequences: BTreeMap<(P, P), u64>,
+    pending_deliveries: BTreeMap<(P, P), BTreeMap<u64, PendingDelivery>>,
+
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
     sent_messages: Family<metrics::Message, Counter>,
@@ -87,6 +97,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     pub fn new(context: E, cfg: Config) -> (Self, Oracle<P>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
+        let (flow_complete_tx, flow_complete_rx) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         context.register("messages_sent", "messages sent", sent_messages.clone());
@@ -113,6 +124,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 blocks: HashSet::new(),
+                next_flow_id: 0,
+                assign_sequences: BTreeMap::new(),
+                active_flows: BTreeMap::new(),
+                pending_transmissions: BTreeMap::new(),
+                flow_complete_tx,
+                flow_complete_rx,
+                expected_sequences: BTreeMap::new(),
+                pending_deliveries: BTreeMap::new(),
                 received_messages,
                 sent_messages,
             },
@@ -268,69 +287,296 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 }
 
 impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
-    /// Schedule a transmission respecting bandwidth limits on both sender and receiver.
+    /// Schedule a transmission using the fair-share bandwidth scheduler on both peers.
+    ///
+    /// Returns a pair `(serialize_done, arrival_done)` where `serialize_done` marks when the
+    /// sender finished transmitting the bytes under the GPS allocation and `arrival_done`
+    /// corresponds to the end of the latency-shifted ingress reservations.
+    #[allow(clippy::too_many_arguments)]
     fn schedule_transmission(
         &mut self,
         sender: &P,
         receiver: &P,
+        flow_id: u64,
         data_size: usize,
         now: SystemTime,
+        latency: Duration,
         should_deliver: bool,
-    ) -> SystemTime {
-        // Prune and get used bandwidth for sender and receiver
-        let sender_used = {
+    ) -> (SystemTime, SystemTime, SystemTime) {
+        let (serialize_done, first_start) = {
             let sender_peer = self.peers.get_mut(sender).expect("sender not found");
-            sender_peer.egress.prune_and_get_usage(now)
+            sender_peer.egress.prune(now);
+            sender_peer.egress.add_flow(flow_id, now, data_size);
+            sender_peer.egress.recompute(now);
+            let completion = sender_peer
+                .egress
+                .completion_time(flow_id)
+                .expect("missing sender completion");
+            let first_start = sender_peer
+                .egress
+                .flow_segments(flow_id)
+                .and_then(|segments| segments.first().map(|s| s.start_time()))
+                .unwrap_or(now);
+            (completion, first_start)
         };
 
-        let receiver_used = if should_deliver && sender != receiver {
+        let first_byte_arrival = if should_deliver && sender != receiver {
+            first_start
+                .checked_add(latency)
+                .expect("latency overflow computing first byte arrival")
+        } else {
+            serialize_done
+        };
+
+        let arrival_completion = if should_deliver && sender != receiver {
+            let arrival_start = first_byte_arrival;
             let receiver_peer = self.peers.get_mut(receiver).expect("receiver not found");
-            Some(receiver_peer.ingress.prune_and_get_usage(now))
+            receiver_peer.ingress.prune(arrival_start);
+            receiver_peer
+                .ingress
+                .add_flow(flow_id, arrival_start, data_size);
+            receiver_peer.ingress.recompute(arrival_start);
+            let completion = receiver_peer
+                .ingress
+                .completion_time(flow_id)
+                .expect("missing receiver completion");
+            assert!(
+                completion >= arrival_start,
+                "receiver completion precedes reserved arrival start"
+            );
+            let last_byte_arrival = serialize_done
+                .checked_add(latency)
+                .expect("latency overflow computing last byte arrival");
+            completion.max(last_byte_arrival)
         } else {
-            None
+            serialize_done
         };
 
-        let sender_schedule = {
-            let sender = self.peers.get(sender).expect("sender not found");
-            (&sender.egress, sender_used)
-        };
+        (serialize_done, first_byte_arrival, arrival_completion)
+    }
 
-        let receiver_schedule = if let Some(used) = receiver_used {
-            let receiver_peer = self.peers.get(receiver).expect("receiver not found");
-            Some((&receiver_peer.ingress, used))
-        } else {
-            None
-        };
+    fn next_sequence_id(&mut self, origin: &P, recipient: &P) -> u64 {
+        let key = (origin.clone(), recipient.clone());
+        let counter = self.assign_sequences.entry(key).or_insert(0);
+        let seq = *counter;
+        *counter += 1;
+        seq
+    }
 
-        // Now calculate reservations
-        let (reservations, completion_time) =
-            bandwidth::calculate_reservations(data_size, now, sender_schedule, receiver_schedule);
+    fn enqueue_delivery(&mut self, origin: &P, recipient: &P, seq: u64, pending: PendingDelivery) {
+        let key = (origin.clone(), recipient.clone());
+        self.pending_deliveries
+            .entry(key.clone())
+            .or_default()
+            .insert(seq, pending);
+        self.flush_delivery_queue(key);
+    }
 
-        // Apply reservations to sender
-        if !reservations.is_empty() {
-            let sender_peer = self.peers.get_mut(sender).expect("sender not found");
-            for reservation in &reservations {
-                sender_peer.egress.add_reservation(
-                    reservation.start,
-                    reservation.end,
-                    reservation.bandwidth,
+    fn flush_delivery_queue(&mut self, key: (P, P)) {
+        let expected_entry = self.expected_sequences.entry(key.clone()).or_insert(0);
+        loop {
+            let pending = match self.pending_deliveries.entry(key.clone()) {
+                Entry::Occupied(mut occ) => {
+                    if let Some(p) = occ.get_mut().remove(expected_entry) {
+                        if occ.get().is_empty() {
+                            occ.remove();
+                        }
+                        Some(p)
+                    } else {
+                        None
+                    }
+                }
+                Entry::Vacant(_) => None,
+            };
+
+            let Some(pending) = pending else { break };
+
+            if let Some(link) = self.links.get_mut(&key) {
+                // Deliver only when all earlier sequence numbers are already flushed.
+                let (origin_key, recipient_key) = (&key.0, &key.1);
+                assert!(
+                    pending.arrival_complete_at >= pending.sent_at,
+                    "arrival completed before send time for {:?}->{:?}",
+                    origin_key,
+                    recipient_key
                 );
+                assert!(
+                    pending.egress_complete_at >= pending.sent_at,
+                    "egress completed before send time for {:?}->{:?}",
+                    origin_key,
+                    recipient_key
+                );
+                assert!(
+                    pending.arrival_complete_at >= pending.first_byte_arrival_at,
+                    "arrival completed before first byte for {:?}->{:?}",
+                    origin_key,
+                    recipient_key
+                );
+                assert!(
+                    pending.first_byte_arrival_at >= pending.sent_at,
+                    "first byte arrived before send time for {:?}->{:?}",
+                    origin_key,
+                    recipient_key
+                );
+
+                let travel_time = pending
+                    .arrival_complete_at
+                    .duration_since(pending.sent_at)
+                    .expect("checked above");
+                let egress_time = pending
+                    .egress_complete_at
+                    .duration_since(pending.sent_at)
+                    .expect("checked above");
+                let ingress_time = pending
+                    .arrival_complete_at
+                    .duration_since(pending.first_byte_arrival_at)
+                    .expect("checked above");
+                let first_byte_latency = pending
+                    .first_byte_arrival_at
+                    .duration_since(pending.sent_at)
+                    .expect("checked above");
+                let message_size = pending.message.len();
+                info!(
+                    origin = ?origin_key,
+                    recipient = ?recipient_key,
+                    channel = pending.channel,
+                    travel_time = ?travel_time,
+                    egress_time = ?egress_time,
+                    ingress_time = ?ingress_time,
+                    first_byte_latency = ?first_byte_latency,
+                    link_latency = ?pending.link_latency,
+                    message_size,
+                    "sent message"
+                );
+                if let Err(err) = link.send(
+                    pending.channel,
+                    pending.message,
+                    pending.arrival_complete_at,
+                ) {
+                    error!(?err, "failed to send");
+                }
             }
 
-            // Apply to receiver if delivering
-            if receiver_used.is_some() {
-                let receiver_peer = self.peers.get_mut(receiver).expect("receiver not found");
-                for reservation in &reservations {
-                    receiver_peer.ingress.add_reservation(
-                        reservation.start,
-                        reservation.end,
-                        reservation.bandwidth,
+            *expected_entry += 1;
+        }
+    }
+
+    fn queue_transmission(&mut self, origin: P, recipient: P, entry: QueuedTransmission) {
+        let key = (origin.clone(), recipient.clone());
+        if self.active_flows.contains_key(&key) {
+            self.pending_transmissions
+                .entry(key)
+                .or_default()
+                .push_back(entry);
+        } else {
+            let flow_id = self.next_flow_id;
+            self.next_flow_id += 1;
+            self.active_flows
+                .insert((origin.clone(), recipient.clone()), flow_id);
+            self.start_transmission(origin, recipient, flow_id, entry);
+        }
+    }
+
+    fn start_transmission(
+        &mut self,
+        origin: P,
+        recipient: P,
+        flow_id: u64,
+        entry: QueuedTransmission,
+    ) {
+        let QueuedTransmission {
+            channel,
+            message,
+            latency,
+            should_deliver,
+        } = entry;
+
+        let now = self.context.current();
+        let size = message.len();
+        let (serialize_done, first_byte_arrival_at, arrival_complete_at) = self
+            .schedule_transmission(
+                &origin,
+                &recipient,
+                flow_id,
+                size,
+                now,
+                latency,
+                should_deliver,
+            );
+
+        if should_deliver {
+            let seq = self.next_sequence_id(&origin, &recipient);
+            let pending = PendingDelivery {
+                channel,
+                message: message.clone(),
+                arrival_complete_at,
+                first_byte_arrival_at,
+                egress_complete_at: serialize_done,
+                sent_at: now,
+                link_latency: latency,
+            };
+            self.enqueue_delivery(&origin, &recipient, seq, pending);
+        }
+
+        let flow_complete_tx = self.flow_complete_tx.clone();
+        let origin_clone = origin.clone();
+        let recipient_clone = recipient.clone();
+        trace!(
+            ?origin,
+            ?recipient,
+            latency_ms = latency.as_millis(),
+            delivered = should_deliver,
+            "sending message",
+        );
+        self.context
+            .with_label("sender-timing")
+            .spawn(move |context| async move {
+                context.sleep_until(serialize_done).await;
+                if flow_complete_tx
+                    .unbounded_send((origin_clone.clone(), recipient_clone.clone()))
+                    .is_err()
+                {
+                    error!(
+                        ?origin_clone,
+                        ?recipient_clone,
+                        "failed to notify flow completion"
                     );
                 }
+                if !should_deliver {
+                    trace!(
+                        ?origin_clone,
+                        ?recipient_clone,
+                        reason = "random link failure",
+                        "dropping message",
+                    );
+                }
+            });
+    }
+
+    fn on_flow_complete(&mut self, origin: P, recipient: P) {
+        let key = (origin.clone(), recipient.clone());
+        self.active_flows.remove(&key);
+
+        let mut next_entry = None;
+        let mut remove_queue = false;
+
+        if let Some(queue) = self.pending_transmissions.get_mut(&key) {
+            next_entry = queue.pop_front();
+            if queue.is_empty() {
+                remove_queue = true;
             }
         }
 
-        completion_time
+        if remove_queue {
+            self.pending_transmissions.remove(&key);
+        }
+
+        if let Some(entry) = next_entry {
+            let flow_id = self.next_flow_id;
+            self.next_flow_id += 1;
+            self.active_flows.insert(key, flow_id);
+            self.start_transmission(origin, recipient, flow_id, entry);
+        }
     }
 
     /// Handle a task.
@@ -348,15 +594,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         // Send to all recipients
         let mut sent = Vec::new();
-        let (acquired_sender, mut acquired_receiver) = mpsc::channel(recipients.len());
         for recipient in recipients {
-            // Skip self
             if recipient == origin {
                 trace!(?recipient, reason = "self", "dropping message",);
                 continue;
             }
 
-            // Determine if the sender or recipient has blocked the other
             let o_r = (origin.clone(), recipient.clone());
             let r_o = (recipient.clone(), origin.clone());
             if self.disconnect_on_block
@@ -366,41 +609,28 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 continue;
             }
 
-            // Determine if there is a link between the sender and recipient
-            let link = match self.links.get(&o_r) {
-                Some(link) => link,
-                None => {
-                    trace!(?origin, ?recipient, reason = "no link", "dropping message",);
-                    continue;
-                }
-            };
+            if !self.links.contains_key(&o_r) {
+                trace!(?origin, ?recipient, reason = "no link", "dropping message",);
+                continue;
+            }
 
-            // Record sent message as soon as we determine there is a link with recipient (approximates
-            // having an open connection)
             self.sent_messages
                 .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
                 .inc();
 
-            // Check bandwidth constraints and determine if the message should be delivered
-            let (sender_has_bandwidth, should_deliver) = {
+            let (latency, success_rate) = {
+                let link = self.links.get_mut(&o_r).expect("link must exist");
+                let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
+                (latency, link.success_rate)
+            };
+
+            let (sender_has_bandwidth, receiver_has_bandwidth) = {
                 let sender_peer = self.peers.get(&origin).expect("sender must exist");
                 let receiver_peer = self.peers.get(&recipient).expect("receiver must exist");
-
-                let sender_has_bandwidth = sender_peer.egress.bps > 0;
-                let receiver_has_bandwidth = receiver_peer.ingress.bps > 0;
-
-                let should_deliver = self.context.gen_bool(link.success_rate);
-
-                (
-                    sender_has_bandwidth,
-                    // If the receiver has no bandwidth then we treat it as if the message
-                    // is never delivered. Still consume sender-side bandwidth.
-                    should_deliver && receiver_has_bandwidth,
-                )
+                (sender_peer.egress.bps > 0, receiver_peer.ingress.bps > 0)
             };
 
             if !sender_has_bandwidth {
-                // Sender has no bandwidth, skip this recipient
                 trace!(
                     ?origin,
                     ?recipient,
@@ -409,81 +639,23 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 continue;
             }
 
-            // Sample latency and get current time
-            let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
-            let now = self.context.current();
+            let should_deliver = receiver_has_bandwidth && self.context.gen_bool(success_rate);
 
-            // Schedule the transmission
-            let transmission_complete_at =
-                self.schedule_transmission(&origin, &recipient, message.len(), now, should_deliver);
+            let entry = QueuedTransmission {
+                channel,
+                message: message.clone(),
+                latency,
+                should_deliver,
+            };
 
-            // If the message should be delivered, queue it immediately on the
-            // link to preserve ordering
-            if should_deliver {
-                let link = self.links.get_mut(&o_r).unwrap();
-
-                // The final arrival time includes the per-message latency
-                let receive_complete_at = transmission_complete_at + latency;
-
-                if let Err(err) = link.send(channel, message.clone(), receive_complete_at) {
-                    // This can only happen if the receiver exited.
-                    error!(?origin, ?recipient, ?err, "failed to send");
-                    continue;
-                }
-            }
-
-            let transmission_duration = transmission_complete_at
-                .duration_since(now)
-                .unwrap_or(Duration::ZERO);
-            trace!(
-                ?origin,
-                ?recipient,
-                transmission_duration_ms = transmission_duration.as_millis(),
-                latency_ms = latency.as_millis(),
-                delivered = should_deliver,
-                "sending message",
-            );
-
-            // Spawn task to handle sender timing
-            self.context.with_label("sender-timing").spawn({
-                let recipient = recipient.clone();
-                let mut acquired_sender = acquired_sender.clone();
-                move |context| async move {
-                    // Wait for transmission to complete
-                    context.sleep_until(transmission_complete_at).await;
-
-                    // Mark as sent once transmission completes
-                    acquired_sender.send(()).await.unwrap();
-
-                    if !should_deliver {
-                        trace!(
-                            ?recipient,
-                            reason = "random link failure",
-                            "dropping message",
-                        );
-                    }
-                }
-            });
+            self.queue_transmission(origin.clone(), recipient.clone(), entry);
 
             sent.push(recipient);
         }
 
-        // Notify sender of successful sends
-        self.context
-            .clone()
-            .with_label("notifier")
-            .spawn(|_| async move {
-                // Wait for semaphore to be acquired on all sends
-                for _ in 0..sent.len() {
-                    acquired_receiver.next().await.unwrap();
-                }
-
-                // Notify sender of successful sends
-                if let Err(err) = reply.send(sent) {
-                    // This can only happen if the sender exited.
-                    error!(?err, "failed to send ack");
-                }
-            });
+        if let Err(err) = reply.send(sent) {
+            error!(?err, "failed to send ack");
+        }
     }
 
     /// Run the simulated network.
@@ -512,6 +684,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         None => break,
                     };
                     self.handle_task(task);
+                },
+                completion = self.flow_complete_rx.next() => {
+                    if let Some((origin, recipient)) = completion {
+                        self.on_flow_complete(origin, recipient);
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -801,6 +980,24 @@ struct Link {
     inbox: mpsc::UnboundedSender<(Channel, Bytes, SystemTime)>,
 }
 
+/// Buffered payload waiting for earlier messages on the same link to complete.
+struct PendingDelivery {
+    channel: Channel,
+    message: Bytes,
+    arrival_complete_at: SystemTime,
+    first_byte_arrival_at: SystemTime,
+    egress_complete_at: SystemTime,
+    sent_at: SystemTime,
+    link_latency: Duration,
+}
+
+struct QueuedTransmission {
+    channel: Channel,
+    message: Bytes,
+    latency: Duration,
+    should_deliver: bool,
+}
+
 impl Link {
     #[allow(clippy::too_many_arguments)]
     fn new<E: Spawner + RNetwork + Clock + Metrics, P: PublicKey>(
@@ -870,9 +1067,10 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Receiver as _, Recipients, Sender as _};
+    use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-    use commonware_runtime::{deterministic, Runner};
-
+    use commonware_runtime::{deterministic, Runner as _};
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
     #[test]
@@ -953,6 +1151,134 @@ mod tests {
                 next,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 1, 0, 0)), 0)
             );
+        });
+    }
+
+    #[test]
+    fn test_fifo_burst_same_recipient() {
+        let cfg = Config {
+            max_size: MAX_MESSAGE_SIZE,
+            disconnect_on_block: true,
+        };
+
+        deterministic::Runner::default().start(|context| async move {
+            let (network, mut oracle) = Network::new(context.with_label("network"), cfg);
+            let network_handle = network.start();
+
+            let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
+            let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
+
+            let (mut sender, _sender_recv) = oracle.register(sender_pk.clone(), 0).await.unwrap();
+            let (_sender2, mut receiver) = oracle.register(recipient_pk.clone(), 0).await.unwrap();
+
+            oracle
+                .set_bandwidth(sender_pk.clone(), 5_000, usize::MAX)
+                .await
+                .unwrap();
+            oracle
+                .set_bandwidth(recipient_pk.clone(), usize::MAX, 5_000)
+                .await
+                .unwrap();
+
+            oracle
+                .add_link(
+                    sender_pk.clone(),
+                    recipient_pk.clone(),
+                    ingress::Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            const COUNT: usize = 50;
+            let mut expected = Vec::with_capacity(COUNT);
+            for i in 0..COUNT {
+                let msg = Bytes::from(vec![i as u8; 64]);
+                sender
+                    .send(Recipients::One(recipient_pk.clone()), msg.clone(), false)
+                    .await
+                    .unwrap();
+                expected.push(msg);
+            }
+
+            for expected_msg in expected {
+                let (_pk, bytes) = receiver.recv().await.unwrap();
+                assert_eq!(bytes, expected_msg);
+            }
+
+            drop(oracle);
+            drop(sender);
+            network_handle.abort();
+        });
+    }
+
+    #[test]
+    fn test_broadcast_respects_transmit_latency() {
+        let cfg = Config {
+            max_size: MAX_MESSAGE_SIZE,
+            disconnect_on_block: true,
+        };
+
+        deterministic::Runner::default().start(|context| async move {
+            let (network, mut oracle) = Network::new(context.with_label("network"), cfg);
+            let network_handle = network.start();
+
+            let sender_pk = ed25519::PrivateKey::from_seed(42).public_key();
+            let recipient_a = ed25519::PrivateKey::from_seed(43).public_key();
+            let recipient_b = ed25519::PrivateKey::from_seed(44).public_key();
+
+            let (mut sender, _recv_sender) = oracle.register(sender_pk.clone(), 0).await.unwrap();
+            let (_sender2, mut recv_a) = oracle.register(recipient_a.clone(), 0).await.unwrap();
+            let (_sender3, mut recv_b) = oracle.register(recipient_b.clone(), 0).await.unwrap();
+
+            oracle
+                .set_bandwidth(sender_pk.clone(), 1_000, usize::MAX)
+                .await
+                .unwrap();
+            oracle
+                .set_bandwidth(recipient_a.clone(), usize::MAX, 1_000)
+                .await
+                .unwrap();
+            oracle
+                .set_bandwidth(recipient_b.clone(), usize::MAX, 1_000)
+                .await
+                .unwrap();
+
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(sender_pk.clone(), recipient_a.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(sender_pk.clone(), recipient_b.clone(), link)
+                .await
+                .unwrap();
+
+            let big_msg = Bytes::from(vec![7u8; 10_000]);
+            let start = context.current();
+            sender
+                .send(Recipients::All, big_msg.clone(), false)
+                .await
+                .unwrap();
+
+            let (_pk, received_a) = recv_a.recv().await.unwrap();
+            let elapsed_a = context.current().duration_since(start).unwrap();
+            assert!(elapsed_a >= Duration::from_millis(100));
+
+            let (_pk, received_b) = recv_b.recv().await.unwrap();
+            assert_eq!(received_a, big_msg);
+            assert_eq!(received_b, big_msg);
+
+            drop(oracle);
+            drop(sender);
+            network_handle.abort();
         });
     }
 }
