@@ -27,12 +27,10 @@
 //! bandwidth. When a new message is enqueued the scheduler performs the following steps:
 //!
 //! 1. **Gather Transfers:** Collect all active transfers on the sender and
-//!    receiver (if the transfer will be delivered). Prune any transfers that finished before
-//!    the current time.
+//!    receiver, pruning any transfers that finished before the current time.
 //!
-//! 2. **Allocate Capacity:** Allocate available bandwidth equally across all active transfers,
-//!    emitting segments for each transfer so that multiple messages progress together. Limited capacity is
-//!    redistributed as transfers complete.
+//! 2. **Allocate Capacity:** Distribute available bandwidth equally across all
+//!    active transfers. TODO: add explanation of how this works on the receiver.
 //!
 //! 3. **Apply Latency:** The same segments are written to the receiver schedule
 //!    offset by the sampled latency, ensuring ingress capacity is only consumed
