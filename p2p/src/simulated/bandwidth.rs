@@ -206,7 +206,6 @@ pub(super) struct Transfer<P> {
     pub recipient: P,
     pub remaining: u128,
     pub ready_time: SystemTime,
-    pub latency: Duration,
     pub deliver: bool,
 }
 
@@ -637,7 +636,6 @@ mod tests {
         recipient: P,
         remaining: u128,
         ready_time: SystemTime,
-        latency: Duration,
         deliver: bool,
     }
 
@@ -663,7 +661,6 @@ mod tests {
                         recipient: transfer.recipient.clone(),
                         remaining: transfer.remaining,
                         ready_time: transfer.ready_time,
-                        latency: transfer.latency,
                         deliver: transfer.deliver,
                     },
                 )
@@ -685,7 +682,6 @@ mod tests {
                     recipient: entry.recipient.clone(),
                     remaining: entry.remaining,
                     ready_time: entry.ready_time,
-                    latency: entry.latency,
                     deliver: entry.deliver,
                 })
                 .collect();
@@ -730,7 +726,6 @@ mod tests {
                 recipient: 2,
                 remaining: 2000,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
             Transfer {
@@ -739,7 +734,6 @@ mod tests {
                 recipient: 2,
                 remaining: 1000,
                 ready_time: now + Duration::from_secs(1),
-                latency: Duration::ZERO,
                 deliver: true,
             },
         ];
@@ -775,7 +769,6 @@ mod tests {
                 recipient: 2,
                 remaining: 1200,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
             Transfer {
@@ -784,7 +777,6 @@ mod tests {
                 recipient: 2,
                 remaining: 600,
                 ready_time: now + Duration::from_millis(200),
-                latency: Duration::ZERO,
                 deliver: true,
             },
             Transfer {
@@ -793,7 +785,6 @@ mod tests {
                 recipient: 2,
                 remaining: 600,
                 ready_time: now + Duration::from_millis(200),
-                latency: Duration::ZERO,
                 deliver: true,
             },
         ];
@@ -846,7 +837,6 @@ mod tests {
             recipient: 2,
             remaining: 1024,
             ready_time: now,
-            latency: Duration::ZERO,
             deliver: true,
         }];
 
@@ -869,7 +859,6 @@ mod tests {
                 recipient: 4,
                 remaining: 1500,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
             Transfer {
@@ -878,7 +867,6 @@ mod tests {
                 recipient: 4,
                 remaining: 1500,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
             Transfer {
@@ -887,7 +875,6 @@ mod tests {
                 recipient: 4,
                 remaining: 1500,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
         ];
@@ -951,7 +938,6 @@ mod tests {
                 recipient: 10,
                 remaining: 1000,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
             Transfer {
@@ -960,7 +946,6 @@ mod tests {
                 recipient: 10,
                 remaining: 1000,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
         ];
@@ -992,7 +977,6 @@ mod tests {
                 recipient: 10,
                 remaining: 1000,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
             Transfer {
@@ -1001,7 +985,6 @@ mod tests {
                 recipient: 11,
                 remaining: 1000,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
         ];
@@ -1035,7 +1018,6 @@ mod tests {
             recipient: 2,
             remaining: 1024,
             ready_time: now,
-            latency: Duration::ZERO,
             deliver: true,
         }];
 
@@ -1057,7 +1039,6 @@ mod tests {
                 recipient: 2,
                 remaining: 1000,
                 ready_time: now,
-                latency: Duration::ZERO,
                 deliver: true,
             },
             Transfer {
@@ -1066,7 +1047,6 @@ mod tests {
                 recipient: 3,
                 remaining: 1000,
                 ready_time: now + Duration::from_secs(1),
-                latency: Duration::ZERO,
                 deliver: true,
             },
         ];

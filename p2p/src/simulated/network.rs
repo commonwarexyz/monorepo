@@ -320,7 +320,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     recipient: meta.recipient.clone(),
                     remaining: snapshot.remaining,
                     ready_time: snapshot.ready_time.max(now),
-                    latency: meta.latency,
                     deliver: meta.deliver,
                 });
             }
