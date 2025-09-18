@@ -32,7 +32,7 @@
 //!    receiver, pruning any transfers that finished before the current time.
 //!    Transfers that no longer have bytes remaining are removed from the model.
 //!
-//! 2. **Progressive Filling:** Treat each transfer as being limited by two
+//! 2. **Allocate Capacity:** Treat each transfer as being limited by two
 //!    resources—its sender's egress bucket and, if the message will be delivered,
 //!    the receiver's ingress bucket. We then raise the rate for every active
 //!    transfer in lock-step until some resource saturates, freeze the flows that
@@ -40,12 +40,12 @@
 //!    that is automatically capped by whichever side (egress or ingress) is
 //!    slower.
 //!
-//! 3. **Write Schedules:** The planner emits piecewise-constant segments for
-//!    each transfer. We store those segments on the sender immediately and on
-//!    the receiver after shifting them by the sampled latency, so ingress
-//!    capacity is only consumed while bytes are actually in flight. Because the
-//!    same plan powers both ends, unused capacity is instantly redistributed to
-//!    other transfers.
+//! 3. **Materialize Segments:** The planner returns piecewise-constant segments
+//!    for every transfer. We install those segments on the sender right away and
+//!    on the receiver after shifting them by the sampled latency. This keeps
+//!    ingress capacity busy only while bytes are in flight, and because the two
+//!    ends share the same plan, any slack that appears on one side automatically
+//!    flows to the others.
 //!
 //! 4. **FIFO Delivery:** Each link tracks the next sequence number expected from
 //!    the sender, so even though transfers share bandwidth fairly, payloads are
