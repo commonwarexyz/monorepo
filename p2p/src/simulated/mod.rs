@@ -998,9 +998,10 @@ mod tests {
 
             // One-to-many (main peer sends to all others). Verifies that bandwidth limits
             // are properly enforced when sending to multiple recipients
+            let start = context.current();
+
             // Send message to all peers concurrently
             // and wait for all sends to be acknowledged
-            let start = context.current();
             join_all(peers.iter().skip(1).map(|peer| {
                 let mut sender = senders[0].clone();
                 let recipient = peer.clone();
