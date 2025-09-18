@@ -364,30 +364,27 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 ready_time,
             } = plan;
 
-            let segments: Vec<_> = segment.iter().cloned().collect();
-
             if let Some(peer) = self.peers.get_mut(&origin) {
                 peer.egress
-                    .reset_flow_segments(flow_id, segments.clone(), ready_time);
+                    .reset_flow_segment(flow_id, segment.clone(), ready_time);
             }
 
             if deliver {
                 if let Some(peer) = self.peers.get_mut(&recipient) {
-                    let shifted: Vec<bandwidth::Segment> = segments
-                        .iter()
-                        .map(|segment| segment.shifted(latency))
-                        .collect();
+                    let shifted = segment
+                        .clone()
+                        .map(|segment| segment.shifted(latency));
                     let ingress_ready = ready_time
                         .checked_add(latency)
                         .expect("latency overflow computing ingress ready time");
                     peer.ingress
-                        .reset_flow_segments(flow_id, shifted, ingress_ready);
+                        .reset_flow_segment(flow_id, shifted, ingress_ready);
                 }
             }
 
             if let Some(meta) = self.flow_meta.get_mut(&flow_id) {
                 if meta.first_segment_start.is_none() {
-                    if let Some(segment) = segments.first() {
+                    if let Some(segment) = segment.as_ref() {
                         meta.first_segment_start = Some(segment.start_time());
                     }
                 }

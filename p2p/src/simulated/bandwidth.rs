@@ -56,7 +56,7 @@ struct Flow {
     bytes_total: u128,
     bytes_delivered: u128,
     ready_time: SystemTime,
-    segments: Vec<Segment>,
+    segment: Option<Segment>,
 }
 
 impl Flow {
@@ -65,7 +65,7 @@ impl Flow {
             bytes_total: bytes as u128,
             bytes_delivered: 0,
             ready_time,
-            segments: Vec::new(),
+            segment: None,
         }
     }
 
@@ -74,8 +74,8 @@ impl Flow {
     }
 
     fn completion_time(&self) -> Option<SystemTime> {
-        if let Some(last) = self.segments.last() {
-            Some(last.end)
+        if let Some(segment) = &self.segment {
+            Some(segment.end)
         } else if self.remaining() == 0 {
             Some(self.ready_time)
         } else {
@@ -83,8 +83,8 @@ impl Flow {
         }
     }
 
-    fn reset_segments(&mut self, segments: Vec<Segment>, ready_time: SystemTime) {
-        self.segments = segments;
+    fn reset_segment(&mut self, segment: Option<Segment>, ready_time: SystemTime) {
+        self.segment = segment;
         self.ready_time = ready_time;
     }
 
@@ -129,32 +129,43 @@ impl Schedule {
     pub(super) fn prune(&mut self, now: SystemTime) -> Vec<u64> {
         let mut completed = Vec::new();
         for (&id, flow) in self.flows.iter_mut() {
-            let mut updated = Vec::new();
-            for mut segment in flow.segments.drain(..) {
-                if segment.end <= now {
-                    flow.bytes_delivered = flow.bytes_delivered.saturating_add(segment.bytes);
-                } else if segment.start < now {
-                    let total_ns = segment.duration_ns().max(1);
+            let mut segment = flow.segment.take();
+            if let Some(mut current) = segment {
+                if current.end <= now {
+                    flow.bytes_delivered = flow
+                        .bytes_delivered
+                        .saturating_add(current.bytes);
+                    segment = None;
+                } else if current.start < now {
+                    let total_ns = current.duration_ns().max(1);
                     let elapsed_ns = now
-                        .duration_since(segment.start)
+                        .duration_since(current.start)
                         .unwrap_or(Duration::ZERO)
                         .as_nanos();
-                    let credited = segment.bytes * elapsed_ns / total_ns;
-                    let credited = credited.min(segment.bytes);
-                    flow.bytes_delivered = flow.bytes_delivered.saturating_add(credited);
-                    let remaining_bytes = segment.bytes.saturating_sub(credited);
+                    let credited = current.bytes * elapsed_ns / total_ns;
+                    let credited = credited.min(current.bytes);
+                    flow.bytes_delivered = flow
+                        .bytes_delivered
+                        .saturating_add(credited);
+                    let remaining_bytes = current.bytes.saturating_sub(credited);
                     if remaining_bytes > 0 {
-                        segment.start = now;
-                        segment.bytes = remaining_bytes;
-                        updated.push(segment);
+                        current.start = now;
+                        current.bytes = remaining_bytes;
+                        segment = Some(current);
+                    } else {
+                        segment = None;
                     }
                 } else {
-                    updated.push(segment);
+                    segment = Some(current);
                 }
             }
 
-            flow.segments = updated;
-            flow.ready_time = flow.segments.first().map(|s| s.start).unwrap_or(now);
+            flow.segment = segment;
+            flow.ready_time = flow
+                .segment
+                .as_ref()
+                .map(|s| s.start)
+                .unwrap_or(now);
 
             if flow.remaining() == 0 {
                 completed.push(id);
@@ -168,14 +179,14 @@ impl Schedule {
         completed
     }
 
-    pub(super) fn reset_flow_segments(
+    pub(super) fn reset_flow_segment(
         &mut self,
         flow_id: u64,
-        segments: Vec<Segment>,
+        segment: Option<Segment>,
         ready_time: SystemTime,
     ) {
         if let Some(flow) = self.flows.get_mut(&flow_id) {
-            flow.reset_segments(segments, ready_time);
+            flow.reset_segment(segment, ready_time);
         }
     }
 
@@ -185,8 +196,10 @@ impl Schedule {
             .and_then(|flow| flow.completion_time())
     }
 
-    pub(super) fn flow_segments(&self, flow_id: u64) -> Option<&[Segment]> {
-        self.flows.get(&flow_id).map(|f| f.segments.as_slice())
+    pub(super) fn flow_segment(&self, flow_id: u64) -> Option<&Segment> {
+        self.flows
+            .get(&flow_id)
+            .and_then(|flow| flow.segment.as_ref())
     }
 
     pub(super) fn flow_snapshot(&self, flow_id: u64) -> Option<FlowSnapshot> {
@@ -1149,13 +1162,12 @@ mod tests {
         let plans = outcome.plans;
 
         let plan = plans.get(&1).unwrap();
-        let segments: Vec<_> = plan.segment.iter().cloned().collect();
-        schedule.reset_flow_segments(1, segments, plan.ready_time);
+        schedule.reset_flow_segment(1, plan.segment.clone(), plan.ready_time);
 
         let completion = schedule.completion_time(1).unwrap();
         assert_eq!(completion, now + Duration::from_secs(1));
 
         let _ = schedule.prune(now + Duration::from_secs(2));
-        assert!(schedule.flow_segments(1).is_none());
+        assert!(schedule.flow_segment(1).is_none());
     }
 }
