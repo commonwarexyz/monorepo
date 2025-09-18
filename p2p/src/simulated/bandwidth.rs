@@ -132,9 +132,7 @@ impl Schedule {
             let mut segment = flow.segment.take();
             if let Some(mut current) = segment {
                 if current.end <= now {
-                    flow.bytes_delivered = flow
-                        .bytes_delivered
-                        .saturating_add(current.bytes);
+                    flow.bytes_delivered = flow.bytes_delivered.saturating_add(current.bytes);
                     segment = None;
                 } else if current.start < now {
                     let total_ns = current.duration_ns().max(1);
@@ -144,9 +142,7 @@ impl Schedule {
                         .as_nanos();
                     let credited = current.bytes * elapsed_ns / total_ns;
                     let credited = credited.min(current.bytes);
-                    flow.bytes_delivered = flow
-                        .bytes_delivered
-                        .saturating_add(credited);
+                    flow.bytes_delivered = flow.bytes_delivered.saturating_add(credited);
                     let remaining_bytes = current.bytes.saturating_sub(credited);
                     if remaining_bytes > 0 {
                         current.start = now;
@@ -161,11 +157,7 @@ impl Schedule {
             }
 
             flow.segment = segment;
-            flow.ready_time = flow
-                .segment
-                .as_ref()
-                .map(|s| s.start)
-                .unwrap_or(now);
+            flow.ready_time = flow.segment.as_ref().map(|s| s.start).unwrap_or(now);
 
             if flow.remaining() == 0 {
                 completed.push(id);
@@ -508,29 +500,21 @@ where
         });
     }
 
-    let mut time = now;
-    let mut next_event = None;
+    let active: BTreeSet<usize> = flows
+        .iter()
+        .enumerate()
+        .filter(|(_, flow)| flow.remaining > 0 && flow.ready_time <= now)
+        .map(|(idx, _)| idx)
+        .collect();
 
-    loop {
-        let active: BTreeSet<usize> = flows
+    let next_event = if active.is_empty() {
+        flows
             .iter()
-            .enumerate()
-            .filter(|(_, flow)| flow.remaining > 0 && flow.ready_time <= time)
-            .map(|(idx, _)| idx)
-            .collect();
-
-        if active.is_empty() {
-            if let Some(next_ready) = flows
-                .iter()
-                .filter(|flow| flow.remaining > 0)
-                .map(|flow| flow.ready_time)
-                .filter(|t| *t > time)
-                .min()
-            {
-                next_event = Some(next_ready);
-            }
-            break;
-        }
+            .filter(|flow| flow.remaining > 0 && flow.ready_time > now)
+            .map(|flow| flow.ready_time)
+            .min()
+    } else {
+        let time = now;
 
         // At this point at least one flow is active; derive its instantaneous rate.
         let rates = compute_rates(&active, &flows, &resources);
@@ -580,7 +564,7 @@ where
             (Some(finish), Some(ready)) => finish.min(ready),
             (Some(finish), None) => finish,
             (None, Some(ready)) => ready,
-            (None, None) => break,
+            (None, None) => time,
         };
 
         let delta_ns = event_time
@@ -645,9 +629,8 @@ where
             flow.ready_time = event_time;
         }
 
-        next_event = Some(event_time);
-        break;
-    }
+        Some(event_time)
+    };
 
     PlanOutcome {
         plans: flows

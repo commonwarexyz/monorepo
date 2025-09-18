@@ -371,9 +371,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             if deliver {
                 if let Some(peer) = self.peers.get_mut(&recipient) {
-                    let shifted = segment
-                        .clone()
-                        .map(|segment| segment.shifted(latency));
+                    let shifted = segment.clone().map(|segment| segment.shifted(latency));
                     let ingress_ready = ready_time
                         .checked_add(latency)
                         .expect("latency overflow computing ingress ready time");
