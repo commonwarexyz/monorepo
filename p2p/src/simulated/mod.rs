@@ -24,21 +24,37 @@
 //! a fair division of capacity is computed and schedules are updated accordingly.
 //!
 //! Each peer has a schedule for its egress (upload) and ingress (download)
-//! bandwidth. When a new message is enqueued the scheduler performs the following steps:
+//! bandwidth. Whenever the set of in-flight transfers changes we rebuild the
+//! schedules using a progressive-filling algorithm that conserves work and
+//! respects both endpoints of every link:
 //!
 //! 1. **Gather Transfers:** Collect all active transfers on the sender and
 //!    receiver, pruning any transfers that finished before the current time.
+//!    Transfers that no longer have bytes remaining are removed from the model.
 //!
-//! 2. **Allocate Capacity:** Distribute available bandwidth equally across all
-//!    active transfers. TODO: add explanation of how this works on the receiver.
+//! 2. **Progressive Filling:** Treat each transfer as being limited by two
+//!    resources—its sender's egress bucket and, if the message will be delivered,
+//!    the receiver's ingress bucket. We then raise the rate for every active
+//!    transfer in lock-step until some resource saturates, freeze the flows that
+//!    touch that resource, and repeat. The result is a max-min fair allocation
+//!    that is automatically capped by whichever side (egress or ingress) is
+//!    slower. This computation uses integer arithmetic (`u128` ratios) to avoid
+//!    rounding artefacts.
 //!
-//! 3. **Apply Latency:** The same segments are written to the receiver schedule
-//!    offset by the sampled latency, ensuring ingress capacity is only consumed
-//!    while the bytes are in flight.
+//! 3. **Write Schedules:** The planner emits piecewise-constant segments for
+//!    each transfer. We store those segments on the sender immediately and on
+//!    the receiver after shifting them by the sampled latency, so ingress
+//!    capacity is only consumed while bytes are actually in flight. Because the
+//!    same plan powers both ends, unused capacity is instantly redistributed to
+//!    other transfers.
 //!
 //! 4. **FIFO Delivery:** Each link tracks the next sequence number expected from
 //!    the sender, so even though transfers share bandwidth fairly, payloads are
 //!    still handed to the socket in strict send order.
+//!
+//! This recomputation is triggered whenever a transfer starts, completes, or a
+//! peer's bandwidth limit changes, ensuring the model remains work conserving
+//! without iterative reconciliation between sender and receiver schedules.
 //!
 //! ## Latency vs. Transmission Delay
 //!
