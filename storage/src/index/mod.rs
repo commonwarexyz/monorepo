@@ -172,11 +172,19 @@ mod tests {
         index.prune(key, |_| true);
     }
 
+    fn new_unordered(context: deterministic::Context) -> Unordered<TwoCap, u64> {
+        Unordered::<_, u64>::init(context.clone(), TwoCap)
+    }
+
+    fn new_ordered(context: deterministic::Context) -> Ordered<TwoCap, u64> {
+        Ordered::<_, u64>::init(context, TwoCap)
+    }
+
     #[test_traced]
     fn test_hash_index_basic() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             assert_eq!(index.keys(), 0);
             run_index_basic(&mut index);
             assert_eq!(index.keys(), 0);
@@ -187,7 +195,7 @@ mod tests {
     fn test_ordered_index_basic() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             assert_eq!(index.keys(), 0);
             run_index_basic(&mut index);
             assert_eq!(index.keys(), 0);
@@ -220,7 +228,7 @@ mod tests {
     fn test_hash_index_many_keys() {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context.clone());
             run_index_many_keys(&mut index, |bytes| context.fill(bytes));
         });
     }
@@ -229,7 +237,7 @@ mod tests {
     fn test_ordered_index_many_keys() {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context.clone());
             run_index_many_keys(&mut index, |bytes| context.fill(bytes));
         });
     }
@@ -266,7 +274,7 @@ mod tests {
     fn test_hash_index_key_lengths_and_key_item_metrics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_key_lengths_and_metrics(&mut index);
         });
     }
@@ -275,7 +283,7 @@ mod tests {
     fn test_ordered_index_key_lengths_and_key_item_metrics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_key_lengths_and_metrics(&mut index);
         });
     }
@@ -294,7 +302,7 @@ mod tests {
     fn test_hash_index_value_order() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_value_order(&mut index);
         });
     }
@@ -303,7 +311,7 @@ mod tests {
     fn test_ordered_index_value_order() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_value_order(&mut index);
         });
     }
@@ -322,7 +330,7 @@ mod tests {
     fn test_hash_index_remove_specific() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_remove_specific(&mut index);
         });
     }
@@ -331,7 +339,7 @@ mod tests {
     fn test_ordered_index_remove_specific() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_remove_specific(&mut index);
         });
     }
@@ -361,7 +369,7 @@ mod tests {
     fn test_hash_index_empty_key() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_empty_key(&mut index);
         });
     }
@@ -370,7 +378,7 @@ mod tests {
     fn test_ordered_index_empty_key() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_empty_key(&mut index);
         });
     }
@@ -395,7 +403,7 @@ mod tests {
     fn test_hash_index_mutate_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_mutate_through_iterator(&mut index);
         });
     }
@@ -404,7 +412,7 @@ mod tests {
     fn test_ordered_index_mutate_through_index() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_mutate_through_iterator(&mut index);
         });
     }
@@ -435,7 +443,7 @@ mod tests {
     fn test_hash_index_mutate_middle_of_four() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_mutate_middle_of_four(&mut index);
         });
     }
@@ -444,7 +452,7 @@ mod tests {
     fn test_ordered_index_mutate_middle_of_four() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_mutate_middle_of_four(&mut index);
         });
     }
@@ -514,7 +522,7 @@ mod tests {
     fn test_hash_index_remove_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_remove_through_iterator(&mut index);
         });
     }
@@ -523,7 +531,7 @@ mod tests {
     fn test_ordered_index_remove_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_remove_through_iterator(&mut index);
         });
     }
@@ -563,7 +571,7 @@ mod tests {
     fn test_hash_index_insert_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_insert_through_iterator(&mut index);
         });
     }
@@ -572,7 +580,7 @@ mod tests {
     fn test_ordered_index_insert_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_insert_through_iterator(&mut index);
         });
     }
@@ -592,7 +600,7 @@ mod tests {
     fn test_hash_index_cursor_insert_after_done_appends() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_cursor_insert_after_done_appends(&mut index);
         });
     }
@@ -601,7 +609,7 @@ mod tests {
     fn test_ordered_index_cursor_insert_after_done_appends() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_cursor_insert_after_done_appends(&mut index);
         });
     }
@@ -632,7 +640,7 @@ mod tests {
     fn test_hash_index_remove_to_nothing_then_add() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_remove_to_nothing_then_add(&mut index);
         });
     }
@@ -641,7 +649,7 @@ mod tests {
     fn test_ordered_index_remove_to_nothing_then_add() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_remove_to_nothing_then_add(&mut index);
         });
     }
@@ -661,7 +669,7 @@ mod tests {
     fn test_hash_index_insert_and_remove_cursor() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_insert_and_remove_cursor(&mut index);
         });
     }
@@ -670,7 +678,7 @@ mod tests {
     fn test_ordered_index_insert_and_remove_cursor() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_insert_and_remove_cursor(&mut index);
         });
     }
@@ -687,7 +695,7 @@ mod tests {
     fn test_hash_index_insert_and_prune_vacant() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_insert_and_prune_vacant(&mut index);
         });
     }
@@ -696,7 +704,7 @@ mod tests {
     fn test_ordered_index_insert_and_prune_vacant() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_insert_and_prune_vacant(&mut index);
         });
     }
@@ -714,7 +722,7 @@ mod tests {
     fn test_hash_index_insert_and_prune_replace_one() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_insert_and_prune_replace_one(&mut index);
         });
     }
@@ -723,7 +731,7 @@ mod tests {
     fn test_ordered_index_insert_and_prune_replace_one() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_insert_and_prune_replace_one(&mut index);
         });
     }
@@ -745,7 +753,7 @@ mod tests {
     fn test_hash_index_insert_and_prune_dead_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_insert_and_prune_dead_insert(&mut index);
         });
     }
@@ -754,7 +762,7 @@ mod tests {
     fn test_ordered_index_insert_and_prune_dead_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_insert_and_prune_dead_insert(&mut index);
         });
     }
@@ -809,10 +817,7 @@ mod tests {
     fn test_hash_index_cursor_across_threads() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let index = Arc::new(Mutex::new(Unordered::<_, u64>::init(
-                context.clone(),
-                TwoCap,
-            )));
+            let index = Arc::new(Mutex::new(new_unordered(context)));
             run_index_cursor_across_threads(index);
         });
     }
@@ -821,7 +826,7 @@ mod tests {
     fn test_ordered_index_cursor_across_threads() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let index = Arc::new(Mutex::new(Ordered::<_, u64>::init(context.clone(), TwoCap)));
+            let index = Arc::new(Mutex::new(new_ordered(context)));
             run_index_cursor_across_threads(index);
         });
     }
@@ -845,7 +850,7 @@ mod tests {
     fn test_hash_index_remove_middle_then_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_remove_middle_then_next(&mut index);
         });
     }
@@ -854,7 +859,7 @@ mod tests {
     fn test_ordered_index_remove_middle_then_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_remove_middle_then_next(&mut index);
         });
     }
@@ -883,7 +888,7 @@ mod tests {
     fn test_hash_index_remove_to_nothing() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_remove_to_nothing(&mut index);
         });
     }
@@ -892,7 +897,7 @@ mod tests {
     fn test_ordered_index_remove_to_nothing() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_remove_to_nothing(&mut index);
         });
     }
@@ -908,7 +913,7 @@ mod tests {
     fn test_hash_index_cursor_update_before_next_panics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_cursor_update_before_next_panics(&mut index);
         });
     }
@@ -918,7 +923,7 @@ mod tests {
     fn test_ordered_index_cursor_update_before_next_panics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_cursor_update_before_next_panics(&mut index);
         });
     }
@@ -934,7 +939,7 @@ mod tests {
     fn test_hash_index_cursor_delete_before_next_panics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_cursor_delete_before_next_panics(&mut index);
         });
     }
@@ -944,7 +949,7 @@ mod tests {
     fn test_ordered_index_cursor_delete_before_next_panics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_cursor_delete_before_next_panics(&mut index);
         });
     }
@@ -962,7 +967,7 @@ mod tests {
     fn test_hash_index_cursor_update_after_done() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_cursor_update_after_done(&mut index);
         });
     }
@@ -972,7 +977,7 @@ mod tests {
     fn test_ordered_index_cursor_update_after_done() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_cursor_update_after_done(&mut index);
         });
     }
@@ -988,7 +993,7 @@ mod tests {
     fn test_hash_index_cursor_insert_before_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_cursor_insert_before_next(&mut index);
         });
     }
@@ -998,7 +1003,7 @@ mod tests {
     fn test_ordered_index_cursor_insert_before_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_cursor_insert_before_next(&mut index);
         });
     }
@@ -1016,7 +1021,7 @@ mod tests {
     fn test_hash_index_cursor_delete_after_done() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_cursor_delete_after_done(&mut index);
         });
     }
@@ -1026,7 +1031,7 @@ mod tests {
     fn test_ordered_index_cursor_delete_after_done() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_cursor_delete_after_done(&mut index);
         });
     }
@@ -1050,7 +1055,7 @@ mod tests {
     fn test_hash_index_cursor_insert_with_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_cursor_insert_with_next(&mut index);
         });
     }
@@ -1059,7 +1064,7 @@ mod tests {
     fn test_ordered_index_cursor_insert_with_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_cursor_insert_with_next(&mut index);
         });
     }
@@ -1078,7 +1083,7 @@ mod tests {
     fn test_hash_index_cursor_double_delete() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_cursor_double_delete(&mut index);
         });
     }
@@ -1088,7 +1093,7 @@ mod tests {
     fn test_ordered_index_cursor_double_delete() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_cursor_double_delete(&mut index);
         });
     }
@@ -1112,7 +1117,7 @@ mod tests {
     fn test_hash_index_cursor_delete_last_then_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_cursor_delete_last_then_next(&mut index);
         });
     }
@@ -1121,7 +1126,7 @@ mod tests {
     fn test_ordered_index_cursor_delete_last_then_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_cursor_delete_last_then_next(&mut index);
         });
     }
@@ -1143,7 +1148,7 @@ mod tests {
     fn test_hash_index_delete_in_middle_then_continue() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_delete_in_middle_then_continue(&mut index);
         });
     }
@@ -1152,7 +1157,7 @@ mod tests {
     fn test_ordered_index_delete_in_middle_then_continue() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_delete_in_middle_then_continue(&mut index);
         });
     }
@@ -1177,7 +1182,7 @@ mod tests {
     fn test_hash_index_delete_first() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_delete_first(&mut index);
         });
     }
@@ -1186,7 +1191,7 @@ mod tests {
     fn test_ordered_index_delete_first() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_delete_first(&mut index);
         });
     }
@@ -1219,7 +1224,7 @@ mod tests {
     fn test_hash_index_delete_first_and_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_delete_first_and_insert(&mut index);
         });
     }
@@ -1228,7 +1233,7 @@ mod tests {
     fn test_ordered_index_delete_first_and_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_delete_first_and_insert(&mut index);
         });
     }
@@ -1247,7 +1252,7 @@ mod tests {
     fn test_hash_index_insert_at_entry_then_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_insert_at_entry_then_next(&mut index);
         });
     }
@@ -1256,7 +1261,7 @@ mod tests {
     fn test_ordered_index_insert_at_entry_then_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_insert_at_entry_then_next(&mut index);
         });
     }
@@ -1275,7 +1280,7 @@ mod tests {
     fn test_hash_index_insert_at_entry_then_delete_head() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_insert_at_entry_then_delete_head(&mut index);
         });
     }
@@ -1285,7 +1290,7 @@ mod tests {
     fn test_ordered_index_insert_at_entry_then_delete_head() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_insert_at_entry_then_delete_head(&mut index);
         });
     }
@@ -1305,7 +1310,7 @@ mod tests {
     fn test_hash_index_delete_then_insert_without_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_delete_then_insert_without_next(&mut index);
         });
     }
@@ -1315,7 +1320,7 @@ mod tests {
     fn test_ordered_index_delete_then_insert_without_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_delete_then_insert_without_next(&mut index);
         });
     }
@@ -1334,7 +1339,7 @@ mod tests {
     fn test_hash_index_inserts_without_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_inserts_without_next(&mut index);
         });
     }
@@ -1344,7 +1349,7 @@ mod tests {
     fn test_ordered_index_inserts_without_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_inserts_without_next(&mut index);
         });
     }
@@ -1370,7 +1375,7 @@ mod tests {
     fn test_hash_index_delete_last_then_insert_while_done() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_delete_last_then_insert_while_done(&mut index);
         });
     }
@@ -1379,7 +1384,7 @@ mod tests {
     fn test_ordered_index_delete_last_then_insert_while_done() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_delete_last_then_insert_while_done(&mut index);
         });
     }
@@ -1403,7 +1408,7 @@ mod tests {
     fn test_hash_index_drop_mid_iteration_relinks() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_drop_mid_iteration_relinks(&mut index);
         });
     }
@@ -1412,7 +1417,7 @@ mod tests {
     fn test_ordered_index_drop_mid_iteration_relinks() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_drop_mid_iteration_relinks(&mut index);
         });
     }
@@ -1428,7 +1433,7 @@ mod tests {
     fn test_hash_index_update_before_next_panics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_update_before_next_panics(&mut index);
         });
     }
@@ -1438,7 +1443,7 @@ mod tests {
     fn test_ordered_index_update_before_next_panics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_update_before_next_panics(&mut index);
         });
     }
@@ -1460,7 +1465,7 @@ mod tests {
     fn test_hash_index_entry_replacement_not_a_collision() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_entry_replacement_not_a_collision(&mut index);
         });
     }
@@ -1469,7 +1474,7 @@ mod tests {
     fn test_ordered_index_entry_replacement_not_a_collision() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_entry_replacement_not_a_collision(&mut index);
         });
     }
@@ -1484,7 +1489,7 @@ mod tests {
     fn test_hash_index_large_collision_chain_stack_overflow() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Unordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_unordered(context);
             run_index_large_collision_chain_stack_overflow(&mut index);
         });
     }
@@ -1493,7 +1498,7 @@ mod tests {
     fn test_ordered_index_large_collision_chain_stack_overflow() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Ordered::<_, u64>::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
             run_index_large_collision_chain_stack_overflow(&mut index);
         });
     }
