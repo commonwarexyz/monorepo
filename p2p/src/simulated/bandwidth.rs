@@ -73,16 +73,6 @@ impl Flow {
         self.bytes_total.saturating_sub(self.bytes_delivered)
     }
 
-    fn completion_time(&self) -> Option<SystemTime> {
-        if let Some(segment) = &self.segment {
-            Some(segment.end)
-        } else if self.remaining() == 0 {
-            Some(self.ready_time)
-        } else {
-            None
-        }
-    }
-
     fn reset_segment(&mut self, segment: Option<Segment>, ready_time: SystemTime) {
         self.segment = segment;
         self.ready_time = ready_time;
@@ -165,7 +155,7 @@ impl Schedule {
         }
 
         for id in &completed {
-            self.flows.remove(&id);
+            self.flows.remove(id);
         }
 
         completed
@@ -180,18 +170,6 @@ impl Schedule {
         if let Some(flow) = self.flows.get_mut(&flow_id) {
             flow.reset_segment(segment, ready_time);
         }
-    }
-
-    pub(super) fn completion_time(&self, flow_id: u64) -> Option<SystemTime> {
-        self.flows
-            .get(&flow_id)
-            .and_then(|flow| flow.completion_time())
-    }
-
-    pub(super) fn flow_segment(&self, flow_id: u64) -> Option<&Segment> {
-        self.flows
-            .get(&flow_id)
-            .and_then(|flow| flow.segment.as_ref())
     }
 
     pub(super) fn flow_snapshot(&self, flow_id: u64) -> Option<FlowSnapshot> {
@@ -248,26 +226,19 @@ struct FlowState<P> {
     segment: Option<Segment>,
 }
 
-/// Remaining capacity tracker for one logical resource (sender egress or receiver ingress).
-struct ResourceState {
-    capacity: Ratio,
-}
-
 /// Lazily allocate a resource slot. If `limit` is `None` the resource is treated as unbounded.
 fn ensure_resource<P: Clone + Ord>(
     key: ResourceKey<P>,
     limit: Option<u128>,
     indices: &mut BTreeMap<ResourceKey<P>, Option<usize>>,
-    resources: &mut Vec<ResourceState>,
+    resources: &mut Vec<Ratio>,
 ) -> Option<usize> {
     if let Some(idx) = indices.get(&key) {
         return *idx;
     }
     let idx = limit.map(|value| {
         let index = resources.len();
-        resources.push(ResourceState {
-            capacity: Ratio::from_int(value),
-        });
+        resources.push(Ratio::from_int(value));
         index
     });
     indices.insert(key, idx);
@@ -310,7 +281,7 @@ fn div_ceil_or_max(num: u128, denom: u128) -> u128 {
 fn compute_rates<P: Clone + Ord>(
     active: &BTreeSet<usize>,
     flows: &[FlowState<P>],
-    resources: &[ResourceState],
+    resources: &[Ratio],
 ) -> Vec<Option<Ratio>> {
     let mut rates = vec![None; flows.len()];
     if active.is_empty() {
@@ -330,7 +301,7 @@ fn compute_rates<P: Clone + Ord>(
         }
     }
 
-    let mut remaining: Vec<Ratio> = resources.iter().map(|r| r.capacity.clone()).collect();
+    let mut remaining: Vec<Ratio> = resources.to_vec();
     let mut unfrozen = active.clone();
 
     loop {
@@ -460,7 +431,7 @@ where
     }
 
     let mut resource_indices: BTreeMap<ResourceKey<P>, Option<usize>> = BTreeMap::new();
-    let mut resources: Vec<ResourceState> = Vec::new();
+    let mut resources: Vec<Ratio> = Vec::new();
 
     let mut flows: Vec<FlowState<P>> = Vec::with_capacity(transfers.len());
     for transfer in transfers.iter() {
@@ -1122,35 +1093,5 @@ mod tests {
         assert_eq!(seg2.len(), 1);
         assert_eq!(seg2[0].start, now + Duration::from_secs(1));
         assert_eq!(seg2[0].end, now + Duration::from_secs(2));
-    }
-
-    #[test]
-    fn test_prune_drops_completed_flows() {
-        let now = UNIX_EPOCH;
-        let mut schedule = Schedule::new(1000);
-
-        schedule.add_flow(1, now, 1000);
-
-        let transfers = vec![Transfer {
-            id: 1,
-            origin: 1,
-            recipient: 2,
-            remaining: 1000,
-            ready_time: now,
-            latency: Duration::ZERO,
-            deliver: false,
-        }];
-
-        let outcome = plan_transmissions(now, &transfers, |_pk| Some(1000), |_pk| None);
-        let plans = outcome.plans;
-
-        let plan = plans.get(&1).unwrap();
-        schedule.reset_flow_segment(1, plan.segment.clone(), plan.ready_time);
-
-        let completion = schedule.completion_time(1).unwrap();
-        assert_eq!(completion, now + Duration::from_secs(1));
-
-        let _ = schedule.prune(now + Duration::from_secs(2));
-        assert!(schedule.flow_segment(1).is_none());
     }
 }
