@@ -3,7 +3,7 @@ use super::{
     config::Config,
     finalizer::Finalizer,
     ingress::{
-        handler::{self, Handler, Request},
+        handler::{self, Request},
         mailbox::{Mailbox, Message},
         orchestrator::{Orchestration, Orchestrator},
     },
@@ -17,11 +17,8 @@ use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
-use commonware_resolver::{
-    p2p::{self, Coordinator},
-    Resolver,
-};
+use commonware_p2p::Recipients;
+use commonware_resolver::Resolver;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::archive::{immutable, Archive as _, Identifier};
 use commonware_utils::futures::{AbortablePool, Aborter};
@@ -29,13 +26,13 @@ use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
 };
-use governor::{clock::Clock as GClock, Quota};
+use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tracing::{debug, info, warn};
 
@@ -59,31 +56,19 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<
-    B: Block,
-    R: Rng + Spawner + Metrics + Clock + GClock + Storage,
-    V: Variant,
-    P: PublicKey,
-    Z: Coordinator<PublicKey = P>,
-> {
+pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> {
     // ---------- Context ----------
-    context: R,
+    context: E,
 
     // ---------- Message Passing ----------
-    // Coordinator
-    coordinator: Z,
     // Mailbox
     mailbox: mpsc::Receiver<Message<V, B>>,
 
     // ---------- Configuration ----------
-    // Public key
-    public_key: P,
     // Identity
     identity: V::Public,
     // Mailbox size
     mailbox_size: usize,
-    // Backfill quota
-    backfill_quota: Quota,
     // Unique application namespace
     namespace: Vec<u8>,
     /// Minimum number of views to retain temporary data after the application processes a block
@@ -104,11 +89,11 @@ pub struct Actor<
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<R, B, V>,
+    cache: cache::Manager<E, B, V>,
     // Finalizations stored by height
-    finalizations_by_height: immutable::Archive<R, B::Commitment, Finalization<V, B::Commitment>>,
+    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<V, B::Commitment>>,
     // Finalized blocks stored by height
-    finalized_blocks: immutable::Archive<R, B::Commitment, B>,
+    finalized_blocks: immutable::Archive<E, B::Commitment, B>,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -117,16 +102,9 @@ pub struct Actor<
     processed_height: Gauge,
 }
 
-impl<
-        B: Block,
-        R: Rng + Spawner + Metrics + Clock + GClock + Storage,
-        V: Variant,
-        P: PublicKey,
-        Z: Coordinator<PublicKey = P>,
-    > Actor<B, R, V, P, Z>
-{
+impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
     /// Create a new application actor.
-    pub async fn init(context: R, config: Config<V, P, Z, B>) -> (Self, Mailbox<V, B>) {
+    pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -232,12 +210,9 @@ impl<
         (
             Self {
                 context,
-                coordinator: config.coordinator,
                 mailbox,
-                public_key: config.public_key,
                 identity: config.identity,
                 mailbox_size: config.mailbox_size,
-                backfill_quota: config.backfill_quota,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
@@ -256,25 +231,29 @@ impl<
     }
 
     /// Start the actor.
-    pub fn start(
+    pub fn start<R, P>(
         mut self,
         application: impl Reporter<Activity = B>,
         buffer: buffered::Mailbox<P, B>,
-        backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(application, buffer, backfill))
+        resolver: (mpsc::Receiver<handler::Message<B>>, R),
+    ) -> Handle<()>
+    where
+        R: Resolver<Key = handler::Request<B>>,
+        P: PublicKey,
+    {
+        self.context.spawn_ref()(self.run(application, buffer, resolver))
     }
 
     /// Run the application actor.
-    async fn run(
+    async fn run<R, P>(
         mut self,
         application: impl Reporter<Activity = B>,
         mut buffer: buffered::Mailbox<P, B>,
-        backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) {
-        // Initialize resolvers
-        let (mut resolver_rx, mut resolver) = self.init_resolver(backfill);
-
+        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
+    ) where
+        R: Resolver<Key = handler::Request<B>>,
+        P: PublicKey,
+    {
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
@@ -627,40 +606,6 @@ impl<
         }
     }
 
-    // -------------------- Initialization --------------------
-
-    /// Helper to initialize a resolver.
-    fn init_resolver(
-        &self,
-        backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) -> (
-        mpsc::Receiver<handler::Message<B>>,
-        p2p::Mailbox<Request<B>>,
-    ) {
-        let (handler, receiver) = mpsc::channel(self.mailbox_size);
-        let handler = Handler::new(handler);
-        let (resolver_engine, resolver) = p2p::Engine::new(
-            self.context.with_label("resolver"),
-            p2p::Config {
-                coordinator: self.coordinator.clone(),
-                consumer: handler.clone(),
-                producer: handler,
-                mailbox_size: self.mailbox_size,
-                requester_config: requester::Config {
-                    public_key: self.public_key.clone(),
-                    rate_limit: self.backfill_quota,
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                },
-                fetch_retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-                priority_responses: false,
-            },
-        );
-        resolver_engine.start(backfill);
-        (receiver, resolver)
-    }
-
     // -------------------- Waiters --------------------
 
     /// Notify any subscribers for the given commitment with the provided block.
@@ -754,7 +699,7 @@ impl<
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
-    async fn find_block(
+    async fn find_block<P: PublicKey>(
         &mut self,
         buffer: &mut buffered::Mailbox<P, B>,
         commitment: B::Commitment,
