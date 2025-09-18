@@ -220,7 +220,7 @@ pub(super) struct FlowPlan<P> {
     pub recipient: P,
     pub latency: Duration,
     pub deliver: bool,
-    pub segments: Vec<Segment>,
+    pub segment: Option<Segment>,
     pub ready_time: SystemTime,
 }
 
@@ -240,7 +240,7 @@ struct FlowState<P> {
     remaining: u128,
     sender_resource: Option<usize>,
     receiver_resource: Option<usize>,
-    segments: Vec<Segment>,
+    segment: Option<Segment>,
 }
 
 /// Remaining capacity tracker for one logical resource (sender egress or receiver ingress).
@@ -491,7 +491,7 @@ where
             remaining: transfer.remaining,
             sender_resource: sender_idx,
             receiver_resource: receiver_idx,
-            segments: Vec::new(),
+            segment: None,
         });
     }
 
@@ -621,7 +621,11 @@ where
                     end: event_time,
                     bytes,
                 };
-                flow.segments.push(segment);
+                debug_assert!(
+                    flow.segment.is_none(),
+                    "flow produced multiple segments within a single planning tick",
+                );
+                flow.segment = Some(segment);
                 flow.remaining = flow.remaining.saturating_sub(bytes);
             }
 
@@ -641,7 +645,7 @@ where
                     recipient: flow.recipient.clone(),
                     latency: flow.latency,
                     deliver: flow.deliver,
-                    segments: flow.segments,
+                    segment: flow.segment,
                     ready_time: flow.ready_time,
                 };
                 (flow.id, plan)
@@ -727,17 +731,21 @@ mod tests {
 
             let mut progressed = false;
             for (id, plan) in outcome.plans {
+                let FlowPlan {
+                    segment,
+                    ready_time,
+                    ..
+                } = plan;
                 let entry = state.get_mut(&id).expect("missing transfer state for plan");
-                let transferred: u128 = plan.segments.iter().map(|segment| segment.bytes).sum();
-                if transferred > 0 {
-                    plans
-                        .entry(id)
-                        .or_default()
-                        .extend(plan.segments.iter().cloned());
-                    entry.remaining = entry.remaining.saturating_sub(transferred);
-                    progressed = true;
+                if let Some(segment) = segment {
+                    let transferred = segment.bytes;
+                    if transferred > 0 {
+                        plans.entry(id).or_default().push(segment);
+                        entry.remaining = entry.remaining.saturating_sub(transferred);
+                        progressed = true;
+                    }
                 }
-                entry.ready_time = plan.ready_time;
+                entry.ready_time = ready_time;
             }
 
             if !progressed && next_event == now {
@@ -1074,7 +1082,7 @@ mod tests {
         let plans = outcome.plans;
 
         let seg = plans.get(&1).unwrap();
-        assert!(seg.segments.is_empty());
+        assert!(seg.segment.is_none());
     }
 
     #[test]
@@ -1141,7 +1149,8 @@ mod tests {
         let plans = outcome.plans;
 
         let plan = plans.get(&1).unwrap();
-        schedule.reset_flow_segments(1, plan.segments.clone(), plan.ready_time);
+        let segments: Vec<_> = plan.segment.iter().cloned().collect();
+        schedule.reset_flow_segments(1, segments, plan.ready_time);
 
         let completion = schedule.completion_time(1).unwrap();
         assert_eq!(completion, now + Duration::from_secs(1));

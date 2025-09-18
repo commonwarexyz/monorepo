@@ -355,21 +355,30 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         );
 
         for (flow_id, plan) in outcome.plans {
-            if let Some(peer) = self.peers.get_mut(&plan.origin) {
+            let bandwidth::FlowPlan {
+                origin,
+                recipient,
+                latency,
+                deliver,
+                segment,
+                ready_time,
+            } = plan;
+
+            let segments: Vec<_> = segment.iter().cloned().collect();
+
+            if let Some(peer) = self.peers.get_mut(&origin) {
                 peer.egress
-                    .reset_flow_segments(flow_id, plan.segments.clone(), plan.ready_time);
+                    .reset_flow_segments(flow_id, segments.clone(), ready_time);
             }
 
-            if plan.deliver {
-                if let Some(peer) = self.peers.get_mut(&plan.recipient) {
-                    let shifted: Vec<bandwidth::Segment> = plan
-                        .segments
+            if deliver {
+                if let Some(peer) = self.peers.get_mut(&recipient) {
+                    let shifted: Vec<bandwidth::Segment> = segments
                         .iter()
-                        .map(|segment| segment.shifted(plan.latency))
+                        .map(|segment| segment.shifted(latency))
                         .collect();
-                    let ingress_ready = plan
-                        .ready_time
-                        .checked_add(plan.latency)
+                    let ingress_ready = ready_time
+                        .checked_add(latency)
                         .expect("latency overflow computing ingress ready time");
                     peer.ingress
                         .reset_flow_segments(flow_id, shifted, ingress_ready);
@@ -378,7 +387,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             if let Some(meta) = self.flow_meta.get_mut(&flow_id) {
                 if meta.first_segment_start.is_none() {
-                    if let Some(segment) = plan.segments.first() {
+                    if let Some(segment) = segments.first() {
                         meta.first_segment_start = Some(segment.start_time());
                     }
                 }
