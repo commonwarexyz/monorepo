@@ -1500,7 +1500,8 @@ mod tests {
             let start = context.current();
 
             // Sender 0: sends 30KB at t=0
-            // Should get full 30KB/s bandwidth, completes at t=1s
+            // Gets full 30KB/s for the first 0.5s, then shares with sender 1
+            // at 15KB/s until completion at t=1.5s
             let mut tx0 = sender_txs[0].clone();
             let rx_clone = receiver.clone();
             context.clone().spawn(move |_| async move {
@@ -1511,8 +1512,8 @@ mod tests {
             });
 
             // Sender 1: sends 30KB at t=0.5s
-            // Should share bandwidth with sender 0 for 0.5s (15KB/s each)
-            // Then get full bandwidth after sender 0 completes
+            // Shares bandwidth with sender 0 (15KB/s each) until t=1.5s,
+            // then gets the full 30KB/s
             let mut tx1 = sender_txs[1].clone();
             let rx_clone = receiver.clone();
             context.clone().spawn(move |context| async move {
@@ -1523,9 +1524,8 @@ mod tests {
                     .unwrap();
             });
 
-            // Sender 2: sends 15KB at t=1.5s
-            // Should get full bandwidth since others are done
-            // Completes at t=2s (0.5s transmission)
+            // Sender 2: sends 15KB at t=1.5s and shares the receiver with
+            // sender 1, completing at roughly t=2.5s
             let mut tx2 = sender_txs[2].clone();
             let rx_clone = receiver.clone();
             context.clone().spawn(move |context| async move {
@@ -1537,13 +1537,14 @@ mod tests {
             });
 
             // Receive and verify timing
-            // Message 0: starts at t=0, gets full 30KB/s, completes at t=1s
+            // Message 0: starts at t=0, shares bandwidth after 0.5s,
+            // and completes at t=1.5s (plus link latency)
             let (_, msg0) = receiver_rx.recv().await.unwrap();
             assert_eq!(msg0[0], 0);
             let t0 = context.current().duration_since(start).unwrap();
             assert!(
-                t0 >= Duration::from_millis(1000) && t0 <= Duration::from_millis(1100),
-                "Message 0 received at {t0:?}, expected ~1s",
+                t0 >= Duration::from_millis(1490) && t0 <= Duration::from_millis(1600),
+                "Message 0 received at {t0:?}, expected ~1.5s",
             );
 
             // The algorithm may deliver messages in a different order based on
