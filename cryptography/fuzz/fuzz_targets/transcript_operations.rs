@@ -5,7 +5,7 @@ use commonware_cryptography::transcript::Transcript;
 use libfuzzer_sys::fuzz_target;
 use rand::RngCore;
 
-const LABELS: &[&'static [u8]] = &[
+const LABELS: &[&[u8]] = &[
     b"test", b"fork", b"label", b"A", b"B", b"C", b"data", b"noise",
 ];
 
