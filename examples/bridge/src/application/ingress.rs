@@ -8,6 +8,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
+use async_trait::async_trait;
 
 #[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {
@@ -40,7 +41,8 @@ impl<D: Digest> Mailbox<D> {
     }
 }
 
-impl<D: Digest> Au for Mailbox<D> {
+#[async_trait]
+impl<D: Digest + Send + 'static> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest>;
 
@@ -53,7 +55,7 @@ impl<D: Digest> Au for Mailbox<D> {
         receiver.await.expect("Failed to receive genesis")
     }
 
-    async fn propose(&mut self, context: Context<Self::Digest>) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(&mut self, context: Context<Self::Digest>) -> Self::Digest {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
         let (response, receiver) = oneshot::channel();
@@ -64,14 +66,14 @@ impl<D: Digest> Au for Mailbox<D> {
             })
             .await
             .expect("Failed to send propose");
-        receiver
+        receiver.await.expect("Failed to receive propose")
     }
 
     async fn verify(
         &mut self,
         _: Context<Self::Digest>,
         payload: Self::Digest,
-    ) -> oneshot::Receiver<bool> {
+    ) -> bool {
         // If we linked payloads to their parent, we would verify
         // the parent included in the payload matches the provided `Context`.
         let (response, receiver) = oneshot::channel();
@@ -79,7 +81,7 @@ impl<D: Digest> Au for Mailbox<D> {
             .send(Message::Verify { payload, response })
             .await
             .expect("Failed to send verify");
-        receiver
+        receiver.await.expect("Failed to receive verify")
     }
 }
 
