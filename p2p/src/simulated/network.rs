@@ -78,6 +78,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     next_flow_id: u64,
     assign_sequences: BTreeMap<(P, P), u64>,
     active_flows: BTreeMap<(P, P), u64>,
+    flow_meta: BTreeMap<u64, FlowMeta<P>>,
     pending_transmissions: BTreeMap<(P, P), VecDeque<QueuedTransmission>>,
     flow_complete_tx: mpsc::UnboundedSender<(P, P)>,
     flow_complete_rx: mpsc::UnboundedReceiver<(P, P)>,
@@ -127,6 +128,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 next_flow_id: 0,
                 assign_sequences: BTreeMap::new(),
                 active_flows: BTreeMap::new(),
+                flow_meta: BTreeMap::new(),
                 pending_transmissions: BTreeMap::new(),
                 flow_complete_tx,
                 flow_complete_rx,
@@ -226,6 +228,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             } => match self.peers.get_mut(&public_key) {
                 Some(peer) => {
                     peer.set_bandwidth(egress_bps, ingress_bps);
+                    let now = self.context.current();
+                    self.recompute_bandwidth(now);
                     send_result(result, Ok(()));
                 }
                 None => send_result(result, Err(Error::PeerMissing)),
@@ -303,24 +307,44 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         latency: Duration,
         should_deliver: bool,
     ) -> (SystemTime, SystemTime, SystemTime) {
-        let (serialize_done, first_start) = {
+        {
             let sender_peer = self.peers.get_mut(sender).expect("sender not found");
             sender_peer.egress.prune(now);
             sender_peer.egress.add_flow(flow_id, now, data_size);
-            sender_peer.egress.recompute(now);
-            let completion = sender_peer
-                .egress
-                .completion_time(flow_id)
-                .expect("missing sender completion");
-            let first_start = sender_peer
-                .egress
-                .flow_segments(flow_id)
-                .and_then(|segments| segments.first().map(|s| s.start_time()))
-                .unwrap_or(now);
-            (completion, first_start)
-        };
+        }
 
-        let first_byte_arrival = if should_deliver && sender != receiver {
+        let deliver = should_deliver && sender != receiver;
+
+        if deliver {
+            let receiver_peer = self.peers.get_mut(receiver).expect("receiver not found");
+            receiver_peer.ingress.prune(now);
+            receiver_peer.ingress.add_flow(flow_id, now, data_size);
+        }
+
+        self.flow_meta.insert(
+            flow_id,
+            FlowMeta {
+                origin: sender.clone(),
+                recipient: receiver.clone(),
+                latency,
+                deliver,
+            },
+        );
+
+        self.recompute_bandwidth(now);
+
+        let sender_peer = self.peers.get(sender).expect("sender not found");
+        let serialize_done = sender_peer
+            .egress
+            .completion_time(flow_id)
+            .expect("missing sender completion");
+        let first_start = sender_peer
+            .egress
+            .flow_segments(flow_id)
+            .and_then(|segments| segments.first().map(|s| s.start_time()))
+            .unwrap_or(now);
+
+        let first_byte_arrival = if deliver {
             first_start
                 .checked_add(latency)
                 .expect("latency overflow computing first byte arrival")
@@ -328,31 +352,99 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             serialize_done
         };
 
-        let arrival_completion = if should_deliver && sender != receiver {
-            let arrival_start = first_byte_arrival;
-            let receiver_peer = self.peers.get_mut(receiver).expect("receiver not found");
-            receiver_peer.ingress.prune(arrival_start);
+        let arrival_completion = if deliver {
+            let receiver_peer = self.peers.get(receiver).expect("receiver not found");
             receiver_peer
                 .ingress
-                .add_flow(flow_id, arrival_start, data_size);
-            receiver_peer.ingress.recompute(arrival_start);
-            let completion = receiver_peer
-                .ingress
                 .completion_time(flow_id)
-                .expect("missing receiver completion");
-            assert!(
-                completion >= arrival_start,
-                "receiver completion precedes reserved arrival start"
-            );
-            let last_byte_arrival = serialize_done
-                .checked_add(latency)
-                .expect("latency overflow computing last byte arrival");
-            completion.max(last_byte_arrival)
+                .unwrap_or_else(|| {
+                    serialize_done
+                        .checked_add(latency)
+                        .expect("latency overflow computing last byte arrival")
+                })
         } else {
             serialize_done
         };
 
         (serialize_done, first_byte_arrival, arrival_completion)
+    }
+
+    fn recompute_bandwidth(&mut self, now: SystemTime) {
+        for peer in self.peers.values_mut() {
+            peer.egress.prune(now);
+            peer.ingress.prune(now);
+        }
+
+        if self.flow_meta.is_empty() {
+            return;
+        }
+
+        let mut transfers = Vec::new();
+        for (&flow_id, meta) in self.flow_meta.iter() {
+            let sender_peer = match self.peers.get(&meta.origin) {
+                Some(peer) => peer,
+                None => continue,
+            };
+            if let Some(snapshot) = sender_peer.egress.flow_snapshot(flow_id) {
+                if snapshot.remaining == 0 {
+                    continue;
+                }
+                transfers.push(bandwidth::Transfer {
+                    id: flow_id,
+                    origin: meta.origin.clone(),
+                    recipient: meta.recipient.clone(),
+                    remaining: snapshot.remaining,
+                    ready_time: snapshot.ready_time.max(now),
+                    latency: meta.latency,
+                    deliver: meta.deliver,
+                });
+            }
+        }
+
+        if transfers.is_empty() {
+            return;
+        }
+
+        let plans = bandwidth::plan_transmissions(
+            now,
+            &transfers,
+            |origin: &P| {
+                self.peers.get(origin).and_then(|peer| {
+                    if peer.egress.bps == usize::MAX {
+                        None
+                    } else {
+                        Some(peer.egress.bps as u128)
+                    }
+                })
+            },
+            |recipient: &P| {
+                self.peers.get(recipient).and_then(|peer| {
+                    if peer.ingress.bps == usize::MAX {
+                        None
+                    } else {
+                        Some(peer.ingress.bps as u128)
+                    }
+                })
+            },
+        );
+
+        for (flow_id, plan) in plans {
+            if let Some(peer) = self.peers.get_mut(&plan.origin) {
+                peer.egress
+                    .reset_flow_segments(flow_id, plan.segments.clone(), now);
+            }
+
+            if plan.deliver {
+                if let Some(peer) = self.peers.get_mut(&plan.recipient) {
+                    let shifted: Vec<bandwidth::Segment> = plan
+                        .segments
+                        .iter()
+                        .map(|segment| segment.shifted(plan.latency))
+                        .collect();
+                    peer.ingress.reset_flow_segments(flow_id, shifted, now);
+                }
+            }
+        }
     }
 
     fn next_sequence_id(&mut self, origin: &P, recipient: &P) -> u64 {
@@ -555,7 +647,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     fn on_flow_complete(&mut self, origin: P, recipient: P) {
         let key = (origin.clone(), recipient.clone());
-        self.active_flows.remove(&key);
+        let Some(completed_flow_id) = self.active_flows.remove(&key) else {
+            return;
+        };
+        self.flow_meta.remove(&completed_flow_id);
 
         let mut next_entry = None;
         let mut remove_queue = false;
@@ -571,11 +666,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             self.pending_transmissions.remove(&key);
         }
 
+        let mut recompute_needed = true;
         if let Some(entry) = next_entry {
             let flow_id = self.next_flow_id;
             self.next_flow_id += 1;
             self.active_flows.insert(key, flow_id);
             self.start_transmission(origin, recipient, flow_id, entry);
+            recompute_needed = false;
+        }
+
+        if recompute_needed {
+            let now = self.context.current();
+            self.recompute_bandwidth(now);
         }
     }
 
@@ -996,6 +1098,13 @@ struct QueuedTransmission {
     message: Bytes,
     latency: Duration,
     should_deliver: bool,
+}
+
+struct FlowMeta<P: PublicKey> {
+    origin: P,
+    recipient: P,
+    latency: Duration,
+    deliver: bool,
 }
 
 impl Link {
