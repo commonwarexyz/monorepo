@@ -83,13 +83,9 @@ impl Flow {
         }
     }
 
-    fn reset_segments(&mut self, segments: Vec<Segment>, default_start: SystemTime) {
+    fn reset_segments(&mut self, segments: Vec<Segment>, ready_time: SystemTime) {
         self.segments = segments;
-        self.ready_time = self
-            .segments
-            .first()
-            .map(|s| s.start)
-            .unwrap_or(default_start);
+        self.ready_time = ready_time;
     }
 
     fn snapshot(&self) -> FlowSnapshot {
@@ -128,8 +124,9 @@ impl Schedule {
     }
 
     /// Discard segments that end before `now`, crediting their bytes to the flow and
-    /// trimming partially-completed segments.
-    pub(super) fn prune(&mut self, now: SystemTime) {
+    /// trimming partially-completed segments. Returns the ids of flows that
+    /// completed during this prune.
+    pub(super) fn prune(&mut self, now: SystemTime) -> Vec<u64> {
         let mut completed = Vec::new();
         for (&id, flow) in self.flows.iter_mut() {
             let mut updated = Vec::new();
@@ -164,19 +161,21 @@ impl Schedule {
             }
         }
 
-        for id in completed {
+        for id in &completed {
             self.flows.remove(&id);
         }
+
+        completed
     }
 
     pub(super) fn reset_flow_segments(
         &mut self,
         flow_id: u64,
         segments: Vec<Segment>,
-        default_start: SystemTime,
+        ready_time: SystemTime,
     ) {
         if let Some(flow) = self.flows.get_mut(&flow_id) {
-            flow.reset_segments(segments, default_start);
+            flow.reset_segments(segments, ready_time);
         }
     }
 
@@ -222,6 +221,12 @@ pub(super) struct FlowPlan<P> {
     pub latency: Duration,
     pub deliver: bool,
     pub segments: Vec<Segment>,
+    pub ready_time: SystemTime,
+}
+
+pub(super) struct PlanOutcome<P> {
+    pub plans: BTreeMap<u64, FlowPlan<P>>,
+    pub next_event: Option<SystemTime>,
 }
 
 /// Planner-internal representation of a transfer while rates are being derived.
@@ -436,14 +441,17 @@ pub(super) fn plan_transmissions<P, E, I>(
     transfers: &[Transfer<P>],
     mut egress_limit: E,
     mut ingress_limit: I,
-) -> BTreeMap<u64, FlowPlan<P>>
+) -> PlanOutcome<P>
 where
     P: Clone + Ord,
     E: FnMut(&P) -> Option<u128>,
     I: FnMut(&P) -> Option<u128>,
 {
     if transfers.is_empty() {
-        return BTreeMap::new();
+        return PlanOutcome {
+            plans: BTreeMap::new(),
+            next_event: None,
+        };
     }
 
     let mut resource_indices: BTreeMap<ResourceKey<P>, Option<usize>> = BTreeMap::new();
@@ -488,6 +496,7 @@ where
     }
 
     let mut time = now;
+    let mut next_event = None;
 
     loop {
         let active: BTreeSet<usize> = flows
@@ -505,8 +514,7 @@ where
                 .filter(|t| *t > time)
                 .min()
             {
-                time = next_ready;
-                continue;
+                next_event = Some(next_ready);
             }
             break;
         }
@@ -620,27 +628,27 @@ where
             flow.ready_time = event_time;
         }
 
-        time = event_time;
-
-        if flows.iter().all(|flow| flow.remaining == 0) {
-            break;
-        }
+        next_event = Some(event_time);
+        break;
     }
 
-    // Return the sender-oriented plans keyed by flow id for deterministic lookup.
-    flows
-        .into_iter()
-        .map(|flow| {
-            let plan = FlowPlan {
-                origin: flow.origin.clone(),
-                recipient: flow.recipient.clone(),
-                latency: flow.latency,
-                deliver: flow.deliver,
-                segments: flow.segments,
-            };
-            (flow.id, plan)
-        })
-        .collect()
+    PlanOutcome {
+        plans: flows
+            .into_iter()
+            .map(|flow| {
+                let plan = FlowPlan {
+                    origin: flow.origin.clone(),
+                    recipient: flow.recipient.clone(),
+                    latency: flow.latency,
+                    deliver: flow.deliver,
+                    segments: flow.segments,
+                    ready_time: flow.ready_time,
+                };
+                (flow.id, plan)
+            })
+            .collect(),
+        next_event,
+    }
 }
 
 #[cfg(test)]
@@ -650,6 +658,96 @@ mod tests {
 
     fn capacity_map(value: u128) -> impl FnMut(&u8) -> Option<u128> {
         move |_| Some(value)
+    }
+
+    #[derive(Clone)]
+    struct TransferState<P> {
+        origin: P,
+        recipient: P,
+        remaining: u128,
+        ready_time: SystemTime,
+        latency: Duration,
+        deliver: bool,
+    }
+
+    fn run_to_completion<P, E, I>(
+        start: SystemTime,
+        transfers: &[Transfer<P>],
+        mut egress_limit: E,
+        mut ingress_limit: I,
+    ) -> BTreeMap<u64, Vec<Segment>>
+    where
+        P: Clone + Ord,
+        E: FnMut(&P) -> Option<u128>,
+        I: FnMut(&P) -> Option<u128>,
+    {
+        let mut now = start;
+        let mut state: BTreeMap<u64, TransferState<P>> = transfers
+            .iter()
+            .map(|transfer| {
+                (
+                    transfer.id,
+                    TransferState {
+                        origin: transfer.origin.clone(),
+                        recipient: transfer.recipient.clone(),
+                        remaining: transfer.remaining,
+                        ready_time: transfer.ready_time,
+                        latency: transfer.latency,
+                        deliver: transfer.deliver,
+                    },
+                )
+            })
+            .collect();
+
+        let mut plans: BTreeMap<u64, Vec<Segment>> = BTreeMap::new();
+        let mut guard = 0usize;
+
+        while state.values().any(|entry| entry.remaining > 0) {
+            guard += 1;
+            assert!(guard < 10_000, "planner failed to converge");
+
+            let active: Vec<Transfer<P>> = state
+                .iter()
+                .map(|(&id, entry)| Transfer {
+                    id,
+                    origin: entry.origin.clone(),
+                    recipient: entry.recipient.clone(),
+                    remaining: entry.remaining,
+                    ready_time: entry.ready_time,
+                    latency: entry.latency,
+                    deliver: entry.deliver,
+                })
+                .collect();
+
+            let outcome = plan_transmissions(now, &active, &mut egress_limit, &mut ingress_limit);
+
+            let next_event = outcome
+                .next_event
+                .expect("planner must produce a next event while work remains");
+
+            let mut progressed = false;
+            for (id, plan) in outcome.plans {
+                let entry = state.get_mut(&id).expect("missing transfer state for plan");
+                let transferred: u128 = plan.segments.iter().map(|segment| segment.bytes).sum();
+                if transferred > 0 {
+                    plans
+                        .entry(id)
+                        .or_default()
+                        .extend(plan.segments.iter().cloned());
+                    entry.remaining = entry.remaining.saturating_sub(transferred);
+                    progressed = true;
+                }
+                entry.ready_time = plan.ready_time;
+            }
+
+            if !progressed && next_event == now {
+                panic!("planner stalled without progress");
+            }
+
+            now = next_event;
+        }
+
+        plans
     }
 
     #[test]
@@ -676,25 +774,25 @@ mod tests {
             },
         ];
 
-        let plans = plan_transmissions(now, &transfers, capacity_map(1000), capacity_map(1000));
+        let plans = run_to_completion(now, &transfers, capacity_map(1000), capacity_map(1000));
 
         let seg1 = plans.get(&1).unwrap();
         let seg2 = plans.get(&2).unwrap();
 
-        assert_eq!(seg1.segments.len(), 2);
-        assert_eq!(seg2.segments.len(), 1);
+        assert_eq!(seg1.len(), 2);
+        assert_eq!(seg2.len(), 1);
 
-        assert_eq!(seg1.segments[0].start, now);
-        assert_eq!(seg1.segments[0].end, now + Duration::from_secs(1));
-        assert_eq!(seg1.segments[0].bytes, 1000);
+        assert_eq!(seg1[0].start, now);
+        assert_eq!(seg1[0].end, now + Duration::from_secs(1));
+        assert_eq!(seg1[0].bytes, 1000);
 
-        assert_eq!(seg1.segments[1].start, now + Duration::from_secs(1));
-        assert_eq!(seg1.segments[1].end, now + Duration::from_secs(3));
-        assert_eq!(seg1.segments[1].bytes, 1000);
+        assert_eq!(seg1[1].start, now + Duration::from_secs(1));
+        assert_eq!(seg1[1].end, now + Duration::from_secs(3));
+        assert_eq!(seg1[1].bytes, 1000);
 
-        assert_eq!(seg2.segments[0].start, now + Duration::from_secs(1));
-        assert_eq!(seg2.segments[0].end, now + Duration::from_secs(3));
-        assert_eq!(seg2.segments[0].bytes, 1000);
+        assert_eq!(seg2[0].start, now + Duration::from_secs(1));
+        assert_eq!(seg2[0].end, now + Duration::from_secs(3));
+        assert_eq!(seg2[0].bytes, 1000);
     }
 
     #[test]
@@ -738,35 +836,35 @@ mod tests {
 
         let ingress_cap = |_: &u8| Some(1200);
 
-        let plans = plan_transmissions(now, &transfers, egress_cap, ingress_cap);
+        let plans = run_to_completion(now, &transfers, egress_cap, ingress_cap);
 
         let seg1 = plans.get(&1).unwrap();
         let seg2 = plans.get(&2).unwrap();
         let seg3 = plans.get(&3).unwrap();
 
-        assert_eq!(seg1.segments.len(), 3);
-        assert_eq!(seg2.segments.len(), 1);
-        assert_eq!(seg3.segments.len(), 1);
+        assert_eq!(seg1.len(), 3);
+        assert_eq!(seg2.len(), 1);
+        assert_eq!(seg3.len(), 1);
 
-        assert_eq!(seg1.segments[0].start, now);
-        assert_eq!(seg1.segments[0].end, now + Duration::from_millis(200));
-        assert_eq!(seg1.segments[0].bytes, 240);
+        assert_eq!(seg1[0].start, now);
+        assert_eq!(seg1[0].end, now + Duration::from_millis(200));
+        assert_eq!(seg1[0].bytes, 240);
 
-        assert_eq!(seg1.segments[1].start, now + Duration::from_millis(200));
-        assert_eq!(seg1.segments[1].end, now + Duration::from_millis(1700));
-        assert_eq!(seg1.segments[1].bytes, 600);
+        assert_eq!(seg1[1].start, now + Duration::from_millis(200));
+        assert_eq!(seg1[1].end, now + Duration::from_millis(1700));
+        assert_eq!(seg1[1].bytes, 600);
 
-        assert_eq!(seg1.segments[2].start, now + Duration::from_millis(1700));
-        assert_eq!(seg1.segments[2].end, now + Duration::from_secs(2));
-        assert_eq!(seg1.segments[2].bytes, 360);
+        assert_eq!(seg1[2].start, now + Duration::from_millis(1700));
+        assert_eq!(seg1[2].end, now + Duration::from_secs(2));
+        assert_eq!(seg1[2].bytes, 360);
 
-        assert_eq!(seg2.segments[0].start, now + Duration::from_millis(200));
-        assert_eq!(seg2.segments[0].end, now + Duration::from_millis(1700));
-        assert_eq!(seg2.segments[0].bytes, 600);
+        assert_eq!(seg2[0].start, now + Duration::from_millis(200));
+        assert_eq!(seg2[0].end, now + Duration::from_millis(1700));
+        assert_eq!(seg2[0].bytes, 600);
 
-        assert_eq!(seg3.segments[0].start, seg2.segments[0].start);
-        assert_eq!(seg3.segments[0].end, seg2.segments[0].end);
-        assert_eq!(seg3.segments[0].bytes, 600);
+        assert_eq!(seg3[0].start, seg2[0].start);
+        assert_eq!(seg3[0].end, seg2[0].end);
+        assert_eq!(seg3[0].bytes, 600);
     }
 
     #[test]
@@ -782,13 +880,13 @@ mod tests {
             deliver: true,
         }];
 
-        let plans = plan_transmissions(now, &transfers, |_pk| None, |_pk| None);
+        let plans = run_to_completion(now, &transfers, |_pk| None, |_pk| None);
 
         let seg = plans.get(&1).unwrap();
-        assert_eq!(seg.segments.len(), 1);
-        assert_eq!(seg.segments[0].start, now);
-        assert_eq!(seg.segments[0].end, now);
-        assert_eq!(seg.segments[0].bytes, 1024);
+        assert_eq!(seg.len(), 1);
+        assert_eq!(seg[0].start, now);
+        assert_eq!(seg[0].end, now);
+        assert_eq!(seg[0].bytes, 1024);
     }
 
     #[test]
@@ -827,11 +925,11 @@ mod tests {
         let egress = |_pk: &u8| Some(1500);
         let ingress = |_pk: &u8| Some(1500);
 
-        let plans = plan_transmissions(now, &transfers, egress, ingress);
+        let plans = run_to_completion(now, &transfers, egress, ingress);
 
         let mut boundaries = Vec::new();
-        for plan in plans.values() {
-            for segment in &plan.segments {
+        for segments in plans.values() {
+            for segment in segments {
                 boundaries.push(segment.start);
                 boundaries.push(segment.end);
             }
@@ -854,8 +952,8 @@ mod tests {
 
             let mut bytes_in_interval = 0u128;
 
-            for plan in plans.values() {
-                for segment in &plan.segments {
+            for segments in plans.values() {
+                for segment in segments {
                     if segment.end <= interval_start || segment.start >= interval_end {
                         continue;
                     }
@@ -897,7 +995,7 @@ mod tests {
             },
         ];
 
-        let mut plans = plan_transmissions(
+        let plans = run_to_completion(
             now,
             &transfers,
             |_origin| Some(2000),
@@ -905,9 +1003,9 @@ mod tests {
         );
 
         for id in [1u64, 2] {
-            let plan = plans.remove(&id).unwrap();
-            assert_eq!(plan.segments.len(), 1);
-            let segment = &plan.segments[0];
+            let segments = plans.get(&id).unwrap();
+            assert_eq!(segments.len(), 1);
+            let segment = &segments[0];
             assert_eq!(segment.start, now);
             assert_eq!(segment.end, now + Duration::from_secs(2));
             assert_eq!(segment.bytes, 1000);
@@ -938,7 +1036,7 @@ mod tests {
             },
         ];
 
-        let plans = plan_transmissions(
+        let plans = run_to_completion(
             now,
             &transfers,
             |_origin| Some(1000),
@@ -948,14 +1046,14 @@ mod tests {
         let seg1 = plans.get(&1).unwrap();
         let seg2 = plans.get(&2).unwrap();
 
-        assert_eq!(seg1.segments.len(), 1);
-        assert_eq!(seg2.segments.len(), 1);
-        assert_eq!(seg1.segments[0].start, now);
-        assert_eq!(seg2.segments[0].start, now);
-        assert_eq!(seg1.segments[0].end, now + Duration::from_secs(2));
-        assert_eq!(seg2.segments[0].end, now + Duration::from_secs(2));
-        assert_eq!(seg1.segments[0].bytes, 1000);
-        assert_eq!(seg2.segments[0].bytes, 1000);
+        assert_eq!(seg1.len(), 1);
+        assert_eq!(seg2.len(), 1);
+        assert_eq!(seg1[0].start, now);
+        assert_eq!(seg2[0].start, now);
+        assert_eq!(seg1[0].end, now + Duration::from_secs(2));
+        assert_eq!(seg2[0].end, now + Duration::from_secs(2));
+        assert_eq!(seg1[0].bytes, 1000);
+        assert_eq!(seg2[0].bytes, 1000);
     }
 
     #[test]
@@ -971,7 +1069,9 @@ mod tests {
             deliver: true,
         }];
 
-        let plans = plan_transmissions(now, &transfers, |_origin| Some(0), |_recipient| Some(1024));
+        let outcome =
+            plan_transmissions(now, &transfers, |_origin| Some(0), |_recipient| Some(1024));
+        let plans = outcome.plans;
 
         let seg = plans.get(&1).unwrap();
         assert!(seg.segments.is_empty());
@@ -1001,7 +1101,7 @@ mod tests {
             },
         ];
 
-        let plans = plan_transmissions(
+        let plans = run_to_completion(
             now,
             &transfers,
             |_origin| Some(1000),
@@ -1011,13 +1111,13 @@ mod tests {
         let seg1 = plans.get(&1).unwrap();
         let seg2 = plans.get(&2).unwrap();
 
-        assert_eq!(seg1.segments.len(), 1);
-        assert_eq!(seg1.segments[0].start, now);
-        assert_eq!(seg1.segments[0].end, now + Duration::from_secs(1));
+        assert_eq!(seg1.len(), 1);
+        assert_eq!(seg1[0].start, now);
+        assert_eq!(seg1[0].end, now + Duration::from_secs(1));
 
-        assert_eq!(seg2.segments.len(), 1);
-        assert_eq!(seg2.segments[0].start, now + Duration::from_secs(1));
-        assert_eq!(seg2.segments[0].end, now + Duration::from_secs(2));
+        assert_eq!(seg2.len(), 1);
+        assert_eq!(seg2[0].start, now + Duration::from_secs(1));
+        assert_eq!(seg2[0].end, now + Duration::from_secs(2));
     }
 
     #[test]
@@ -1037,15 +1137,16 @@ mod tests {
             deliver: false,
         }];
 
-        let plans = plan_transmissions(now, &transfers, |_pk| Some(1000), |_pk| None);
+        let outcome = plan_transmissions(now, &transfers, |_pk| Some(1000), |_pk| None);
+        let plans = outcome.plans;
 
-        let segments = plans.get(&1).unwrap().segments.clone();
-        schedule.reset_flow_segments(1, segments, now);
+        let plan = plans.get(&1).unwrap();
+        schedule.reset_flow_segments(1, plan.segments.clone(), plan.ready_time);
 
         let completion = schedule.completion_time(1).unwrap();
         assert_eq!(completion, now + Duration::from_secs(1));
 
-        schedule.prune(now + Duration::from_secs(2));
+        let _ = schedule.prune(now + Duration::from_secs(2));
         assert!(schedule.flow_segments(1).is_none());
     }
 }
