@@ -863,6 +863,153 @@ mod tests {
     }
 
     #[test]
+    fn test_receiver_bottleneck_shared_across_origins() {
+        let now = UNIX_EPOCH;
+        let transfers = vec![
+            Transfer {
+                id: 1,
+                origin: 1u8,
+                recipient: 10,
+                remaining: 1000,
+                ready_time: now,
+                latency: Duration::ZERO,
+                deliver: true,
+            },
+            Transfer {
+                id: 2,
+                origin: 2u8,
+                recipient: 10,
+                remaining: 1000,
+                ready_time: now,
+                latency: Duration::ZERO,
+                deliver: true,
+            },
+        ];
+
+        let mut plans = plan_transmissions(
+            now,
+            &transfers,
+            |_origin| Some(2000),
+            |_recipient| Some(1000),
+        );
+
+        for id in [1u64, 2] {
+            let plan = plans.remove(&id).unwrap();
+            assert_eq!(plan.segments.len(), 1);
+            let segment = &plan.segments[0];
+            assert_eq!(segment.start, now);
+            assert_eq!(segment.end, now + Duration::from_secs(2));
+            assert_eq!(segment.bytes, 1000);
+        }
+    }
+
+    #[test]
+    fn test_sender_bottleneck_limits_all_outgoing_flows() {
+        let now = UNIX_EPOCH;
+        let transfers = vec![
+            Transfer {
+                id: 1,
+                origin: 1u8,
+                recipient: 10,
+                remaining: 1000,
+                ready_time: now,
+                latency: Duration::ZERO,
+                deliver: true,
+            },
+            Transfer {
+                id: 2,
+                origin: 1u8,
+                recipient: 11,
+                remaining: 1000,
+                ready_time: now,
+                latency: Duration::ZERO,
+                deliver: true,
+            },
+        ];
+
+        let plans = plan_transmissions(
+            now,
+            &transfers,
+            |_origin| Some(1000),
+            |_recipient| Some(10_000),
+        );
+
+        let seg1 = plans.get(&1).unwrap();
+        let seg2 = plans.get(&2).unwrap();
+
+        assert_eq!(seg1.segments.len(), 1);
+        assert_eq!(seg2.segments.len(), 1);
+        assert_eq!(seg1.segments[0].start, now);
+        assert_eq!(seg2.segments[0].start, now);
+        assert_eq!(seg1.segments[0].end, now + Duration::from_secs(2));
+        assert_eq!(seg2.segments[0].end, now + Duration::from_secs(2));
+        assert_eq!(seg1.segments[0].bytes, 1000);
+        assert_eq!(seg2.segments[0].bytes, 1000);
+    }
+
+    #[test]
+    fn test_zero_capacity_produces_no_segments() {
+        let now = UNIX_EPOCH;
+        let transfers = vec![Transfer {
+            id: 1,
+            origin: 1u8,
+            recipient: 2,
+            remaining: 1024,
+            ready_time: now,
+            latency: Duration::ZERO,
+            deliver: true,
+        }];
+
+        let plans = plan_transmissions(now, &transfers, |_origin| Some(0), |_recipient| Some(1024));
+
+        let seg = plans.get(&1).unwrap();
+        assert!(seg.segments.is_empty());
+    }
+
+    #[test]
+    fn test_future_ready_time_deferred_start() {
+        let now = UNIX_EPOCH;
+        let transfers = vec![
+            Transfer {
+                id: 1,
+                origin: 1u8,
+                recipient: 2,
+                remaining: 1000,
+                ready_time: now,
+                latency: Duration::ZERO,
+                deliver: true,
+            },
+            Transfer {
+                id: 2,
+                origin: 1u8,
+                recipient: 3,
+                remaining: 1000,
+                ready_time: now + Duration::from_secs(1),
+                latency: Duration::ZERO,
+                deliver: true,
+            },
+        ];
+
+        let plans = plan_transmissions(
+            now,
+            &transfers,
+            |_origin| Some(1000),
+            |_recipient| Some(1000),
+        );
+
+        let seg1 = plans.get(&1).unwrap();
+        let seg2 = plans.get(&2).unwrap();
+
+        assert_eq!(seg1.segments.len(), 1);
+        assert_eq!(seg1.segments[0].start, now);
+        assert_eq!(seg1.segments[0].end, now + Duration::from_secs(1));
+
+        assert_eq!(seg2.segments.len(), 1);
+        assert_eq!(seg2.segments[0].start, now + Duration::from_secs(1));
+        assert_eq!(seg2.segments[0].end, now + Duration::from_secs(2));
+    }
+
+    #[test]
     fn test_prune_drops_completed_flows() {
         let now = UNIX_EPOCH;
         let mut schedule = Schedule::new(1000);
