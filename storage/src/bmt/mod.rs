@@ -231,7 +231,7 @@ impl<H: Hasher> Tree<H> {
 
             // Check if we need a left sibling
             let mut left = None;
-            if level_start % 2 == 1 {
+            if !level_start.is_multiple_of(2) {
                 // Our range starts at an odd index, so we need the even sibling to the left
                 left = Some(level[level_start - 1]);
             }
@@ -460,8 +460,8 @@ impl<H: Hasher> RangeProof<H> {
             // Check if we should have a left sibling
             let first_pos = nodes[0].position;
             let last_pos = nodes[nodes.len() - 1].position;
-            let needs_left = first_pos % 2 == 1;
-            let needs_right = last_pos % 2 == 0;
+            let needs_left = !first_pos.is_multiple_of(2);
+            let needs_right = last_pos.is_multiple_of(2);
             if needs_left != bounds.left.is_some() {
                 return Err(Error::UnalignedProof);
             }
