@@ -168,19 +168,22 @@ impl Schedule {
         ready_time: SystemTime,
         offset: Option<Duration>,
     ) {
-        if let Some(flow) = self.flows.get_mut(&flow_id) {
-            let adjusted = segment.map(|segment| match offset {
-                Some(delta) => segment.shifted(delta),
-                None => segment,
-            });
-            let ready_time = match offset {
-                Some(delta) => ready_time
-                    .checked_add(delta)
-                    .expect("shifted ready time overflow"),
-                None => ready_time,
-            };
-            flow.reset_segment(adjusted, ready_time);
-        }
+        let flow = self
+            .flows
+            .get_mut(&flow_id)
+            .expect("attempted to reset unknown flow");
+
+        let adjusted = segment.map(|segment| match offset {
+            Some(delta) => segment.shifted(delta),
+            None => segment,
+        });
+        let ready_time = match offset {
+            Some(delta) => ready_time
+                .checked_add(delta)
+                .expect("shifted ready time overflow"),
+            None => ready_time,
+        };
+        flow.reset_segment(adjusted, ready_time);
     }
 
     pub(super) fn flow_snapshot(&self, flow_id: u64) -> Option<FlowSnapshot> {
