@@ -6,7 +6,7 @@
 //! algorithm using exact rational arithmetic so the resulting plan is
 //! deterministic and work-conserving.
 
-use commonware_utils::Ratio;
+use commonware_utils::math::u128::Ratio;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
