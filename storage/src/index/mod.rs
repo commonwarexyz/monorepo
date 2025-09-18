@@ -39,7 +39,7 @@ pub use unordered::Index as Unordered;
 ///   `next` nodes.
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or
-/// `remove()` instead._
+/// `remove()` from [Index] instead._
 pub trait Cursor {
     type Value: Eq;
 

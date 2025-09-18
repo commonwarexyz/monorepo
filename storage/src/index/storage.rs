@@ -1,3 +1,5 @@
+//! Shared structures and functionality for the [Index] types.
+
 use crate::index::Cursor as CursorTrait;
 use core::{hash::Hash, marker::PhantomData};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -55,6 +57,7 @@ enum Phase<V: Eq> {
     PostInsert(Box<Record<V>>),
 }
 
+/// A cursor for the [Index] types that can be instantiated with any [IndexEntry] implementation.
 pub(super) struct Cursor<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> {
     // The current phase of the cursor.
     phase: Phase<V>,
