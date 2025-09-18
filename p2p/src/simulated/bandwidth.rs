@@ -264,16 +264,26 @@ fn ensure_resource<P: Clone + Ord>(
     idx
 }
 
+/// Convert an abstract nanosecond interval into a concrete `Duration`.
+///
+/// The planner works in `u128` nanoseconds so it can represent very long
+/// intervals without overflow. `std::time::Duration`, however, is capped at
+/// `u64::MAX` seconds with nanosecond precision. We therefore clamp extremely
+/// large values to that maximum and otherwise split the `u128` into whole seconds
+/// and the remaining nanoseconds.
 fn ns_to_duration(ns: u128) -> Duration {
     if ns == 0 {
         return Duration::ZERO;
     }
-    if ns > u128::from(u64::MAX) {
-        Duration::from_secs(u64::MAX)
-    } else {
-        Duration::from_nanos(ns as u64)
+    let max_ns = u128::from(u64::MAX) * NS_PER_SEC;
+    if ns >= max_ns {
+        return Duration::from_secs(u64::MAX);
     }
+    let secs = (ns / NS_PER_SEC) as u64;
+    let nanos = (ns % NS_PER_SEC) as u32;
+    Duration::new(secs, nanos)
 }
+
 /// Core progressive-filling loop. Returns the instantaneous rate (bytes/sec) for
 /// each active flow expressed as a `Ratio<num, den>` where `num / den == Bps`.
 fn compute_rates<P: Clone + Ord>(
