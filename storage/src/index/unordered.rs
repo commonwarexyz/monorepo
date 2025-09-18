@@ -13,9 +13,9 @@ use std::collections::{
     HashMap,
 };
 
-/// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we will
-/// encounter. The hashmap will grow as needed, but this is a good starting point (covering
-/// the entire [crate::translator::OneCap] range).
+/// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we
+/// will encounter. The hashmap will grow as needed, but this is a good starting point (covering the
+/// entire [crate::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
@@ -31,13 +31,12 @@ impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for OccupiedEntry<'_, K, Reco
     }
 }
 
-/// A cursor for [Index] that wraps the internal implementation.
+/// A cursor for the unordered [Index] that wraps the shared implementation.
 pub struct Cursor<'a, T: Translator, V: Eq> {
     inner: CursorImpl<'a, T::Key, V, OccupiedEntry<'a, T::Key, Record<V>>>,
 }
 
 impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
-    #[inline]
     fn new(
         entry: OccupiedEntry<'a, T::Key, Record<V>>,
         keys: &'a Gauge,
@@ -72,8 +71,8 @@ impl<T: Translator, V: Eq> CursorTrait for Cursor<'_, T, V> {
     }
 }
 
-/// A memory-efficient index that uses a [HashMap] internally to map translated keys to arbitrary
-/// values.
+/// A memory-efficient index that uses an unordered map internally to map translated keys to
+/// arbitrary values.
 pub struct Index<T: Translator, V: Eq> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
@@ -232,8 +231,8 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
 }
 
 impl<T: Translator, V: Eq> Drop for Index<T, V> {
-    /// To avoid stack overflow on keys with many collisions, we implement an iterative
-    /// drop (in lieu of Rust's default recursive drop).
+    /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
+    /// lieu of Rust's default recursive drop).
     fn drop(&mut self) {
         for (_, mut record) in self.map.drain() {
             let mut next = record.next.take();

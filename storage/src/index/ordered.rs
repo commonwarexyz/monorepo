@@ -15,6 +15,7 @@ use std::collections::{
     BTreeMap,
 };
 
+/// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
 impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for BTreeOccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
@@ -27,13 +28,12 @@ impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for BTreeOccupiedEntry<'_, K,
     }
 }
 
-/// A cursor for [Index] that wraps the internal implementation.
+/// A cursor for the ordered [Index] that wraps the shared implementation.
 pub struct Cursor<'a, T: Translator, V: Eq> {
     inner: CursorImpl<'a, T::Key, V, BTreeOccupiedEntry<'a, T::Key, Record<V>>>,
 }
 
 impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
-    #[inline]
     fn new(
         entry: BTreeOccupiedEntry<'a, T::Key, Record<V>>,
         keys: &'a Gauge,
@@ -114,7 +114,6 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
     where
         Self: 'a;
 
-    #[inline]
     fn keys(&self) -> usize {
         self.map.len()
     }
@@ -210,8 +209,8 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
     }
 
     fn remove(&mut self, key: &[u8]) {
-        // To ensure metrics are accurate, we iterate over all conflicting values and remove them one-by-one (rather
-        // than just removing the entire entry).
+        // To ensure metrics are accurate, we iterate over all conflicting values and remove them
+        // one-by-one (rather than just removing the entire entry).
         self.prune(key, |_| true);
     }
 
@@ -227,8 +226,8 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
 }
 
 impl<T: Translator, V: Eq> Drop for Index<T, V> {
-    /// To avoid stack overflow on keys with many collisions, we implement an iterative
-    /// drop (in lieu of Rust's default recursive drop).
+    /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
+    /// lieu of Rust's default recursive drop).
     fn drop(&mut self) {
         for (_, record) in self.map.iter_mut() {
             let mut next = record.next.take();
