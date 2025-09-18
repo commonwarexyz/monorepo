@@ -24,7 +24,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
 };
-use tracing::{error, info, trace};
+use tracing::{error, trace};
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
@@ -487,59 +487,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Deliver only when all earlier sequence numbers are already flushed.
                 let (origin_key, recipient_key) = (&key.0, &key.1);
                 assert!(
-                    pending.arrival_complete_at >= pending.sent_at,
-                    "arrival completed before send time for {:?}->{:?}",
-                    origin_key,
-                    recipient_key
-                );
-                assert!(
-                    pending.egress_complete_at >= pending.sent_at,
-                    "egress completed before send time for {:?}->{:?}",
-                    origin_key,
-                    recipient_key
-                );
-                assert!(
                     pending.arrival_complete_at >= pending.first_byte_arrival_at,
-                    "arrival completed before first byte for {:?}->{:?}",
-                    origin_key,
-                    recipient_key
-                );
-                assert!(
-                    pending.first_byte_arrival_at >= pending.sent_at,
-                    "first byte arrived before send time for {:?}->{:?}",
-                    origin_key,
-                    recipient_key
+                    "arrival completed before first byte for {origin_key:?}->{recipient_key:?}",
                 );
 
-                let travel_time = pending
-                    .arrival_complete_at
-                    .duration_since(pending.sent_at)
-                    .expect("checked above");
-                let egress_time = pending
-                    .egress_complete_at
-                    .duration_since(pending.sent_at)
-                    .expect("checked above");
-                let ingress_time = pending
-                    .arrival_complete_at
-                    .duration_since(pending.first_byte_arrival_at)
-                    .expect("checked above");
-                let first_byte_latency = pending
-                    .first_byte_arrival_at
-                    .duration_since(pending.sent_at)
-                    .expect("checked above");
-                let message_size = pending.message.len();
-                info!(
-                    origin = ?origin_key,
-                    recipient = ?recipient_key,
-                    channel = pending.channel,
-                    travel_time = ?travel_time,
-                    egress_time = ?egress_time,
-                    ingress_time = ?ingress_time,
-                    first_byte_latency = ?first_byte_latency,
-                    link_latency = ?pending.link_latency,
-                    message_size,
-                    "sent message"
-                );
                 if let Err(err) = link.send(
                     pending.channel,
                     pending.message,
@@ -603,9 +554,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 message: message.clone(),
                 arrival_complete_at,
                 first_byte_arrival_at,
-                egress_complete_at: serialize_done,
-                sent_at: now,
-                link_latency: latency,
             };
             self.enqueue_delivery(&origin, &recipient, seq, pending);
         }
@@ -1088,9 +1036,6 @@ struct PendingDelivery {
     message: Bytes,
     arrival_complete_at: SystemTime,
     first_byte_arrival_at: SystemTime,
-    egress_complete_at: SystemTime,
-    sent_at: SystemTime,
-    link_latency: Duration,
 }
 
 struct QueuedTransmission {
