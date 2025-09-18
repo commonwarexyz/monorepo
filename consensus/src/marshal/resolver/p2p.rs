@@ -9,19 +9,36 @@ use commonware_p2p::{utils::requester, Receiver, Sender};
 use commonware_resolver::p2p::{self, Coordinator};
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;
-use governor::{clock::Clock as GClock, Quota};
+use governor::clock::Clock as GClock;
 use rand::Rng;
-use std::{num::NonZeroU32, time::Duration};
+use std::time::Duration;
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
 pub struct Config<P: PublicKey, C: Coordinator<PublicKey = P>> {
+    /// The public key to identify this node.
     pub public_key: P,
+
+    /// The coordinator of peers that can be consulted for fetching data.
     pub coordinator: C,
+
+    /// The size of the request mailbox backlog.
     pub mailbox_size: usize,
+
+    /// The requester configuration.
+    pub requester_config: requester::Config<P>,
+
+    /// Retry timeout for the fetcher.
+    pub fetch_retry_timeout: Duration,
+
+    /// Whether requests are sent with priority over other network messages
+    pub priority_requests: bool,
+
+    /// Whether responses are sent with priority over other network messages
+    pub priority_responses: bool,
 }
 
 /// Initialize a P2P resolver.
-pub fn init_p2p_resolver<E, C, B, S, R, P>(
+pub fn init<E, C, B, S, R, P>(
     ctx: &E,
     config: Config<P, C>,
     backfill: (S, R),
@@ -46,15 +63,10 @@ where
             consumer: handler.clone(),
             producer: handler,
             mailbox_size: config.mailbox_size,
-            requester_config: requester::Config {
-                public_key: config.public_key,
-                rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
-                initial: Duration::from_secs(1),
-                timeout: Duration::from_secs(2),
-            },
-            fetch_retry_timeout: Duration::from_millis(100),
-            priority_requests: false,
-            priority_responses: false,
+            requester_config: config.requester_config,
+            fetch_retry_timeout: config.fetch_retry_timeout,
+            priority_requests: config.priority_requests,
+            priority_responses: config.priority_responses,
         },
     );
     resolver_engine.start(backfill);

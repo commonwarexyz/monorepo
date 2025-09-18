@@ -100,12 +100,20 @@ mod tests {
         Digestible, Hasher as _, PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::test_traced;
-    use commonware_p2p::simulated::{self, Link, Network, Oracle};
+    use commonware_p2p::{
+        simulated::{self, Link, Network, Oracle},
+        utils::requester,
+    };
     use commonware_resolver::p2p;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
+    use governor::Quota;
     use rand::{seq::SliceRandom, Rng};
-    use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU32, NonZeroUsize},
+        time::Duration,
+    };
 
     type D = Sha256Digest;
     type B = Block<D>;
@@ -163,13 +171,22 @@ mod tests {
         };
 
         // Create the resolver
-        let backfill = oracle.register(secret.public_key(), 2).await.unwrap();
+        let backfill = oracle.register(secret.public_key(), 1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: secret.public_key(),
             coordinator,
             mailbox_size: config.mailbox_size,
+            requester_config: requester::Config {
+                public_key: secret.public_key(),
+                rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+            },
+            fetch_retry_timeout: Duration::from_millis(100),
+            priority_requests: false,
+            priority_responses: false,
         };
-        let resolver = resolver::init_p2p_resolver(&context, resolver_cfg, backfill);
+        let resolver = resolver::init(&context, resolver_cfg, backfill);
 
         // Create a buffered broadcast engine and get its mailbox
         let broadcast_config = buffered::Config {
@@ -180,7 +197,7 @@ mod tests {
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = oracle.register(secret.public_key(), 1).await.unwrap();
+        let network = oracle.register(secret.public_key(), 2).await.unwrap();
         broadcast_engine.start(network);
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
