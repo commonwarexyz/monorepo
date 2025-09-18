@@ -25,6 +25,8 @@ jobs:
           - os: ubuntu-latest
             flags: "--features commonware-runtime/iouring-network"
           - os: ubuntu-latest
+            flags: "--no-default-features --target thumbv7em-none-eabihf"
+          - os: ubuntu-latest
             flags: ""
           - os: windows-latest
             flags: ""
@@ -37,11 +39,20 @@ jobs:
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Lint
+    - name: Lint (no_std storage)
+      if: matrix.os == 'ubuntu-latest' && contains(matrix.flags, '--no-default-features')
+      run: |
+        rustup target add thumbv7em-none-eabihf
+        sudo apt-get update
+        sudo apt-get install -y gcc-arm-none-eabi
+        cargo clippy -p commonware-codec -p commonware-cryptography -p commonware-storage -p commonware-utils --no-default-features --target thumbv7em-none-eabihf -- -D warnings
+    - name: Lint (general)
+      if: ${{ !(matrix.os == 'ubuntu-latest' && contains(matrix.flags, '--no-default-features')) }}
       run: cargo clippy --all-targets ${{ matrix.flags }} -- -D warnings
     - name: Fmt
       run: cargo +${{ env.NIGHTLY_VERSION }} fmt --all -- --check
-    - name: Check docs
+    - name: Check docs (exclude no_std)
+      if: ${{ !(matrix.os == 'ubuntu-latest' && contains(matrix.flags, '--no-default-features')) }}
       run: cargo doc ${{ matrix.flags }} --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"

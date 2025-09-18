@@ -229,6 +229,7 @@ impl<D: Digest> Proof<D> {
     /// # Returns
     /// A Vec of digests for all nodes in `nodes_to_pin(pruning_boundary)`, in the same order as
     /// returned by `nodes_to_pin` (decreasing height order)
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     pub(crate) fn extract_pinned_nodes(
         &self,
         range: std::ops::Range<u64>,
