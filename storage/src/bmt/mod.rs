@@ -173,7 +173,11 @@ impl<H: Hasher> Tree<H> {
             if level.len() == 1 {
                 break;
             }
-            let sibling_index = if index % 2 == 0 { index + 1 } else { index - 1 };
+            let sibling_index = if index.is_multiple_of(2) {
+                index + 1
+            } else {
+                index - 1
+            };
             let sibling = if sibling_index < level.len() {
                 level[sibling_index]
             } else {
@@ -227,14 +231,14 @@ impl<H: Hasher> Tree<H> {
 
             // Check if we need a left sibling
             let mut left = None;
-            if level_start % 2 == 1 {
+            if !level_start.is_multiple_of(2) {
                 // Our range starts at an odd index, so we need the even sibling to the left
                 left = Some(level[level_start - 1]);
             }
 
             // Check if we need a right sibling
             let mut right = None;
-            if level_end % 2 == 0 {
+            if level_end.is_multiple_of(2) {
                 if level_end + 1 < level.len() {
                     // Our range ends at an even index, so we need the odd sibling to the right
                     right = Some(level[level_end + 1]);
@@ -311,7 +315,7 @@ impl<H: Hasher> Proof<H> {
         let mut computed = hasher.finalize();
         for sibling in self.siblings.iter() {
             // Determine the position of the sibling
-            let (left_node, right_node) = if position % 2 == 0 {
+            let (left_node, right_node) = if position.is_multiple_of(2) {
                 (&computed, sibling)
             } else {
                 (sibling, &computed)
@@ -456,8 +460,8 @@ impl<H: Hasher> RangeProof<H> {
             // Check if we should have a left sibling
             let first_pos = nodes[0].position;
             let last_pos = nodes[nodes.len() - 1].position;
-            let needs_left = first_pos % 2 == 1;
-            let needs_right = last_pos % 2 == 0;
+            let needs_left = !first_pos.is_multiple_of(2);
+            let needs_right = last_pos.is_multiple_of(2);
             if needs_left != bounds.left.is_some() {
                 return Err(Error::UnalignedProof);
             }

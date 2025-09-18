@@ -228,6 +228,7 @@ impl<D: Digest> Proof<D> {
     /// # Returns
     /// A Vec of digest values for all nodes in `nodes_to_pin(pruning_boundary)`,
     /// in the same order as returned by `nodes_to_pin` (decreasing height order)
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     pub(crate) fn extract_pinned_nodes(
         &self,
         start_element_pos: u64,
@@ -493,6 +494,7 @@ pub(crate) fn nodes_required_for_range_proof(
 /// elements at the specified `positions`.
 ///
 /// The order of positions does not affect the output (sorted internally).
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) fn nodes_required_for_multi_proof(size: u64, positions: &[u64]) -> BTreeSet<u64> {
     // Collect all required node positions
     //
