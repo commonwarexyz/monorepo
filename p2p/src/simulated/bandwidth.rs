@@ -1,3 +1,11 @@
+//! Progressive-filling bandwidth planner shared by the simulated network.
+//!
+//! The planner consumes a snapshot of all in-flight transfers and emits
+//! piecewise-constant schedules that respect both the sender's egress limit and
+//! the receiver's ingress limit. Rates are computed with a water-filling
+//! algorithm using exact rational arithmetic so the resulting plan is
+//! deterministic and work-conserving.
+
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -7,7 +15,7 @@ use std::{
 const NS_PER_SEC: u128 = 1_000_000_000;
 
 #[derive(Clone, Debug)]
-/// Portion of a transfer executed over a constant-rate window.
+/// Portion of a transfer executed at a constant rate within the generated schedule.
 pub(super) struct Segment {
     start: SystemTime,
     end: SystemTime,
@@ -42,7 +50,7 @@ impl Segment {
 }
 
 #[derive(Debug)]
-/// State for an in-flight transfer managed by the scheduler.
+/// Private state recorded for each flow inside a peer-local schedule.
 struct Flow {
     bytes_total: u128,
     bytes_delivered: u128,
@@ -92,11 +100,13 @@ impl Flow {
 }
 
 #[derive(Clone, Debug)]
+/// Snapshot of flow progress exposed to the planner.
 pub(super) struct FlowSnapshot {
     pub remaining: u128,
     pub ready_time: SystemTime,
 }
 
+/// Per-peer view of the active flows and their assigned segments.
 pub(super) struct Schedule {
     pub(super) bps: usize,
     flows: BTreeMap<u64, Flow>,
@@ -191,6 +201,7 @@ enum ResourceKey<P> {
 }
 
 #[derive(Clone, Debug)]
+/// Helper that stores rates as reduced fractions to avoid precision loss.
 struct Ratio {
     num: u128,
     den: u128,
@@ -281,6 +292,8 @@ impl Ratio {
 }
 
 #[derive(Clone, Debug)]
+/// Transfer snapshot supplied to the planner. `ready_time` denotes the first
+/// instant at which the sender can resume transmitting bytes.
 pub(super) struct Transfer<P> {
     pub id: u64,
     pub origin: P,
@@ -292,6 +305,7 @@ pub(super) struct Transfer<P> {
 }
 
 #[derive(Clone, Debug)]
+/// Planner output for a single flow (before latency is applied to the receiver).
 pub(super) struct FlowPlan<P> {
     pub origin: P,
     pub recipient: P,
@@ -300,6 +314,7 @@ pub(super) struct FlowPlan<P> {
     pub segments: Vec<Segment>,
 }
 
+/// Planner-internal representation of a transfer while rates are being derived.
 struct FlowState<P> {
     id: u64,
     origin: P,
@@ -313,10 +328,12 @@ struct FlowState<P> {
     segments: Vec<Segment>,
 }
 
+/// Remaining capacity tracker for one logical resource (sender egress or receiver ingress).
 struct ResourceState {
     capacity: Ratio,
 }
 
+/// Lazily allocate a resource slot. If `limit` is `None` the resource is treated as unbounded.
 fn ensure_resource<P: Clone + Ord>(
     key: ResourceKey<P>,
     limit: Option<u128>,
@@ -374,6 +391,8 @@ fn lcm_u128(a: u128, b: u128) -> u128 {
     (a / gcd_u128(a, b)) * b
 }
 
+/// Core progressive-filling loop. Returns the instantaneous rate (bytes/sec) for
+/// each active flow expressed as a `Ratio<num, den>` where `num / den == Bps`.
 fn compute_rates<P: Clone + Ord>(
     active: &BTreeSet<usize>,
     flows: &[FlowState<P>],
@@ -384,6 +403,7 @@ fn compute_rates<P: Clone + Ord>(
         return rates;
     }
 
+    // Map each resource to the flow indices that currently depend on it.
     let mut resource_sets: Vec<BTreeSet<usize>> =
         resources.iter().map(|_| BTreeSet::new()).collect();
 
@@ -440,6 +460,7 @@ fn compute_rates<P: Clone + Ord>(
         }
 
         if min_delta.is_none() {
+            // No resource constrains the remaining flows (everything is unlimited).
             for idx in unfrozen.iter() {
                 rates[*idx] = None;
             }
@@ -448,6 +469,8 @@ fn compute_rates<P: Clone + Ord>(
 
         let delta = min_delta.unwrap();
         if delta.is_zero() {
+            // One or more resources are already exhausted; freeze the flows that
+            // depend on them and continue with the rest.
             let mut saturated = Vec::new();
             for &idx in &limiting {
                 for flow_idx in resource_sets[idx].intersection(&unfrozen) {
@@ -482,6 +505,7 @@ fn compute_rates<P: Clone + Ord>(
                 continue;
             }
             let usage = delta.mul_int(users);
+            // Deduct the portion of the resource consumed over this time slice.
             remaining[res_idx].sub_assign(&usage);
             if remaining[res_idx].is_zero() {
                 for flow_idx in set.intersection(&unfrozen) {
@@ -498,6 +522,11 @@ fn compute_rates<P: Clone + Ord>(
     rates
 }
 
+/// Produce bandwidth plans for every active transfer at `now`.
+///
+/// The closures expose per-peer limits. Returning `None` signals "unlimited" for that side.
+/// The resulting `FlowPlan` objects contain sender-oriented segments; callers can shift them
+/// by latency for ingress scheduling.
 pub(super) fn plan_transmissions<P, E, I>(
     now: SystemTime,
     transfers: &[Transfer<P>],
@@ -520,6 +549,8 @@ where
     flows.reserve(transfers.len());
 
     for transfer in transfers.iter() {
+        // Egress is always considered; ingress only matters when the transfer
+        // should be delivered (i.e. not dropped due to link failure).
         let sender_limit = egress_limit(&transfer.origin);
         let sender_idx = ensure_resource(
             ResourceKey::Egress(transfer.origin.clone()),
@@ -578,6 +609,7 @@ where
             break;
         }
 
+        // At this point at least one flow is active; derive its instantaneous rate.
         let rates = compute_rates(&active, &flows, &resources);
 
         let mut next_finish: Option<SystemTime> = None;
@@ -619,6 +651,8 @@ where
             .map(|flow| flow.ready_time)
             .min();
 
+        // Jump to the next "interesting" instant: either the earliest completion or
+        // the arrival of a new flow.
         let event_time = match (next_finish, next_ready) {
             (Some(finish), Some(ready)) => finish.min(ready),
             (Some(finish), None) => finish,
@@ -651,6 +685,7 @@ where
                 }
                 Some(r) if r.is_zero() => {}
                 Some(r) => {
+                    // Convert the fractional rate back into bytes over the current interval.
                     if delta_ns == 0 {
                         if finishing {
                             bytes = flow.remaining;
@@ -690,6 +725,7 @@ where
         }
     }
 
+    // Return the sender-oriented plans keyed by flow id for deterministic lookup.
     flows
         .into_iter()
         .map(|flow| {
