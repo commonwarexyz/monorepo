@@ -52,8 +52,7 @@
 //!    still handed to the socket in strict send order.
 //!
 //! This recomputation is triggered whenever a transfer starts, completes, or a
-//! peer's bandwidth limit changes, ensuring the model remains work conserving
-//! without iterative reconciliation between sender and receiver schedules.
+//! peer's bandwidth limit changes, ensuring the model remains fair and work conserving.
 //!
 //! ## Latency vs. Transmission Delay
 //!
