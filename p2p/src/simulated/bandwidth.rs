@@ -28,7 +28,7 @@ impl Segment {
         self.end
             .duration_since(self.start)
             .unwrap_or(Duration::ZERO)
-            .as_nanos() as u128
+            .as_nanos()
     }
 
     pub(super) fn start_time(&self) -> SystemTime {
@@ -141,7 +141,7 @@ impl Schedule {
                     let elapsed_ns = now
                         .duration_since(segment.start)
                         .unwrap_or(Duration::ZERO)
-                        .as_nanos() as u128;
+                        .as_nanos();
                     let credited = segment.bytes * elapsed_ns / total_ns;
                     let credited = credited.min(segment.bytes);
                     flow.bytes_delivered = flow.bytes_delivered.saturating_add(credited);
@@ -256,7 +256,7 @@ fn ensure_resource<P: Clone + Ord>(
     let idx = limit.map(|value| {
         let index = resources.len();
         resources.push(ResourceState {
-            capacity: Ratio::from_int(value as u128),
+            capacity: Ratio::from_int(value),
         });
         index
     });
@@ -438,9 +438,7 @@ where
     let mut resource_indices: BTreeMap<ResourceKey<P>, Option<usize>> = BTreeMap::new();
     let mut resources: Vec<ResourceState> = Vec::new();
 
-    let mut flows: Vec<FlowState<P>> = Vec::new();
-    flows.reserve(transfers.len());
-
+    let mut flows: Vec<FlowState<P>> = Vec::with_capacity(transfers.len());
     for transfer in transfers.iter() {
         // Egress is always considered; ingress only matters when the transfer
         // should be delivered (i.e. not dropped due to link failure).
@@ -556,7 +554,7 @@ where
         let delta_ns = event_time
             .duration_since(time)
             .unwrap_or(Duration::ZERO)
-            .as_nanos() as u128;
+            .as_nanos();
 
         for &idx in active.iter() {
             let flow = &mut flows[idx];
@@ -841,7 +839,7 @@ mod tests {
             let interval_ns = interval_end
                 .duration_since(interval_start)
                 .unwrap()
-                .as_nanos() as u128;
+                .as_nanos();
 
             let mut bytes_in_interval = 0u128;
 
@@ -852,7 +850,7 @@ mod tests {
                     }
                     let seg_start = segment.start.max(interval_start);
                     let seg_end = segment.end.min(interval_end);
-                    let overlap_ns = seg_end.duration_since(seg_start).unwrap().as_nanos() as u128;
+                    let overlap_ns = seg_end.duration_since(seg_start).unwrap().as_nanos();
                     let total_ns = segment.duration_ns().max(1);
                     let contributed = segment.bytes * overlap_ns / total_ns;
                     bytes_in_interval += contributed;
@@ -860,7 +858,7 @@ mod tests {
             }
 
             let rate = bytes_in_interval * NS_PER_SEC / interval_ns;
-            assert!(rate <= 1500, "rate {} exceeds capacity", rate);
+            assert!(rate <= 1500, "rate {rate} exceeds capacity");
         }
     }
 
