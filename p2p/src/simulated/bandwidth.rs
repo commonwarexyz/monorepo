@@ -166,9 +166,20 @@ impl Schedule {
         flow_id: u64,
         segment: Option<Segment>,
         ready_time: SystemTime,
+        offset: Option<Duration>,
     ) {
         if let Some(flow) = self.flows.get_mut(&flow_id) {
-            flow.reset_segment(segment, ready_time);
+            let adjusted = segment.map(|segment| match offset {
+                Some(delta) => segment.shifted(delta),
+                None => segment,
+            });
+            let ready_time = match offset {
+                Some(delta) => ready_time
+                    .checked_add(delta)
+                    .expect("shifted ready time overflow"),
+                None => ready_time,
+            };
+            flow.reset_segment(adjusted, ready_time);
         }
     }
 

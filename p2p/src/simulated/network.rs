@@ -366,17 +366,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             if let Some(peer) = self.peers.get_mut(&origin) {
                 peer.egress
-                    .reset_flow_segment(flow_id, segment.clone(), ready_time);
+                    .reset_flow_segment(flow_id, segment.clone(), ready_time, None);
             }
 
             if deliver {
                 if let Some(peer) = self.peers.get_mut(&recipient) {
-                    let shifted = segment.clone().map(|segment| segment.shifted(latency));
-                    let ingress_ready = ready_time
-                        .checked_add(latency)
-                        .expect("latency overflow computing ingress ready time");
-                    peer.ingress
-                        .reset_flow_segment(flow_id, shifted, ingress_ready);
+                    peer.ingress.reset_flow_segment(
+                        flow_id,
+                        segment.clone(),
+                        ready_time,
+                        Some(latency),
+                    );
                 }
             }
 
