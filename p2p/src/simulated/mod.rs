@@ -1161,6 +1161,87 @@ mod tests {
     }
 
     #[test]
+    fn test_high_latency_message_blocks_followup() {
+        // A long transmission must complete before a subsequent message is delivered on the same link.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let (mut sender, _) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (_, mut receiver) = oracle.register(pk2.clone(), 0).await.unwrap();
+
+            oracle
+                .set_bandwidth(pk1.clone(), 1_000, usize::MAX)
+                .await
+                .unwrap();
+            oracle
+                .set_bandwidth(pk2.clone(), usize::MAX, 1_000)
+                .await
+                .unwrap();
+
+            // Fixed latency ensures deterministic arrival ordering.
+            oracle
+                .add_link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    Link {
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            let slow = Bytes::from(vec![0u8; 1_000]);
+            sender
+                .send(Recipients::One(pk2.clone()), slow.clone(), true)
+                .await
+                .unwrap();
+
+            let fast = Bytes::from(vec![1u8; 1_000]);
+            sender
+                .send(Recipients::One(pk2.clone()), fast.clone(), true)
+                .await
+                .unwrap();
+
+            let start = context.current();
+            let (origin1, message1) = receiver.recv().await.unwrap();
+            let first_done = context.current();
+            let (origin2, message2) = receiver.recv().await.unwrap();
+            let second_done = context.current();
+
+            assert_eq!(origin1, pk1);
+            assert_eq!(message1, slow);
+            assert_eq!(origin2, pk1);
+            assert_eq!(message2, fast);
+
+            let first_elapsed = first_done.duration_since(start).unwrap();
+            let second_elapsed = second_done.duration_since(start).unwrap();
+            assert!(
+                first_elapsed >= Duration::from_millis(5),
+                "slow message arrived too early: {first_elapsed:?}"
+            );
+            assert!(
+                second_elapsed
+                    .checked_sub(first_elapsed)
+                    .expect("timestamps ordered")
+                    >= Duration::from_millis(999),
+                "fast message arrived before slow transmission completed"
+            );
+        })
+    }
+
+    #[test]
     fn test_many_to_one_bandwidth_sharing() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
