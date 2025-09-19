@@ -401,10 +401,6 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         let mut outcomes = Vec::new();
 
         for flow_id in completed {
-            let Some(meta) = self.all_flows.remove(&flow_id) else {
-                continue;
-            };
-
             let Status {
                 origin,
                 recipient,
@@ -414,7 +410,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 message,
                 sequence,
                 ..
-            } = meta;
+            } = self.all_flows.remove(&flow_id).unwrap();
 
             self.active_flows
                 .remove(&(origin.clone(), recipient.clone()));
