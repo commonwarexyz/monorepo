@@ -343,6 +343,14 @@ impl crate::Runner for Runner {
     }
 }
 
+/// A simple helper function to use the current tokio runtime instead of creating a new one.
+/// 
+/// This sets an environment variable that causes the Context to use `tokio::spawn` 
+/// instead of `executor.runtime.spawn`.
+pub fn use_current_tokio_runtime() {
+    std::env::set_var("COMMONWARE_USE_EXTERNAL_TOKIO", "1");
+}
+
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
         type Storage = MeteredStorage<IoUringStorage>;
@@ -416,7 +424,11 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init_future(future, gauge, catch_panics, children);
 
         // Spawn the task
-        executor.runtime.spawn(f);
+        if std::env::var("COMMONWARE_USE_EXTERNAL_TOKIO").is_ok() {
+            tokio::spawn(f);
+        } else {
+            executor.runtime.spawn(f);
+        }
         handle
     }
 
@@ -445,7 +457,11 @@ impl crate::Spawner for Context {
             );
 
             // Spawn the task
-            executor.runtime.spawn(f);
+            if std::env::var("COMMONWARE_USE_EXTERNAL_TOKIO").is_ok() {
+                tokio::spawn(f);
+            } else {
+                executor.runtime.spawn(f);
+            }
             handle
         }
     }
@@ -488,6 +504,8 @@ impl crate::Spawner for Context {
         // Spawn the blocking task
         if dedicated {
             std::thread::spawn(f);
+        } else if std::env::var("COMMONWARE_USE_EXTERNAL_TOKIO").is_ok() {
+            tokio::task::spawn_blocking(f);
         } else {
             executor.runtime.spawn_blocking(f);
         }
@@ -514,6 +532,8 @@ impl crate::Spawner for Context {
             // Spawn the blocking task
             if dedicated {
                 std::thread::spawn(f);
+            } else if std::env::var("COMMONWARE_USE_EXTERNAL_TOKIO").is_ok() {
+                tokio::task::spawn_blocking(f);
             } else {
                 executor.runtime.spawn_blocking(f);
             }
