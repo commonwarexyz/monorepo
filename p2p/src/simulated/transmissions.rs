@@ -835,4 +835,68 @@ mod tests {
             Some(start + Duration::from_millis(3500))
         );
     }
+
+    #[test]
+    fn equal_split_across_destinations() {
+        let mut state = TransmissionState::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin = key(30);
+        let recipient_b = key(31);
+        let recipient_c = key(32);
+
+        let mut egress_cap = |_pk: &ed25519::PublicKey| Some(1_000u128);
+        let mut ingress_unlimited = unlimited();
+
+        let msg_b = Bytes::from(vec![0xBB; 1_000]);
+        let msg_c = Bytes::from(vec![0xCC; 1_000]);
+
+        let completions = state.queue_transmission(
+            now,
+            origin.clone(),
+            recipient_b.clone(),
+            CHANNEL,
+            msg_b.clone(),
+            Duration::ZERO,
+            true,
+            &mut egress_cap,
+            &mut ingress_unlimited,
+        );
+        assert!(completions.is_empty());
+
+        let completions = state.queue_transmission(
+            now,
+            origin.clone(),
+            recipient_c.clone(),
+            CHANNEL,
+            msg_c.clone(),
+            Duration::ZERO,
+            true,
+            &mut egress_cap,
+            &mut ingress_unlimited,
+        );
+        assert!(completions.is_empty());
+
+        let finish = state.next_bandwidth_event().expect("completion scheduled");
+        assert_eq!(finish, now + Duration::from_secs(2));
+
+        let completions =
+            state.recompute_bandwidth(finish, &mut egress_cap, &mut ingress_unlimited);
+        assert_eq!(completions.len(), 2);
+
+        let mut recipients: Vec<_> = completions
+            .iter()
+            .map(|c| {
+                assert!(c.deliver);
+                assert_eq!(c.message.len(), 1_000);
+                assert_eq!(c.arrival_complete_at, Some(finish));
+                c.recipient.clone()
+            })
+            .collect();
+        recipients.sort();
+        let mut expected = vec![recipient_b, recipient_c];
+        expected.sort();
+        assert_eq!(recipients, expected);
+
+        assert!(state.next_bandwidth_event().is_none());
+    }
 }
