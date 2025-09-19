@@ -870,8 +870,9 @@ mod tests {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
         };
+        let runner = deterministic::Runner::default();
 
-        deterministic::Runner::default().start(|context| async move {
+        runner.start(|context| async move {
             let (network, mut oracle) = Network::new(context.with_label("network"), cfg);
             let network_handle = network.start();
 
@@ -931,8 +932,9 @@ mod tests {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
         };
+        let runner = deterministic::Runner::default();
 
-        deterministic::Runner::default().start(|context| async move {
+        runner.start(|context| async move {
             let (network, mut oracle) = Network::new(context.with_label("network"), cfg);
             let network_handle = network.start();
 
@@ -979,12 +981,17 @@ mod tests {
                 .unwrap();
 
             let (_pk, received_a) = recv_a.recv().await.unwrap();
+            assert_eq!(received_a, big_msg);
             let elapsed_a = context.current().duration_since(start).unwrap();
-            assert!(elapsed_a >= Duration::from_millis(100));
+            assert!(elapsed_a >= Duration::from_secs(20));
 
             let (_pk, received_b) = recv_b.recv().await.unwrap();
-            assert_eq!(received_a, big_msg);
             assert_eq!(received_b, big_msg);
+            let elapsed_b = context.current().duration_since(start).unwrap();
+            assert!(elapsed_b >= Duration::from_secs(20));
+
+            // Because bandwidth is shared, the two messages should take about the same time
+            assert!(elapsed_a.abs_diff(elapsed_b) <= Duration::from_secs(1));
 
             drop(oracle);
             drop(sender);
