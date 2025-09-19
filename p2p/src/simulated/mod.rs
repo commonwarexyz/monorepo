@@ -1179,12 +1179,13 @@ mod tests {
             let (mut sender, _) = oracle.register(pk1.clone(), 0).await.unwrap();
             let (_, mut receiver) = oracle.register(pk2.clone(), 0).await.unwrap();
 
+            const BPS: usize = 1_000;
             oracle
-                .set_bandwidth(pk1.clone(), 1_000, usize::MAX)
+                .set_bandwidth(pk1.clone(), BPS, usize::MAX)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(pk2.clone(), usize::MAX, 1_000)
+                .set_bandwidth(pk2.clone(), usize::MAX, BPS)
                 .await
                 .unwrap();
 
@@ -1194,7 +1195,7 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency: Duration::from_millis(5),
+                        latency: Duration::from_millis(5_000),
                         jitter: Duration::ZERO,
                         success_rate: 1.0,
                     },
@@ -1205,6 +1206,20 @@ mod tests {
             let slow = Bytes::from(vec![0u8; 1_000]);
             sender
                 .send(Recipients::One(pk2.clone()), slow.clone(), true)
+                .await
+                .unwrap();
+
+            oracle.remove_link(pk1.clone(), pk2.clone()).await.unwrap();
+            oracle
+                .add_link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    Link {
+                        latency: Duration::from_millis(1),
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
                 .await
                 .unwrap();
 
@@ -1227,13 +1242,27 @@ mod tests {
 
             let first_elapsed = first_done.duration_since(start).unwrap();
             let second_elapsed = second_done.duration_since(start).unwrap();
+            let slow_latency = Duration::from_millis(5_000);
+            let tx_time = Duration::from_secs(1);
+            let expected_first = slow_latency + tx_time;
+            let tolerance = Duration::from_millis(10);
             assert!(
-                first_elapsed >= Duration::from_millis(5),
-                "slow message arrived too early: {first_elapsed:?}"
+                first_elapsed >= expected_first.saturating_sub(tolerance)
+                    && first_elapsed <= expected_first + tolerance,
+                "slow message arrived outside expected window: {first_elapsed:?} (expected {expected_first:?} ± {tolerance:?})"
             );
             assert!(
                 second_elapsed >= first_elapsed,
                 "fast message arrived before slow transmission completed"
+            );
+
+            let arrival_gap = second_elapsed
+                .checked_sub(first_elapsed)
+                .expect("timestamps ordered");
+            assert!(
+                arrival_gap >= tx_time.saturating_sub(tolerance)
+                    && arrival_gap <= tx_time + tolerance,
+                "next arrival deviated from transmit duration (gap = {arrival_gap:?}, expected {tx_time:?} ± {tolerance:?})"
             );
         })
     }
