@@ -66,6 +66,12 @@ struct QueuedTransmission {
 }
 
 #[derive(Clone, Debug)]
+struct PeerBandwidth {
+    egress: Option<u128>,
+    ingress: Option<u128>,
+}
+
+#[derive(Clone, Debug)]
 struct FlowMeta<P: PublicKey> {
     origin: P,
     recipient: P,
@@ -81,6 +87,7 @@ struct FlowMeta<P: PublicKey> {
 }
 
 pub struct TransmissionState<P: PublicKey + Ord + Clone> {
+    bandwidth_limits: BTreeMap<P, PeerBandwidth>,
     next_flow_id: u64,
     assign_sequences: BTreeMap<(P, P), u64>,
     active_flows: BTreeMap<(P, P), u64>,
@@ -96,6 +103,7 @@ pub struct TransmissionState<P: PublicKey + Ord + Clone> {
 impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
     pub fn new() -> Self {
         Self {
+            bandwidth_limits: BTreeMap::new(),
             next_flow_id: 0,
             assign_sequences: BTreeMap::new(),
             active_flows: BTreeMap::new(),
@@ -109,6 +117,27 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         }
     }
 
+    pub fn update_bandwidth(&mut self, peer: &P, egress: Option<u128>, ingress: Option<u128>) {
+        if egress.is_none() && ingress.is_none() {
+            self.bandwidth_limits.remove(peer);
+        } else {
+            self.bandwidth_limits
+                .insert(peer.clone(), PeerBandwidth { egress, ingress });
+        }
+    }
+
+    fn egress_limit(&self, peer: &P) -> Option<u128> {
+        self.bandwidth_limits
+            .get(peer)
+            .and_then(|limits| limits.egress)
+    }
+
+    fn ingress_limit(&self, peer: &P) -> Option<u128> {
+        self.bandwidth_limits
+            .get(peer)
+            .and_then(|limits| limits.ingress)
+    }
+
     pub fn next(&self) -> Option<SystemTime> {
         match (self.next_bandwidth_event, self.next_transmission_ready) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -118,17 +147,8 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         }
     }
 
-    pub fn process<F, G>(
-        &mut self,
-        now: SystemTime,
-        egress_limit: &mut F,
-        ingress_limit: &mut G,
-    ) -> Vec<Completion<P>>
-    where
-        F: FnMut(&P) -> Option<u128>,
-        G: FnMut(&P) -> Option<u128>,
-    {
-        let mut completions = self.start_due_transmissions(now, egress_limit, ingress_limit);
+    pub fn process(&mut self, now: SystemTime) -> Vec<Completion<P>> {
+        let mut completions = self.start_due_transmissions(now);
 
         loop {
             let Some(next_event) = self.next() else { break };
@@ -144,8 +164,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
                 .unwrap_or(false)
             {
                 self.next_bandwidth_event = None;
-                let mut outcomes =
-                    self.recompute_bandwidth(next_event, egress_limit, ingress_limit);
+                let mut outcomes = self.recompute_bandwidth(next_event);
                 completions.append(&mut outcomes);
                 handled = true;
             }
@@ -156,8 +175,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
                 .unwrap_or(false)
             {
                 self.next_transmission_ready = None;
-                let mut outcomes =
-                    self.start_due_transmissions(next_event, egress_limit, ingress_limit);
+                let mut outcomes = self.start_due_transmissions(next_event);
                 completions.append(&mut outcomes);
                 handled = true;
             }
@@ -170,7 +188,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         completions
     }
 
-    pub fn queue_transmission<F, G>(
+    pub fn queue_transmission(
         &mut self,
         now: SystemTime,
         origin: P,
@@ -179,13 +197,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         message: Bytes,
         latency: Duration,
         should_deliver: bool,
-        egress_limit: &mut F,
-        ingress_limit: &mut G,
-    ) -> Vec<Completion<P>>
-    where
-        F: FnMut(&P) -> Option<u128>,
-        G: FnMut(&P) -> Option<u128>,
-    {
+    ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
         let mut entry = QueuedTransmission {
             channel,
@@ -206,19 +218,10 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             .or_default()
             .push_back(entry);
 
-        self.try_start_transmission_for(origin, recipient, true, now, egress_limit, ingress_limit)
+        self.try_start_transmission_for(origin, recipient, true, now)
     }
 
-    fn start_due_transmissions<F, G>(
-        &mut self,
-        now: SystemTime,
-        egress_limit: &mut F,
-        ingress_limit: &mut G,
-    ) -> Vec<Completion<P>>
-    where
-        F: FnMut(&P) -> Option<u128>,
-        G: FnMut(&P) -> Option<u128>,
-    {
+    fn start_due_transmissions(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         let ready_pairs: Vec<(P, P)> = self
             .pending_transmissions
             .iter()
@@ -238,29 +241,13 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
 
         let mut completions = Vec::new();
         for (origin, recipient) in ready_pairs {
-            completions.extend(self.try_start_transmission_for(
-                origin,
-                recipient,
-                false,
-                now,
-                egress_limit,
-                ingress_limit,
-            ));
+            completions.extend(self.try_start_transmission_for(origin, recipient, false, now));
         }
         self.refresh_next_transmission_ready(now);
         completions
     }
 
-    fn recompute_bandwidth<F, G>(
-        &mut self,
-        now: SystemTime,
-        egress_limit: &mut F,
-        ingress_limit: &mut G,
-    ) -> Vec<Completion<P>>
-    where
-        F: FnMut(&P) -> Option<u128>,
-        G: FnMut(&P) -> Option<u128>,
-    {
+    fn recompute_bandwidth(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         let mut completed = Vec::new();
 
         for (&flow_id, meta) in self.flow_meta.iter_mut() {
@@ -300,10 +287,12 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
 
         if active.is_empty() {
             self.next_bandwidth_event = None;
-            return self.handle_completed_flows(completed, now, egress_limit, ingress_limit);
+            return self.handle_completed_flows(completed, now);
         }
 
-        let allocations = bandwidth::allocate(&active, &mut *egress_limit, &mut *ingress_limit);
+        let mut egress_limit = |pk: &P| self.egress_limit(pk);
+        let mut ingress_limit = |pk: &P| self.ingress_limit(pk);
+        let allocations = bandwidth::allocate(&active, &mut egress_limit, &mut ingress_limit);
         let mut earliest: Option<Duration> = None;
 
         for (flow_id, rate) in allocations {
@@ -340,20 +329,14 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             }
         });
 
-        self.handle_completed_flows(completed, now, egress_limit, ingress_limit)
+        self.handle_completed_flows(completed, now)
     }
 
-    fn handle_completed_flows<F, G>(
+    fn handle_completed_flows(
         &mut self,
         completed: Vec<u64>,
         now: SystemTime,
-        egress_limit: &mut F,
-        ingress_limit: &mut G,
-    ) -> Vec<Completion<P>>
-    where
-        F: FnMut(&P) -> Option<u128>,
-        G: FnMut(&P) -> Option<u128>,
-    {
+    ) -> Vec<Completion<P>> {
         let mut outcomes = Vec::new();
 
         for flow_id in completed {
@@ -414,14 +397,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             self.last_arrival_complete
                 .insert((origin.clone(), recipient.clone()), arrival_complete_at);
 
-            outcomes.extend(self.try_start_transmission_for(
-                origin,
-                recipient,
-                true,
-                now,
-                egress_limit,
-                ingress_limit,
-            ));
+            outcomes.extend(self.try_start_transmission_for(origin, recipient, true, now));
         }
 
         outcomes
@@ -498,19 +474,13 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         self.next_transmission_ready = next_ready;
     }
 
-    fn try_start_transmission_for<F, G>(
+    fn try_start_transmission_for(
         &mut self,
         origin: P,
         recipient: P,
         refresh_schedule: bool,
         now: SystemTime,
-        egress_limit: &mut F,
-        ingress_limit: &mut G,
-    ) -> Vec<Completion<P>>
-    where
-        F: FnMut(&P) -> Option<u128>,
-        G: FnMut(&P) -> Option<u128>,
-    {
+    ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
         if self.active_flows.contains_key(&key) {
             if refresh_schedule {
@@ -551,15 +521,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             let flow_id = self.next_flow_id;
             self.next_flow_id += 1;
             self.active_flows.insert(key, flow_id);
-            return self.start_transmission(
-                origin,
-                recipient,
-                flow_id,
-                entry,
-                now,
-                egress_limit,
-                ingress_limit,
-            );
+            return self.start_transmission(origin, recipient, flow_id, entry, now);
         }
 
         if refresh_schedule {
@@ -569,20 +531,14 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         Vec::new()
     }
 
-    fn start_transmission<F, G>(
+    fn start_transmission(
         &mut self,
         origin: P,
         recipient: P,
         flow_id: u64,
         entry: QueuedTransmission,
         now: SystemTime,
-        egress_limit: &mut F,
-        ingress_limit: &mut G,
-    ) -> Vec<Completion<P>>
-    where
-        F: FnMut(&P) -> Option<u128>,
-        G: FnMut(&P) -> Option<u128>,
-    {
+    ) -> Vec<Completion<P>> {
         let QueuedTransmission {
             channel,
             message,
@@ -624,7 +580,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             "sending message",
         );
 
-        let completions = self.recompute_bandwidth(now, egress_limit, ingress_limit);
+        let completions = self.recompute_bandwidth(now);
         self.refresh_next_transmission_ready(now);
         completions
     }
@@ -651,18 +607,12 @@ mod tests {
         ed25519::PrivateKey::from_seed(seed).public_key()
     }
 
-    fn unlimited() -> impl FnMut(&ed25519::PublicKey) -> Option<u128> {
-        |_pk| None
-    }
-
     #[test]
     fn queue_immediate_completion_with_unlimited_capacity() {
         let mut state = TransmissionState::new();
         let now = SystemTime::UNIX_EPOCH;
         let origin = key(1);
         let recipient = key(2);
-        let mut egress = unlimited();
-        let mut ingress = unlimited();
 
         let completions = state.queue_transmission(
             now,
@@ -672,8 +622,6 @@ mod tests {
             Bytes::from_static(b"hello"),
             Duration::ZERO,
             true,
-            &mut egress,
-            &mut ingress,
         );
 
         assert_eq!(completions.len(), 1);
@@ -688,8 +636,6 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         let origin = key(3);
         let recipient = key(4);
-        let mut egress = unlimited();
-        let mut ingress = unlimited();
 
         let completions = state.queue_transmission(
             now,
@@ -699,8 +645,6 @@ mod tests {
             Bytes::from_static(b"drop"),
             Duration::ZERO,
             false,
-            &mut egress,
-            &mut ingress,
         );
 
         assert_eq!(completions.len(), 1);
@@ -716,8 +660,7 @@ mod tests {
         let recipient = key(11);
         let make_bytes = |value: u8| Bytes::from(vec![value; 1_000]);
 
-        let mut egress_cap = |_pk: &ed25519::PublicKey| Some(1_000u128);
-        let mut ingress_unlimited = unlimited();
+        state.update_bandwidth(&origin, Some(1_000u128), None);
 
         let completions = state.queue_transmission(
             now,
@@ -727,15 +670,13 @@ mod tests {
             make_bytes(1),
             Duration::from_secs(1),
             true,
-            &mut egress_cap,
-            &mut ingress_unlimited,
         );
         assert!(completions.is_empty());
 
         let first_finish = state.next().expect("first completion scheduled");
         assert_eq!(first_finish, now + Duration::from_secs(1));
 
-        let completions = state.process(first_finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(first_finish);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
         assert!(completion_a.deliver);
@@ -752,24 +693,22 @@ mod tests {
             make_bytes(2),
             Duration::ZERO,
             true,
-            &mut egress_cap,
-            &mut ingress_unlimited,
         );
         assert!(completions.is_empty());
 
-        let completions = state.process(now, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(now);
         assert!(completions.is_empty());
 
         let next_ready = state.next().expect("second transfer should be scheduled");
         assert_eq!(next_ready, first_finish + Duration::from_secs(1));
 
-        let completions = state.process(next_ready, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(next_ready);
         assert!(completions.is_empty());
 
         let second_finish = state.next().expect("second completion scheduled");
         assert_eq!(second_finish, next_ready + Duration::from_secs(1));
 
-        let completions = state.process(second_finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(second_finish);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
         assert!(completion_b.deliver);
@@ -785,8 +724,7 @@ mod tests {
         let origin = key(21);
         let recipient = key(22);
 
-        let mut egress_cap = |_pk: &ed25519::PublicKey| Some(500_000u128); // 500 KB/s
-        let mut ingress_unlimited = unlimited();
+        state.update_bandwidth(&origin, Some(500_000u128), None); // 500 KB/s
 
         let msg_a = Bytes::from(vec![0xAA; 1_000_000]);
         let msg_b = Bytes::from(vec![0xBB; 500_000]);
@@ -799,8 +737,6 @@ mod tests {
             msg_a.clone(),
             Duration::from_millis(500),
             true,
-            &mut egress_cap,
-            &mut ingress_unlimited,
         );
         assert!(completions.is_empty());
 
@@ -812,15 +748,13 @@ mod tests {
             msg_b.clone(),
             Duration::from_millis(100),
             true,
-            &mut egress_cap,
-            &mut ingress_unlimited,
         );
         assert!(completions.is_empty());
 
         let first_finish = state.next().expect("message A completion scheduled");
         assert_eq!(first_finish, start + Duration::from_millis(2000));
 
-        let completions = state.process(first_finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(first_finish);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
         assert!(completion_a.deliver);
@@ -836,13 +770,13 @@ mod tests {
             first_finish + Duration::from_millis(500) - Duration::from_millis(100)
         );
 
-        let completions = state.process(next_ready, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(next_ready);
         assert!(completions.is_empty());
 
         let second_finish = state.next().expect("message B completion scheduled");
         assert_eq!(second_finish, next_ready + Duration::from_secs_f64(1.0));
 
-        let completions = state.process(second_finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(second_finish);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
         assert!(completion_b.deliver);
@@ -870,8 +804,7 @@ mod tests {
         let recipient_b = key(31);
         let recipient_c = key(32);
 
-        let mut egress_cap = |_pk: &ed25519::PublicKey| Some(1_000u128);
-        let mut ingress_unlimited = unlimited();
+        state.update_bandwidth(&origin, Some(1_000u128), None);
 
         let msg_b = Bytes::from(vec![0xBB; 1_000]);
         let msg_c = Bytes::from(vec![0xCC; 1_000]);
@@ -884,8 +817,6 @@ mod tests {
             msg_b.clone(),
             Duration::ZERO,
             true,
-            &mut egress_cap,
-            &mut ingress_unlimited,
         );
         assert!(completions.is_empty());
 
@@ -897,15 +828,13 @@ mod tests {
             msg_c.clone(),
             Duration::ZERO,
             true,
-            &mut egress_cap,
-            &mut ingress_unlimited,
         );
         assert!(completions.is_empty());
 
         let finish = state.next().expect("completion scheduled");
         assert_eq!(finish, now + Duration::from_secs(2));
 
-        let completions = state.process(finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(finish);
         assert_eq!(completions.len(), 2);
 
         let mut recipients: Vec<_> = completions

@@ -212,18 +212,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             } => match self.peers.get_mut(&public_key) {
                 Some(peer) => {
                     peer.set_bandwidth(egress_bps, ingress_bps);
+                    let egress = peer.egress_limit();
+                    let ingress = peer.ingress_limit();
+                    self.transmissions
+                        .update_bandwidth(&public_key, egress, ingress);
                     let now = self.context.current();
-                    let completions = {
-                        let peers = &self.peers;
-                        let mut egress_limit = |pk: &P| {
-                            peers.get(pk).and_then(|p| p.egress_limit())
-                        };
-                        let mut ingress_limit = |pk: &P| {
-                            peers.get(pk).and_then(|p| p.ingress_limit())
-                        };
-                        self.transmissions
-                            .process(now, &mut egress_limit, &mut ingress_limit)
-                    };
+                    let completions = self.transmissions.process(now);
                     if !completions.is_empty() {
                         self.process_completions(completions);
                     }
@@ -384,9 +378,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let should_deliver = receiver_has_bandwidth && self.context.gen_bool(success_rate);
 
             let now = self.context.current();
-            let peers = &self.peers;
-            let mut egress_limit = |pk: &P| peers.get(pk).and_then(|peer| peer.egress_limit());
-            let mut ingress_limit = |pk: &P| peers.get(pk).and_then(|peer| peer.ingress_limit());
 
             let completions = self.transmissions.queue_transmission(
                 now,
@@ -396,8 +387,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 message.clone(),
                 latency,
                 should_deliver,
-                &mut egress_limit,
-                &mut ingress_limit,
             );
 
             if !completions.is_empty() {
@@ -423,13 +412,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     async fn run(mut self) {
         loop {
             let now = self.context.current();
-            let completions = {
-                let peers = &self.peers;
-                let mut egress_limit = |pk: &P| peers.get(pk).and_then(|peer| peer.egress_limit());
-                let mut ingress_limit = |pk: &P| peers.get(pk).and_then(|peer| peer.ingress_limit());
-                self.transmissions
-                    .process(now, &mut egress_limit, &mut ingress_limit)
-            };
+            let completions = self.transmissions.process(now);
             if !completions.is_empty() {
                 self.process_completions(completions);
             }
@@ -464,17 +447,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 },
                 tick = &mut event_sleep => {
                     if let Some(when) = tick {
-                        let completions = {
-                            let peers = &self.peers;
-                            let mut egress_limit = |pk: &P| {
-                                peers.get(pk).and_then(|peer| peer.egress_limit())
-                            };
-                            let mut ingress_limit = |pk: &P| {
-                                peers.get(pk).and_then(|peer| peer.ingress_limit())
-                            };
-                            self.transmissions
-                                .process(when, &mut egress_limit, &mut ingress_limit)
-                        };
+                        let completions = self.transmissions.process(when);
                         if !completions.is_empty() {
                             self.process_completions(completions);
                         }
