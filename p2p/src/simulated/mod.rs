@@ -16,6 +16,9 @@
 //! capacity is a shared, finite resource. Bandwidth is allocated via progressive
 //! filling to provide max-min fairness.
 //!
+//! _If no bandwidth constraints are provided (default behavior), progressive filling and bandwidth
+//! tracking are not performed (avoiding unnecessary overhead for minimal p2p testing common in CI)._
+//!
 //! ## Core Model
 //!
 //! Whenever a transfer starts or finishes, or a bandwidth limit is updated, we execute a scheduling tick:
