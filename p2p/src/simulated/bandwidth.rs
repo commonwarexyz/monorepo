@@ -297,6 +297,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
     }
 }
 
+/// Calculate the time it will take to deplete a given amount of capacity at some [Rate].
 pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
     match rate {
         Rate::Unlimited => Some(Duration::ZERO),
@@ -316,6 +317,10 @@ pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
     }
 }
 
+/// Calculate the number of bytes that can be transferred in a given duration at some [Rate],
+/// accounting for any fractional bytes-per-nanosecond that would otherwise be rounded away.
+///
+/// This can be used to deduce how many bytes were sent when interrupting a flow at some point in time.
 pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u128) -> u128 {
     if remaining == 0 {
         return 0;
@@ -323,7 +328,6 @@ pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u12
 
     match rate {
         Rate::Unlimited => {
-            // No throttling – consume everything immediately.
             *carry = 0;
             remaining
         }
@@ -342,8 +346,6 @@ pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u12
                 return remaining;
             }
             let numerator = ratio.num.saturating_mul(delta_ns);
-            // Any remainder from the integer division is stored in `carry` so the next tick can
-            // honour fractional bytes-per-nanosecond that would otherwise be rounded away.
             let total = numerator.saturating_add(*carry);
             let bytes = total / denom;
             *carry = total % denom;
@@ -352,6 +354,7 @@ pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u12
     }
 }
 
+/// Calculate the ceiling of the division of two numbers (if the denominator is zero, return `u128::MAX`).
 fn div_ceil(num: u128, denom: u128) -> u128 {
     if denom == 0 {
         return u128::MAX;
@@ -364,6 +367,7 @@ fn div_ceil(num: u128, denom: u128) -> u128 {
     }
 }
 
+/// Convert a number of nanoseconds to a duration, handling overflows.
 fn duration_from_ns(ns: u128) -> Duration {
     if ns == 0 {
         return Duration::ZERO;
