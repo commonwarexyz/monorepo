@@ -141,10 +141,8 @@ where
         let size = journal.size().await?;
 
         if size <= lower_bound {
-            // Close the existing journal before creating a new one
-            journal.close().await?;
-
             // Create a new journal with the new bounds
+            journal.destroy().await?;
             Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Just prune to the lower bound
