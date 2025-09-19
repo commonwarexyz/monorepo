@@ -597,22 +597,32 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+    use std::time::{Duration, SystemTime};
 
-    const ORIGIN: u8 = 1;
-    const RECIPIENT: u8 = 2;
     const CHANNEL: Channel = 0;
+
+    fn key(seed: u64) -> ed25519::PublicKey {
+        ed25519::PrivateKey::from_seed(seed).public_key()
+    }
+
+    fn unlimited() -> impl FnMut(&ed25519::PublicKey) -> Option<u128> {
+        |_pk| None
+    }
 
     #[test]
     fn queue_immediate_completion_with_unlimited_capacity() {
         let mut state = TransmissionState::new();
         let now = SystemTime::UNIX_EPOCH;
-        let mut egress = |_pk: &u8| None;
-        let mut ingress = |_pk: &u8| None;
+        let origin = key(1);
+        let recipient = key(2);
+        let mut egress = unlimited();
+        let mut ingress = unlimited();
 
         let completions = state.queue_transmission(
             now,
-            ORIGIN,
-            RECIPIENT,
+            origin,
+            recipient,
             CHANNEL,
             Bytes::from_static(b"hello"),
             Duration::ZERO,
@@ -631,13 +641,15 @@ mod tests {
     fn queue_dropped_message_records_outcome() {
         let mut state = TransmissionState::new();
         let now = SystemTime::UNIX_EPOCH;
-        let mut egress = |_pk: &u8| None;
-        let mut ingress = |_pk: &u8| None;
+        let origin = key(3);
+        let recipient = key(4);
+        let mut egress = unlimited();
+        let mut ingress = unlimited();
 
         let completions = state.queue_transmission(
             now,
-            ORIGIN,
-            RECIPIENT,
+            origin,
+            recipient,
             CHANNEL,
             Bytes::from_static(b"drop"),
             Duration::ZERO,
@@ -655,16 +667,17 @@ mod tests {
     fn fifo_delivery_per_pair() {
         let mut state = TransmissionState::new();
         let now = SystemTime::UNIX_EPOCH;
-        let mut make_bytes = |value: u8| Bytes::from(vec![value; 1_000]);
+        let origin = key(10);
+        let recipient = key(11);
+        let make_bytes = |value: u8| Bytes::from(vec![value; 1_000]);
 
-        let mut egress_cap = |_pk: &u8| Some(1_000u128);
-        let mut ingress_unlimited = |_pk: &u8| None;
+        let mut egress_cap = |_pk: &ed25519::PublicKey| Some(1_000u128);
+        let mut ingress_unlimited = unlimited();
 
-        // Queue first message; capacity limits mean it finishes in 1s.
         let completions = state.queue_transmission(
             now,
-            ORIGIN,
-            RECIPIENT,
+            origin.clone(),
+            recipient.clone(),
             CHANNEL,
             make_bytes(1),
             Duration::ZERO,
@@ -674,22 +687,20 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let first_finish = state.next_bandwidth_event().expect("first completion scheduled");
+        let first_finish = state
+            .next_bandwidth_event()
+            .expect("first completion scheduled");
         assert_eq!(first_finish, now + Duration::from_secs(1));
 
-        let completions = state.recompute_bandwidth(
-            first_finish,
-            &mut egress_cap,
-            &mut ingress_unlimited,
-        );
+        let completions =
+            state.recompute_bandwidth(first_finish, &mut egress_cap, &mut ingress_unlimited);
         assert_eq!(completions.len(), 1);
         assert!(completions[0].deliver);
 
-        // Queue a second message; it should not start until the first completes.
         let completions = state.queue_transmission(
             now,
-            ORIGIN,
-            RECIPIENT,
+            origin.clone(),
+            recipient.clone(),
             CHANNEL,
             make_bytes(2),
             Duration::ZERO,
@@ -699,30 +710,21 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        // Starting transmissions before the first arrival completes should be a no-op.
-        let completions = state.start_due_transmissions(
-            now,
-            &mut egress_cap,
-            &mut ingress_unlimited,
-        );
+        let completions =
+            state.start_due_transmissions(now, &mut egress_cap, &mut ingress_unlimited);
         assert!(completions.is_empty());
 
-        // Once we reach the arrival boundary we can start the second transfer.
-        let completions = state.start_due_transmissions(
-            first_finish,
-            &mut egress_cap,
-            &mut ingress_unlimited,
-        );
+        let completions =
+            state.start_due_transmissions(first_finish, &mut egress_cap, &mut ingress_unlimited);
         assert!(completions.is_empty());
 
-        let second_finish = state.next_bandwidth_event().expect("second completion scheduled");
+        let second_finish = state
+            .next_bandwidth_event()
+            .expect("second completion scheduled");
         assert_eq!(second_finish, first_finish + Duration::from_secs(1));
 
-        let completions = state.recompute_bandwidth(
-            second_finish,
-            &mut egress_cap,
-            &mut ingress_unlimited,
-        );
+        let completions =
+            state.recompute_bandwidth(second_finish, &mut egress_cap, &mut ingress_unlimited);
         assert_eq!(completions.len(), 1);
         assert!(completions[0].deliver);
         assert_eq!(completions[0].message.len(), 1_000);
