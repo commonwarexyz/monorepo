@@ -1310,21 +1310,12 @@ mod tests {
             let start = context.current();
 
             // All senders send 10KB simultaneously
-            let mut handles = Vec::new();
             for (i, mut tx) in sender_txs.into_iter().enumerate() {
                 let receiver_clone = receiver.clone();
-                let handle = context.clone().spawn(move |_| async move {
-                    let msg = Bytes::from(vec![i as u8; 10_000]);
-                    tx.send(Recipients::One(receiver_clone), msg, true)
-                        .await
-                        .unwrap();
-                });
-                handles.push(handle);
-            }
-
-            // Wait for all sends to complete
-            for handle in handles {
-                handle.await.unwrap();
+                let msg = Bytes::from(vec![i as u8; 10_000]);
+                tx.send(Recipients::One(receiver_clone), msg, true)
+                    .await
+                    .unwrap();
             }
 
             // All 10 messages should be received at ~1s
@@ -1401,23 +1392,14 @@ mod tests {
             let start = context.current();
 
             // Send 10KB to each receiver (100KB total)
-            let mut handles = Vec::new();
             for (i, receiver) in receivers.iter().enumerate() {
                 let mut sender_tx = sender_tx.clone();
                 let receiver_clone = receiver.clone();
-                let handle = context.clone().spawn(move |_| async move {
-                    let msg = Bytes::from(vec![i as u8; 10_000]);
-                    sender_tx
-                        .send(Recipients::One(receiver_clone), msg, true)
-                        .await
-                        .unwrap();
-                });
-                handles.push(handle);
-            }
-
-            // Wait for all sends to complete
-            for handle in handles {
-                handle.await.unwrap();
+                let msg = Bytes::from(vec![i as u8; 10_000]);
+                sender_tx
+                    .send(Recipients::One(receiver_clone), msg, true)
+                    .await
+                    .unwrap();
             }
 
             // Each receiver should receive their 10KB message in ~1s (10KB at 10KB/s)
@@ -1496,21 +1478,12 @@ mod tests {
             let start = context.current();
 
             // All senders send 1KB simultaneously
-            let mut handles = Vec::new();
             for (i, mut tx) in sender_txs.into_iter().enumerate() {
                 let receiver_clone = receiver.clone();
-                let handle = context.clone().spawn(move |_| async move {
-                    let msg = Bytes::from(vec![i as u8; 1_000]);
-                    tx.send(Recipients::One(receiver_clone), msg, true)
-                        .await
-                        .unwrap();
-                });
-                handles.push(handle);
-            }
-
-            // Wait for all sends to complete
-            for handle in handles {
-                handle.await.unwrap();
+                let msg = Bytes::from(vec![i as u8; 1_000]);
+                tx.send(Recipients::One(receiver_clone), msg, true)
+                    .await
+                    .unwrap();
             }
 
             // Each sender takes 1s to transmit 1KB at 1KB/s
@@ -1737,23 +1710,12 @@ mod tests {
             // The scheduler reserves bandwidth in advance, the actual behavior
             // depends on the order tasks are processed. Since all senders
             // start at once, they'll compete for bandwidth
-
             let sizes = [10_000, 20_000, 30_000];
-            let mut handles = Vec::new();
-
             for (i, (mut tx, size)) in sender_txs.into_iter().zip(sizes.iter()).enumerate() {
                 let rx_clone = receiver.clone();
                 let msg_size = *size;
-                let handle = context.clone().spawn(move |_| async move {
-                    let msg = Bytes::from(vec![i as u8; msg_size]);
-                    tx.send(Recipients::One(rx_clone), msg, true).await.unwrap();
-                });
-                handles.push(handle);
-            }
-
-            // Wait for all sends to complete
-            for handle in handles {
-                handle.await.unwrap();
+                let msg = Bytes::from(vec![i as u8; msg_size]);
+                tx.send(Recipients::One(rx_clone), msg, true).await.unwrap();
             }
 
             // Receive messages. They arrive in the order they were scheduled,
