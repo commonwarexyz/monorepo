@@ -223,7 +223,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         Some(ingress_bps)
                     };
                     self.transmissions
-                        .update_bandwidth(&public_key, egress_bps, ingress_bps);
+                        .update(&public_key, egress_bps, ingress_bps);
 
                     // Trigger processing (we may need to recompute bandwidth limits)
                     let now = self.context.current();
