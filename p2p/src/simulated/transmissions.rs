@@ -730,4 +730,97 @@ mod tests {
         assert_eq!(completions[0].message.len(), 1_000);
         assert_eq!(completions[0].message[0], 2);
     }
+
+    #[test]
+    fn staggered_latencies_allow_overlap() {
+        let mut state = TransmissionState::new();
+        let start = SystemTime::UNIX_EPOCH;
+        let origin = key(21);
+        let recipient = key(22);
+
+        let mut egress_cap = |_pk: &ed25519::PublicKey| Some(500_000u128); // 500 KB/s
+        let mut ingress_unlimited = unlimited();
+
+        let msg_a = Bytes::from(vec![0xAA; 1_000_000]);
+        let msg_b = Bytes::from(vec![0xBB; 500_000]);
+
+        let completions = state.queue_transmission(
+            start,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            msg_a.clone(),
+            Duration::from_millis(500),
+            true,
+            &mut egress_cap,
+            &mut ingress_unlimited,
+        );
+        assert!(completions.is_empty());
+
+        let completions = state.queue_transmission(
+            start,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            msg_b.clone(),
+            Duration::from_millis(100),
+            true,
+            &mut egress_cap,
+            &mut ingress_unlimited,
+        );
+        assert!(completions.is_empty());
+
+        let first_finish = state
+            .next_bandwidth_event()
+            .expect("message A completion scheduled");
+        assert_eq!(first_finish, start + Duration::from_millis(2000));
+
+        let completions =
+            state.recompute_bandwidth(first_finish, &mut egress_cap, &mut ingress_unlimited);
+        assert_eq!(completions.len(), 1);
+        let completion_a = &completions[0];
+        assert!(completion_a.deliver);
+        assert_eq!(completion_a.message.len(), msg_a.len());
+        assert_eq!(
+            completion_a.arrival_complete_at,
+            Some(first_finish + Duration::from_millis(500))
+        );
+
+        let next_ready = state
+            .next_transmission_ready()
+            .expect("message B send should be scheduled");
+        assert_eq!(
+            next_ready,
+            first_finish + Duration::from_millis(500) - Duration::from_millis(100)
+        );
+
+        let completions =
+            state.start_due_transmissions(next_ready, &mut egress_cap, &mut ingress_unlimited);
+        assert!(completions.is_empty());
+
+        let second_finish = state
+            .next_bandwidth_event()
+            .expect("message B completion scheduled");
+        assert_eq!(second_finish, next_ready + Duration::from_secs_f64(1.0));
+
+        let completions =
+            state.recompute_bandwidth(second_finish, &mut egress_cap, &mut ingress_unlimited);
+        assert_eq!(completions.len(), 1);
+        let completion_b = &completions[0];
+        assert!(completion_b.deliver);
+        assert_eq!(completion_b.message.len(), msg_b.len());
+        assert_eq!(
+            completion_b.arrival_complete_at,
+            Some(second_finish + Duration::from_millis(100))
+        );
+
+        assert_eq!(
+            completion_a.arrival_complete_at,
+            Some(start + Duration::from_millis(2500))
+        );
+        assert_eq!(
+            completion_b.arrival_complete_at,
+            Some(start + Duration::from_millis(3500))
+        );
+    }
 }
