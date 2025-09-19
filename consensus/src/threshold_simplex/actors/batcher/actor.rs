@@ -17,7 +17,7 @@ use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, Handle, Metrics, Spawner,
+    Clock, Metrics, Spawner,
 };
 use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
@@ -330,7 +330,6 @@ pub struct Actor<
         Polynomial = Vec<V::Public>,
     >,
 > {
-    context: E,
     blocker: B,
     reporter: R,
     supervisor: S,
@@ -397,7 +396,6 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context: context.clone(),
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
@@ -418,14 +416,6 @@ impl<
             },
             Mailbox::new(sender),
         )
-    }
-
-    pub fn start(
-        mut self,
-        consensus: voter::Mailbox<V, D>,
-        receiver: impl Receiver<PublicKey = C>,
-    ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(consensus, receiver))
     }
 
     pub async fn run(

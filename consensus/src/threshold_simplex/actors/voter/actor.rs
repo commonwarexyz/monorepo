@@ -29,7 +29,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef,
     telemetry::metrics::histogram::{self, Buckets},
-    Clock, Handle, Metrics, Spawner, Storage,
+    Clock, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{quorum, quorum_from_slice};
@@ -1637,24 +1637,7 @@ impl<
         };
     }
 
-    pub fn start(
-        mut self,
-        batcher: batcher::Mailbox<C::PublicKey, V, D>,
-        resolver: resolver::Mailbox<V, D>,
-        pending_sender: impl Sender<PublicKey = C::PublicKey>,
-        recovered_sender: impl Sender<PublicKey = C::PublicKey>,
-        recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
-    ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(
-            batcher,
-            resolver,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
-        ))
-    }
-
-    async fn run(
+    pub async fn run(
         mut self,
         mut batcher: batcher::Mailbox<C::PublicKey, V, D>,
         mut resolver: resolver::Mailbox<V, D>,
