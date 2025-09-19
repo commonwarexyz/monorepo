@@ -121,6 +121,20 @@ pub struct State<P: PublicKey + Ord + Clone> {
     buffered: BTreeMap<(P, P), BTreeMap<u128, Buffered>>,
 }
 
+/// Smallest scheduling delta we rely on when booking future bandwidth events.
+///
+/// On Windows, `SystemTime` is backed by a FILETIME with 100ns granularity.
+/// Asking for a shorter advance can round down to the current instant, so we
+/// clamp to a single tick there. Other platforms keep their original behavior
+/// (no minimum step).
+#[cfg(windows)]
+const MIN_BANDWIDTH_STEP: Duration = Duration::from_nanos(100);
+
+/// Preserve prior behavior elsewhere by keeping the minimum at zero for non-Windows platforms
+/// because it is technically more accurate.
+#[cfg(not(windows))]
+const MIN_BANDWIDTH_STEP: Duration = Duration::ZERO;
+
 impl<P: PublicKey + Ord + Clone> State<P> {
     /// Creates a new scheduler.
     pub fn new() -> Self {
@@ -450,11 +464,8 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
         // Record the next time at which a bandwidth event should fire.
         self.next_bandwidth_event = earliest.and_then(|duration| {
-            if duration.is_zero() {
-                Some(now)
-            } else {
-                now.checked_add(duration)
-            }
+            let delay = duration.max(MIN_BANDWIDTH_STEP);
+            now.checked_add(delay)
         });
 
         self.finish(completed, now)
