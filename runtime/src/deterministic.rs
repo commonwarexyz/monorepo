@@ -33,11 +33,12 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::signal::{Signal, Stopper},
-    AbortToken, Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
+    stream::AbortHandle,
     task::{waker, ArcWake},
     Future,
 };
@@ -679,7 +680,7 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    children: Arc<Mutex<Vec<AbortToken>>>,
+    children: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
 impl Context {
