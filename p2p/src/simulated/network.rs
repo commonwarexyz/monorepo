@@ -33,8 +33,11 @@ type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
     pub max_size: usize,
-    /// Whether to ignore block operations.
-    pub ignore_blocks: bool,
+
+    /// True if peers should disconnect upon being blocked. While production networking would
+    /// typically disconnect, for testing purposes it may be useful to keep peers connected,
+    /// allowing byzantine actors the ability to continue sending messages.
+    pub disconnect_on_block: bool,
 }
 
 /// Implementation of a simulated network.
@@ -44,8 +47,10 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Maximum size of a message that can be sent over the network
     max_size: usize,
 
-    // Whether to ignore block operations
-    ignore_blocks: bool,
+    // True if peers should disconnect upon being blocked.
+    // While production networking would typically disconnect, for testing purposes it may be useful
+    // to keep peers connected, allowing byzantine actors the ability to continue sending messages.
+    disconnect_on_block: bool,
 
     // Next socket address to assign to a new peer
     // Incremented for each new peer
@@ -100,7 +105,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             Self {
                 context,
                 max_size: cfg.max_size,
-                ignore_blocks: cfg.ignore_blocks,
+                disconnect_on_block: cfg.disconnect_on_block,
                 next_addr,
                 ingress: oracle_receiver,
                 sender,
@@ -253,9 +258,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 send_result(result, Ok(()))
             }
             ingress::Message::Block { from, to } => {
-                if !self.ignore_blocks {
-                    self.blocks.insert((from, to));
-                }
+                self.blocks.insert((from, to));
             }
             ingress::Message::Blocked { result } => {
                 send_result(result, Ok(self.blocks.iter().cloned().collect()))
@@ -355,12 +358,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             // Determine if the sender or recipient has blocked the other
             let o_r = (origin.clone(), recipient.clone());
-            if !self.ignore_blocks {
-                let r_o = (recipient.clone(), origin.clone());
-                if self.blocks.contains(&o_r) || self.blocks.contains(&r_o) {
-                    trace!(?origin, ?recipient, reason = "blocked", "dropping message");
-                    continue;
-                }
+            let r_o = (recipient.clone(), origin.clone());
+            if self.disconnect_on_block
+                && (self.blocks.contains(&o_r) || self.blocks.contains(&r_o))
+            {
+                trace!(?origin, ?recipient, reason = "blocked", "dropping message");
+                continue;
             }
 
             // Determine if there is a link between the sender and recipient
@@ -878,7 +881,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
-                ignore_blocks: true,
+                disconnect_on_block: true,
             };
             let network_context = context.with_label("network");
             let (network, mut oracle) = Network::new(network_context.clone(), cfg);
@@ -923,7 +926,7 @@ mod tests {
     fn test_get_next_socket() {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
-            ignore_blocks: true,
+            disconnect_on_block: true,
         };
         let runner = deterministic::Runner::default();
 

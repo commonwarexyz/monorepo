@@ -43,7 +43,7 @@ use std::{
     time::Duration,
 };
 
-const VALID_PANICS: [&str; 2] = ["invalid view (in payload):", "invalid parent (in payload):"];
+const VALID_PANICS: [&str; 3] = ["invalid payload:", "invalid parent (in payload):", "invalid round (in payload):"];
 
 static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
 
@@ -61,7 +61,7 @@ fn fuzzer(input: FuzzInput) {
             context.with_label("network"),
             NetworkConfig {
                 max_size: 1024 * 1024,
-                ignore_blocks: true, // Ignore block operation
+                disconnect_on_block: false, // Ignore blocking operation
             },
         );
 
@@ -181,6 +181,7 @@ fn fuzzer(input: FuzzInput) {
                 partition: validator.to_string(),
                 supervisor: supervisor.clone(),
                 mailbox_size: 1024,
+                epoch: 0,
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),

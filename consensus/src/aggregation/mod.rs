@@ -67,8 +67,8 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, types::Epoch, Config, Engine};
-    use crate::aggregation::mocks::Strategy;
+    use super::{mocks, Config, Engine};
+    use crate::{aggregation::mocks::Strategy, types::Epoch};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -160,7 +160,7 @@ mod tests {
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
-                ignore_blocks: true,
+                disconnect_on_block: true,
             },
         );
         network.start();

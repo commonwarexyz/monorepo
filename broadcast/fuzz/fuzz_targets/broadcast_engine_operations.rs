@@ -156,7 +156,7 @@ fn fuzz(input: FuzzInput) {
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
-                ignore_blocks: true,
+                disconnect_on_block: false,
             },
         );
         network.start();

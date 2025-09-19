@@ -9,6 +9,7 @@ use commonware_consensus::{
         mocks::supervisor::Supervisor,
         types::{Finalize, Notarize, Nullify, Proposal, Voter},
     },
+    types::Round,
     Supervisor as SupervisorTrait, Viewable,
 };
 use commonware_cryptography::{
@@ -196,16 +197,16 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                 // Get our index
                 let public_key_index = self
                     .supervisor
-                    .is_participant(nullify.view, &self.crypto.public_key())
+                    .is_participant(nullify.view(), &self.crypto.public_key())
                     .unwrap();
 
                 // Nullify random view
-                let mutated_view = self.random_view(nullify.view);
+                let mutated_view = self.random_view(nullify.view());
                 let msg = Nullify::sign(
                     &self.namespace,
                     &mut self.crypto,
                     public_key_index,
-                    mutated_view,
+                    Round::new(0, mutated_view),
                 );
                 let msg = Voter::<Signature, Sha256Digest>::Nullify(msg)
                     .encode()
@@ -229,19 +230,29 @@ impl<E: Clock + Spawner> Fuzzer<E> {
         strategy: Mutation,
     ) -> Proposal<Sha256Digest> {
         match strategy {
-            Mutation::Payload => {
-                Proposal::new(original.view, original.parent, self.random_payload())
-            }
+            Mutation::Payload => Proposal::new(
+                Round::new(0, original.view()),
+                original.parent,
+                self.random_payload(),
+            ),
             Mutation::View => {
                 let mutated_view = self.random_view(self.view);
-                Proposal::new(mutated_view, original.parent, original.payload)
+                Proposal::new(
+                    Round::new(0, mutated_view),
+                    original.parent,
+                    original.payload,
+                )
             }
             Mutation::Parent => {
                 let mutated_parent = self.random_parent();
-                Proposal::new(original.view, mutated_parent, original.payload)
+                Proposal::new(
+                    Round::new(0, original.view()),
+                    mutated_parent,
+                    original.payload,
+                )
             }
             Mutation::All => Proposal::new(
-                self.random_view(self.view),
+                Round::new(0, self.random_view(self.view)),
                 self.random_parent(),
                 self.random_payload(),
             ),
@@ -252,7 +263,7 @@ impl<E: Clock + Spawner> Fuzzer<E> {
         let real_view = self.view;
 
         let proposal = Proposal::new(
-            self.random_view(self.view),
+            Round::new(0, self.random_view(self.view)),
             self.random_parent(),
             self.random_payload(),
         );
@@ -293,7 +304,7 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                         &self.namespace,
                         &mut self.crypto,
                         public_key_index,
-                        real_view,
+                        Round::new(0, real_view),
                     );
                     let encoded_msg = Voter::<Signature, Sha256Digest>::Nullify(msg)
                         .encode()

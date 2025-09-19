@@ -75,7 +75,7 @@
 //! // Configure network
 //! let p2p_cfg = Config {
 //!     max_size: 1024 * 1024, // 1MB
-//!     ignore_blocks: true,
+//!     disconnect_on_block: true,
 //! };
 //!
 //! // Start context
@@ -200,7 +200,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -317,7 +317,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -358,7 +358,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -396,7 +396,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -422,7 +422,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -462,7 +462,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -536,7 +536,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -589,7 +589,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -659,7 +659,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -845,7 +845,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -937,7 +937,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1097,7 +1097,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1155,7 +1155,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1247,7 +1247,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1348,7 +1348,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1447,7 +1447,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1586,7 +1586,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1692,7 +1692,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1825,7 +1825,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1912,7 +1912,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();
@@ -1979,7 +1979,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
-                    ignore_blocks: true,
+                    disconnect_on_block: true,
                 },
             );
             network.start();

@@ -1,5 +1,6 @@
 use crate::{
-    ordered_broadcast::types::{Activity, Chunk, Epoch, Lock, Proposal},
+    ordered_broadcast::types::{Activity, Chunk, Lock, Proposal},
+    types::Epoch,
     Reporter as Z,
 };
 use commonware_codec::{DecodeExt, Encode};

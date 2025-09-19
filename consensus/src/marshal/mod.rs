@@ -14,7 +14,7 @@
 //! - [crate::threshold_simplex]: Provides consensus messages
 //! - Application: Provides verified blocks
 //! - [commonware_broadcast::buffered]: Provides uncertified blocks received from the network
-//! - [commonware_resolver::p2p]: Provides a backfill mechanism for missing blocks
+//! - [commonware_resolver::Resolver]: Provides a backfill mechanism for missing blocks
 //!
 //! # Design
 //!
@@ -50,19 +50,19 @@
 //! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
 //! - No state sync supported. Will attempt to sync every block in the history of the chain.
 //! - Stores the entire history of the chain, which requires indefinite amounts of disk space.
-//! - Uses [`resolver::p2p`](`commonware_resolver::p2p`) for backfilling rather than a general
-//!   [`Resolver`](`commonware_resolver::Resolver`).
 //! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
 //!   uncertified blocks from the network.
 
 pub mod actor;
 pub use actor::Actor;
+pub mod cache;
 pub mod config;
 pub use config::Config;
 pub mod finalizer;
 pub use finalizer::Finalizer;
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
+pub mod resolver;
 
 #[cfg(test)]
 pub mod mocks;
@@ -73,12 +73,14 @@ mod tests {
         actor,
         config::Config,
         mocks::{application::Application, block::Block},
+        resolver::p2p as resolver,
     };
     use crate::{
         threshold_simplex::types::{
-            finalize_namespace, notarize_namespace, seed_namespace, view_message, Activity,
-            Finalization, Notarization, Proposal,
+            finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
+            Notarization, Proposal,
         },
+        types::Round,
         Block as _, Reporter,
     };
     use commonware_broadcast::buffered;
@@ -98,8 +100,11 @@ mod tests {
         Digestible, Hasher as _, PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::test_traced;
-    use commonware_p2p::simulated::{self, Link, Network, Oracle};
-    use commonware_resolver::p2p as resolver;
+    use commonware_p2p::{
+        simulated::{self, Link, Network, Oracle},
+        utils::requester,
+    };
+    use commonware_resolver::p2p;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use governor::Quota;
@@ -119,16 +124,26 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-
     const NAMESPACE: &[u8] = b"test";
     const NUM_VALIDATORS: u32 = 4;
     const QUORUM: u32 = 3;
-    const NUM_BLOCKS: u64 = 100;
+    const NUM_BLOCKS: u64 = 160;
+    const BLOCKS_PER_EPOCH: u64 = 20;
+    const LINK: Link = Link {
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
+        success_rate: 1.0,
+    };
+    const UNRELIABLE_LINK: Link = Link {
+        latency: Duration::from_millis(200),
+        jitter: Duration::from_millis(50),
+        success_rate: 0.7,
+    };
 
     async fn setup_validator(
         context: deterministic::Context,
         oracle: &mut Oracle<P>,
-        coordinator: resolver::mocks::Coordinator<P>,
+        coordinator: p2p::mocks::Coordinator<P>,
         secret: E,
         identity: <V as Variant>::Public,
     ) -> (
@@ -136,11 +151,8 @@ mod tests {
         crate::marshal::ingress::mailbox::Mailbox<V, B>,
     ) {
         let config = Config {
-            public_key: secret.public_key(),
             identity,
-            coordinator,
             mailbox_size: 100,
-            backfill_quota: Quota::per_second(NonZeroU32::new(5).unwrap()),
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
             max_repair: 10,
@@ -158,24 +170,41 @@ mod tests {
             immutable_items_per_section: NZU64!(10),
         };
 
-        let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
-        let application = Application::<B>::default();
+        // Create the resolver
+        let backfill = oracle.register(secret.public_key(), 1).await.unwrap();
+        let resolver_cfg = resolver::Config {
+            public_key: secret.public_key(),
+            coordinator,
+            mailbox_size: config.mailbox_size,
+            requester_config: requester::Config {
+                public_key: secret.public_key(),
+                rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+            },
+            fetch_retry_timeout: Duration::from_millis(100),
+            priority_requests: false,
+            priority_responses: false,
+        };
+        let resolver = resolver::init(&context, resolver_cfg, backfill);
 
         // Create a buffered broadcast engine and get its mailbox
         let broadcast_config = buffered::Config {
             public_key: secret.public_key(),
-            mailbox_size: 100,
+            mailbox_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = oracle.register(secret.public_key(), 1).await.unwrap();
+        let network = oracle.register(secret.public_key(), 2).await.unwrap();
         broadcast_engine.start(network);
 
-        // Start the actor
-        let backfill = oracle.register(secret.public_key(), 2).await.unwrap();
-        actor.start(application.clone(), buffer, backfill);
+        let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
+        let application = Application::<B>::default();
+
+        // Start the application
+        actor.start(application.clone(), buffer, resolver);
 
         (application, mailbox)
     }
@@ -195,7 +224,7 @@ mod tests {
             threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
 
         // Generate seed signature (for the view number)
-        let seed_msg = view_message(proposal.view);
+        let seed_msg = proposal.round.encode();
         let seed_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
@@ -225,7 +254,7 @@ mod tests {
             threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
 
         // Generate seed signature (for the view number)
-        let seed_msg = view_message(proposal.view);
+        let seed_msg = proposal.round.encode();
         let seed_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
@@ -245,7 +274,7 @@ mod tests {
             context.with_label("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
-                ignore_blocks: true,
+                disconnect_on_block: true,
             },
         );
         network.start();
@@ -283,14 +312,9 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_finalize_good_links() {
-        let link = Link {
-            latency: Duration::from_millis(100),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
         for seed in 0..5 {
-            let result1 = finalize(seed, link.clone());
-            let result2 = finalize(seed, link.clone());
+            let result1 = finalize(seed, LINK);
+            let result2 = finalize(seed, LINK);
 
             // Ensure determinism
             assert_eq!(result1, result2);
@@ -299,14 +323,9 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_finalize_bad_links() {
-        let link = Link {
-            latency: Duration::from_millis(200),
-            jitter: Duration::from_millis(50),
-            success_rate: 0.7,
-        };
         for seed in 0..5 {
-            let result1 = finalize(seed, link.clone());
-            let result2 = finalize(seed, link.clone());
+            let result1 = finalize(seed, UNRELIABLE_LINK);
+            let result2 = finalize(seed, UNRELIABLE_LINK);
 
             // Ensure determinism
             assert_eq!(result1, result2);
@@ -326,7 +345,7 @@ mod tests {
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             for (i, secret) in schemes.iter().enumerate() {
                 let (application, actor) = setup_validator(
@@ -360,11 +379,15 @@ mod tests {
                 let height = block.height();
                 assert!(height > 0, "genesis block should not have been generated");
 
+                // Calculate the epoch and round for the block
+                let epoch = height / BLOCKS_PER_EPOCH;
+                let round = Round::new(epoch, height);
+
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
                 actor.broadcast(block.clone()).await;
-                actor.verified(height, block.clone()).await;
+                actor.verified(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
                 // the block before continuing.
@@ -372,7 +395,7 @@ mod tests {
 
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
-                    view: height,
+                    round,
                     parent: height.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
@@ -384,8 +407,13 @@ mod tests {
                 // Finalize block by all validators
                 let fin = make_finalization(proposal, &shares, QUORUM);
                 for actor in actors.iter_mut() {
-                    // Always finalize the last block. Otherwise, finalize randomly.
-                    if height == NUM_BLOCKS || context.gen_bool(0.2) {
+                    // Always finalize 1) the last block in each epoch 2) the last block in the chain.
+                    // Otherwise, finalize randomly.
+                    if height == NUM_BLOCKS
+                        || height % BLOCKS_PER_EPOCH == 0
+                        || context.gen_bool(0.2)
+                    // 20% chance to finalize randomly
+                    {
                         actor.report(Activity::Finalization(fin.clone())).await;
                     }
                 }
@@ -421,7 +449,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -437,23 +465,18 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
+            setup_network_links(&mut oracle, &peers, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block = B::new::<Sha256>(parent, 1, 1);
             let commitment = block.digest();
 
-            let subscription_rx = actor.subscribe(Some(1), commitment).await;
+            let subscription_rx = actor.subscribe(Some(Round::from((0, 1))), commitment).await;
 
-            actor.verified(1, block.clone()).await;
+            actor.verified(Round::from((0, 1)), block.clone()).await;
 
             let proposal = Proposal {
-                view: 1,
+                round: Round::new(0, 1),
                 parent: 0,
                 payload: commitment,
             };
@@ -475,7 +498,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -491,12 +514,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
+            setup_network_links(&mut oracle, &peers, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent, 1, 1);
@@ -504,16 +522,22 @@ mod tests {
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
-            let sub1_rx = actor.subscribe(Some(1), commitment1).await;
-            let sub2_rx = actor.subscribe(Some(2), commitment2).await;
-            let sub3_rx = actor.subscribe(Some(1), commitment1).await;
+            let sub1_rx = actor
+                .subscribe(Some(Round::from((0, 1))), commitment1)
+                .await;
+            let sub2_rx = actor
+                .subscribe(Some(Round::from((0, 2))), commitment2)
+                .await;
+            let sub3_rx = actor
+                .subscribe(Some(Round::from((0, 1))), commitment1)
+                .await;
 
-            actor.verified(1, block1.clone()).await;
-            actor.verified(2, block2.clone()).await;
+            actor.verified(Round::from((0, 1)), block1.clone()).await;
+            actor.verified(Round::from((0, 2)), block2.clone()).await;
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
                 let proposal = Proposal {
-                    view,
+                    round: Round::new(0, view),
                     parent: view.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
@@ -543,7 +567,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -559,12 +583,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
+            setup_network_links(&mut oracle, &peers, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent, 1, 1);
@@ -572,17 +591,21 @@ mod tests {
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
-            let sub1_rx = actor.subscribe(Some(1), commitment1).await;
-            let sub2_rx = actor.subscribe(Some(2), commitment2).await;
+            let sub1_rx = actor
+                .subscribe(Some(Round::from((0, 1))), commitment1)
+                .await;
+            let sub2_rx = actor
+                .subscribe(Some(Round::from((0, 2))), commitment2)
+                .await;
 
             drop(sub1_rx);
 
-            actor.verified(1, block1.clone()).await;
-            actor.verified(2, block2.clone()).await;
+            actor.verified(Round::from((0, 1)), block1.clone()).await;
+            actor.verified(Round::from((0, 2)), block2.clone()).await;
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
                 let proposal = Proposal {
-                    view,
+                    round: Round::new(0, view),
                     parent: view.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
@@ -605,7 +628,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -621,12 +644,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
+            setup_network_links(&mut oracle, &peers, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent, 1, 1);
@@ -635,11 +653,11 @@ mod tests {
             let block4 = B::new::<Sha256>(block3.digest(), 4, 4);
             let block5 = B::new::<Sha256>(block4.digest(), 5, 5);
 
-            let sub1_rx = actor.subscribe(Some(1), block1.digest()).await;
-            let sub2_rx = actor.subscribe(Some(2), block2.digest()).await;
-            let sub3_rx = actor.subscribe(Some(3), block3.digest()).await;
-            let sub4_rx = actor.subscribe(Some(4), block4.digest()).await;
-            let sub5_rx = actor.subscribe(Some(5), block5.digest()).await;
+            let sub1_rx = actor.subscribe(None, block1.digest()).await;
+            let sub2_rx = actor.subscribe(None, block2.digest()).await;
+            let sub3_rx = actor.subscribe(None, block3.digest()).await;
+            let sub4_rx = actor.subscribe(None, block4.digest()).await;
+            let sub5_rx = actor.subscribe(None, block5.digest()).await;
 
             // Block1: Broadcasted by the actor
             actor.broadcast(block1.clone()).await;
@@ -651,7 +669,7 @@ mod tests {
             assert_eq!(received1.height(), 1);
 
             // Block2: Verified by the actor
-            actor.verified(2, block2.clone()).await;
+            actor.verified(Round::from((0, 2)), block2.clone()).await;
 
             // Block2: delivered
             let received2 = sub2_rx.await.unwrap();
@@ -660,13 +678,13 @@ mod tests {
 
             // Block3: Notarized by the actor
             let proposal3 = Proposal {
-                view: 3,
+                round: Round::new(0, 3),
                 parent: 2,
                 payload: block3.digest(),
             };
             let notarization3 = make_notarization(proposal3.clone(), &shares, QUORUM);
             actor.report(Activity::Notarization(notarization3)).await;
-            actor.verified(3, block3.clone()).await;
+            actor.verified(Round::from((0, 3)), block3.clone()).await;
 
             // Block3: delivered
             let received3 = sub3_rx.await.unwrap();
@@ -676,7 +694,7 @@ mod tests {
             // Block4: Finalized by the actor
             let finalization4 = make_finalization(
                 Proposal {
-                    view: 4,
+                    round: Round::new(0, 4),
                     parent: 3,
                     payload: block4.digest(),
                 },
@@ -684,7 +702,7 @@ mod tests {
                 QUORUM,
             );
             actor.report(Activity::Finalization(finalization4)).await;
-            actor.verified(4, block4.clone()).await;
+            actor.verified(Round::from((0, 4)), block4.clone()).await;
 
             // Block4: delivered
             let received4 = sub4_rx.await.unwrap();

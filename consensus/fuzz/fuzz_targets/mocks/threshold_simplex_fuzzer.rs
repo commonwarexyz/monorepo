@@ -9,6 +9,7 @@ use commonware_consensus::{
         mocks::supervisor::Supervisor,
         types::{Finalize, Notarize, Nullify, Proposal, Voter},
     },
+    types::Round,
     Viewable,
 };
 use commonware_cryptography::{
@@ -172,8 +173,8 @@ impl<E: Clock + Spawner, V: Variant> ThresholdFuzzer<E, V> {
             }
             Voter::Nullify(nullify) => {
                 // Nullify random view
-                let mutated_view = self.random_view(nullify.view);
-                let msg = Nullify::sign(&self.namespace, &self.share, mutated_view);
+                let mutated_view = self.random_view(nullify.view());
+                let msg = Nullify::sign(&self.namespace, &self.share, Round::new(0, mutated_view));
 
                 let msg = Voter::<V, Sha256Digest>::Nullify(msg).encode().into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
@@ -195,19 +196,29 @@ impl<E: Clock + Spawner, V: Variant> ThresholdFuzzer<E, V> {
         strategy: Mutation,
     ) -> Proposal<Sha256Digest> {
         match strategy {
-            Mutation::Payload => {
-                Proposal::new(original.view, original.parent, self.random_payload())
-            }
+            Mutation::Payload => Proposal::new(
+                Round::new(0, original.view()),
+                original.parent,
+                self.random_payload(),
+            ),
             Mutation::View => {
                 let mutated_view = self.random_view(self.view);
-                Proposal::new(mutated_view, original.parent, original.payload)
+                Proposal::new(
+                    Round::new(0, mutated_view),
+                    original.parent,
+                    original.payload,
+                )
             }
             Mutation::Parent => {
                 let mutated_parent = self.random_parent();
-                Proposal::new(original.view, mutated_parent, original.payload)
+                Proposal::new(
+                    Round::new(0, original.view()),
+                    mutated_parent,
+                    original.payload,
+                )
             }
             Mutation::All => Proposal::new(
-                self.random_view(self.view),
+                Round::new(0, self.random_view(self.view)),
                 self.random_parent(),
                 self.random_payload(),
             ),
@@ -216,7 +227,7 @@ impl<E: Clock + Spawner, V: Variant> ThresholdFuzzer<E, V> {
 
     async fn send_random_message(&mut self, sender: &mut impl Sender) {
         let proposal = Proposal::new(
-            self.random_view(self.view),
+            Round::new(0, self.random_view(self.view)),
             self.random_parent(),
             self.random_payload(),
         );
@@ -235,7 +246,7 @@ impl<E: Clock + Spawner, V: Variant> ThresholdFuzzer<E, V> {
                 let _ = sender.send(Recipients::All, encoded_msg, true).await;
             }
             Message::Nullify => {
-                let msg = Nullify::sign(&self.namespace, &self.share, self.view);
+                let msg = Nullify::sign(&self.namespace, &self.share, Round::new(0, self.view));
                 let encoded_msg = Voter::<V, Sha256Digest>::Nullify(msg).encode().into();
                 let _ = sender.send(Recipients::All, encoded_msg, true).await;
             }
