@@ -52,16 +52,17 @@ impl<P: PublicKey> Completion<P> {
     }
 }
 
-/// Message that has been delivered.
+/// Message that has been buffered and will be delivered later.
 #[derive(Clone, Debug)]
-struct Completed {
+struct Buffered {
     channel: Channel,
     message: Bytes,
     arrival_complete_at: SystemTime,
 }
 
+/// Message that is queued to be sent.
 #[derive(Clone, Debug)]
-struct Pending {
+struct Queued {
     channel: Channel,
     message: Bytes,
     latency: Duration,
@@ -69,12 +70,14 @@ struct Pending {
     ready_at: SystemTime,
 }
 
+/// Bandwidth limits for a peer (bytes per second, `None` => unlimited).
 #[derive(Clone, Debug)]
 struct Bandwidth {
     egress: Option<u128>,
     ingress: Option<u128>,
 }
 
+/// Status of a flow (a single transmission request).
 #[derive(Clone, Debug)]
 struct Status<P: PublicKey> {
     origin: P,
@@ -97,15 +100,16 @@ pub struct State<P: PublicKey + Ord + Clone> {
     assign_sequences: BTreeMap<(P, P), u64>,
     active_flows: BTreeMap<(P, P), u64>,
     all_flows: BTreeMap<u64, Status<P>>,
-    pending_transmissions: BTreeMap<(P, P), VecDeque<Pending>>,
+    queued: BTreeMap<(P, P), VecDeque<Queued>>,
     last_arrival_complete: BTreeMap<(P, P), SystemTime>,
     next_bandwidth_event: Option<SystemTime>,
     next_transmission_ready: Option<SystemTime>,
     expected_sequences: BTreeMap<(P, P), u64>,
-    completed: BTreeMap<(P, P), BTreeMap<u64, Completed>>,
+    buffered: BTreeMap<(P, P), BTreeMap<u64, Buffered>>,
 }
 
 impl<P: PublicKey + Ord + Clone> State<P> {
+    /// Creates a new scheduler.
     pub fn new() -> Self {
         Self {
             bandwidth_limits: BTreeMap::new(),
@@ -113,16 +117,16 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             assign_sequences: BTreeMap::new(),
             active_flows: BTreeMap::new(),
             all_flows: BTreeMap::new(),
-            pending_transmissions: BTreeMap::new(),
+            queued: BTreeMap::new(),
             last_arrival_complete: BTreeMap::new(),
             next_bandwidth_event: None,
             next_transmission_ready: None,
             expected_sequences: BTreeMap::new(),
-            completed: BTreeMap::new(),
+            buffered: BTreeMap::new(),
         }
     }
 
-    /// Records the latest bandwidth limits for `peer` (bytes per second, `None` => unlimited).
+    /// Records the latest bandwidth limits for `peer`.
     pub fn tune(&mut self, peer: &P, egress: Option<usize>, ingress: Option<usize>) {
         self.bandwidth_limits.insert(
             peer.clone(),
@@ -133,12 +137,14 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         );
     }
 
+    /// Returns the egress bandwidth limit for `peer`.
     fn egress_limit(&self, peer: &P) -> Option<u128> {
         self.bandwidth_limits
             .get(peer)
             .and_then(|limits| limits.egress)
     }
 
+    /// Returns the ingress bandwidth limit for `peer`.
     fn ingress_limit(&self, peer: &P) -> Option<u128> {
         self.bandwidth_limits
             .get(peer)
@@ -197,7 +203,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         completions
     }
 
-    /// Records a transmission request and guards against head-of-line blocking constraints.
+    /// Records a transmission request.
     #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         &mut self,
@@ -210,7 +216,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         should_deliver: bool,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
-        let mut entry = Pending {
+        let mut entry = Queued {
             channel,
             message,
             latency,
@@ -226,10 +232,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 entry.ready_at = entry.ready_at.max(limit);
             }
         }
-        self.pending_transmissions
-            .entry(key.clone())
-            .or_default()
-            .push_back(entry);
+        self.queued.entry(key.clone()).or_default().push_back(entry);
 
         let completions = self.launch(origin, recipient, now);
         self.schedule(now);
@@ -239,7 +242,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
     /// Awakens any queued transmissions that have become ready to send at `now`.
     fn wake(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         let ready_pairs: Vec<(P, P)> = self
-            .pending_transmissions
+            .queued
             .iter()
             .filter_map(|(key, queue)| {
                 if self.active_flows.contains_key(key) {
@@ -351,7 +354,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         self.finish(completed, now)
     }
 
-    /// Finalises completed flows and opportunistically starts follow-on work.
+    /// Finalizes completed flows and opportunistically starts follow-on work.
     fn finish(&mut self, completed: Vec<u64>, now: SystemTime) -> Vec<Completion<P>> {
         let mut outcomes = Vec::new();
 
@@ -383,12 +386,12 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
             if deliver {
                 if let Some(seq) = sequence {
-                    let pending = Completed {
+                    let buffered = Buffered {
                         channel,
                         message,
                         arrival_complete_at,
                     };
-                    outcomes.extend(self.stash(origin.clone(), recipient.clone(), seq, pending));
+                    outcomes.extend(self.stash(origin.clone(), recipient.clone(), seq, buffered));
                 }
             } else {
                 trace!(
@@ -421,13 +424,13 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         origin: P,
         recipient: P,
         seq: u64,
-        pending: Completed,
+        buffered: Buffered,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
-        self.completed
+        self.buffered
             .entry(key.clone())
             .or_default()
-            .insert(seq, pending);
+            .insert(seq, buffered);
         self.drain(key)
     }
 
@@ -437,7 +440,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         let mut delivered = Vec::new();
 
         loop {
-            let pending = match self.completed.entry(key.clone()) {
+            let buffered = match self.buffered.entry(key.clone()) {
                 Entry::Occupied(mut occ) => {
                     if let Some(p) = occ.get_mut().remove(expected_entry) {
                         if occ.get().is_empty() {
@@ -450,15 +453,14 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 }
                 Entry::Vacant(_) => None,
             };
-
-            let Some(pending) = pending else { break };
+            let Some(buffered) = buffered else { break };
 
             delivered.push(Completion::delivered(
                 key.0.clone(),
                 key.1.clone(),
-                pending.channel,
-                pending.message,
-                pending.arrival_complete_at,
+                buffered.channel,
+                buffered.message,
+                buffered.arrival_complete_at,
             ));
 
             *expected_entry += 1;
@@ -470,7 +472,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
     /// Updates `next_transmission_ready` by peeking at each queue head.
     fn schedule(&mut self, now: SystemTime) {
         let mut next_ready: Option<SystemTime> = None;
-        for (key, queue) in self.pending_transmissions.iter() {
+        for (key, queue) in self.queued.iter() {
             if self.active_flows.contains_key(key) {
                 continue;
             }
@@ -499,7 +501,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         let mut entry_to_start = None;
         let mut remove_queue = false;
 
-        if let Some(queue) = self.pending_transmissions.get_mut(&key) {
+        if let Some(queue) = self.queued.get_mut(&key) {
             if let Some(front) = queue.front_mut() {
                 let mut ready_at = front.ready_at.max(now);
                 if let Some(arrival_complete) = self.last_arrival_complete.get(&key) {
@@ -523,7 +525,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         }
 
         if remove_queue {
-            self.pending_transmissions.remove(&key);
+            self.queued.remove(&key);
         }
 
         if let Some(entry) = entry_to_start {
@@ -536,16 +538,16 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         Vec::new()
     }
 
-    /// Materialises a flow record and triggers a bandwidth rebalance.
+    /// Materializes a flow record and triggers a bandwidth rebalance.
     fn begin(
         &mut self,
         origin: P,
         recipient: P,
         flow_id: u64,
-        entry: Pending,
+        entry: Queued,
         now: SystemTime,
     ) -> Vec<Completion<P>> {
-        let Pending {
+        let Queued {
             channel,
             message,
             latency,
