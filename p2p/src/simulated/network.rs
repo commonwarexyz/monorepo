@@ -3,7 +3,7 @@
 use super::{
     ingress::{self, Oracle},
     metrics,
-    transmissions::{self, Completion},
+    transmitter::{self, Completion},
     Error,
 };
 use crate::{Channel, Message, Recipients};
@@ -76,7 +76,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map of peers blocking each other
     blocks: HashSet<(P, P)>,
 
-    transmissions: transmissions::State<P>,
+    // State of the transmitter
+    transmitter: transmitter::State<P>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -117,7 +118,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 blocks: HashSet::new(),
-                transmissions: transmissions::State::new(),
+                transmitter: transmitter::State::new(),
                 received_messages,
                 sent_messages,
             },
@@ -221,10 +222,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     } else {
                         Some(ingress_bps)
                     };
-                    self.transmissions.tune(&public_key, egress, ingress);
+                    self.transmitter.tune(&public_key, egress, ingress);
 
                     let now = self.context.current();
-                    let completions = self.transmissions.process(now);
+                    let completions = self.transmitter.process(now);
                     if !completions.is_empty() {
                         self.process_completions(completions);
                     }
@@ -369,7 +370,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             };
             let should_deliver = self.context.gen_bool(success_rate);
 
-            let completions = self.transmissions.enqueue(
+            let completions = self.transmitter.enqueue(
                 now,
                 origin.clone(),
                 recipient.clone(),
@@ -399,10 +400,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     async fn run(mut self) {
         loop {
             let now = self.context.current();
-            let completions = self.transmissions.process(now);
+            let completions = self.transmitter.process(now);
             self.process_completions(completions);
 
-            let deadline = self.transmissions.next();
+            let deadline = self.transmitter.next();
             let context = self.context.clone();
             let event_sleep = async move {
                 if let Some(when) = deadline {
@@ -432,7 +433,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 },
                 tick = &mut event_sleep => {
                     if let Some(when) = tick {
-                        let completions = self.transmissions.process(when);
+                        let completions = self.transmitter.process(when);
                         self.process_completions(completions);
                     }
                 }
