@@ -6,14 +6,15 @@ use std::hash::{BuildHasher, Hash, Hasher};
 ///
 /// # Warning
 ///
-/// The output of [Translator::transform] is often used as a key in a hash table. If the output is not
-/// uniformly distributed, the performance of said hash table will degrade substantially.
+/// The output of [Translator::transform] is often used as a key in a hash table. If the output is
+/// not uniformly distributed, the performance of said hash table will degrade substantially.
 pub trait Translator: Clone + BuildHasher {
     /// The type of the internal representation of keys.
     ///
-    /// Although [Translator] is a [BuildHasher], the `Key` type must still implement [Hash] for compatibility
-    /// with any hash table that wraps [Translator].
-    type Key: Eq + Hash + Copy;
+    /// Although [Translator] is a [BuildHasher], the `Key` type must still implement [Hash] for
+    /// compatibility with any hash table that wraps [Translator]. We also require [Ord] for
+    /// compatibility with ordered collections.
+    type Key: Ord + Hash + Copy;
 
     /// Transform a key into its new representation.
     fn transform(&self, key: &[u8]) -> Self::Key;
@@ -25,7 +26,8 @@ pub trait Translator: Clone + BuildHasher {
 /// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give
 /// [std::collections::HashMap] this identity hasher instead:
 ///
-/// * [Hasher::write_u8], [Hasher::write_u16], [Hasher::write_u32], [Hasher::write_u64] copies the input into an internal field;
+/// * [Hasher::write_u8], [Hasher::write_u16], [Hasher::write_u32], [Hasher::write_u64] copies the
+///   input into an internal field;
 /// * [Hasher::finish] returns that value unchanged.
 ///
 /// # Warning

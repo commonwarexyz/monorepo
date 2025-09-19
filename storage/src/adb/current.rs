@@ -9,7 +9,7 @@ use crate::{
         any::fixed::{Any, Config as AConfig},
         Error,
     },
-    index::Index,
+    index::Unordered as Index,
     mmr::{
         bitmap::Bitmap,
         grafting::{
