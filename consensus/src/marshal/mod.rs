@@ -738,8 +738,8 @@ mod tests {
             let expect_none = actor.get_block_by_height(1).await;
             assert!(expect_none.await.expect("mailbox closed").is_none());
 
-            let initial_finalized = actor.get_finalized_height().await;
-            assert_eq!(initial_finalized.await.expect("mailbox closed"), 0);
+            let initial_finalized = actor.get_finalized().await;
+            assert_eq!(initial_finalized.await.expect("mailbox closed"), None);
 
             let initial_processed = actor.get_processed_height().await;
             assert_eq!(initial_processed.await.expect("mailbox closed"), 0);
@@ -781,16 +781,16 @@ mod tests {
             assert_eq!(fetched_block.digest(), block.digest());
             assert_eq!(fetched_block.height(), block.height());
 
-            let mut finalized_height = 0;
+            let mut finalized_height = None;
             for _ in 0..100 {
-                let rx = actor.get_finalized_height().await;
-                finalized_height = rx.await.expect("mailbox closed");
-                if finalized_height == 1 {
+                let rx = actor.get_finalized().await;
+                if let Some(finalized) = rx.await.expect("mailbox closed") {
+                    finalized_height = Some(finalized);
                     break;
-                }
+                };
                 context.sleep(Duration::from_millis(10)).await;
             }
-            assert_eq!(finalized_height, 1);
+            assert_eq!(finalized_height, Some((1, block.digest())));
 
             let mut processed_height = 0;
             for _ in 0..100 {

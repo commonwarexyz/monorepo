@@ -405,9 +405,17 @@ impl<
                             let _ = response.send(block);
                         }
                         Message::GetFinalized { response } => {
-                            let height = self.finalizations_by_height.last_index().unwrap_or(0);
-                            let finalization = self.finalizations_by_height.get(Identifier::Index(height)).await.unwrap().unwrap();
-                            let _ = response.send((height, finalization.proposal.payload));
+                            // TODO: make this genesis rather than none
+                            let height = self.finalized_blocks.last_index().unwrap_or(0);
+                            if height == 0 {
+                                let _ = response.send(None);
+                                println!("no finalizations by height");
+                                continue;
+                            }
+
+                            // TODO: make this faster
+                            let block = self.finalized_blocks.get(Identifier::Index(height)).await.unwrap().unwrap();
+                            let _ = response.send(Some((height, block.commitment())));
                         }
                         Message::GetProcessedHeight { response } => {
                             let height = self.processed_height.get();
