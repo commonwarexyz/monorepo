@@ -14,7 +14,7 @@
 //!
 //! The simulator provides a realistic model of bandwidth contention where network
 //! capacity is a shared, finite resource. Bandwidth is allocated via progressive
-//! filling to ensure max-min fairness.
+//! filling to provide max-min fairness.
 //!
 //! ## Core Model
 //!
