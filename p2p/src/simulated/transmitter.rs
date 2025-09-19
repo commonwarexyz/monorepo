@@ -208,9 +208,8 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 handled = true;
             }
 
-            if !handled {
-                break;
-            }
+            // If next returns that something can be handled, we should have handled it.
+            assert!(handled, "no event was handled");
         }
 
         completions
