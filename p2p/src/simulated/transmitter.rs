@@ -237,6 +237,18 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         latency: Duration,
         should_deliver: bool,
     ) -> Vec<Completion<P>> {
+        if self.bandwidth_limits.is_empty() {
+            return self.fulfill_unconstrained(
+                now,
+                origin,
+                recipient,
+                channel,
+                message,
+                latency,
+                should_deliver,
+            );
+        }
+
         let key = (origin.clone(), recipient.clone());
         let entry = Queued {
             channel,
@@ -249,6 +261,50 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         self.queued.entry(key.clone()).or_default().push_back(entry);
 
         let completions = self.launch(origin, recipient, now);
+        self.schedule(now);
+
+        completions
+    }
+
+    /// Completes a transmission immediately when no bandwidth constraints are registered.
+    #[allow(clippy::too_many_arguments)]
+    fn fulfill_unconstrained(
+        &mut self,
+        now: SystemTime,
+        origin: P,
+        recipient: P,
+        channel: Channel,
+        message: Bytes,
+        latency: Duration,
+        should_deliver: bool,
+    ) -> Vec<Completion<P>> {
+        let key = (origin.clone(), recipient.clone());
+        let deliver = should_deliver && origin != recipient;
+
+        let mut completions = Vec::new();
+
+        if deliver {
+            let last_arrival = self.last_arrival_complete.get(&key).cloned();
+            let ready_at = Self::compute_ready_at(None, now, last_arrival, latency);
+            let arrival_complete_at = ready_at
+                .checked_add(latency)
+                .expect("latency overflow computing arrival completion");
+            self.last_arrival_complete
+                .insert(key.clone(), arrival_complete_at);
+
+            let seq = self.tag(&origin, &recipient);
+            let buffered = Buffered {
+                channel,
+                message,
+                arrival_complete_at,
+            };
+            completions.extend(self.stash(origin, recipient, seq, buffered));
+        } else {
+            self.last_arrival_complete.insert(key, now);
+            completions.push(Completion::dropped(origin, recipient, channel, message));
+        }
+
+        self.next_bandwidth_event = None;
         self.schedule(now);
 
         completions
@@ -933,6 +989,48 @@ mod tests {
 
         let more = state.process(deadline);
         assert!(more.is_empty());
+    }
+
+    #[test]
+    fn unconstrained_delivery_is_immediate() {
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin = key(46);
+        let recipient = key(47);
+
+        let completions = state.enqueue(
+            now,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from_static(b"first"),
+            Duration::from_millis(100),
+            true,
+        );
+        assert_eq!(completions.len(), 1);
+        assert!(completions[0].deliver);
+        assert_eq!(
+            completions[0].arrival_complete_at,
+            Some(now + Duration::from_millis(100))
+        );
+
+        let completions = state.enqueue(
+            now,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from_static(b"second"),
+            Duration::from_millis(50),
+            true,
+        );
+        assert_eq!(completions.len(), 1);
+        assert!(completions[0].deliver);
+        assert_eq!(
+            completions[0].arrival_complete_at,
+            Some(now + Duration::from_millis(100)) // must still be FIFO
+        );
+
+        assert!(state.next().is_none());
     }
 
     #[test]
