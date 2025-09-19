@@ -83,10 +83,9 @@ struct Status<P: PublicKey> {
     origin: P,
     recipient: P,
     latency: Duration,
-    deliver: bool,
     channel: Channel,
     message: Bytes,
-    sequence: Option<u64>,
+    sequence: Option<u64>, // delivered if some
     remaining: u128,
     rate: Rate,
     carry: u128,
@@ -286,17 +285,17 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             let arrival_complete_at = ready_at
                 .checked_add(latency)
                 .expect("latency overflow computing arrival completion");
+            let sequence = Some(self.tag(&origin, &recipient));
             self.register_completion(
                 origin,
                 recipient,
                 channel,
                 message,
-                true,
                 arrival_complete_at,
-                None,
+                sequence,
             )
         } else {
-            self.register_completion(origin, recipient, channel, message, false, now, None)
+            self.register_completion(origin, recipient, channel, message, now, None)
         };
 
         self.next_bandwidth_event = None;
@@ -409,7 +408,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 id: flow_id,
                 origin: meta.origin.clone(),
                 recipient: meta.recipient.clone(),
-                requires_ingress: meta.deliver,
+                requires_ingress: meta.sequence.is_some(),
             });
         }
 
@@ -475,7 +474,6 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 origin,
                 recipient,
                 latency,
-                deliver,
                 channel,
                 message,
                 sequence,
@@ -485,7 +483,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             let key = (origin.clone(), recipient.clone());
             self.active_flows.remove(&key);
 
-            let arrival_complete_at = if deliver {
+            let arrival_complete_at = if sequence.is_some() {
                 now.checked_add(latency)
                     .expect("latency overflow computing arrival completion")
             } else {
@@ -497,7 +495,6 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 recipient.clone(),
                 channel,
                 message,
-                deliver,
                 arrival_complete_at,
                 sequence,
             ));
@@ -517,15 +514,13 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         recipient: P,
         channel: Channel,
         message: Bytes,
-        deliver: bool,
         arrival_complete_at: SystemTime,
         sequence: Option<u64>,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
         self.last_arrival_complete.insert(key, arrival_complete_at);
 
-        if deliver {
-            let seq = sequence.unwrap_or_else(|| self.tag(&origin, &recipient));
+        if let Some(seq) = sequence {
             let buffered = Buffered {
                 channel,
                 message,
@@ -694,7 +689,6 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 origin: origin.clone(),
                 recipient: recipient.clone(),
                 latency,
-                deliver,
                 channel,
                 message,
                 sequence,
