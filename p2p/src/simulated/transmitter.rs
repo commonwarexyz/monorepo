@@ -165,14 +165,13 @@ impl<P: PublicKey + Ord + Clone> State<P> {
     pub fn process(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         let mut completions = self.wake(now);
 
-        loop {
-            let Some(next_event) = self.next() else { break };
+        // Process events until the next event is in the future.
+        while let Some(next_event) = self.next() {
             if next_event > now {
                 break;
             }
 
             let mut handled = false;
-
             if self
                 .next_bandwidth_event
                 .map(|event| event <= now && event == next_event)
