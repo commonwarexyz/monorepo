@@ -72,6 +72,7 @@ use commonware_cryptography::{
     },
     Signer,
 };
+use commonware_macros::select;
 use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
 use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRngCore;
@@ -99,6 +100,8 @@ pub enum Error {
     SendTooLarge(usize),
     #[error("connection closed")]
     StreamClosed,
+    #[error("handshake timed out")]
+    HandshakeTimeout,
 }
 
 impl From<CodecError> for Error {
@@ -165,38 +168,46 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     mut stream: I,
     mut sink: O,
 ) -> Result<(Sender<O>, Receiver<I>), Error> {
-    send_frame(
-        &mut sink,
-        config.signing_key.public_key().encode().as_ref(),
-        config.max_message_size,
-    )
-    .await?;
+    let timeout = ctx.sleep(config.handshake_timeout);
+    let inner_routine = async move {
+        send_frame(
+            &mut sink,
+            config.signing_key.public_key().encode().as_ref(),
+            config.max_message_size,
+        )
+        .await?;
 
-    let (current_time, ok_timestamps) = config.time_information(&ctx);
-    let (state, syn) = dial_start(
-        &mut ctx,
-        Context::new(current_time, ok_timestamps, config.signing_key, peer),
-    );
-    send_frame(&mut sink, &syn.encode(), config.max_message_size).await?;
+        let (current_time, ok_timestamps) = config.time_information(&ctx);
+        let (state, syn) = dial_start(
+            &mut ctx,
+            Context::new(current_time, ok_timestamps, config.signing_key, peer),
+        );
+        send_frame(&mut sink, &syn.encode(), config.max_message_size).await?;
 
-    let syn_ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-    let syn_ack = SynAck::<S::Signature>::decode(syn_ack_bytes)?;
+        let syn_ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
+        let syn_ack = SynAck::<S::Signature>::decode(syn_ack_bytes)?;
 
-    let (ack, send, recv) = dial_end(state, syn_ack)?;
-    send_frame(&mut sink, &ack.encode(), config.max_message_size).await?;
+        let (ack, send, recv) = dial_end(state, syn_ack)?;
+        send_frame(&mut sink, &ack.encode(), config.max_message_size).await?;
 
-    Ok((
-        Sender {
-            cipher: send,
-            sink,
-            max_message_size: config.max_message_size,
-        },
-        Receiver {
-            cipher: recv,
-            stream,
-            max_message_size: config.max_message_size,
-        },
-    ))
+        Ok((
+            Sender {
+                cipher: send,
+                sink,
+                max_message_size: config.max_message_size,
+            },
+            Receiver {
+                cipher: recv,
+                stream,
+                max_message_size: config.max_message_size,
+            },
+        ))
+    };
+
+    select! {
+        x = inner_routine => { x } ,
+        _ = timeout => { Err(Error::HandshakeTimeout) }
+    }
 }
 
 /// Accepts an authenticated connection from a peer as the listener.
@@ -215,46 +226,54 @@ pub async fn listen<
     mut stream: I,
     mut sink: O,
 ) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error> {
-    let peer_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-    let peer = S::PublicKey::decode(peer_bytes)?;
-    if !bouncer(peer.clone()).await {
-        return Err(Error::PeerRejected(peer.encode().to_vec()));
+    let timeout = ctx.sleep(config.handshake_timeout);
+    let inner_routine = async move {
+        let peer_bytes = recv_frame(&mut stream, config.max_message_size).await?;
+        let peer = S::PublicKey::decode(peer_bytes)?;
+        if !bouncer(peer.clone()).await {
+            return Err(Error::PeerRejected(peer.encode().to_vec()));
+        }
+
+        let msg1_bytes = recv_frame(&mut stream, config.max_message_size).await?;
+        let msg1 = Syn::<S::Signature>::decode(msg1_bytes)?;
+
+        let (current_time, ok_timestamps) = config.time_information(&ctx);
+        let (state, syn_ack) = listen_start(
+            &mut ctx,
+            Context::new(
+                current_time,
+                ok_timestamps,
+                config.signing_key,
+                peer.clone(),
+            ),
+            msg1,
+        )?;
+        send_frame(&mut sink, &syn_ack.encode(), config.max_message_size).await?;
+
+        let ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
+        let ack = Ack::decode(ack_bytes)?;
+
+        let (send, recv) = listen_end(state, ack)?;
+
+        Ok((
+            peer,
+            Sender {
+                cipher: send,
+                sink,
+                max_message_size: config.max_message_size,
+            },
+            Receiver {
+                cipher: recv,
+                stream,
+                max_message_size: config.max_message_size,
+            },
+        ))
+    };
+
+    select! {
+        x = inner_routine => { x } ,
+        _ = timeout => { Err(Error::HandshakeTimeout) }
     }
-
-    let msg1_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-    let msg1 = Syn::<S::Signature>::decode(msg1_bytes)?;
-
-    let (current_time, ok_timestamps) = config.time_information(&ctx);
-    let (state, syn_ack) = listen_start(
-        &mut ctx,
-        Context::new(
-            current_time,
-            ok_timestamps,
-            config.signing_key,
-            peer.clone(),
-        ),
-        msg1,
-    )?;
-    send_frame(&mut sink, &syn_ack.encode(), config.max_message_size).await?;
-
-    let ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-    let ack = Ack::decode(ack_bytes)?;
-
-    let (send, recv) = listen_end(state, ack)?;
-
-    Ok((
-        peer,
-        Sender {
-            cipher: send,
-            sink,
-            max_message_size: config.max_message_size,
-        },
-        Receiver {
-            cipher: recv,
-            stream,
-            max_message_size: config.max_message_size,
-        },
-    ))
 }
 
 /// Sends encrypted messages to a peer.
