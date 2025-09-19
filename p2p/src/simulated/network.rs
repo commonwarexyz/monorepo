@@ -344,7 +344,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         for recipient in recipients {
             // Skip self
             if recipient == origin {
-                trace!(?recipient, reason = "self", "dropping message",);
+                trace!(?recipient, reason = "self", "dropping message");
                 continue;
             }
 
