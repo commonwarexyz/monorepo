@@ -1,0 +1,15 @@
+# Alpenglow (Votor)
+
+## Propose a block (1MB proposal)
+propose{0, size=1048576}
+
+## Multicast notarize (32B digest + 8B view)
+wait{0, threshold=1}
+broadcast{1, size=40}
+
+## Wait for 3f+1 to notarize to multicast finalize (32B digest + 8B view)
+wait{1, threshold=61%}
+broadcast{2, size=40}
+
+## Wait for n-f or 3f+1 of finalize
+wait{1, threshold=81%} || wait{2, threshold=61%}

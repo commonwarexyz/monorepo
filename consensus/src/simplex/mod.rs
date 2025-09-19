@@ -761,7 +761,7 @@ mod tests {
             let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
                 deterministic::Runner::from(prev_checkpoint)
             } else {
-                deterministic::Runner::timed(Duration::from_secs(30))
+                deterministic::Runner::timed(Duration::from_secs(60))
             }
             .start_and_recover(f);
 

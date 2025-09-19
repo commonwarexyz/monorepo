@@ -1,601 +1,640 @@
-use std::{
-    collections::{btree_map, BTreeMap},
-    iter::Peekable,
-    time::{Duration, SystemTime},
-};
+//! Max-min fair bandwidth planner.
+//!
+//! The planner performs progressive filling over a set of active flows to
+//! compute per-flow transmission rates that respect both sender egress limits
+//! and receiver ingress limits (to provide max-min fairness). The caller is responsible
+//! for advancing flow progress according to the returned rates and invoking the planner
+//! whenever the active set changes (for example when a message finishes or a new message
+//! arrives).
 
-/// Encapsulates bandwidth scheduling for a single direction (egress or ingress).
-///
-/// This struct manages bandwidth allocations over time using a delta-based approach.
-/// Each entry in the schedule represents a change in bandwidth usage at a specific time.
-pub(super) struct Schedule {
-    /// Map of time -> bandwidth delta. Positive deltas increase usage, negative decrease.
-    pub(super) schedule: BTreeMap<SystemTime, isize>,
-    /// Maximum bandwidth capacity in bytes per second. usize::MAX represents unlimited.
-    pub(super) bps: usize,
+use commonware_utils::Ratio;
+use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
+
+/// Number of nanoseconds in a second.
+pub const NS_PER_SEC: u128 = 1_000_000_000;
+
+/// Minimal description of a simulated transmission path.
+#[derive(Clone, Debug)]
+pub struct Flow<P> {
+    pub id: u64,
+    pub origin: P,
+    pub recipient: P,
+    pub requires_ingress: bool,
 }
 
-impl Schedule {
-    /// Creates a new bandwidth schedule with the specified capacity.
-    pub(super) fn new(bps: usize) -> Self {
+/// Resulting per-flow throughput expressed as bytes/second.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Rate {
+    Unlimited,
+    Finite(Ratio),
+}
+
+/// Shared capacity constraint (either egress or ingress) tracked by the planner.
+#[derive(Debug)]
+struct Resource {
+    capacity: Ratio,
+    members: Vec<usize>,
+}
+
+impl Resource {
+    fn new(limit: u128) -> Self {
         Self {
-            schedule: BTreeMap::new(),
-            bps,
-        }
-    }
-
-    /// Prunes events before the specified time and returns current bandwidth usage.
-    ///
-    /// Events in the past are removed and their deltas summed to calculate
-    /// the bandwidth currently in use.
-    pub(super) fn prune_and_get_usage(&mut self, now: SystemTime) -> isize {
-        let future = self.schedule.split_off(&now);
-        let used = self.schedule.values().sum::<isize>().max(0);
-        self.schedule = future;
-        used
-    }
-
-    /// Calculates available bandwidth given the current usage.
-    ///
-    /// Returns the amount of bandwidth that can be used for new transfers,
-    /// accounting for the bandwidth already in use.
-    pub(super) fn available_bandwidth(&self, used: isize) -> usize {
-        if self.bps == usize::MAX {
-            usize::MAX
-        } else {
-            (self.bps as isize - used).max(0) as usize
-        }
-    }
-
-    /// Adds a bandwidth reservation from start to end time.
-    ///
-    /// The bandwidth is allocated at start and released at end.
-    pub(super) fn add_reservation(&mut self, start: SystemTime, end: SystemTime, bandwidth: isize) {
-        self.insert_point(start, bandwidth);
-        self.insert_point(end, -bandwidth);
-    }
-
-    /// Inserts a bandwidth delta at the specified time.
-    ///
-    /// Zero deltas are automatically removed to keep the schedule compact.
-    fn insert_point(&mut self, time: SystemTime, delta: isize) {
-        if delta == 0 {
-            return;
-        }
-        let entry = self.schedule.entry(time).or_default();
-        *entry += delta;
-        if *entry == 0 {
-            self.schedule.remove(&time);
+            capacity: Ratio::from_int(limit),
+            members: Vec::new(),
         }
     }
 }
 
-/// Represents a bandwidth reservation for a transfer.
+/// Identifier used to deduplicate resource entries across flows.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ResourceKey<P> {
+    Egress(P),
+    Ingress(P),
+}
+
+/// Ensures an entry exists for the given resource, returning its index if limited.
+fn insert<P: Clone + Ord>(
+    key: ResourceKey<P>,
+    limit: Option<u128>,
+    indices: &mut BTreeMap<ResourceKey<P>, usize>,
+    resources: &mut Vec<Resource>,
+) -> Option<usize> {
+    if let Some(index) = indices.get(&key) {
+        return Some(*index);
+    }
+
+    let idx = resources.len();
+    resources.push(Resource::new(limit?));
+    indices.insert(key, idx);
+    Some(idx)
+}
+
+/// Computes a fair allocation for the provided `flows`, returning per-flow rates.
 ///
-/// A reservation allocates bandwidth from `start` to `end` time.
-pub(super) struct Reservation {
-    /// When the transfer begins.
-    pub(super) start: SystemTime,
-    /// When the transfer completes.
-    pub(super) end: SystemTime,
-    /// Bandwidth allocated in bytes per second.
-    pub(super) bandwidth: isize,
+/// Each sender/receiver cap is modeled as a shared resource. Every flow registers
+/// with the resources it touches, after which we perform progressive filling: raise
+/// the rate of all unfrozen flows uniformly until a resource is depleted, freeze flows
+/// using that resource, and repeat. This yields a deterministic, starvation-free assignment
+/// that honors both ingress and egress limits.
+pub fn allocate<P, E, I>(
+    flows: &[Flow<P>],
+    mut egress_limit: E,
+    mut ingress_limit: I,
+) -> BTreeMap<u64, Rate>
+where
+    P: Clone + Ord,
+    E: FnMut(&P) -> Option<u128>,
+    I: FnMut(&P) -> Option<u128>,
+{
+    // If there are no flows, there is nothing to allocate.
+    let mut result = BTreeMap::new();
+    if flows.is_empty() {
+        return result;
+    }
+
+    // Register all flows with the resources they touch.
+    let mut indices: BTreeMap<ResourceKey<P>, usize> = BTreeMap::new();
+    let mut resources: Vec<Resource> = Vec::new();
+    let mut rates: Vec<Option<Ratio>> = vec![None; flows.len()];
+    let mut active_indices: Vec<usize> = Vec::new();
+    for (idx, flow) in flows.iter().enumerate() {
+        // Always insert the egress resource.
+        let mut limited = false;
+        if let Some(resource_idx) = insert(
+            ResourceKey::Egress(flow.origin.clone()),
+            egress_limit(&flow.origin),
+            &mut indices,
+            &mut resources,
+        ) {
+            resources[resource_idx].members.push(idx);
+            limited = true;
+        }
+
+        // If the flow requires ingress, insert the ingress resource (may be a no-op
+        // if the message will be dropped).
+        if flow.requires_ingress {
+            if let Some(resource_idx) = insert(
+                ResourceKey::Ingress(flow.recipient.clone()),
+                ingress_limit(&flow.recipient),
+                &mut indices,
+                &mut resources,
+            ) {
+                resources[resource_idx].members.push(idx);
+                limited = true;
+            }
+        }
+
+        // If the flow is limited by a resource, set its rate to zero (we'll increase it later).
+        if limited {
+            rates[idx] = Some(Ratio::zero());
+            active_indices.push(idx);
+        }
+    }
+
+    // Compute the rates for the constrained flows.
+    compute_rates(&active_indices, &resources, &mut rates);
+
+    // Convert the rates to the result format.
+    for (idx, flow) in flows.iter().enumerate() {
+        let rate = match &rates[idx] {
+            None => Rate::Unlimited,
+            Some(ratio) => Rate::Finite(ratio.clone()),
+        };
+        result.insert(flow.id, rate);
+    }
+
+    result
 }
 
-/// Iterator that merges two bandwidth schedules chronologically.
+/// Distribute capacity among constrained flows.
 ///
-/// This iterator processes events from both sender and receiver schedules
-/// in time order, aggregating all bandwidth changes at each timestamp.
-struct MergedScheduleIterator<'a> {
-    sender: Peekable<btree_map::Iter<'a, SystemTime, isize>>,
-    receiver: Peekable<btree_map::Iter<'a, SystemTime, isize>>,
-}
-
-impl<'a> MergedScheduleIterator<'a> {
-    /// Creates a new iterator over the sender and receiver schedules.
-    fn new(
-        sender: &'a BTreeMap<SystemTime, isize>,
-        receiver: &'a BTreeMap<SystemTime, isize>,
-    ) -> Self {
-        Self {
-            sender: sender.iter().peekable(),
-            receiver: receiver.iter().peekable(),
-        }
+/// `active` indexes flows that are limited by some resource. Each iteration identifies the
+/// tightest remaining resource, increases rates for all unfrozen flows by the same delta,
+/// and freezes any flow that now sits on a saturated resource. When no constrained flows
+/// remain, `rates` captures the final allocation (with `None` meaning unlimited).
+fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<Ratio>]) {
+    // If there are no active flows, there is nothing to allocate.
+    if active.is_empty() {
+        return;
     }
 
-    /// Returns the next event time without consuming any items.
-    fn peek_time(&mut self) -> Option<SystemTime> {
-        let sender_time = self.sender.peek().map(|(&t, _)| t);
-        let receiver_time = self.receiver.peek().map(|(&t, _)| t);
+    // Track how much capacity each resource still has to hand out.
+    let mut remaining: Vec<Ratio> = resources.iter().map(|res| res.capacity.clone()).collect();
 
-        match (sender_time, receiver_time) {
-            (Some(s), Some(r)) => Some(s.min(r)),
-            (Some(s), None) => Some(s),
-            (None, Some(r)) => Some(r),
-            (None, None) => None,
-        }
+    // `unfrozen[idx] == true` means the flow is still participating in progressive filling.
+    let mut unfrozen = vec![false; rates.len()];
+    for &idx in active {
+        unfrozen[idx] = true;
     }
 
-    /// Consumes all bandwidth deltas at the specified time from an iterator.
-    ///
-    /// Returns the sum of all deltas at exactly this timestamp.
-    fn consume_deltas(
-        iter: &mut Peekable<btree_map::Iter<'a, SystemTime, isize>>,
-        time: SystemTime,
-    ) -> isize {
-        let mut delta = 0;
-        while let Some((&t, &d)) = iter.peek() {
-            if t == time {
-                delta += d;
-                iter.next();
-            } else {
+    // Continue allocating until every flow is either unlimited or fully constrained.
+    let mut active_left = active.len();
+    while active_left > 0 {
+        // Find the resource with the smallest remaining capacity.
+        let mut limiting = Vec::new();
+        let mut min_delta: Option<Ratio> = None;
+        for (res_idx, resource) in resources.iter().enumerate() {
+            // Count how many still-active flows are drawing from this resource.
+            let users: u128 = resource
+                .members
+                .iter()
+                .filter(|&&flow_idx| unfrozen[flow_idx])
+                .count() as u128;
+            if users == 0 {
+                continue;
+            }
+
+            // If the resource is exhausted, freeze all flows depending on it.
+            if remaining[res_idx].is_zero() {
+                limiting.clear();
+                limiting.push(res_idx);
+                min_delta = Some(Ratio::zero());
                 break;
             }
-        }
-        delta
-    }
-}
 
-/// Represents a point in time where bandwidth allocation changes.
-///
-/// Used by `MergedScheduleIterator` to chronologically process bandwidth changes
-/// from merged sender/receiver schedules when calculating transfer reservations.
-struct Event {
-    time: SystemTime,
-    sender_delta: isize,
-    receiver_delta: isize,
-}
-
-impl<'a> Iterator for MergedScheduleIterator<'a> {
-    type Item = Event;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let next_time = self.peek_time()?;
-
-        let sender_delta = Self::consume_deltas(&mut self.sender, next_time);
-        let receiver_delta = Self::consume_deltas(&mut self.receiver, next_time);
-
-        Some(Event {
-            time: next_time,
-            sender_delta,
-            receiver_delta,
-        })
-    }
-}
-
-/// Calculates the amount of data that can be transferred in a given time window.
-///
-/// # Parameters
-/// - `remaining_data`: Bytes still to transfer
-/// - `bps`: Available bandwidth in bytes per second
-/// - `window_duration`: Time until next bandwidth change (`None` if no future events)
-///
-/// Returns a tuple `(bytes_transferred, time_taken)`, `None` if no transfer can occur
-/// (if bandwidth is 0).
-fn calculate_window_transfer(
-    remaining_data: f64,
-    bps: usize,
-    window_duration: Option<Duration>,
-) -> Option<(f64, Duration)> {
-    if bps == usize::MAX {
-        // Unlimited bandwidth: transfer is instantaneous
-        return Some((remaining_data, Duration::ZERO));
-    }
-
-    if bps == 0 {
-        // No bandwidth: no transfer can occur
-        return None;
-    }
-
-    let time_needed = Duration::from_secs_f64(remaining_data / bps as f64);
-
-    match window_duration {
-        Some(duration) => {
-            if time_needed <= duration {
-                // Entire transfer fits within the window
-                Some((remaining_data, time_needed))
-            } else {
-                // Window will be completely filled
-                let amount = bps as f64 * duration.as_secs_f64();
-                Some((amount, duration))
+            // Potential additional rate every user could receive before hitting this limit.
+            let delta = remaining[res_idx].div_int(users);
+            match &min_delta {
+                None => {
+                    min_delta = Some(delta);
+                    limiting.clear();
+                    limiting.push(res_idx);
+                }
+                Some(current) => match delta.cmp(current) {
+                    Ordering::Less => {
+                        min_delta = Some(delta);
+                        limiting.clear();
+                        limiting.push(res_idx);
+                    }
+                    Ordering::Equal => limiting.push(res_idx),
+                    Ordering::Greater => {}
+                },
             }
         }
-        None => {
-            // No upcoming events, transfer takes exactly the time needed
-            Some((remaining_data, time_needed))
+
+        // If there is no resource with a remaining capacity, freeze all flows.
+        if min_delta.is_none() {
+            for &idx in active {
+                if unfrozen[idx] {
+                    rates[idx] = None;
+                }
+            }
+            break;
+        }
+
+        // Freeze flows depending on the resource with the smallest remaining capacity (if exhausted).
+        let delta = min_delta.unwrap();
+        if delta.is_zero() {
+            let mut newly_frozen = Vec::new();
+            for &res_idx in &limiting {
+                for &flow_idx in &resources[res_idx].members {
+                    if unfrozen[flow_idx] {
+                        newly_frozen.push(flow_idx);
+                    }
+                }
+                remaining[res_idx] = Ratio::zero();
+            }
+            for idx in newly_frozen {
+                if rates[idx].is_none() {
+                    rates[idx] = Some(Ratio::zero());
+                }
+                if unfrozen[idx] {
+                    unfrozen[idx] = false;
+                    active_left -= 1;
+                }
+            }
+            continue;
+        }
+
+        // If the resource has a remaining capacity, distribute it evenly among the unfrozen flows.
+        for &idx in active {
+            if !unfrozen[idx] {
+                continue;
+            }
+            match &mut rates[idx] {
+                Some(rate) => rate.add_assign(&delta),
+                None => {
+                    let mut rate = Ratio::zero();
+                    rate.add_assign(&delta);
+                    rates[idx] = Some(rate);
+                }
+            }
+        }
+
+        // Charge each resource for the extra `delta` assigned to its active members. When a
+        // resource is fully consumed, we freeze all flows that depend on it so future rounds
+        // no longer consider them when distributing remaining capacity. Freezing is safe even if
+        // only one resource is depleted: that constraint alone prevents the flow from ever
+        // increasing its rate beyond the current allocation.
+        let mut newly_frozen = Vec::new();
+        for (res_idx, resource) in resources.iter().enumerate() {
+            let users: u128 = resource
+                .members
+                .iter()
+                .filter(|&&flow_idx| unfrozen[flow_idx])
+                .count() as u128;
+            if users == 0 {
+                continue;
+            }
+            let usage = delta.mul_int(users);
+            remaining[res_idx].sub_assign(&usage);
+            if remaining[res_idx].is_zero() {
+                for &flow_idx in &resource.members {
+                    if unfrozen[flow_idx] {
+                        newly_frozen.push(flow_idx);
+                    }
+                }
+            }
+        }
+
+        // Remove newly frozen flows from the active set so subsequent iterations ignore them.
+        for idx in newly_frozen {
+            if unfrozen[idx] {
+                unfrozen[idx] = false;
+                active_left -= 1;
+            }
         }
     }
 }
 
-/// Calculates bandwidth reservations needed for a transfer, returning the
-/// reservations that would be needed.
+/// Calculate the time it will take to deplete a given amount of capacity at some [Rate].
+pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
+    match rate {
+        Rate::Unlimited => Some(Duration::ZERO),
+        Rate::Finite(ratio) => {
+            if ratio.is_zero() {
+                if bytes == 0 {
+                    Some(Duration::ZERO)
+                } else {
+                    None
+                }
+            } else {
+                let numerator = bytes.saturating_mul(ratio.den).saturating_mul(NS_PER_SEC);
+                let ns = div_ceil(numerator, ratio.num);
+                Some(duration_from_ns(ns))
+            }
+        }
+    }
+}
+
+/// Calculate the number of bytes that can be transferred in a given duration at some [Rate],
+/// accounting for any fractional bytes-per-nanosecond that would otherwise be rounded away.
 ///
-/// # Parameters
-/// - `data_size`: Total bytes to transfer
-/// - `now`: Current time
-/// - `sender`: Sender's bandwidth schedule and current bandwidth usage
-/// - `receiver`: Optional receiver schedule and usage (`None` if not delivering)
-///
-/// Returns a tuple `(reservations, completion_time)`.
-pub(super) fn calculate_reservations(
-    data_size: usize,
-    now: SystemTime,
-    sender: (&Schedule, isize),
-    receiver: Option<(&Schedule, isize)>,
-) -> (Vec<Reservation>, SystemTime) {
-    if data_size == 0 {
-        return (Vec::new(), now);
+/// This can be used to deduce how many bytes were sent when interrupting a flow at some point in time.
+pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u128) -> u128 {
+    if remaining == 0 {
+        return 0;
     }
 
-    let mut reservations = Vec::new();
-    let mut current_time = now;
-    let mut remaining_data = data_size as f64;
-    let mut sender_used_bandwidth = sender.1;
-    let mut receiver_used_bandwidth = receiver.as_ref().map(|(_, usage)| *usage).unwrap_or(0);
+    match rate {
+        Rate::Unlimited => {
+            *carry = 0;
+            remaining
+        }
+        Rate::Finite(ratio) => {
+            if ratio.is_zero() {
+                return 0;
+            }
+            let delta_ns = elapsed.as_nanos();
+            if delta_ns == 0 {
+                return 0;
+            }
 
-    // Create merged iterator for both schedules
-    let empty_schedule = BTreeMap::new();
+            let denom = ratio.den.saturating_mul(NS_PER_SEC);
+            if denom == 0 {
+                *carry = 0;
+                return remaining;
+            }
+            let numerator = ratio.num.saturating_mul(delta_ns);
+            let total = numerator.saturating_add(*carry);
+            let bytes = total / denom;
+            *carry = total % denom;
+            bytes.min(remaining)
+        }
+    }
+}
 
-    let mut events = if let Some((receiver, _)) = receiver.as_ref() {
-        MergedScheduleIterator::new(&sender.0.schedule, &receiver.schedule)
+/// Calculate the ceiling of the division of two numbers (if the denominator is zero, return `u128::MAX`).
+fn div_ceil(num: u128, denom: u128) -> u128 {
+    if denom == 0 {
+        return u128::MAX;
+    }
+    let div = num / denom;
+    if num % denom == 0 {
+        div
     } else {
-        MergedScheduleIterator::new(&sender.0.schedule, &empty_schedule)
-    };
-
-    loop {
-        // Calculate current available bandwidth
-        let sender_available = sender.0.available_bandwidth(sender_used_bandwidth);
-        let receiver_available = receiver
-            .as_ref()
-            .map(|(r, _)| r.available_bandwidth(receiver_used_bandwidth))
-            .unwrap_or(usize::MAX);
-
-        let bandwidth = sender_available.min(receiver_available);
-
-        // Determine the duration of this window
-        let window = events
-            .peek_time()
-            .and_then(|t| t.duration_since(current_time).ok());
-
-        // Calculate transfer and create reservation if progress can be made
-        if let Some((amount, duration)) =
-            calculate_window_transfer(remaining_data, bandwidth, window)
-        {
-            let end_time = current_time + duration;
-
-            reservations.push(Reservation {
-                start: current_time,
-                end: end_time,
-                bandwidth: bandwidth as isize,
-            });
-
-            remaining_data -= amount;
-        }
-
-        // Check for completion
-        if remaining_data <= 0.0 {
-            break;
-        }
-
-        // Advance to the next state
-        if let Some(Event {
-            time: event_time,
-            sender_delta,
-            receiver_delta,
-        }) = events.next()
-        {
-            // Move time forward to the next event
-            current_time = event_time;
-            sender_used_bandwidth += sender_delta;
-            receiver_used_bandwidth += receiver_delta;
-        } else {
-            // No more events. If we are here, it means remaining > 0 but
-            // we cannot make any more progress (e.g. bandwidth is 0)
-            break;
-        }
+        div.saturating_add(1)
     }
+}
 
-    let completion = reservations.last().map(|r| r.end).unwrap_or(now);
-    (reservations, completion)
+/// Convert a number of nanoseconds to a duration, handling overflows.
+fn duration_from_ns(ns: u128) -> Duration {
+    if ns == 0 {
+        return Duration::ZERO;
+    }
+    let max_ns = u128::from(u64::MAX) * NS_PER_SEC;
+    if ns >= max_ns {
+        return Duration::from_secs(u64::MAX);
+    }
+    let secs = (ns / NS_PER_SEC) as u64;
+    let nanos = (ns % NS_PER_SEC) as u32;
+    Duration::new(secs, nanos)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::collections::BTreeMap;
 
-    #[test]
-    fn test_calculate_window_transfer() {
-        // Unlimited bandwidth
-        let (amount, duration) =
-            calculate_window_transfer(1000.0, usize::MAX, Some(Duration::from_secs(10))).unwrap();
-        assert_eq!(amount, 1000.0);
-        assert_eq!(duration, Duration::ZERO);
+    fn constant(limit: u128) -> impl FnMut(&u8) -> Option<u128> {
+        move |_| Some(limit)
+    }
 
-        // Zero bandwidth
-        let window = Duration::from_secs(5);
-        assert!(calculate_window_transfer(1000.0, 0, Some(window)).is_none());
-
-        // Transfer fits within the window
-        let (amount, duration) = calculate_window_transfer(
-            1000.0,
-            1000,                         // 1000 B/s
-            Some(Duration::from_secs(2)), // 2 second window
-        )
-        .unwrap();
-        assert_eq!(amount, 1000.0);
-        assert_eq!(duration, Duration::from_secs(1)); // 1000 bytes at 1000 B/s = 1s
-
-        // Transfer fills the window completely
-        let (amount, duration) = calculate_window_transfer(
-            2000.0,
-            1000,                         // 1000 B/s
-            Some(Duration::from_secs(1)), // 1 second window
-        )
-        .unwrap();
-        assert_eq!(amount, 1000.0); // Can only transfer 1000 bytes in 1s at 1000 B/s
-        assert_eq!(duration, Duration::from_secs(1));
-
-        // No window limit (open-ended transfer)
-        let (amount, duration) = calculate_window_transfer(
-            5000.0, 1000, // 1000 B/s
-            None,
-        )
-        .unwrap();
-        assert_eq!(amount, 5000.0);
-        assert_eq!(duration, Duration::from_secs(5)); // 5000 bytes at 1000 B/s = 5s
+    fn unlimited() -> impl FnMut(&u8) -> Option<u128> {
+        move |_| None
     }
 
     #[test]
-    fn test_calculate_reservations_simple() {
-        let now = UNIX_EPOCH;
+    fn equal_share_on_single_egress() {
+        let flows = vec![
+            Flow {
+                id: 1,
+                origin: 1,
+                recipient: 10,
+                requires_ingress: true,
+            },
+            Flow {
+                id: 2,
+                origin: 1,
+                recipient: 11,
+                requires_ingress: true,
+            },
+        ];
 
-        // Unlimited bandwidth on both ends
-        let sender_schedule = Schedule::new(usize::MAX);
-        let (reservations, completion) = calculate_reservations(
-            1000,
-            now,
-            (&sender_schedule, 0),
-            None, // No receiver constraint
-        );
-        assert_eq!(reservations.len(), 1);
-        assert_eq!(reservations[0].bandwidth, usize::MAX as isize);
-        assert_eq!(reservations[0].start, now);
-        assert_eq!(reservations[0].end, now); // Instant transfer
-        assert_eq!(completion, now);
+        let allocations = allocate(&flows, constant(1_000), unlimited());
+        assert_eq!(allocations.len(), 2);
 
-        // Limited by sender bandwidth (1000 B/s, 1000 bytes = 1s)
-        let sender_schedule = Schedule::new(1000);
-        let (reservations, completion) =
-            calculate_reservations(1000, now, (&sender_schedule, 0), None);
-        assert_eq!(reservations.len(), 1);
-        assert_eq!(reservations[0].bandwidth, 1000);
-        assert_eq!(reservations[0].start, now);
-        assert_eq!(reservations[0].end, now + Duration::from_secs(1));
-        assert_eq!(completion, now + Duration::from_secs(1));
-
-        // Limited by receiver bandwidth
-        let sender_schedule = Schedule::new(usize::MAX);
-        let receiver_schedule = Schedule::new(500); // 500 B/s
-        let (reservations, completion) = calculate_reservations(
-            1000,
-            now,
-            (&sender_schedule, 0),
-            Some((&receiver_schedule, 0)),
-        );
-        assert_eq!(reservations.len(), 1);
-        assert_eq!(reservations[0].bandwidth, 500);
-        assert_eq!(reservations[0].start, now);
-        assert_eq!(reservations[0].end, now + Duration::from_secs(2)); // 1000 bytes at 500 B/s = 2s
-        assert_eq!(completion, now + Duration::from_secs(2));
-
-        // Limited by minimum of sender and receiver bandwidth
-        let sender_schedule = Schedule::new(2000);
-        let receiver_schedule = Schedule::new(1000); // Receiver is bottleneck
-        let (reservations, completion) = calculate_reservations(
-            3000,
-            now,
-            (&sender_schedule, 0),
-            Some((&receiver_schedule, 0)),
-        );
-        assert_eq!(reservations.len(), 1);
-        assert_eq!(reservations[0].bandwidth, 1000); // Min of 2000 and 1000
-        assert_eq!(reservations[0].start, now);
-        assert_eq!(reservations[0].end, now + Duration::from_secs(3)); // 3000 bytes at 1000 B/s = 3s
-        assert_eq!(completion, now + Duration::from_secs(3));
+        for rate in allocations.values() {
+            let Rate::Finite(ratio) = rate else {
+                panic!("expected finite rate");
+            };
+            assert_eq!(ratio.num, 500);
+            assert_eq!(ratio.den, 1);
+        }
     }
 
     #[test]
-    fn test_calculate_reservations_with_existing_traffic() {
-        let now = UNIX_EPOCH;
+    fn ingress_limit_enforced() {
+        let flows = vec![Flow {
+            id: 1,
+            origin: 1,
+            recipient: 5,
+            requires_ingress: true,
+        }];
 
-        // Partial capacity available
-        // Create a sender schedule with existing traffic: 500 B/s used from t=1s to t=2s
-        let mut sender_schedule = Schedule::new(1000); // 1000 B/s total capacity
-        sender_schedule
-            .schedule
-            .insert(now + Duration::from_secs(1), 500); // Start using 500 B/s at t=1s
-        sender_schedule
-            .schedule
-            .insert(now + Duration::from_secs(2), -500); // Stop at t=2s
-
-        // Send 2000 bytes starting at t=0
-        let (reservations, completion) = calculate_reservations(
-            2000,
-            now,
-            (&sender_schedule, 0), // No current usage at t=0
-            None,
-        );
-
-        // Should create 3 reservations:
-        // 1. t=0 to t=1s at 1000 B/s (1000 bytes)
-        // 2. t=1s to t=2s at 500 B/s (500 bytes)
-        // 3. t=2s onward at 1000 B/s (remaining 500 bytes, 0.5s)
-        assert_eq!(reservations.len(), 3);
-        assert_eq!(reservations[0].bandwidth, 1000);
-        assert_eq!(reservations[0].start, now);
-        assert_eq!(reservations[0].end, now + Duration::from_secs(1));
-
-        assert_eq!(reservations[1].bandwidth, 500);
-        assert_eq!(reservations[1].start, now + Duration::from_secs(1));
-        assert_eq!(reservations[1].end, now + Duration::from_secs(2));
-
-        assert_eq!(reservations[2].bandwidth, 1000);
-        assert_eq!(reservations[2].start, now + Duration::from_secs(2));
-        assert_eq!(reservations[2].end, now + Duration::from_millis(2500));
-
-        assert_eq!(completion, now + Duration::from_millis(2500));
-
-        // No capacity available initially (should return empty)
-        let mut full_schedule = Schedule::new(1000);
-        full_schedule.schedule.insert(now, 1000); // Use full capacity from t=0
-        full_schedule
-            .schedule
-            .insert(now + Duration::from_secs(2), -1000); // Free at t=2s
-
-        let (reservations, completion) = calculate_reservations(
-            1000,
-            now,
-            (&full_schedule, 1000), // Full capacity used at t=0
-            None,
-        );
-
-        // No bandwidth available, so no reservations can be made
-        // No reservations means completion time is now
-        assert_eq!(reservations.len(), 0);
-        assert_eq!(completion, now);
+        let allocations = allocate(&flows, unlimited(), constant(2_000));
+        let rate = allocations.get(&1).expect("missing flow");
+        let Rate::Finite(ratio) = rate else {
+            panic!("expected finite rate");
+        };
+        assert_eq!(ratio.num, 2_000);
+        assert_eq!(ratio.den, 1);
     }
 
     #[test]
-    fn test_calculate_reservations_staggered() {
-        let now = UNIX_EPOCH;
+    fn unlimited_flow_finishes_immediately() {
+        let flows = vec![Flow {
+            id: 7,
+            origin: 1,
+            recipient: 2,
+            requires_ingress: false,
+        }];
 
-        // Create a simple staggered scenario with bandwidth that becomes available
-        let sender_schedule = Schedule::new(1000); // 1000 B/s total
+        let allocations = allocate(&flows, unlimited(), unlimited());
+        assert_eq!(allocations[&7], Rate::Unlimited);
+    }
 
-        // No existing traffic, just test a simple transfer
-        let (reservations, completion) = calculate_reservations(
-            1500, // 1500 bytes
-            now,
-            (&sender_schedule, 0), // No current usage
-            None,
+    #[test]
+    fn transfer_accumulates_carry() {
+        let ratio = Ratio { num: 1, den: 2 }; // 0.5 bytes per second
+        let mut carry = 0;
+        let rate = Rate::Finite(ratio);
+        let first = transfer(&rate, Duration::from_millis(500), &mut carry, 10);
+        assert_eq!(first, 0); // 0.25 bytes rounded down
+        assert_ne!(carry, 0);
+        let second = transfer(&rate, Duration::from_millis(1500), &mut carry, 10);
+        // 0.75 + previous 0.25 == 1 byte
+        assert_eq!(first + second, 1);
+    }
+
+    #[test]
+    fn completion_time_calculation() {
+        let ratio = Ratio::from_int(500);
+        let rate = Rate::Finite(ratio);
+        let time = time_to_deplete(&rate, 1_000).expect("finite time");
+        assert_eq!(time.as_secs(), 2);
+    }
+
+    fn rate_of(map: &BTreeMap<u64, Rate>, id: u64) -> Ratio {
+        match map.get(&id).expect("missing flow") {
+            Rate::Finite(ratio) => ratio.clone(),
+            Rate::Unlimited => panic!("unexpected unlimited rate"),
+        }
+    }
+
+    #[test]
+    fn three_peer_fair_sharing() {
+        let flows = vec![
+            Flow {
+                id: 1,
+                origin: 'A',
+                recipient: 'B',
+                requires_ingress: true,
+            },
+            Flow {
+                id: 2,
+                origin: 'A',
+                recipient: 'B',
+                requires_ingress: true,
+            },
+            Flow {
+                id: 3,
+                origin: 'B',
+                recipient: 'C',
+                requires_ingress: true,
+            },
+            Flow {
+                id: 4,
+                origin: 'A',
+                recipient: 'C',
+                requires_ingress: true,
+            },
+            Flow {
+                id: 5,
+                origin: 'C',
+                recipient: 'B',
+                requires_ingress: true,
+            },
+        ];
+
+        let allocations = allocate(
+            &flows,
+            |origin: &char| match origin {
+                'A' => Some(1_000_000), // 1_000 KB/s
+                'B' => Some(750_000),
+                'C' => Some(100_000),
+                _ => None,
+            },
+            |recipient: &char| match recipient {
+                'A' => Some(500_000),
+                'B' => Some(250_000),
+                'C' => Some(1_000_000),
+                _ => None,
+            },
         );
 
-        // Should create a single reservation at 1000 B/s for 1.5 seconds
-        assert_eq!(reservations.len(), 1);
-        assert_eq!(reservations[0].bandwidth, 1000);
-        assert_eq!(reservations[0].start, now);
-        assert_eq!(reservations[0].end, now + Duration::from_millis(1500));
-        assert_eq!(completion, now + Duration::from_millis(1500));
+        let rate_ab1 = rate_of(&allocations, 1);
+        assert_eq!(rate_ab1.num, 250_000);
+        assert_eq!(rate_ab1.den, 3);
+
+        let rate_ab2 = rate_of(&allocations, 2);
+        assert_eq!(rate_ab2.num, 250_000);
+        assert_eq!(rate_ab2.den, 3);
+
+        let rate_ac = rate_of(&allocations, 4);
+        assert_eq!(rate_ac.num, 500_000);
+        assert_eq!(rate_ac.den, 1);
+
+        let rate_bc = rate_of(&allocations, 3);
+        assert_eq!(rate_bc.num, 500_000);
+        assert_eq!(rate_bc.den, 1);
+
+        let rate_cb = rate_of(&allocations, 5);
+        assert_eq!(rate_cb.num, 250_000);
+        assert_eq!(rate_cb.den, 3);
     }
 
     #[test]
-    fn test_bandwidth_schedule_operations() {
-        let mut schedule = Schedule::new(1000);
-        let now = UNIX_EPOCH;
+    fn upstream_bottleneck_propagates() {
+        let flows = vec![
+            Flow {
+                id: 1,
+                origin: 'A',
+                recipient: 'B',
+                requires_ingress: true,
+            },
+            Flow {
+                id: 2,
+                origin: 'A',
+                recipient: 'C',
+                requires_ingress: true,
+            },
+        ];
 
-        // Test prune_and_get_usage with no past events
-        let usage = schedule.prune_and_get_usage(now);
-        assert_eq!(usage, 0);
+        let allocations = allocate(
+            &flows,
+            |origin: &char| match origin {
+                'A' => Some(1_000_000),
+                'B' => Some(1_000_000),
+                'C' => Some(1_000_000),
+                _ => None,
+            },
+            |recipient: &char| match recipient {
+                'A' => Some(500_000),
+                'B' => Some(1_000),
+                'C' => Some(500_000),
+                _ => None,
+            },
+        );
 
-        // Add some events
-        schedule.schedule.insert(now - Duration::from_secs(2), 500); // Past event
-        schedule.schedule.insert(now - Duration::from_secs(1), -200); // Past event
-        schedule.schedule.insert(now + Duration::from_secs(1), 300); // Future event
+        let rate_ab = rate_of(&allocations, 1);
+        assert_eq!(rate_ab.num, 1_000);
+        assert_eq!(rate_ab.den, 1);
 
-        // Prune and check usage (500 - 200 = 300)
-        let usage = schedule.prune_and_get_usage(now);
-        assert_eq!(usage, 300);
-        assert_eq!(schedule.schedule.len(), 1); // Only future event remains
-        assert!(schedule
-            .schedule
-            .contains_key(&(now + Duration::from_secs(1))));
-
-        // Test available_bandwidth
-        assert_eq!(schedule.available_bandwidth(0), 1000);
-        assert_eq!(schedule.available_bandwidth(300), 700);
-        assert_eq!(schedule.available_bandwidth(1000), 0);
-        assert_eq!(schedule.available_bandwidth(1500), 0); // Over capacity
-
-        // Test add_reservation
-        let start = now + Duration::from_secs(2);
-        let end = now + Duration::from_secs(3);
-        schedule.add_reservation(start, end, 400);
-        assert_eq!(schedule.schedule[&start], 400);
-        assert_eq!(schedule.schedule[&end], -400);
-
-        // Test zero removal in insert_point
-        schedule.insert_point(end, 400); // This should cancel out the -400
-        assert!(!schedule.schedule.contains_key(&end));
+        let rate_bc = rate_of(&allocations, 2);
+        assert_eq!(rate_bc.num, 500_000);
+        assert_eq!(rate_bc.den, 1);
     }
 
     #[test]
-    fn test_merged_schedule_iterator() {
-        let now = UNIX_EPOCH;
+    fn limited_capacity_still_guarantees_fair_share() {
+        let flows = vec![
+            Flow {
+                id: 1,
+                origin: 'A',
+                recipient: 'B',
+                requires_ingress: true,
+            },
+            Flow {
+                id: 2,
+                origin: 'A',
+                recipient: 'C',
+                requires_ingress: true,
+            },
+        ];
 
-        let mut sender_schedule = BTreeMap::new();
-        sender_schedule.insert(now + Duration::from_secs(1), 100);
-        sender_schedule.insert(now + Duration::from_secs(3), -100);
-        sender_schedule.insert(now + Duration::from_secs(5), 200);
+        let allocations = allocate(
+            &flows,
+            |origin: &char| match origin {
+                'A' => Some(50_000),
+                'B' => Some(1_000_000),
+                'C' => Some(1_000_000),
+                _ => None,
+            },
+            |recipient: &char| match recipient {
+                'A' => Some(500_000),
+                'B' => Some(1_000),
+                'C' => Some(500_000),
+                _ => None,
+            },
+        );
 
-        let mut receiver_schedule = BTreeMap::new();
-        receiver_schedule.insert(now + Duration::from_secs(2), 50);
-        receiver_schedule.insert(now + Duration::from_secs(3), -50);
-        receiver_schedule.insert(now + Duration::from_secs(4), 150);
+        let rate_ab = rate_of(&allocations, 1);
+        assert_eq!(rate_ab.num, 1_000);
+        assert_eq!(rate_ab.den, 1);
 
-        let mut iter = MergedScheduleIterator::new(&sender_schedule, &receiver_schedule);
-
-        // Should get events in chronological order
-        let Event {
-            time: t1,
-            sender_delta: s1,
-            receiver_delta: r1,
-        } = iter.next().unwrap();
-
-        assert_eq!(t1, now + Duration::from_secs(1));
-        assert_eq!(s1, 100);
-        assert_eq!(r1, 0);
-
-        let Event {
-            time: t2,
-            sender_delta: s2,
-            receiver_delta: r2,
-        } = iter.next().unwrap();
-
-        assert_eq!(t2, now + Duration::from_secs(2));
-        assert_eq!(s2, 0);
-        assert_eq!(r2, 50);
-
-        let Event {
-            time: t3,
-            sender_delta: s3,
-            receiver_delta: r3,
-        } = iter.next().unwrap();
-
-        assert_eq!(t3, now + Duration::from_secs(3));
-        assert_eq!(s3, -100); // Both have events at t=3
-        assert_eq!(r3, -50);
-
-        let Event {
-            time: t4,
-            sender_delta: s4,
-            receiver_delta: r4,
-        } = iter.next().unwrap();
-
-        assert_eq!(t4, now + Duration::from_secs(4));
-        assert_eq!(s4, 0);
-        assert_eq!(r4, 150);
-
-        let Event {
-            time: t5,
-            sender_delta: s5,
-            receiver_delta: r5,
-        } = iter.next().unwrap();
-
-        assert_eq!(t5, now + Duration::from_secs(5));
-        assert_eq!(s5, 200);
-        assert_eq!(r5, 0);
-
-        assert!(iter.next().is_none());
+        let rate_bc = rate_of(&allocations, 2);
+        assert_eq!(rate_bc.num, 49_000);
+        assert_eq!(rate_bc.den, 1);
     }
 }
