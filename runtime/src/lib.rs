@@ -310,14 +310,11 @@ pub trait Clock: Clone + Send + Sync + 'static {
         T: Send + 'static,
     {
         async move {
-            let mut future = std::pin::pin!(future);
-            let mut sleep_future = std::pin::pin!(self.sleep(duration));
-
             commonware_macros::select! {
-                result = future.as_mut() => {
+                result = future => {
                     Ok(result)
                 },
-                _ = sleep_future.as_mut() => {
+                _ = self.sleep(duration) => {
                     Err(Error::Timeout)
                 },
             }
