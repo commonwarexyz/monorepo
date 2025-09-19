@@ -81,7 +81,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     active_flows: BTreeMap<(P, P), u64>,
     flow_meta: BTreeMap<u64, FlowMeta<P>>,
     pending_transmissions: BTreeMap<(P, P), VecDeque<QueuedTransmission>>,
+    last_arrival_complete: BTreeMap<(P, P), SystemTime>,
     next_bandwidth_event: Option<SystemTime>,
+    next_transmission_ready: Option<SystemTime>,
     expected_sequences: BTreeMap<(P, P), u64>,
     pending_deliveries: BTreeMap<(P, P), BTreeMap<u64, PendingDelivery>>,
 
@@ -129,7 +131,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 active_flows: BTreeMap::new(),
                 flow_meta: BTreeMap::new(),
                 pending_transmissions: BTreeMap::new(),
+                last_arrival_complete: BTreeMap::new(),
                 next_bandwidth_event: None,
+                next_transmission_ready: None,
                 expected_sequences: BTreeMap::new(),
                 pending_deliveries: BTreeMap::new(),
                 received_messages,
@@ -457,41 +461,72 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    fn queue_transmission(&mut self, origin: P, recipient: P, entry: QueuedTransmission) {
+    fn queue_transmission(&mut self, origin: P, recipient: P, mut entry: QueuedTransmission) {
         let key = (origin.clone(), recipient.clone());
-        if self.active_flows.contains_key(&key) {
-            self.pending_transmissions
-                .entry(key)
-                .or_default()
-                .push_back(entry);
-        } else {
-            let flow_id = self.next_flow_id;
-            self.next_flow_id += 1;
-            self.active_flows
-                .insert((origin.clone(), recipient.clone()), flow_id);
-            self.start_transmission(origin, recipient, flow_id, entry);
-        }
+        entry.ready_at = self.context.current();
+        self.pending_transmissions
+            .entry(key.clone())
+            .or_default()
+            .push_back(entry);
+
+        self.try_start_transmission_for(origin, recipient);
     }
 
-    fn start_next_for(&mut self, origin: P, recipient: P) {
+    fn try_start_transmission_for(&mut self, origin: P, recipient: P) {
+        self.try_start_transmission_for_inner(origin, recipient, true);
+    }
+
+    fn try_start_transmission_for_inner(
+        &mut self,
+        origin: P,
+        recipient: P,
+        refresh_schedule: bool,
+    ) {
         let key = (origin.clone(), recipient.clone());
-        let mut entry = None;
+        if self.active_flows.contains_key(&key) {
+            if refresh_schedule {
+                self.refresh_next_transmission_ready();
+            }
+            return;
+        }
+
+        let mut entry_to_start = None;
         let mut remove_queue = false;
+        let now = self.context.current();
         if let Some(queue) = self.pending_transmissions.get_mut(&key) {
-            entry = queue.pop_front();
-            if queue.is_empty() {
+            if let Some(front) = queue.front_mut() {
+                let mut ready_at = front.ready_at.max(now);
+                if let Some(arrival_complete) = self.last_arrival_complete.get(&key) {
+                    if let Some(limit) = arrival_complete.checked_sub(front.latency) {
+                        ready_at = ready_at.max(limit);
+                    }
+                }
+                if ready_at <= now {
+                    entry_to_start = queue.pop_front();
+                    if queue.is_empty() {
+                        remove_queue = true;
+                    }
+                } else {
+                    front.ready_at = ready_at;
+                }
+            } else {
                 remove_queue = true;
             }
         }
+
         if remove_queue {
             self.pending_transmissions.remove(&key);
         }
-        if let Some(next_entry) = entry {
+
+        if let Some(entry) = entry_to_start {
             let flow_id = self.next_flow_id;
             self.next_flow_id += 1;
-            self.active_flows
-                .insert((origin.clone(), recipient.clone()), flow_id);
-            self.start_transmission(origin, recipient, flow_id, next_entry);
+            self.active_flows.insert(key, flow_id);
+            self.start_transmission(origin, recipient, flow_id, entry);
+        }
+
+        if refresh_schedule {
+            self.refresh_next_transmission_ready();
         }
     }
 
@@ -516,15 +551,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let queue_origin = origin.clone();
             let queue_recipient = recipient.clone();
 
+            let arrival_complete_at = if deliver {
+                now.checked_add(latency)
+                    .expect("latency overflow computing arrival completion")
+            } else {
+                now
+            };
+
             if deliver {
                 if let Some(seq) = sequence {
                     let first_start = first_segment_start.unwrap_or(now);
                     let first_byte_arrival_at = first_start
                         .checked_add(latency)
                         .expect("latency overflow computing first byte arrival");
-                    let arrival_complete_at = now
-                        .checked_add(latency)
-                        .expect("latency overflow computing arrival completion");
                     let pending = PendingDelivery {
                         channel,
                         message,
@@ -542,8 +581,58 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 );
             }
 
-            self.start_next_for(queue_origin, queue_recipient);
+            self.last_arrival_complete
+                .insert((origin.clone(), recipient.clone()), arrival_complete_at);
+
+            self.try_start_transmission_for(queue_origin, queue_recipient);
         }
+    }
+
+    fn start_due_transmissions(&mut self, now: SystemTime) {
+        let ready_pairs: Vec<(P, P)> = self
+            .pending_transmissions
+            .iter()
+            .filter_map(|(key, queue)| {
+                if self.active_flows.contains_key(key) {
+                    return None;
+                }
+                queue.front().and_then(|entry| {
+                    if entry.ready_at <= now {
+                        Some(key.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        for (origin, recipient) in ready_pairs {
+            self.try_start_transmission_for_inner(origin, recipient, false);
+        }
+
+        self.refresh_next_transmission_ready();
+    }
+
+    fn refresh_next_transmission_ready(&mut self) {
+        let now = self.context.current();
+        let mut next_ready: Option<SystemTime> = None;
+        for (key, queue) in self.pending_transmissions.iter() {
+            if self.active_flows.contains_key(key) {
+                continue;
+            }
+            if let Some(entry) = queue.front() {
+                let candidate = if entry.ready_at <= now {
+                    now
+                } else {
+                    entry.ready_at
+                };
+                next_ready = match next_ready {
+                    None => Some(candidate),
+                    Some(current) => Some(current.min(candidate)),
+                };
+            }
+        }
+        self.next_transmission_ready = next_ready;
     }
 
     fn start_transmission(
@@ -558,6 +647,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             message,
             latency,
             should_deliver,
+            ..
         } = entry;
 
         let now = self.context.current();
@@ -675,6 +765,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 message: message.clone(),
                 latency,
                 should_deliver,
+                ready_at: self.context.current(),
             };
 
             self.queue_transmission(origin.clone(), recipient.clone(), entry);
@@ -697,9 +788,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     async fn run(mut self) {
         loop {
-            let deadline = self.next_bandwidth_event;
+            let now = self.context.current();
+            self.start_due_transmissions(now);
+
+            let deadline = match (self.next_bandwidth_event, self.next_transmission_ready) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
             let context = self.context.clone();
-            let bandwidth_sleep = async move {
+            let event_sleep = async move {
                 if let Some(when) = deadline {
                     context.sleep_until(when).await;
                     Some(when)
@@ -707,7 +806,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     pending::<Option<SystemTime>>().await
                 }
             };
-            futures::pin_mut!(bandwidth_sleep);
+            futures::pin_mut!(event_sleep);
             select! {
                 message = self.ingress.next() => {
                     // If ingress is closed, exit
@@ -725,12 +824,27 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     };
                     self.handle_task(task);
                 },
-                tick = &mut bandwidth_sleep => {
+                tick = &mut event_sleep => {
                     if let Some(when) = tick {
-                        self.next_bandwidth_event = None;
-                        let completed = self.recompute_bandwidth(when);
-                        if !completed.is_empty() {
-                            self.handle_completed_flows(completed, when);
+                        if self
+                            .next_bandwidth_event
+                            .map(|event| event <= when)
+                            .unwrap_or(false)
+                        {
+                            self.next_bandwidth_event = None;
+                            let completed = self.recompute_bandwidth(when);
+                            if !completed.is_empty() {
+                                self.handle_completed_flows(completed, when);
+                            }
+                        }
+
+                        if self
+                            .next_transmission_ready
+                            .map(|event| event <= when)
+                            .unwrap_or(false)
+                        {
+                            self.next_transmission_ready = None;
+                            self.start_due_transmissions(when);
                         }
                     }
                 }
@@ -1035,6 +1149,7 @@ struct QueuedTransmission {
     message: Bytes,
     latency: Duration,
     should_deliver: bool,
+    ready_at: SystemTime,
 }
 
 struct FlowMeta<P: PublicKey> {

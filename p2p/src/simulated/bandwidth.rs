@@ -9,7 +9,7 @@
 use commonware_utils::math::u128::Ratio;
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     time::{Duration, SystemTime},
 };
 
@@ -146,8 +146,13 @@ impl Schedule {
                 }
             }
 
+            let previous_ready = flow.ready_time;
             flow.segment = segment;
-            flow.ready_time = flow.segment.as_ref().map(|s| s.start).unwrap_or(now);
+            flow.ready_time = flow
+                .segment
+                .as_ref()
+                .map(|s| s.start)
+                .unwrap_or_else(|| previous_ready.max(now));
 
             if flow.remaining() == 0 {
                 completed.push(id);
@@ -198,6 +203,21 @@ enum ResourceKey<P> {
 }
 
 #[derive(Clone, Debug)]
+struct ResourceState {
+    limit: Ratio,
+    members: Vec<usize>,
+}
+
+impl ResourceState {
+    fn new(limit: u128) -> Self {
+        Self {
+            limit: Ratio::from_int(limit),
+            members: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 /// Transfer snapshot supplied to the planner. `ready_time` denotes the first
 /// instant at which the sender can resume transmitting bytes.
 pub(super) struct Transfer<P> {
@@ -226,8 +246,6 @@ struct PlannerFlow {
     id: u64,
     ready_time: SystemTime,
     remaining: u128,
-    sender_resource: Option<usize>,
-    receiver_resource: Option<usize>,
     segment: Option<Segment>,
 }
 
@@ -236,14 +254,14 @@ fn ensure_resource<P: Clone + Ord>(
     key: ResourceKey<P>,
     limit: Option<u128>,
     indices: &mut BTreeMap<ResourceKey<P>, Option<usize>>,
-    resources: &mut Vec<Ratio>,
+    resources: &mut Vec<ResourceState>,
 ) -> Option<usize> {
     if let Some(idx) = indices.get(&key) {
         return *idx;
     }
     let idx = limit.map(|value| {
         let index = resources.len();
-        resources.push(Ratio::from_int(value));
+        resources.push(ResourceState::new(value));
         index
     });
     indices.insert(key, idx);
@@ -281,69 +299,134 @@ fn div_ceil_or_max(num: u128, denom: u128) -> u128 {
     num.div_ceil(denom)
 }
 
+fn bytes_over_interval(
+    rate: &Option<Ratio>,
+    delta_ns: u128,
+    finishing: bool,
+    remaining: u128,
+) -> u128 {
+    match rate {
+        None => remaining,
+        Some(r) if r.is_zero() => {
+            if finishing {
+                remaining
+            } else {
+                0
+            }
+        }
+        Some(r) => {
+            if delta_ns == 0 {
+                return if finishing { remaining } else { 0 };
+            }
+            let numerator = r.num.saturating_mul(delta_ns);
+            let denominator = r.den.saturating_mul(NS_PER_SEC);
+            let mut bytes = if denominator > 0 {
+                numerator / denominator
+            } else {
+                0
+            };
+            if finishing {
+                bytes = remaining;
+            }
+            bytes.min(remaining)
+        }
+    }
+}
+
+fn compute_finish_times(
+    time: SystemTime,
+    active: &[usize],
+    flows: &[PlannerFlow],
+    rates: &[Option<Ratio>],
+) -> (Option<SystemTime>, Vec<Option<u128>>) {
+    let mut finish_ns: Vec<Option<u128>> = vec![None; flows.len()];
+    let mut next_finish: Option<SystemTime> = None;
+
+    for &idx in active {
+        match &rates[idx] {
+            None => {
+                finish_ns[idx] = Some(0);
+                next_finish = Some(time);
+            }
+            Some(rate) if rate.is_zero() => {}
+            Some(rate) => {
+                let remaining = flows[idx].remaining;
+                if remaining == 0 {
+                    finish_ns[idx] = Some(0);
+                    next_finish = Some(time);
+                    continue;
+                }
+                let numerator = remaining
+                    .saturating_mul(rate.den)
+                    .saturating_mul(NS_PER_SEC);
+                let ns = div_ceil_or_max(numerator, rate.num);
+                finish_ns[idx] = Some(ns);
+                let finish_time = time
+                    .checked_add(ns_to_duration(ns))
+                    .expect("finish time overflow");
+                next_finish = match next_finish {
+                    None => Some(finish_time),
+                    Some(current) => Some(current.min(finish_time)),
+                };
+            }
+        }
+    }
+
+    (next_finish, finish_ns)
+}
+
 /// Core progressive-filling loop. Returns the instantaneous rate (bytes/sec) for
 /// each active flow expressed as a `Ratio<num, den>` where `num / den == Bps`.
 fn compute_rates(
-    active: &BTreeSet<usize>,
+    active: &[usize],
     flows: &[PlannerFlow],
-    resources: &[Ratio],
+    resources: &[ResourceState],
 ) -> Vec<Option<Ratio>> {
     let mut rates = vec![None; flows.len()];
     if active.is_empty() {
         return rates;
     }
 
-    // Map each resource to the flow indices that currently depend on it.
-    let mut resource_sets: Vec<BTreeSet<usize>> =
-        resources.iter().map(|_| BTreeSet::new()).collect();
-
+    let mut remaining: Vec<Ratio> = resources.iter().map(|res| res.limit.clone()).collect();
+    let mut unfrozen: Vec<bool> = vec![false; flows.len()];
     for &idx in active {
-        if let Some(res) = flows[idx].sender_resource {
-            resource_sets[res].insert(idx);
-        }
-        if let Some(res) = flows[idx].receiver_resource {
-            resource_sets[res].insert(idx);
-        }
+        unfrozen[idx] = true;
     }
 
-    let mut remaining: Vec<Ratio> = resources.to_vec();
-    let mut unfrozen = active.clone();
+    let mut active_left = active.len();
 
-    loop {
-        if unfrozen.is_empty() {
-            break;
-        }
-
+    while active_left > 0 {
         let mut limiting: Vec<usize> = Vec::new();
         let mut min_delta: Option<Ratio> = None;
 
-        for (idx, set) in resource_sets.iter().enumerate() {
-            if set.is_empty() {
-                continue;
-            }
-            let users: u128 = set.intersection(&unfrozen).count() as u128;
+        for (res_idx, resource) in resources.iter().enumerate() {
+            let users: u128 = resource
+                .members
+                .iter()
+                .filter(|&&flow_idx| unfrozen[flow_idx])
+                .count() as u128;
             if users == 0 {
                 continue;
             }
-            if remaining[idx].is_zero() {
-                limiting.push(idx);
+            if remaining[res_idx].is_zero() {
+                limiting.push(res_idx);
                 min_delta = Some(Ratio::zero());
                 continue;
             }
-            let delta = remaining[idx].div_int(users);
+            let delta = remaining[res_idx].div_int(users);
             match &min_delta {
                 None => {
                     min_delta = Some(delta);
                     limiting.clear();
-                    limiting.push(idx);
+                    limiting.push(res_idx);
                 }
                 Some(current) => match delta.cmp(current) {
                     Ordering::Less => {
                         min_delta = Some(delta);
                         limiting.clear();
-                        limiting.push(idx);
+                        limiting.push(res_idx);
                     }
-                    Ordering::Equal => limiting.push(idx),
+                    Ordering::Equal => limiting.push(res_idx),
                     Ordering::Greater => {}
                 },
             }
@@ -351,61 +434,77 @@ fn compute_rates(
 
         if min_delta.is_none() {
             // No resource constrains the remaining flows (everything is unlimited).
-            for idx in unfrozen.iter() {
-                rates[*idx] = None;
+            for &idx in active {
+                if unfrozen[idx] {
+                    rates[idx] = None;
+                }
             }
             break;
         }
 
         let delta = min_delta.unwrap();
         if delta.is_zero() {
-            // One or more resources are already exhausted; freeze the flows that
-            // depend on them and continue with the rest.
-            let mut saturated = Vec::new();
-            for &idx in &limiting {
-                for flow_idx in resource_sets[idx].intersection(&unfrozen) {
-                    saturated.push(*flow_idx);
+            let mut newly_frozen = Vec::new();
+            for &res_idx in &limiting {
+                for &flow_idx in resources[res_idx].members.iter() {
+                    if unfrozen[flow_idx] {
+                        newly_frozen.push(flow_idx);
+                    }
                 }
-                remaining[idx] = Ratio::zero();
+                remaining[res_idx] = Ratio::zero();
             }
-            for idx in saturated {
-                unfrozen.remove(&idx);
-                if rates[idx].is_none() {
-                    rates[idx] = Some(Ratio::zero());
+            for flow_idx in newly_frozen {
+                if rates[flow_idx].is_none() {
+                    rates[flow_idx] = Some(Ratio::zero());
+                }
+                if unfrozen[flow_idx] {
+                    unfrozen[flow_idx] = false;
+                    active_left -= 1;
                 }
             }
             continue;
         }
 
-        for idx in unfrozen.iter() {
-            match &mut rates[*idx] {
+        for &idx in active {
+            if !unfrozen[idx] {
+                continue;
+            }
+            match &mut rates[idx] {
                 Some(rate) => rate.add_assign(&delta),
                 None => {
                     let mut rate = Ratio::zero();
                     rate.add_assign(&delta);
-                    rates[*idx] = Some(rate);
+                    rates[idx] = Some(rate);
                 }
             }
         }
 
-        let mut saturated = Vec::new();
-        for (res_idx, set) in resource_sets.iter().enumerate() {
-            let users = set.intersection(&unfrozen).count() as u128;
+        let mut newly_frozen = Vec::new();
+        for (res_idx, resource) in resources.iter().enumerate() {
+            let users = resource
+                .members
+                .iter()
+                .filter(|&&flow_idx| unfrozen[flow_idx])
+                .count() as u128;
             if users == 0 {
                 continue;
             }
             let usage = delta.mul_int(users);
-            // Deduct the portion of the resource consumed over this time slice.
             remaining[res_idx].sub_assign(&usage);
             if remaining[res_idx].is_zero() {
-                for flow_idx in set.intersection(&unfrozen) {
-                    saturated.push(*flow_idx);
+                for &flow_idx in resource.members.iter() {
+                    if unfrozen[flow_idx] {
+                        newly_frozen.push(flow_idx);
+                    }
                 }
             }
         }
 
-        for idx in saturated {
-            unfrozen.remove(&idx);
+        for flow_idx in newly_frozen {
+            if unfrozen[flow_idx] {
+                unfrozen[flow_idx] = false;
+                active_left -= 1;
+            }
         }
     }
 
@@ -436,7 +535,7 @@ where
     }
 
     let mut resource_indices: BTreeMap<ResourceKey<P>, Option<usize>> = BTreeMap::new();
-    let mut resources: Vec<Ratio> = Vec::new();
+    let mut resources: Vec<ResourceState> = Vec::new();
 
     let mut flows: Vec<PlannerFlow> = Vec::with_capacity(transfers.len());
     for transfer in transfers.iter() {
@@ -466,13 +565,18 @@ where
             id: transfer.id,
             ready_time: transfer.ready_time,
             remaining: transfer.remaining,
-            sender_resource: sender_idx,
-            receiver_resource: receiver_idx,
             segment: None,
         });
+        let flow_idx = flows.len() - 1;
+        if let Some(idx) = sender_idx {
+            resources[idx].members.push(flow_idx);
+        }
+        if let Some(idx) = receiver_idx {
+            resources[idx].members.push(flow_idx);
+        }
     }
 
-    let active: BTreeSet<usize> = flows
+    let active: Vec<usize> = flows
         .iter()
         .enumerate()
         .filter(|(_, flow)| flow.remaining > 0 && flow.ready_time <= now)
@@ -491,38 +595,7 @@ where
         // At this point at least one flow is active; derive its instantaneous rate.
         let rates = compute_rates(&active, &flows, &resources);
 
-        let mut next_finish: Option<SystemTime> = None;
-        let mut finish_ns: Vec<Option<u128>> = vec![None; flows.len()];
-
-        for &idx in active.iter() {
-            match &rates[idx] {
-                None => {
-                    finish_ns[idx] = Some(0);
-                    next_finish = Some(time);
-                }
-                Some(rate) if rate.is_zero() => {}
-                Some(rate) => {
-                    let remaining = flows[idx].remaining;
-                    if remaining == 0 {
-                        finish_ns[idx] = Some(0);
-                        next_finish = Some(time);
-                        continue;
-                    }
-                    let numerator = remaining
-                        .saturating_mul(rate.den)
-                        .saturating_mul(NS_PER_SEC);
-                    let ns = div_ceil_or_max(numerator, rate.num);
-                    finish_ns[idx] = Some(ns);
-                    let finish_time = time
-                        .checked_add(ns_to_duration(ns))
-                        .expect("finish time overflow");
-                    next_finish = match next_finish {
-                        None => Some(finish_time),
-                        Some(current) => Some(current.min(finish_time)),
-                    };
-                }
-            }
-        }
+        let (next_finish, finish_ns) = compute_finish_times(time, &active, &flows, &rates);
 
         let next_ready = flows
             .iter()
@@ -546,8 +619,6 @@ where
 
         for &idx in active.iter() {
             let flow = &mut flows[idx];
-            let rate = &rates[idx];
-            let mut bytes = 0u128;
             let finishing = match finish_ns[idx] {
                 Some(ns) => {
                     let finish_time = time
@@ -558,32 +629,7 @@ where
                 None => false,
             };
 
-            match rate {
-                None => {
-                    bytes = flow.remaining;
-                }
-                Some(r) if r.is_zero() => {}
-                Some(r) => {
-                    // Convert the fractional rate back into bytes over the current interval.
-                    if delta_ns == 0 {
-                        if finishing {
-                            bytes = flow.remaining;
-                        }
-                    } else {
-                        let numerator = r.num.saturating_mul(delta_ns);
-                        let denominator = r.den.saturating_mul(NS_PER_SEC);
-                        if denominator > 0 {
-                            bytes = numerator / denominator;
-                        }
-                        if finishing {
-                            bytes = flow.remaining;
-                        } else {
-                            bytes = bytes.min(flow.remaining);
-                        }
-                    }
-                }
-            }
-
+            let bytes = bytes_over_interval(&rates[idx], delta_ns, finishing, flow.remaining);
             if bytes > 0 {
                 let segment = Segment {
                     start: time,
@@ -757,6 +803,21 @@ mod tests {
         assert_eq!(seg2[0].start, now + Duration::from_secs(1));
         assert_eq!(seg2[0].end, now + Duration::from_secs(3));
         assert_eq!(seg2[0].bytes, 1000);
+    }
+
+    #[test]
+    fn test_prune_preserves_future_ready_time() {
+        let now = UNIX_EPOCH;
+        let future = now + Duration::from_secs(5);
+        let mut schedule = Schedule::new(1_000);
+        schedule.add_flow(0, now, 1024);
+        schedule.reset_flow_segment(0, None, future, None);
+
+        let completed = schedule.prune(now);
+        assert!(completed.is_empty());
+
+        let snapshot = schedule.flow_snapshot(0).expect("flow missing after prune");
+        assert_eq!(snapshot.ready_time, future);
     }
 
     #[test]
