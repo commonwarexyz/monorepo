@@ -85,7 +85,7 @@ struct Status<P: PublicKey> {
     latency: Duration,
     channel: Channel,
     message: Bytes,
-    sequence: Option<u64>, // delivered if some
+    sequence: Option<u128>, // delivered if some
     remaining: u128,
     rate: Rate,
     carry: u128,
@@ -110,15 +110,15 @@ struct Status<P: PublicKey> {
 pub struct State<P: PublicKey + Ord + Clone> {
     bandwidth_limits: BTreeMap<P, Bandwidth>,
     next_flow_id: u64,
-    assign_sequences: BTreeMap<(P, P), u64>,
+    assign_sequences: BTreeMap<(P, P), u128>,
     active_flows: BTreeMap<(P, P), u64>,
     all_flows: BTreeMap<u64, Status<P>>,
     queued: BTreeMap<(P, P), VecDeque<Queued>>,
     last_arrival_complete: BTreeMap<(P, P), SystemTime>,
     next_bandwidth_event: Option<SystemTime>,
     next_transmission_ready: Option<SystemTime>,
-    expected_sequences: BTreeMap<(P, P), u64>,
-    buffered: BTreeMap<(P, P), BTreeMap<u64, Buffered>>,
+    expected_sequences: BTreeMap<(P, P), u128>,
+    buffered: BTreeMap<(P, P), BTreeMap<u128, Buffered>>,
 }
 
 impl<P: PublicKey + Ord + Clone> State<P> {
@@ -515,7 +515,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         channel: Channel,
         message: Bytes,
         arrival_complete_at: SystemTime,
-        sequence: Option<u64>,
+        sequence: Option<u128>,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
         self.last_arrival_complete.insert(key, arrival_complete_at);
@@ -543,7 +543,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         &mut self,
         origin: P,
         recipient: P,
-        seq: u64,
+        seq: u128,
         buffered: Buffered,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
@@ -713,7 +713,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
     }
 
     /// Returns the next sequence identifier used to preserve FIFO delivery per link.
-    fn tag(&mut self, origin: &P, recipient: &P) -> u64 {
+    fn tag(&mut self, origin: &P, recipient: &P) -> u128 {
         let key = (origin.clone(), recipient.clone());
         let counter = self.assign_sequences.entry(key).or_insert(0);
         let seq = *counter;
