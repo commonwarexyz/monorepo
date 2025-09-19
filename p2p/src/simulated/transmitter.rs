@@ -129,9 +129,6 @@ pub struct State<P: PublicKey + Ord + Clone> {
 /// (no minimum step).
 #[cfg(windows)]
 const MIN_BANDWIDTH_STEP: Duration = Duration::from_nanos(100);
-
-/// Preserve prior behavior elsewhere by keeping the minimum at zero for non-Windows platforms
-/// because it is technically more accurate.
 #[cfg(not(windows))]
 const MIN_BANDWIDTH_STEP: Duration = Duration::ZERO;
 
