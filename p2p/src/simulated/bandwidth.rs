@@ -77,13 +77,8 @@ fn ensure_resource<P: Clone + Ord>(
         return Some(*index);
     }
 
-    let limit = match limit {
-        Some(limit) => limit,
-        None => return None,
-    };
-
     let idx = resources.len();
-    resources.push(Resource::new(limit));
+    resources.push(Resource::new(limit?));
     indices.insert(key, idx);
     Some(idx)
 }
@@ -433,7 +428,7 @@ mod tests {
 
     #[test]
     fn transfer_accumulates_carry() {
-        let ratio = Ratio::new(1, 2); // 0.5 bytes per second
+        let ratio = Ratio { num: 1, den: 2 }; // 0.5 bytes per second
         let mut carry = 0;
         let rate = FlowRate::Finite(ratio);
         let first = transfer(&rate, Duration::from_millis(500), &mut carry, 10);
