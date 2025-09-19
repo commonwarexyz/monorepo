@@ -289,6 +289,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 }
 
 impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
+    /// Process completions from the transmitter.
     fn process_completions(&mut self, completions: Vec<Completion<P>>) {
         for completion in completions {
             if completion.deliver {
@@ -339,11 +340,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         let now = self.context.current();
         let mut sent = Vec::new();
         for recipient in recipients {
+            // Skip self
             if recipient == origin {
                 trace!(?recipient, reason = "self", "dropping message",);
                 continue;
             }
 
+            // Determine if the sender or recipient has blocked the other
             let o_r = (origin.clone(), recipient.clone());
             let r_o = (recipient.clone(), origin.clone());
             if self.disconnect_on_block
@@ -353,22 +356,29 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 continue;
             }
 
+            // Determine if there is a link between the origin and recipient
             if !self.links.contains_key(&o_r) {
                 trace!(?origin, ?recipient, reason = "no link", "dropping message",);
                 continue;
             }
 
+            // Record sent message as soon as we determine there is a link with recipient (approximates
+            // having an open connection)
             self.sent_messages
                 .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
                 .inc();
 
+            // Sample latency and get current time
             let (latency, success_rate) = {
                 let link = self.links.get_mut(&o_r).expect("link must exist");
                 let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
                 (latency, link.success_rate)
             };
+
+            // Determine if the message should be delivered
             let should_deliver = self.context.gen_bool(success_rate);
 
+            // Enqueue message for delivery
             let completions = self.transmitter.enqueue(
                 now,
                 origin.clone(),
@@ -383,6 +393,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             sent.push(recipient);
         }
 
+        // Alert application of sent messages
         if let Err(err) = reply.send(sent) {
             error!(?err, "failed to send ack");
         }
