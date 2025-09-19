@@ -45,6 +45,14 @@ pub(crate) enum Message<V: Variant, B: Block> {
         block: B,
     },
 
+    GetBlockByHeight {
+        height: u64,
+        response: oneshot::Sender<Option<B>>,
+    },
+    GetFinalizedHeight {
+        response: oneshot::Sender<u64>,
+    },
+
     // -------------------- Consensus Engine Messages --------------------
     /// A notarization from the consensus engine.
     Notarization {
@@ -140,6 +148,37 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         {
             error!("failed to send verified message to actor: receiver dropped");
         }
+    }
+
+    /// Get a block by its height.
+    pub async fn get_block_by_height(&mut self, height: u64) -> oneshot::Receiver<Option<B>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetBlockByHeight {
+                height,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            error!("failed to send get block by height message to actor: receiver dropped");
+        }
+        rx
+    }
+
+    /// Get the latest finalized height.
+    pub async fn get_finalized_height(&mut self) -> oneshot::Receiver<u64> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetFinalizedHeight { response: tx })
+            .await
+            .is_err()
+        {
+            error!("failed to send get finalized height message to actor: receiver dropped");
+        }
+        rx
     }
 }
 
