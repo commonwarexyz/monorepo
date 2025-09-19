@@ -275,9 +275,11 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
     /// Awakens any queued transmissions that have become ready to send at `now`.
     fn wake(&mut self, now: SystemTime) -> Vec<Completion<P>> {
+        // Collect all queued keys
         let queued_keys: Vec<(P, P)> = self.queued.keys().cloned().collect();
-        let mut ready_pairs = Vec::new();
 
+        // Check the ready_at values for each queued item
+        let mut ready_pairs = Vec::new();
         for key in queued_keys {
             if self.active_flows.contains_key(&key) {
                 continue;
@@ -295,6 +297,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             }
         }
 
+        // Launch any queued transmissions that have become ready to send at `now`
         let mut completions = Vec::new();
         for (origin, recipient) in ready_pairs {
             completions.extend(self.launch(origin, recipient, now));
