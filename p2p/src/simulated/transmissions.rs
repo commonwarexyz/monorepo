@@ -189,6 +189,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         completions
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         &mut self,
         now: SystemTime,
