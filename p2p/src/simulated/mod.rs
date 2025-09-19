@@ -1146,7 +1146,6 @@ mod tests {
 
     #[test]
     fn test_high_latency_message_blocks_followup() {
-        // A long transmission must complete before a subsequent message is delivered on the same link.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
@@ -1173,7 +1172,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Fixed latency ensures deterministic arrival ordering.
+            // Send slow message
             oracle
                 .add_link(
                     pk1.clone(),
@@ -1193,6 +1192,7 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Update link
             oracle.remove_link(pk1.clone(), pk2.clone()).await.unwrap();
             oracle
                 .add_link(
@@ -1207,6 +1207,7 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Send fast message
             let fast = Bytes::from(vec![1u8; 1_000]);
             sender
                 .send(Recipients::One(pk2.clone()), fast.clone(), true)
@@ -1215,20 +1216,18 @@ mod tests {
 
             let start = context.current();
             let (origin1, message1) = receiver.recv().await.unwrap();
-            let first_done = context.current();
-            let (origin2, message2) = receiver.recv().await.unwrap();
-            let second_done = context.current();
-
             assert_eq!(origin1, pk1);
             assert_eq!(message1, slow);
+            let first_elapsed = context.current().duration_since(start).unwrap();
+
+            let (origin2, message2) = receiver.recv().await.unwrap();
+            let second_elapsed = context.current().duration_since(start).unwrap();
             assert_eq!(origin2, pk1);
             assert_eq!(message2, fast);
 
-            let first_elapsed = first_done.duration_since(start).unwrap();
-            let second_elapsed = second_done.duration_since(start).unwrap();
+            let egress_time = Duration::from_secs(1);
             let slow_latency = Duration::from_millis(5_000);
-            let tx_time = Duration::from_secs(1);
-            let expected_first = slow_latency + tx_time;
+            let expected_first = egress_time + slow_latency;
             let tolerance = Duration::from_millis(10);
             assert!(
                 first_elapsed >= expected_first.saturating_sub(tolerance)
@@ -1244,9 +1243,9 @@ mod tests {
                 .checked_sub(first_elapsed)
                 .expect("timestamps ordered");
             assert!(
-                arrival_gap >= tx_time.saturating_sub(tolerance)
-                    && arrival_gap <= tx_time + tolerance,
-                "next arrival deviated from transmit duration (gap = {arrival_gap:?}, expected {tx_time:?} ± {tolerance:?})"
+                arrival_gap >= egress_time.saturating_sub(tolerance)
+                    && arrival_gap <= egress_time + tolerance,
+                "next arrival deviated from transmit duration (gap = {arrival_gap:?}, expected {egress_time:?} ± {tolerance:?})"
             );
         })
     }
