@@ -211,7 +211,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         completions
     }
 
-    /// Records a transmission request.
+    /// Enqueue a message for transmission.
     #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         &mut self,
