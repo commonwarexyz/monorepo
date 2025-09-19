@@ -680,7 +680,7 @@ mod tests {
             recipient.clone(),
             CHANNEL,
             make_bytes(1),
-            Duration::ZERO,
+            Duration::from_secs(1),
             true,
             &mut egress_cap,
             &mut ingress_unlimited,
@@ -695,7 +695,12 @@ mod tests {
         let completions =
             state.recompute_bandwidth(first_finish, &mut egress_cap, &mut ingress_unlimited);
         assert_eq!(completions.len(), 1);
-        assert!(completions[0].deliver);
+        let completion_a = &completions[0];
+        assert!(completion_a.deliver);
+        assert_eq!(
+            completion_a.arrival_complete_at,
+            Some(first_finish + Duration::from_secs(1))
+        );
 
         let completions = state.queue_transmission(
             now,
@@ -714,21 +719,28 @@ mod tests {
             state.start_due_transmissions(now, &mut egress_cap, &mut ingress_unlimited);
         assert!(completions.is_empty());
 
+        let next_ready = state
+            .next_transmission_ready()
+            .expect("second transfer should be scheduled");
+        assert_eq!(next_ready, first_finish + Duration::from_secs(1));
+
         let completions =
-            state.start_due_transmissions(first_finish, &mut egress_cap, &mut ingress_unlimited);
+            state.start_due_transmissions(next_ready, &mut egress_cap, &mut ingress_unlimited);
         assert!(completions.is_empty());
 
         let second_finish = state
             .next_bandwidth_event()
             .expect("second completion scheduled");
-        assert_eq!(second_finish, first_finish + Duration::from_secs(1));
+        assert_eq!(second_finish, next_ready + Duration::from_secs(1));
 
         let completions =
             state.recompute_bandwidth(second_finish, &mut egress_cap, &mut ingress_unlimited);
         assert_eq!(completions.len(), 1);
-        assert!(completions[0].deliver);
-        assert_eq!(completions[0].message.len(), 1_000);
-        assert_eq!(completions[0].message[0], 2);
+        let completion_b = &completions[0];
+        assert!(completion_b.deliver);
+        assert_eq!(completion_b.arrival_complete_at, Some(second_finish));
+        assert_eq!(completion_b.message.len(), 1_000);
+        assert_eq!(completion_b.message[0], 2);
     }
 
     #[test]
