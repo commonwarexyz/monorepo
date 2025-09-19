@@ -1,4 +1,4 @@
-use super::bandwidth::{self, Flow, FlowRate};
+use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -50,14 +50,14 @@ impl<P: PublicKey> Completion<P> {
 }
 
 #[derive(Clone, Debug)]
-struct PendingDelivery {
+struct Completed {
     channel: Channel,
     message: Bytes,
     arrival_complete_at: SystemTime,
 }
 
 #[derive(Clone, Debug)]
-struct QueuedTransmission {
+struct Pending {
     channel: Channel,
     message: Bytes,
     latency: Duration,
@@ -66,13 +66,13 @@ struct QueuedTransmission {
 }
 
 #[derive(Clone, Debug)]
-struct PeerBandwidth {
+struct Bandwidth {
     egress: Option<u128>,
     ingress: Option<u128>,
 }
 
 #[derive(Clone, Debug)]
-struct FlowMeta<P: PublicKey> {
+struct Status<P: PublicKey> {
     origin: P,
     recipient: P,
     latency: Duration,
@@ -81,40 +81,40 @@ struct FlowMeta<P: PublicKey> {
     message: Bytes,
     sequence: Option<u64>,
     remaining: u128,
-    rate: FlowRate,
+    rate: Rate,
     carry: u128,
     last_update: SystemTime,
 }
 
 /// Deterministic scheduler responsible for simulating link bandwidth and delivery ordering.
-pub struct TransmissionState<P: PublicKey + Ord + Clone> {
-    bandwidth_limits: BTreeMap<P, PeerBandwidth>,
+pub struct State<P: PublicKey + Ord + Clone> {
+    bandwidth_limits: BTreeMap<P, Bandwidth>,
     next_flow_id: u64,
     assign_sequences: BTreeMap<(P, P), u64>,
     active_flows: BTreeMap<(P, P), u64>,
-    flow_meta: BTreeMap<u64, FlowMeta<P>>,
-    pending_transmissions: BTreeMap<(P, P), VecDeque<QueuedTransmission>>,
+    all_flows: BTreeMap<u64, Status<P>>,
+    pending_transmissions: BTreeMap<(P, P), VecDeque<Pending>>,
     last_arrival_complete: BTreeMap<(P, P), SystemTime>,
     next_bandwidth_event: Option<SystemTime>,
     next_transmission_ready: Option<SystemTime>,
     expected_sequences: BTreeMap<(P, P), u64>,
-    pending_deliveries: BTreeMap<(P, P), BTreeMap<u64, PendingDelivery>>,
+    completed: BTreeMap<(P, P), BTreeMap<u64, Completed>>,
 }
 
-impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
+impl<P: PublicKey + Ord + Clone> State<P> {
     pub fn new() -> Self {
         Self {
             bandwidth_limits: BTreeMap::new(),
             next_flow_id: 0,
             assign_sequences: BTreeMap::new(),
             active_flows: BTreeMap::new(),
-            flow_meta: BTreeMap::new(),
+            all_flows: BTreeMap::new(),
             pending_transmissions: BTreeMap::new(),
             last_arrival_complete: BTreeMap::new(),
             next_bandwidth_event: None,
             next_transmission_ready: None,
             expected_sequences: BTreeMap::new(),
-            pending_deliveries: BTreeMap::new(),
+            completed: BTreeMap::new(),
         }
     }
 
@@ -122,7 +122,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
     pub fn tune(&mut self, peer: &P, egress: Option<usize>, ingress: Option<usize>) {
         self.bandwidth_limits.insert(
             peer.clone(),
-            PeerBandwidth {
+            Bandwidth {
                 egress: egress.map(|bps| bps as u128),
                 ingress: ingress.map(|bps| bps as u128),
             },
@@ -206,7 +206,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         should_deliver: bool,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
-        let mut entry = QueuedTransmission {
+        let mut entry = Pending {
             channel,
             message,
             latency,
@@ -261,7 +261,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
     fn rebalance(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         let mut completed = Vec::new();
 
-        for (&flow_id, meta) in self.flow_meta.iter_mut() {
+        for (&flow_id, meta) in self.all_flows.iter_mut() {
             // First, account for bytes already in flight since the previous tick.
             if meta.remaining > 0 {
                 let elapsed = now
@@ -285,7 +285,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         completed.dedup();
 
         let mut active: Vec<Flow<P>> = Vec::new();
-        for (&flow_id, meta) in self.flow_meta.iter() {
+        for (&flow_id, meta) in self.all_flows.iter() {
             if meta.remaining == 0 {
                 continue;
             }
@@ -308,12 +308,12 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         let mut earliest: Option<Duration> = None;
 
         for (flow_id, rate) in allocations {
-            if let Some(meta) = self.flow_meta.get_mut(&flow_id) {
+            if let Some(meta) = self.all_flows.get_mut(&flow_id) {
                 meta.rate = rate.clone();
                 meta.carry = 0;
                 meta.last_update = now;
 
-                if matches!(meta.rate, FlowRate::Unlimited) {
+                if matches!(meta.rate, Rate::Unlimited) {
                     if meta.remaining > 0 {
                         meta.remaining = 0;
                         completed.push(flow_id);
@@ -350,11 +350,11 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         let mut outcomes = Vec::new();
 
         for flow_id in completed {
-            let Some(meta) = self.flow_meta.remove(&flow_id) else {
+            let Some(meta) = self.all_flows.remove(&flow_id) else {
                 continue;
             };
 
-            let FlowMeta {
+            let Status {
                 origin,
                 recipient,
                 latency,
@@ -377,7 +377,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
 
             if deliver {
                 if let Some(seq) = sequence {
-                    let pending = PendingDelivery {
+                    let pending = Completed {
                         channel,
                         message,
                         arrival_complete_at,
@@ -414,10 +414,10 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         origin: P,
         recipient: P,
         seq: u64,
-        pending: PendingDelivery,
+        pending: Completed,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
-        self.pending_deliveries
+        self.completed
             .entry(key.clone())
             .or_default()
             .insert(seq, pending);
@@ -430,7 +430,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         let mut delivered = Vec::new();
 
         loop {
-            let pending = match self.pending_deliveries.entry(key.clone()) {
+            let pending = match self.completed.entry(key.clone()) {
                 Entry::Occupied(mut occ) => {
                     if let Some(p) = occ.get_mut().remove(expected_entry) {
                         if occ.get().is_empty() {
@@ -548,10 +548,10 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         origin: P,
         recipient: P,
         flow_id: u64,
-        entry: QueuedTransmission,
+        entry: Pending,
         now: SystemTime,
     ) -> Vec<Completion<P>> {
-        let QueuedTransmission {
+        let Pending {
             channel,
             message,
             latency,
@@ -567,9 +567,9 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             None
         };
 
-        self.flow_meta.insert(
+        self.all_flows.insert(
             flow_id,
-            FlowMeta {
+            Status {
                 origin: origin.clone(),
                 recipient: recipient.clone(),
                 latency,
@@ -578,7 +578,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
                 message,
                 sequence,
                 remaining,
-                rate: FlowRate::Finite(Ratio::zero()),
+                rate: Rate::Finite(Ratio::zero()),
                 carry: 0,
                 last_update: now,
             },
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn queue_immediate_completion_with_unlimited_capacity() {
-        let mut state = TransmissionState::new();
+        let mut state = State::new();
         let now = SystemTime::UNIX_EPOCH;
         let origin = key(1);
         let recipient = key(2);
@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn queue_dropped_message_records_outcome() {
-        let mut state = TransmissionState::new();
+        let mut state = State::new();
         let now = SystemTime::UNIX_EPOCH;
         let origin = key(3);
         let recipient = key(4);
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn fifo_delivery_per_pair() {
-        let mut state = TransmissionState::new();
+        let mut state = State::new();
         let now = SystemTime::UNIX_EPOCH;
         let origin = key(10);
         let recipient = key(11);
@@ -732,7 +732,7 @@ mod tests {
 
     #[test]
     fn staggered_latencies_allow_overlap() {
-        let mut state = TransmissionState::new();
+        let mut state = State::new();
         let start = SystemTime::UNIX_EPOCH;
         let origin = key(21);
         let recipient = key(22);
@@ -811,7 +811,7 @@ mod tests {
 
     #[test]
     fn equal_split_across_destinations() {
-        let mut state = TransmissionState::new();
+        let mut state = State::new();
         let now = SystemTime::UNIX_EPOCH;
         let origin = key(30);
         let recipient_b = key(31);

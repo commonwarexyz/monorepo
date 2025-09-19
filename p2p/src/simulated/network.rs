@@ -76,7 +76,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map of peers blocking each other
     blocks: HashSet<(P, P)>,
 
-    transmissions: transmissions::TransmissionState<P>,
+    transmissions: transmissions::State<P>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -117,7 +117,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 blocks: HashSet::new(),
-                transmissions: transmissions::TransmissionState::new(),
+                transmissions: transmissions::State::new(),
                 received_messages,
                 sent_messages,
             },

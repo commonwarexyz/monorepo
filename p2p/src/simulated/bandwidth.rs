@@ -21,18 +21,18 @@ pub struct Flow<P> {
 }
 
 #[derive(Clone, Debug)]
-pub enum FlowRate {
+pub enum Rate {
     Unlimited,
     Finite(Ratio),
 }
 
-impl FlowRate {}
+impl Rate {}
 
-impl PartialEq for FlowRate {
+impl PartialEq for Rate {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (FlowRate::Unlimited, FlowRate::Unlimited) => true,
-            (FlowRate::Finite(left), FlowRate::Finite(right)) => {
+            (Rate::Unlimited, Rate::Unlimited) => true,
+            (Rate::Finite(left), Rate::Finite(right)) => {
                 left.num == right.num && left.den == right.den
             }
             _ => false,
@@ -40,7 +40,7 @@ impl PartialEq for FlowRate {
     }
 }
 
-impl Eq for FlowRate {}
+impl Eq for Rate {}
 
 #[derive(Debug)]
 struct Resource {
@@ -83,7 +83,7 @@ pub fn allocate<P, E, I>(
     flows: &[Flow<P>],
     mut egress_limit: E,
     mut ingress_limit: I,
-) -> BTreeMap<u64, FlowRate>
+) -> BTreeMap<u64, Rate>
 where
     P: Clone + Ord,
     E: FnMut(&P) -> Option<u128>,
@@ -134,8 +134,8 @@ where
 
     for (idx, flow) in flows.iter().enumerate() {
         let rate = match &rates[idx] {
-            None => FlowRate::Unlimited,
-            Some(ratio) => FlowRate::Finite(ratio.clone()),
+            None => Rate::Unlimited,
+            Some(ratio) => Rate::Finite(ratio.clone()),
         };
         result.insert(flow.id, rate);
     }
@@ -273,10 +273,10 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
     }
 }
 
-pub fn time_to_deplete(rate: &FlowRate, bytes: u128) -> Option<Duration> {
+pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
     match rate {
-        FlowRate::Unlimited => Some(Duration::ZERO),
-        FlowRate::Finite(ratio) => {
+        Rate::Unlimited => Some(Duration::ZERO),
+        Rate::Finite(ratio) => {
             if ratio.is_zero() {
                 if bytes == 0 {
                     Some(Duration::ZERO)
@@ -292,17 +292,17 @@ pub fn time_to_deplete(rate: &FlowRate, bytes: u128) -> Option<Duration> {
     }
 }
 
-pub fn transfer(rate: &FlowRate, elapsed: Duration, carry: &mut u128, remaining: u128) -> u128 {
+pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u128) -> u128 {
     if remaining == 0 {
         return 0;
     }
 
     match rate {
-        FlowRate::Unlimited => {
+        Rate::Unlimited => {
             *carry = 0;
             remaining
         }
-        FlowRate::Finite(ratio) => {
+        Rate::Finite(ratio) => {
             if ratio.is_zero() {
                 return 0;
             }
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(allocations.len(), 2);
 
         for rate in allocations.values() {
-            let FlowRate::Finite(ratio) = rate else {
+            let Rate::Finite(ratio) = rate else {
                 panic!("expected finite rate");
             };
             assert_eq!(ratio.num, 500);
@@ -403,7 +403,7 @@ mod tests {
 
         let allocations = allocate(&flows, unlimited(), constant(2_000));
         let rate = allocations.get(&1).expect("missing flow");
-        let FlowRate::Finite(ratio) = rate else {
+        let Rate::Finite(ratio) = rate else {
             panic!("expected finite rate");
         };
         assert_eq!(ratio.num, 2_000);
@@ -420,14 +420,14 @@ mod tests {
         }];
 
         let allocations = allocate(&flows, unlimited(), unlimited());
-        assert_eq!(allocations[&7], FlowRate::Unlimited);
+        assert_eq!(allocations[&7], Rate::Unlimited);
     }
 
     #[test]
     fn transfer_accumulates_carry() {
         let ratio = Ratio { num: 1, den: 2 }; // 0.5 bytes per second
         let mut carry = 0;
-        let rate = FlowRate::Finite(ratio);
+        let rate = Rate::Finite(ratio);
         let first = transfer(&rate, Duration::from_millis(500), &mut carry, 10);
         assert_eq!(first, 0); // 0.25 bytes rounded down
         assert_ne!(carry, 0);
@@ -439,15 +439,15 @@ mod tests {
     #[test]
     fn completion_time_calculation() {
         let ratio = Ratio::from_int(500);
-        let rate = FlowRate::Finite(ratio);
+        let rate = Rate::Finite(ratio);
         let time = time_to_deplete(&rate, 1_000).expect("finite time");
         assert_eq!(time.as_secs(), 2);
     }
 
-    fn rate_of(map: &BTreeMap<u64, FlowRate>, id: u64) -> Ratio {
+    fn rate_of(map: &BTreeMap<u64, Rate>, id: u64) -> Ratio {
         match map.get(&id).expect("missing flow") {
-            FlowRate::Finite(ratio) => ratio.clone(),
-            FlowRate::Unlimited => panic!("unexpected unlimited rate"),
+            Rate::Finite(ratio) => ratio.clone(),
+            Rate::Unlimited => panic!("unexpected unlimited rate"),
         }
     }
 
