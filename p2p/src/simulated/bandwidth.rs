@@ -12,6 +12,7 @@ use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 pub const NS_PER_SEC: u128 = 1_000_000_000;
 
+/// Minimal description of a simulated transmission path.
 #[derive(Clone, Debug)]
 pub struct Flow<P> {
     pub id: u64,
@@ -20,6 +21,7 @@ pub struct Flow<P> {
     pub requires_ingress: bool,
 }
 
+/// Resulting per-flow throughput expressed as bytes/second.
 #[derive(Clone, Debug)]
 pub enum Rate {
     Unlimited,
@@ -42,6 +44,7 @@ impl PartialEq for Rate {
 
 impl Eq for Rate {}
 
+/// Shared capacity constraint (either egress or ingress) tracked by the planner.
 #[derive(Debug)]
 struct Resource {
     capacity: Ratio,
@@ -57,12 +60,14 @@ impl Resource {
     }
 }
 
+/// Identifier used to deduplicate resource entries across flows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ResourceKey<P> {
     Egress(P),
     Ingress(P),
 }
 
+/// Ensures an entry exists for the given resource, returning its index if limited.
 fn ensure_resource<P: Clone + Ord>(
     key: ResourceKey<P>,
     limit: Option<u128>,
@@ -79,6 +84,7 @@ fn ensure_resource<P: Clone + Ord>(
     Some(idx)
 }
 
+/// Computes a fair allocation for the provided `flows`, returning per-flow rates.
 pub fn allocate<P, E, I>(
     flows: &[Flow<P>],
     mut egress_limit: E,
@@ -148,19 +154,23 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
         return;
     }
 
+    // Track how much capacity each resource still has to hand out.
     let mut remaining: Vec<Ratio> = resources.iter().map(|res| res.capacity.clone()).collect();
 
+    // `unfrozen[idx] == true` means the flow is still participating in the water-filling step.
     let mut unfrozen = vec![false; rates.len()];
     for &idx in active {
         unfrozen[idx] = true;
     }
     let mut active_left = active.len();
 
+    // Continue allocating until every flow is either unlimited or fully constrained.
     while active_left > 0 {
         let mut limiting = Vec::new();
         let mut min_delta: Option<Ratio> = None;
 
         for (res_idx, resource) in resources.iter().enumerate() {
+            // Count how many still-active flows are drawing from this resource.
             let users: u128 = resource
                 .members
                 .iter()
@@ -177,6 +187,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
                 break;
             }
 
+            // Potential additional rate every user could receive before hitting this limit.
             let delta = remaining[res_idx].div_int(users);
             match &min_delta {
                 None => {
@@ -208,6 +219,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
         let delta = min_delta.unwrap();
 
         if delta.is_zero() {
+            // Capacity exhausted: freeze every flow depending on the limiting resources.
             let mut newly_frozen = Vec::new();
             for &res_idx in &limiting {
                 for &flow_idx in &resources[res_idx].members {
@@ -229,6 +241,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
             continue;
         }
 
+        // Otherwise share the incremental `delta` evenly across every unfrozen flow.
         for &idx in active {
             if !unfrozen[idx] {
                 continue;
@@ -254,6 +267,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
                 continue;
             }
             let usage = delta.mul_int(users);
+            // Consume the matching share of resource capacity.
             remaining[res_idx].sub_assign(&usage);
             if remaining[res_idx].is_zero() {
                 for &flow_idx in &resource.members {
@@ -299,6 +313,7 @@ pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u12
 
     match rate {
         Rate::Unlimited => {
+            // No throttling – consume everything immediately.
             *carry = 0;
             remaining
         }
