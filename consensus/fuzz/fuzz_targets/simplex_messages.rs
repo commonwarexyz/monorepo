@@ -42,7 +42,11 @@ use std::{
     time::Duration,
 };
 
-const VALID_PANICS: [&str; 3] = ["invalid payload:", "invalid parent (in payload):", "invalid round (in payload)"];
+const VALID_PANICS: [&str; 3] = [
+    "invalid payload:",
+    "invalid parent (in payload):",
+    "invalid round (in payload)",
+];
 
 static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
 
