@@ -1016,6 +1016,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-broadcast-fuzz"
+version = "0.0.62"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-runtime",
+ "libfuzzer-sys",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "commonware-chat"
 version = "0.0.62"
 dependencies = [

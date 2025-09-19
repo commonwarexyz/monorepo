@@ -64,14 +64,16 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
         let (mut indexer_sender, mut indexer_receiver) = self.indexer.split();
         while let Some(message) = self.mailbox.next().await {
             match message {
-                Message::Genesis { response } => {
-                    // Use the digest of the genesis message as the initial
-                    // payload.
+                Message::Genesis { epoch, response } => {
+                    // Sanity check. We don't support multiple epochs.
+                    assert_eq!(epoch, 0, "epoch must be 0");
+
+                    // Use the digest of the genesis message as the initial payload.
                     self.hasher.update(GENESIS);
                     let digest = self.hasher.finalize();
                     let _ = response.send(digest);
                 }
-                Message::Propose { index, response } => {
+                Message::Propose { round, response } => {
                     // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
                     let block = match self.context.gen_bool(0.5) {
                         true => {
@@ -139,7 +141,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let Outbound::Success(success) = msg else {
                         panic!("unexpected response");
                     };
-                    debug!(view = index, success, "block published");
+                    debug!(?round, success, "block published");
                     if !success {
                         continue;
                     }

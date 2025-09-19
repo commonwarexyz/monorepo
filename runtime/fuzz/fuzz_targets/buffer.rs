@@ -89,7 +89,7 @@ fn fuzz(input: FuzzInput) {
 
         let prefill = (input.seed as usize) & 0x0FFF;
         if prefill > 0 && initial_size == 0 {
-            let initial_data: Vec<u8> = (0..prefill).map(|i| (i as u8)).collect();
+            let initial_data: Vec<u8> = (0..prefill).map(|i| i as u8).collect();
             let _ = blob.write_at(initial_data, 0).await;
         }
 

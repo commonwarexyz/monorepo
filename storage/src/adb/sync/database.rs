@@ -6,7 +6,6 @@ use std::future::Future;
 pub trait Database: Sized {
     type Op;
     type Journal: Journal<Op = Self::Op>;
-    type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
     type Config;
     type Digest: Digest;
     type Context: commonware_runtime::Storage
@@ -26,7 +25,7 @@ pub trait Database: Sized {
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, <Self::Journal as Journal>::Error>>;
+    ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -37,7 +36,7 @@ pub trait Database: Sized {
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, Self::Error>>;
+    ) -> impl Future<Output = Result<Self, crate::adb::Error>>;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
@@ -55,5 +54,5 @@ pub trait Database: Sized {
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, Self::Error>>;
+    ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 }

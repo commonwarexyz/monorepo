@@ -2,6 +2,11 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::Rng;
 use std::collections::HashMap;
 
+#[cfg(test)]
+const N_ITEMS: [usize; 1] = [100_000];
+#[cfg(not(test))]
+const N_ITEMS: [usize; 3] = [100_000, 1_000_000, 10_000_000];
+
 struct MockIndex {
     _section: u64,
     _offset: u32,
@@ -10,7 +15,7 @@ struct MockIndex {
 }
 
 fn benchmark_hashmap_insert(c: &mut Criterion) {
-    for n in [100_000, 1_000_000, 10_000_000] {
+    for n in N_ITEMS {
         for k in [4, 8, 16, 32] {
             c.bench_function(&format!("{}/n={} k={}", module_path!(), n, k), |b| {
                 b.iter_batched(

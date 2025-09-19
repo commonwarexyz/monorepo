@@ -6,7 +6,7 @@ pub trait Journal {
     type Op;
 
     /// The error type returned by the journal
-    type Error: std::error::Error + Send + 'static;
+    type Error: std::error::Error + Send + 'static + Into<crate::adb::Error>;
 
     /// Get the number of operations in the journal
     fn size(&self) -> impl Future<Output = Result<u64, Self::Error>>;

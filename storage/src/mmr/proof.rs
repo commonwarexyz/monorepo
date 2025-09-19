@@ -584,14 +584,20 @@ where
     }
 
     if let Some(ref mut collected_digests) = collected_digests {
-        collected_digests.push((left_pos, left_digest.unwrap()));
-        collected_digests.push((right_pos, right_digest.unwrap()));
+        collected_digests.push((
+            left_pos,
+            left_digest.expect("left_digest guaranteed to be Some after checks above"),
+        ));
+        collected_digests.push((
+            right_pos,
+            right_digest.expect("right_digest guaranteed to be Some after checks above"),
+        ));
     }
 
     Ok(hasher.node_digest(
         range_info.pos,
-        &left_digest.unwrap(),
-        &right_digest.unwrap(),
+        &left_digest.expect("left_digest guaranteed to be Some after checks above"),
+        &right_digest.expect("right_digest guaranteed to be Some after checks above"),
     ))
 }
 

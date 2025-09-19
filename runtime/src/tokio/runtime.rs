@@ -371,6 +371,13 @@ pub struct Context {
     children: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
+impl Context {
+    /// Access the [Metrics] of the runtime.
+    fn metrics(&self) -> &Metrics {
+        &self.executor.metrics
+    }
+}
+
 impl Clone for Context {
     fn clone(&self) -> Self {
         Self {

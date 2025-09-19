@@ -116,14 +116,24 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
     // A compile-time assertion that operation's array size is large enough to handle the commit
     // operation, which requires 9 bytes.
     const _MIN_OPERATION_LEN: usize = 9;
-    const _COMMIT_OP_ASSERT: () = assert!(
-        Self::SIZE >= Self::_MIN_OPERATION_LEN,
-        "array size too small for commit op"
-    );
+
+    /// Asserts that the size of `Self` is greater than the minimum operation size.
+    #[inline(always)]
+    const fn assert_valid_size() {
+        assert!(
+            Self::SIZE >= Self::_MIN_OPERATION_LEN,
+            "array size too small for commit op"
+        );
+    }
 
     /// If this is a [Fixed::Update] or [Fixed::Delete] operation, returns the key.
     /// Otherwise, returns None.
     pub fn key(&self) -> Option<&K> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            Self::assert_valid_size();
+        }
+
         match self {
             Fixed::Delete(key) => Some(key),
             Fixed::Update(key, _) => Some(key),
@@ -134,6 +144,11 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
     /// If this is a [Fixed::Update] operation, returns the value.
     /// Otherwise, returns None.
     pub fn value(&self) -> Option<&V> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            Self::assert_valid_size();
+        }
+
         match self {
             Fixed::Delete(_) => None,
             Fixed::Update(_, value) => Some(value),
@@ -144,6 +159,11 @@ impl<K: Array, V: CodecFixed> Fixed<K, V> {
     /// If this is a [Fixed::Update] operation, returns the value.
     /// Otherwise, returns None.
     pub fn into_value(self) -> Option<V> {
+        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+        const {
+            Self::assert_valid_size();
+        }
+
         match self {
             Fixed::Delete(_) => None,
             Fixed::Update(_, value) => Some(value),

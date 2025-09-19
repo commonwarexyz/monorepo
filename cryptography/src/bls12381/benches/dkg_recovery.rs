@@ -13,9 +13,15 @@ use std::{collections::HashMap, hint::black_box};
 /// Concurrency isn't used in DKG recovery, so we set it to 1.
 const CONCURRENCY: usize = 1;
 
+// Configure contributors based on context
+#[cfg(test)]
+const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
+#[cfg(not(test))]
+const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50, 100, 250, 500];
+
 fn benchmark_dkg_recovery(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
-    for &n in &[5, 10, 20, 50, 100, 250, 500] {
+    for &n in CONTRIBUTORS {
         let t = quorum(n);
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
             b.iter_batched(

@@ -109,6 +109,10 @@ pub trait Runner {
     type Context;
 
     /// Start running a root task.
+    ///
+    /// When this function returns, all spawned tasks will be canceled. If clean
+    /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
+    /// [Spawner::stopped] to coordinate clean shutdown.
     fn start<F, Fut>(self, f: F) -> Fut::Output
     where
         F: FnOnce(Self::Context) -> Fut,
@@ -458,11 +462,13 @@ mod tests {
     use std::{
         collections::HashMap,
         panic::{catch_unwind, AssertUnwindSafe},
+        pin::Pin,
         str::FromStr,
         sync::{
             atomic::{AtomicU32, Ordering},
             Arc, Mutex,
         },
+        task::{Context as TContext, Poll, Waker},
     };
     use tracing::{error, Level};
     use utils::reschedule;
@@ -1152,6 +1158,28 @@ mod tests {
         });
     }
 
+    fn test_unfulfilled_shutdown<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics,
+    {
+        runner.start(|context| async move {
+            // Spawn a task that waits for signal
+            context
+                .with_label("before")
+                .spawn(move |context| async move {
+                    let mut signal = context.stopped();
+                    let value = (&mut signal).await.unwrap();
+
+                    // We should never reach this point
+                    assert_eq!(value, 42);
+                    drop(signal);
+                });
+
+            // Ensure waker is registered
+            reschedule().await;
+        });
+    }
+
     fn test_spawn_ref<R: Runner>(runner: R)
     where
         R::Context: Spawner,
@@ -1538,6 +1566,125 @@ mod tests {
         });
     }
 
+    fn test_circular_reference_prevents_cleanup<R: Runner>(runner: R) {
+        runner.start(|_| async move {
+            // Setup tracked resource
+            let dropper = Arc::new(());
+            let executor = deterministic::Runner::default();
+            executor.start({
+                let dropper = dropper.clone();
+                move |context| async move {
+                    // Create tasks with circular dependencies through channels
+                    let (mut setup_tx, mut setup_rx) = mpsc::unbounded::<()>();
+                    let (mut tx1, mut rx1) = mpsc::unbounded::<()>();
+                    let (mut tx2, mut rx2) = mpsc::unbounded::<()>();
+
+                    // Task 1 holds tx2 and waits on rx1
+                    context.with_label("task1").spawn({
+                        let mut setup_tx = setup_tx.clone();
+                        let dropper = dropper.clone();
+                        move |_| async move {
+                            // Setup deadlock and mark ready
+                            tx2.send(()).await.unwrap();
+                            rx1.next().await.unwrap();
+                            setup_tx.send(()).await.unwrap();
+
+                            // Wait forever
+                            while rx1.next().await.is_some() {}
+                            drop(tx2);
+                            drop(dropper);
+                        }
+                    });
+
+                    // Task 2 holds tx1 and waits on rx2
+                    context.with_label("task2").spawn(move |_| async move {
+                        // Setup deadlock and mark ready
+                        tx1.send(()).await.unwrap();
+                        rx2.next().await.unwrap();
+                        setup_tx.send(()).await.unwrap();
+
+                        // Wait forever
+                        while rx2.next().await.is_some() {}
+                        drop(tx1);
+                        drop(dropper);
+                    });
+
+                    // Wait for tasks to start
+                    setup_rx.next().await.unwrap();
+                    setup_rx.next().await.unwrap();
+                }
+            });
+
+            // After runtime drop, both tasks should be cleaned up
+            Arc::try_unwrap(dropper).expect("references remaining");
+        });
+    }
+
+    fn test_late_waker<R: Runner>(runner: R)
+    where
+        R::Context: Metrics + Spawner,
+    {
+        // A future that captures its waker and sends it to the caller, then
+        // stays pending forever.
+        struct CaptureWaker {
+            tx: Option<oneshot::Sender<Waker>>,
+            sent: bool,
+        }
+        impl Future for CaptureWaker {
+            type Output = ();
+            fn poll(mut self: Pin<&mut Self>, cx: &mut TContext<'_>) -> Poll<Self::Output> {
+                if !self.sent {
+                    if let Some(tx) = self.tx.take() {
+                        // Send a clone of the current task's waker to the root
+                        let _ = tx.send(cx.waker().clone());
+                    }
+                    self.sent = true;
+                }
+                Poll::Pending
+            }
+        }
+
+        // A guard that wakes the captured waker on drop.
+        struct WakeOnDrop(Option<Waker>);
+        impl Drop for WakeOnDrop {
+            fn drop(&mut self) {
+                if let Some(w) = self.0.take() {
+                    w.wake_by_ref();
+                }
+            }
+        }
+
+        // Run the executor to completion
+        let holder = runner.start(|context| async move {
+            // Wire a oneshot to receive the task waker.
+            let (tx, rx) = oneshot::channel::<Waker>();
+
+            // Spawn a task that registers its waker and then stays pending.
+            context
+                .with_label("capture-waker")
+                .spawn(move |_| async move {
+                    CaptureWaker {
+                        tx: Some(tx),
+                        sent: false,
+                    }
+                    .await;
+                });
+
+            // Ensure the spawned task runs and registers its waker.
+            utils::reschedule().await;
+
+            // Receive the waker from the spawned task.
+            let waker = rx.await.expect("waker not received");
+
+            // Return a guard that will wake after the runtime has dropped.
+            WakeOnDrop(Some(waker))
+        });
+
+        // Dropping the guard after the runtime has torn down will trigger a wake on
+        // a task whose executor has been dropped.
+        drop(holder);
+    }
+
     fn test_metrics<R: Runner>(runner: R)
     where
         R::Context: Metrics,
@@ -1698,6 +1845,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_unfulfilled_shutdown() {
+        let executor = deterministic::Runner::default();
+        test_unfulfilled_shutdown(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_ref() {
         let executor = deterministic::Runner::default();
         test_spawn_ref(executor);
@@ -1800,6 +1953,18 @@ mod tests {
             let executor = deterministic::Runner::default();
             test_spawn_blocking_ref_duplicate(executor, dedicated);
         }
+    }
+
+    #[test]
+    fn test_deterministic_circular_reference_prevents_cleanup() {
+        let executor = deterministic::Runner::default();
+        test_circular_reference_prevents_cleanup(executor);
+    }
+
+    #[test]
+    fn test_deterministic_late_waker() {
+        let executor = deterministic::Runner::default();
+        test_late_waker(executor);
     }
 
     #[test]
@@ -1931,6 +2096,12 @@ mod tests {
     }
 
     #[test]
+    fn test_tokio_unfulfilled_shutdown() {
+        let executor = tokio::Runner::default();
+        test_unfulfilled_shutdown(executor);
+    }
+
+    #[test]
     fn test_tokio_spawn_ref() {
         let executor = tokio::Runner::default();
         test_spawn_ref(executor);
@@ -2033,6 +2204,18 @@ mod tests {
             let executor = tokio::Runner::default();
             test_spawn_blocking_ref_duplicate(executor, dedicated);
         }
+    }
+
+    #[test]
+    fn test_tokio_circular_reference_prevents_cleanup() {
+        let executor = tokio::Runner::default();
+        test_circular_reference_prevents_cleanup(executor);
+    }
+
+    #[test]
+    fn test_tokio_late_waker() {
+        let executor = tokio::Runner::default();
+        test_late_waker(executor);
     }
 
     #[test]

@@ -6,6 +6,11 @@ use prometheus_client::registry::Metric;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+const N_ITEMS: [usize; 2] = [10_000, 50_000];
+#[cfg(not(test))]
+const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
+
 #[derive(Clone)]
 struct DummyMetrics;
 
@@ -26,7 +31,7 @@ impl Metrics for DummyMetrics {
 }
 
 fn bench_insert(c: &mut Criterion) {
-    for items in [10_000, 50_000, 100_000, 500_000, 1_000_000] {
+    for items in N_ITEMS {
         let label = format!("{}/items={}", module_path!(), items,);
         c.bench_function(&label, |b| {
             b.iter_custom(move |iters| {

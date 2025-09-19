@@ -1,6 +1,7 @@
 use commonware_consensus::{
-    threshold_simplex::types::{Activity, Context, View},
-    Automaton as Au, Relay as Re, Reporter,
+    threshold_simplex::types::{Activity, Context},
+    types::{Epoch, Round},
+    Automaton as Au, Epochable, Relay as Re, Reporter,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
 use futures::{
@@ -11,10 +12,11 @@ use futures::{
 #[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {
     Genesis {
+        epoch: Epoch,
         response: oneshot::Sender<D>,
     },
     Propose {
-        index: View,
+        round: Round,
         response: oneshot::Sender<D>,
     },
     Verify {
@@ -42,10 +44,10 @@ impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest>;
 
-    async fn genesis(&mut self) -> Self::Digest {
+    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Genesis { response })
+            .send(Message::Genesis { epoch, response })
             .await
             .expect("Failed to send genesis");
         receiver.await.expect("Failed to receive genesis")
@@ -57,7 +59,7 @@ impl<D: Digest> Au for Mailbox<D> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Propose {
-                index: context.view,
+                round: context.round,
                 response,
             })
             .await

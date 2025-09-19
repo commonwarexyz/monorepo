@@ -40,12 +40,18 @@ pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
 
+    #[error("runtime error: {0}")]
+    Runtime(#[from] commonware_runtime::Error),
+
     #[error("operation pruned: {0}")]
     OperationPruned(u64),
 
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
     KeyNotFound,
+
+    #[error("unexpected data at location: {0}")]
+    UnexpectedData(u64),
 }
 
 /// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &

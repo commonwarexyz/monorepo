@@ -17,6 +17,18 @@ pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
+pub mod types;
+
+/// Epochable is a trait that provides access to the epoch number.
+/// Any consensus message or object that is associated with a specific epoch should implement this.
+pub trait Epochable {
+    /// Epoch is the type used to indicate a contiguous sequence of views in which the set of
+    /// validators is constant.
+    type Epoch;
+
+    /// Returns the epoch associated with this object.
+    fn epoch(&self) -> Self::Epoch;
+}
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
@@ -61,13 +73,13 @@ cfg_if::cfg_if! {
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
             /// This often includes things like the proposer, view number, the height, or the epoch.
-            type Context;
+            type Context: Epochable;
 
             /// Hash of an arbitrary payload.
             type Digest: Digest;
 
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self) -> impl Future<Output = Self::Digest> + Send;
+            fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> impl Future<Output = Self::Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///

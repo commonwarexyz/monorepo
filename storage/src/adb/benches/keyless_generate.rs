@@ -77,7 +77,6 @@ type KeylessDb = Keyless<Context, Vec<u8>, Sha256>;
 
 /// Benchmark the generation of a large randomly generated keyless db.
 fn bench_keyless_generate(c: &mut Criterion) {
-    tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
     for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {

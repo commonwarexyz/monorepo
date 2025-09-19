@@ -272,7 +272,7 @@ impl<E: Spawner, R: Receiver> Drop for SubReceiver<E, R> {
 mod tests {
     use super::*;
     use crate::{
-        simulated::{Config as SimConfig, Link, Network, Oracle},
+        simulated::{self, Link, Network, Oracle},
         Recipients,
     };
     use bytes::Bytes;
@@ -294,8 +294,9 @@ mod tests {
     fn start_network(context: deterministic::Context) -> Oracle<Pk> {
         let (network, oracle) = Network::new(
             context.with_label("network"),
-            SimConfig {
+            simulated::Config {
                 max_size: 1024 * 1024,
+                disconnect_on_block: true,
             },
         );
         network.start();

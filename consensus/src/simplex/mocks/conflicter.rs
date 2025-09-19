@@ -1,7 +1,8 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
-    simplex::types::{Finalize, Notarize, Proposal, View, Voter},
+    simplex::types::{Finalize, Notarize, Proposal, Voter},
+    types::View,
     Supervisor, Viewable,
 };
 use commonware_codec::{Decode, Encode};
@@ -65,9 +66,9 @@ impl<
                     continue;
                 }
             };
-            let view = msg.view();
 
             // Process message
+            let view = msg.view();
             match msg {
                 Voter::Notarize(notarize) => {
                     // Get our index
@@ -78,7 +79,8 @@ impl<
 
                     // Notarize random digest
                     let payload = H::Digest::random(&mut self.context);
-                    let proposal = Proposal::new(view, notarize.proposal.parent, payload);
+                    let proposal =
+                        Proposal::new(notarize.proposal.round, notarize.proposal.parent, payload);
                     let msg = Notarize::sign(
                         &self.namespace,
                         &mut self.crypto,
@@ -107,7 +109,8 @@ impl<
 
                     // Finalize random digest
                     let payload = H::Digest::random(&mut self.context);
-                    let proposal = Proposal::new(view, finalize.proposal.parent, payload);
+                    let proposal =
+                        Proposal::new(finalize.proposal.round, finalize.proposal.parent, payload);
                     let msg = Finalize::sign(
                         &self.namespace,
                         &mut self.crypto,

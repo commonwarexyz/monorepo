@@ -1,7 +1,8 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
-    simplex::types::{Finalize, Nullify, View, Voter},
+    simplex::types::{Finalize, Nullify, Voter},
+    types::View,
     Supervisor, Viewable,
 };
 use commonware_codec::{Decode, Encode};
@@ -72,8 +73,12 @@ impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C
                         .unwrap();
 
                     // Nullify
-                    let msg =
-                        Nullify::sign(&self.namespace, &mut self.crypto, public_key_index, view);
+                    let msg = Nullify::sign(
+                        &self.namespace,
+                        &mut self.crypto,
+                        public_key_index,
+                        notarize.proposal.round,
+                    );
                     let msg = Voter::Nullify::<C::Signature, H::Digest>(msg)
                         .encode()
                         .into();

@@ -10,9 +10,15 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::HashMap, hint::black_box};
 
+// Configure contributors based on context
+#[cfg(test)]
+const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
+#[cfg(not(test))]
+const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50, 100, 250, 500];
+
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
-    for &n in &[5, 10, 20, 50, 100, 250, 500] {
+    for &n in CONTRIBUTORS {
         // Perform DKG
         //
         // We do this once outside of the benchmark to reduce the overhead

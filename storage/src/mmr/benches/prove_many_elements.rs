@@ -6,8 +6,13 @@ use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
+#[cfg(test)]
+const N_LEAVES: [usize; 2] = [10_000, 100_000];
+#[cfg(not(test))]
+const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
+
 fn bench_prove_many_elements(c: &mut Criterion) {
-    for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+    for n in N_LEAVES {
         // Populate MMR
         let mut mmr = Mmr::<Sha256>::new();
         let mut positions = Vec::with_capacity(n);

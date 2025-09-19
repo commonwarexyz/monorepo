@@ -1,7 +1,8 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
-    threshold_simplex::types::{Finalize, Notarize, Proposal, View, Voter},
+    threshold_simplex::types::{Finalize, Notarize, Proposal, Voter},
+    types::View,
     ThresholdSupervisor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -28,9 +29,7 @@ pub struct Conflicter<
 > {
     context: E,
     supervisor: S,
-
     namespace: Vec<u8>,
-
     _hasher: PhantomData<H>,
     _variant: PhantomData<V>,
 }
@@ -46,9 +45,7 @@ impl<
         Self {
             context,
             supervisor: cfg.supervisor,
-
             namespace: cfg.namespace,
-
             _hasher: PhantomData,
             _variant: PhantomData,
         }
@@ -77,7 +74,8 @@ impl<
                     let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
                     let payload = H::Digest::random(&mut self.context);
-                    let proposal = Proposal::new(view, notarize.proposal.parent, payload);
+                    let proposal =
+                        Proposal::new(notarize.proposal.round, notarize.proposal.parent, payload);
                     let n = Notarize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
@@ -92,7 +90,8 @@ impl<
                     let view = finalize.view();
                     let share = self.supervisor.share(view).unwrap();
                     let payload = H::Digest::random(&mut self.context);
-                    let proposal = Proposal::new(view, finalize.proposal.parent, payload);
+                    let proposal =
+                        Proposal::new(finalize.proposal.round, finalize.proposal.parent, payload);
                     let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();

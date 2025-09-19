@@ -1,3 +1,5 @@
+//! Simple in-memory broadcast relay for mock applications; not a network.
+
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};

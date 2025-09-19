@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::deterministic;
+use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{index::Index, translator::TwoCap};
 use libfuzzer_sys::fuzz_target;
 
@@ -68,106 +68,108 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let context = deterministic::Context::default();
-    let mut index = Index::init(context.clone(), TwoCap);
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let mut index = Index::init(context.clone(), TwoCap);
 
-    for op in input.operations.iter() {
-        match op {
-            IndexOperation::Insert { key, value } => {
-                index.insert(key, *value);
-            }
+        for op in input.operations.iter() {
+            match op {
+                IndexOperation::Insert { key, value } => {
+                    index.insert(key, *value);
+                }
 
-            IndexOperation::Get { key } => {
-                let _values: Vec<_> = index.get(key).collect();
-            }
+                IndexOperation::Get { key } => {
+                    let _values: Vec<_> = index.get(key).collect();
+                }
 
-            IndexOperation::GetMut { key } => {
-                if let Some(mut cursor) = index.get_mut(key) {
-                    // Iterate through all values
-                    while cursor.next().is_some() {
-                        // Just iterate, don't modify
+                IndexOperation::GetMut { key } => {
+                    if let Some(mut cursor) = index.get_mut(key) {
+                        // Iterate through all values
+                        while cursor.next().is_some() {
+                            // Just iterate, don't modify
+                        }
                     }
                 }
-            }
 
-            IndexOperation::GetMutOrInsert { key, value } => {
-                if let Some(mut cursor) = index.get_mut_or_insert(key, *value) {
-                    // Iterate through existing values
-                    while cursor.next().is_some() {
-                        // Just iterate
+                IndexOperation::GetMutOrInsert { key, value } => {
+                    if let Some(mut cursor) = index.get_mut_or_insert(key, *value) {
+                        // Iterate through existing values
+                        while cursor.next().is_some() {
+                            // Just iterate
+                        }
                     }
                 }
-            }
 
-            IndexOperation::Remove { key } => {
-                index.remove(key);
-            }
-
-            IndexOperation::Prune { key, prune_value } => {
-                index.prune(key, |v| *v == *prune_value);
-            }
-
-            IndexOperation::InsertAndPrune {
-                key,
-                value,
-                prune_value,
-            } => {
-                index.insert_and_prune(key, *value, |v| *v == *prune_value);
-            }
-
-            IndexOperation::Keys => {
-                index.keys();
-            }
-
-            IndexOperation::InsertLargeKey { value } => {
-                // Create a large key to test translator behavior
-                let large_key = vec![0u8; 1000];
-                index.insert(&large_key, *value);
-            }
-
-            IndexOperation::InsertMany { key, count } => {
-                // Insert multiple values for the same key to test collisions
-                for i in 0..*count {
-                    index.insert(key, i as u64);
+                IndexOperation::Remove { key } => {
+                    index.remove(key);
                 }
-            }
 
-            IndexOperation::PruneAll { key } => {
-                // Remove all values for a key
-                index.prune(key, |_| true);
-            }
+                IndexOperation::Prune { key, prune_value } => {
+                    index.prune(key, |v| *v == *prune_value);
+                }
 
-            IndexOperation::CursorIterate { key } => {
-                if let Some(mut cursor) = index.get_mut(key) {
-                    // Iterate through all values
-                    while cursor.next().is_some() {
-                        // Just iterate
+                IndexOperation::InsertAndPrune {
+                    key,
+                    value,
+                    prune_value,
+                } => {
+                    index.insert_and_prune(key, *value, |v| *v == *prune_value);
+                }
+
+                IndexOperation::Keys => {
+                    index.keys();
+                }
+
+                IndexOperation::InsertLargeKey { value } => {
+                    // Create a large key to test translator behavior
+                    let large_key = vec![0u8; 1000];
+                    index.insert(&large_key, *value);
+                }
+
+                IndexOperation::InsertMany { key, count } => {
+                    // Insert multiple values for the same key to test collisions
+                    for i in 0..*count {
+                        index.insert(key, i as u64);
                     }
                 }
-            }
 
-            IndexOperation::CursorUpdate { key, new_value } => {
-                if let Some(mut cursor) = index.get_mut(key) {
-                    if cursor.next().is_some() {
-                        cursor.update(*new_value);
+                IndexOperation::PruneAll { key } => {
+                    // Remove all values for a key
+                    index.prune(key, |_| true);
+                }
+
+                IndexOperation::CursorIterate { key } => {
+                    if let Some(mut cursor) = index.get_mut(key) {
+                        // Iterate through all values
+                        while cursor.next().is_some() {
+                            // Just iterate
+                        }
                     }
                 }
-            }
 
-            IndexOperation::CursorDelete { key } => {
-                if let Some(mut cursor) = index.get_mut(key) {
-                    if cursor.next().is_some() {
-                        cursor.delete();
+                IndexOperation::CursorUpdate { key, new_value } => {
+                    if let Some(mut cursor) = index.get_mut(key) {
+                        if cursor.next().is_some() {
+                            cursor.update(*new_value);
+                        }
                     }
                 }
-            }
 
-            IndexOperation::CursorInsert { key, value } => {
-                // Just use regular insert - simpler and avoids borrow issues
-                index.insert(key, *value);
+                IndexOperation::CursorDelete { key } => {
+                    if let Some(mut cursor) = index.get_mut(key) {
+                        if cursor.next().is_some() {
+                            cursor.delete();
+                        }
+                    }
+                }
+
+                IndexOperation::CursorInsert { key, value } => {
+                    // Just use regular insert - simpler and avoids borrow issues
+                    index.insert(key, *value);
+                }
             }
         }
-    }
+    });
 }
 
 fuzz_target!(|input: FuzzInput| {

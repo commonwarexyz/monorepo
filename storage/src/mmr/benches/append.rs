@@ -4,8 +4,13 @@ use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, SeedableRng};
 
+#[cfg(test)]
+const N_LEAVES: [usize; 2] = [10_000, 100_000];
+#[cfg(not(test))]
+const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
+
 fn bench_append(c: &mut Criterion) {
-    for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+    for n in N_LEAVES {
         // Generate random elements
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);

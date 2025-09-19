@@ -865,9 +865,6 @@ mod tests {
     }
 
     #[test]
-    fn test_arbiter_best() {}
-
-    #[test]
     fn test_duplicate_commitment() {
         // Initialize test
         let n = 5;

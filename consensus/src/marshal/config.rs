@@ -1,29 +1,18 @@
 use crate::Block;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
-use commonware_resolver::p2p::Coordinator;
+use commonware_cryptography::bls12381::primitives::variant::Variant;
 use commonware_runtime::buffer::PoolRef;
-use governor::Quota;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Block> {
-    /// The public key of the validator.
-    pub public_key: P,
-
+pub struct Config<V: Variant, B: Block> {
     /// The identity of the network.
     pub identity: V::Public,
-
-    /// The coordinator for the resolvers.
-    pub coordinator: Z,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
 
     /// Size of backfill request/response mailbox.
     pub mailbox_size: usize,
-
-    /// Backfill rate limit.
-    pub backfill_quota: Quota,
 
     /// Minimum number of views to retain temporary data after the application processes a block.
     ///

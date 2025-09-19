@@ -44,7 +44,9 @@ impl PeakIterator {
             return 0;
         }
 
-        let last_peak = PeakIterator::new(size).last().unwrap();
+        let last_peak = PeakIterator::new(size)
+            .last()
+            .expect("PeakIterator has at least one peak when size > 0");
         last_peak.0 - last_peak.1 as u64
     }
 

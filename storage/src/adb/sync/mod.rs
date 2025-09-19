@@ -7,7 +7,7 @@ pub mod engine;
 pub(crate) use engine::Engine;
 
 mod error;
-pub use error::Error;
+pub use error::{EngineError, Error};
 
 mod gaps;
 mod journal;
@@ -25,9 +25,7 @@ pub use target::Target;
 mod requests;
 
 /// Create/open a database and sync it to a target state
-pub async fn sync<DB, R>(
-    config: Config<DB, R>,
-) -> Result<DB, Error<DB::Error, R::Error, DB::Digest>>
+pub async fn sync<DB, R>(config: Config<DB, R>) -> Result<DB, Error<R::Error, DB::Digest>>
 where
     DB: Database,
     DB::Op: Encode,

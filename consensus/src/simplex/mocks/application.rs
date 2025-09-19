@@ -1,5 +1,9 @@
 use super::relay::Relay;
-use crate::{simplex::types::Context, Automaton as Au, Relay as Re};
+use crate::{
+    simplex::types::Context,
+    types::{Epoch, Round},
+    Automaton as Au, Epochable, Relay as Re,
+};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
@@ -19,6 +23,7 @@ use std::{
 
 pub enum Message<D: Digest> {
     Genesis {
+        epoch: Epoch,
         response: oneshot::Sender<D>,
     },
     Propose {
@@ -50,10 +55,10 @@ impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<D>;
 
-    async fn genesis(&mut self) -> Self::Digest {
+    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Genesis { response })
+            .send(Message::Genesis { epoch, response })
             .await
             .expect("Failed to send genesis");
         receiver.await.expect("Failed to receive genesis")
@@ -171,9 +176,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         panic!("[{:?}] {}", self.participant, msg);
     }
 
-    fn genesis(&mut self) -> H::Digest {
-        let payload = Bytes::from(GENESIS_BYTES);
-        self.hasher.update(&payload);
+    fn genesis(&mut self, epoch: Epoch) -> H::Digest {
+        self.hasher
+            .update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
         let digest = self.hasher.finalize();
         self.verified.insert(digest);
         digest
@@ -191,7 +196,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         // Generate the payload
         let parent = context.parent.1;
         let random = self.context.gen::<u64>(); // Ensures we always have a unique payload
-        let payload = (context.view, parent, random).encode();
+        let payload = (context.round, parent, random).encode();
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
 
@@ -216,12 +221,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Verify contents
-        let (parsed_view, parent, _) =
-            <(u64, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
-        if parsed_view != context.view {
+        let (parsed_round, parent, _) =
+            <(Round, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
+        if parsed_round != context.round {
             self.panic(&format!(
-                "invalid view (in payload): {} != {}",
-                parsed_view, context.view
+                "invalid round (in payload): {} != {}",
+                parsed_round, context.round
             ));
         }
         if parent != context.parent.1 {
@@ -264,8 +269,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         None => break,
                     };
                     match message {
-                        Message::Genesis { response } => {
-                            let digest = self.genesis();
+                        Message::Genesis { epoch, response } => {
+                            let digest = self.genesis(epoch);
                             let _ = response.send(digest);
                         }
                         Message::Propose { context, response } => {
