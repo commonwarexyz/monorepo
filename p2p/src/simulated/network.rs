@@ -209,29 +209,30 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 egress_bps,
                 ingress_bps,
                 result,
-            } => match self.peers.contains_key(&public_key) {
-                true => {
-                    // Set bandwidth limits
-                    let egress_bps = if egress_bps == usize::MAX {
+            } => match self.peers.get_mut(&public_key) {
+                Some(peer) => {
+                    peer.egress_bps = egress_bps;
+                    peer.ingress_bps = ingress_bps;
+                    let egress = if egress_bps == usize::MAX {
                         None
                     } else {
                         Some(egress_bps)
                     };
-                    let ingress_bps = if ingress_bps == usize::MAX {
+                    let ingress = if ingress_bps == usize::MAX {
                         None
                     } else {
                         Some(ingress_bps)
                     };
-                    self.transmissions
-                        .update(&public_key, egress_bps, ingress_bps);
+                    self.transmissions.tune(&public_key, egress, ingress);
 
-                    // Trigger processing (we may need to recompute bandwidth limits)
                     let now = self.context.current();
                     let completions = self.transmissions.process(now);
-                    self.process_completions(completions);
+                    if !completions.is_empty() {
+                        self.process_completions(completions);
+                    }
                     send_result(result, Ok(()));
                 }
-                false => send_result(result, Err(Error::PeerMissing)),
+                None => send_result(result, Err(Error::PeerMissing)),
             },
             ingress::Message::AddLink {
                 sender,

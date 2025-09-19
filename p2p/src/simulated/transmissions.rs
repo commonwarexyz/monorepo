@@ -86,6 +86,7 @@ struct FlowMeta<P: PublicKey> {
     last_update: SystemTime,
 }
 
+/// Deterministic scheduler responsible for simulating link bandwidth and delivery ordering.
 pub struct TransmissionState<P: PublicKey + Ord + Clone> {
     bandwidth_limits: BTreeMap<P, PeerBandwidth>,
     next_flow_id: u64,
@@ -117,7 +118,8 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         }
     }
 
-    pub fn update(&mut self, peer: &P, egress: Option<usize>, ingress: Option<usize>) {
+    /// Records the latest bandwidth limits for `peer` (bytes per second, `None` => unlimited).
+    pub fn tune(&mut self, peer: &P, egress: Option<usize>, ingress: Option<usize>) {
         self.bandwidth_limits.insert(
             peer.clone(),
             PeerBandwidth {
@@ -139,6 +141,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             .and_then(|limits| limits.ingress)
     }
 
+    /// Returns the earliest scheduled event (bandwidth update or send readiness).
     pub fn next(&self) -> Option<SystemTime> {
         match (self.next_bandwidth_event, self.next_transmission_ready) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -148,8 +151,9 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         }
     }
 
+    /// Advances the simulation to `now`, draining any completed transmissions.
     pub fn process(&mut self, now: SystemTime) -> Vec<Completion<P>> {
-        let mut completions = self.start_due_transmissions(now);
+        let mut completions = self.wake(now);
 
         loop {
             let Some(next_event) = self.next() else { break };
@@ -165,7 +169,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
                 .unwrap_or(false)
             {
                 self.next_bandwidth_event = None;
-                let mut outcomes = self.recompute_bandwidth(next_event);
+                let mut outcomes = self.rebalance(next_event);
                 completions.append(&mut outcomes);
                 handled = true;
             }
@@ -176,7 +180,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
                 .unwrap_or(false)
             {
                 self.next_transmission_ready = None;
-                let mut outcomes = self.start_due_transmissions(next_event);
+                let mut outcomes = self.wake(next_event);
                 completions.append(&mut outcomes);
                 handled = true;
             }
@@ -189,6 +193,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         completions
     }
 
+    /// Records a transmission request and guards against head-of-line blocking constraints.
     #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         &mut self,
@@ -211,6 +216,8 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
 
         entry.ready_at = entry.ready_at.max(now);
         if let Some(arrival_complete) = self.last_arrival_complete.get(&key) {
+            // Respect per-link serialization: ensure the new flow cannot arrive before the
+            // previous one has finished propagating.
             if let Some(limit) = arrival_complete.checked_sub(entry.latency) {
                 entry.ready_at = entry.ready_at.max(limit);
             }
@@ -220,10 +227,11 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             .or_default()
             .push_back(entry);
 
-        self.try_start_transmission_for(origin, recipient, true, now)
+        self.launch(origin, recipient, true, now)
     }
 
-    fn start_due_transmissions(&mut self, now: SystemTime) -> Vec<Completion<P>> {
+    /// Awakens any queued transmissions that have become ready to send at `now`.
+    fn wake(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         let ready_pairs: Vec<(P, P)> = self
             .pending_transmissions
             .iter()
@@ -243,16 +251,18 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
 
         let mut completions = Vec::new();
         for (origin, recipient) in ready_pairs {
-            completions.extend(self.try_start_transmission_for(origin, recipient, false, now));
+            completions.extend(self.launch(origin, recipient, false, now));
         }
-        self.refresh_next_transmission_ready(now);
+        self.schedule(now);
         completions
     }
 
-    fn recompute_bandwidth(&mut self, now: SystemTime) -> Vec<Completion<P>> {
+    /// Recomputes bandwidth allocations and collects any flows that finished in the interval.
+    fn rebalance(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         let mut completed = Vec::new();
 
         for (&flow_id, meta) in self.flow_meta.iter_mut() {
+            // First, account for bytes already in flight since the previous tick.
             if meta.remaining > 0 {
                 let elapsed = now
                     .duration_since(meta.last_update)
@@ -289,7 +299,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
 
         if active.is_empty() {
             self.next_bandwidth_event = None;
-            return self.handle_completed_flows(completed, now);
+            return self.finish(completed, now);
         }
 
         let mut egress_limit = |pk: &P| self.egress_limit(pk);
@@ -323,6 +333,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         completed.sort_unstable();
         completed.dedup();
 
+        // Record the next time at which a bandwidth event should fire.
         self.next_bandwidth_event = earliest.and_then(|duration| {
             if duration.is_zero() {
                 Some(now)
@@ -331,14 +342,11 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             }
         });
 
-        self.handle_completed_flows(completed, now)
+        self.finish(completed, now)
     }
 
-    fn handle_completed_flows(
-        &mut self,
-        completed: Vec<u64>,
-        now: SystemTime,
-    ) -> Vec<Completion<P>> {
+    /// Finalises completed flows and opportunistically starts follow-on work.
+    fn finish(&mut self, completed: Vec<u64>, now: SystemTime) -> Vec<Completion<P>> {
         let mut outcomes = Vec::new();
 
         for flow_id in completed {
@@ -374,12 +382,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
                         message,
                         arrival_complete_at,
                     };
-                    outcomes.extend(self.enqueue_delivery(
-                        origin.clone(),
-                        recipient.clone(),
-                        seq,
-                        pending,
-                    ));
+                    outcomes.extend(self.stash(origin.clone(), recipient.clone(), seq, pending));
                 }
             } else {
                 trace!(
@@ -399,13 +402,14 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             self.last_arrival_complete
                 .insert((origin.clone(), recipient.clone()), arrival_complete_at);
 
-            outcomes.extend(self.try_start_transmission_for(origin, recipient, true, now));
+            outcomes.extend(self.launch(origin, recipient, true, now));
         }
 
         outcomes
     }
 
-    fn enqueue_delivery(
+    /// Buffers an arrival until preceding transmissions are released.
+    fn stash(
         &mut self,
         origin: P,
         recipient: P,
@@ -417,10 +421,11 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             .entry(key.clone())
             .or_default()
             .insert(seq, pending);
-        self.flush_delivery_queue(key)
+        self.drain(key)
     }
 
-    fn flush_delivery_queue(&mut self, key: (P, P)) -> Vec<Completion<P>> {
+    /// Emits any pending deliveries for the given pair whose sequence is now in order.
+    fn drain(&mut self, key: (P, P)) -> Vec<Completion<P>> {
         let expected_entry = self.expected_sequences.entry(key.clone()).or_insert(0);
         let mut delivered = Vec::new();
 
@@ -455,7 +460,8 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         delivered
     }
 
-    fn refresh_next_transmission_ready(&mut self, now: SystemTime) {
+    /// Updates `next_transmission_ready` by peeking at each queue head.
+    fn schedule(&mut self, now: SystemTime) {
         let mut next_ready: Option<SystemTime> = None;
         for (key, queue) in self.pending_transmissions.iter() {
             if self.active_flows.contains_key(key) {
@@ -476,7 +482,8 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         self.next_transmission_ready = next_ready;
     }
 
-    fn try_start_transmission_for(
+    /// Attempts to start a new flow for the pair, optionally refreshing scheduling metadata.
+    fn launch(
         &mut self,
         origin: P,
         recipient: P,
@@ -486,7 +493,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         let key = (origin.clone(), recipient.clone());
         if self.active_flows.contains_key(&key) {
             if refresh_schedule {
-                self.refresh_next_transmission_ready(now);
+                self.schedule(now);
             }
             return Vec::new();
         }
@@ -498,6 +505,8 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             if let Some(front) = queue.front_mut() {
                 let mut ready_at = front.ready_at.max(now);
                 if let Some(arrival_complete) = self.last_arrival_complete.get(&key) {
+                    // Enforce per-link serialization: the next hop cannot depart until the
+                    // previous arrival (plus latency) has fully cleared.
                     if let Some(limit) = arrival_complete.checked_sub(front.latency) {
                         ready_at = ready_at.max(limit);
                     }
@@ -523,17 +532,18 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             let flow_id = self.next_flow_id;
             self.next_flow_id += 1;
             self.active_flows.insert(key, flow_id);
-            return self.start_transmission(origin, recipient, flow_id, entry, now);
+            return self.begin(origin, recipient, flow_id, entry, now);
         }
 
         if refresh_schedule {
-            self.refresh_next_transmission_ready(now);
+            self.schedule(now);
         }
 
         Vec::new()
     }
 
-    fn start_transmission(
+    /// Materialises a flow record and triggers a bandwidth rebalance.
+    fn begin(
         &mut self,
         origin: P,
         recipient: P,
@@ -552,7 +562,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         let deliver = should_deliver && origin != recipient;
         let remaining = message.len() as u128;
         let sequence = if deliver {
-            Some(self.next_sequence_id(&origin, &recipient))
+            Some(self.tag(&origin, &recipient))
         } else {
             None
         };
@@ -582,12 +592,13 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
             "sending message",
         );
 
-        let completions = self.recompute_bandwidth(now);
-        self.refresh_next_transmission_ready(now);
+        let completions = self.rebalance(now);
+        self.schedule(now);
         completions
     }
 
-    fn next_sequence_id(&mut self, origin: &P, recipient: &P) -> u64 {
+    /// Returns the next sequence identifier used to preserve FIFO delivery per link.
+    fn tag(&mut self, origin: &P, recipient: &P) -> u64 {
         let key = (origin.clone(), recipient.clone());
         let counter = self.assign_sequences.entry(key).or_insert(0);
         let seq = *counter;
@@ -662,7 +673,7 @@ mod tests {
         let recipient = key(11);
         let make_bytes = |value: u8| Bytes::from(vec![value; 1_000]);
 
-        state.update(&origin, Some(1_000), None);
+        state.tune(&origin, Some(1_000), None);
 
         let completions = state.enqueue(
             now,
@@ -726,7 +737,7 @@ mod tests {
         let origin = key(21);
         let recipient = key(22);
 
-        state.update(&origin, Some(500_000), None); // 500 KB/s
+        state.tune(&origin, Some(500_000), None); // 500 KB/s
 
         let msg_a = Bytes::from(vec![0xAA; 1_000_000]);
         let msg_b = Bytes::from(vec![0xBB; 500_000]);
@@ -806,7 +817,7 @@ mod tests {
         let recipient_b = key(31);
         let recipient_c = key(32);
 
-        state.update(&origin, Some(1_000), None);
+        state.tune(&origin, Some(1_000), None);
 
         let msg_b = Bytes::from(vec![0xBB; 1_000]);
         let msg_c = Bytes::from(vec![0xCC; 1_000]);
