@@ -160,13 +160,19 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(pending_network, recovered_network, resolver_network))
+        self.context.clone().spawn(|context| {
+            self.run(
+                context,
+                pending_network,
+                recovered_network,
+                resolver_network,
+            )
+        })
     }
 
     async fn run(
         self,
+        context: E,
         pending_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -182,25 +188,32 @@ impl<
     ) {
         // Start the batcher
         let (pending_sender, pending_receiver) = pending_network;
-        let mut batcher_task = self
-            .batcher
-            .start(self.voter_mailbox.clone(), pending_receiver);
+        let voter_mailbox = self.voter_mailbox.clone();
+        let mut batcher_task = context
+            .with_label("batcher")
+            .spawn_child(|_| async { self.batcher.run(voter_mailbox, pending_receiver).await });
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_task =
+        let mut resolver_task = context.with_label("resolver").spawn_child(|_| async {
             self.resolver
-                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
+                .run(self.voter_mailbox, resolver_sender, resolver_receiver)
+                .await
+        });
 
         // Start the voter
         let (recovered_sender, recovered_receiver) = recovered_network;
-        let mut voter_task = self.voter.start(
-            self.batcher_mailbox,
-            self.resolver_mailbox,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
-        );
+        let mut voter_task = context.with_label("voter").spawn_child(|_| async {
+            self.voter
+                .run(
+                    self.batcher_mailbox,
+                    self.resolver_mailbox,
+                    pending_sender,
+                    recovered_sender,
+                    recovered_receiver,
+                )
+                .await
+        });
 
         // Wait for the resolver or voter to finish
         select! {
