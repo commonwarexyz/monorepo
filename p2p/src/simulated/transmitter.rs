@@ -178,7 +178,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
     /// Advances the simulation to `now`, draining any completed transmissions.
     pub fn process(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         // Process events until the next event is in the future.
-        let mut completions = Vec::new();
+        let mut completions = self.wake(now);
         while let Some(next_event) = self.next() {
             if next_event > now {
                 break;
@@ -210,9 +210,6 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             // If next returns that something can be handled, we should have handled it.
             assert!(handled, "no event was handled");
         }
-
-        // Wake explicitly at now
-        completions.append(&mut self.wake(now));
 
         completions
     }
