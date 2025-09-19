@@ -249,6 +249,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
     ) -> SystemTime {
         let mut ready_at = stored.unwrap_or(now).max(now);
         if let Some(arrival_complete) = last_arrival_complete {
+            // If there was a previously broadcast message, we need to respect its arrival time.
             if let Some(limit) = arrival_complete.checked_sub(latency) {
                 ready_at = ready_at.max(limit);
             }
