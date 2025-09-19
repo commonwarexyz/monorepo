@@ -533,7 +533,7 @@ mod tests {
             },
             Flow {
                 id: 2,
-                origin: 'B',
+                origin: 'A',
                 recipient: 'C',
                 requires_ingress: true,
             },
@@ -567,6 +567,54 @@ mod tests {
         assert_eq!(rate_ab.num, 1_000);
         assert_eq!(rate_ab.den, 1);
         assert_eq!(rate_bc.num, 500_000);
+        assert_eq!(rate_bc.den, 1);
+    }
+
+    #[test]
+    fn limited_capacity_still_guarantees_fair_share() {
+        let flows = vec![
+            Flow {
+                id: 1,
+                origin: 'A',
+                recipient: 'B',
+                requires_ingress: true,
+            },
+            Flow {
+                id: 2,
+                origin: 'A',
+                recipient: 'C',
+                requires_ingress: true,
+            },
+        ];
+
+        let allocations = allocate(
+            &flows,
+            |origin: &char| match origin {
+                'A' => Some(50_000),
+                'B' => Some(1_000_000),
+                'C' => Some(1_000_000),
+                _ => None,
+            },
+            |recipient: &char| match recipient {
+                'A' => Some(500_000),
+                'B' => Some(1_000),
+                'C' => Some(500_000),
+                _ => None,
+            },
+        );
+
+        let rate_ab = match allocations.get(&1).expect("missing flow 1") {
+            FlowRate::Finite(ratio) => ratio.clone(),
+            FlowRate::Unlimited => panic!("unexpected unlimited"),
+        };
+        let rate_bc = match allocations.get(&2).expect("missing flow 2") {
+            FlowRate::Finite(ratio) => ratio.clone(),
+            FlowRate::Unlimited => panic!("unexpected unlimited"),
+        };
+
+        assert_eq!(rate_ab.num, 1_000);
+        assert_eq!(rate_ab.den, 1);
+        assert_eq!(rate_bc.num, 49_000);
         assert_eq!(rate_bc.den, 1);
     }
 }
