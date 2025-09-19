@@ -287,6 +287,7 @@ mod tests {
             assert!(!store.has(50));
             assert!(!store.has(101));
             assert!(!store.has(499));
+            assert_eq!(store.last_index().unwrap(), 500);
 
             // Sync and verify
             store.sync().await.expect("Failed to sync");

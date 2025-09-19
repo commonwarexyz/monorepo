@@ -404,9 +404,10 @@ impl<
                             let block = self.get_finalized_block(Identifier::Index(height)).await;
                             let _ = response.send(block);
                         }
-                        Message::GetFinalizedHeight { response } => {
-                            let height = self.finalized_height.get();
-                            let _ = response.send(height as u64);
+                        Message::GetFinalized { response } => {
+                            let height = self.finalizations_by_height.last_index().unwrap_or(0);
+                            let finalization = self.finalizations_by_height.get(Identifier::Index(height)).await.unwrap().unwrap();
+                            let _ = response.send((height, finalization.proposal.payload));
                         }
                         Message::GetProcessedHeight { response } => {
                             let height = self.processed_height.get();

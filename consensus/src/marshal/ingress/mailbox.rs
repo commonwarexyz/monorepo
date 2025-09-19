@@ -49,8 +49,8 @@ pub(crate) enum Message<V: Variant, B: Block> {
         height: u64,
         response: oneshot::Sender<Option<B>>,
     },
-    GetFinalizedHeight {
-        response: oneshot::Sender<u64>,
+    GetFinalized {
+        response: oneshot::Sender<(u64, B::Commitment)>,
     },
     GetProcessedHeight {
         response: oneshot::Sender<u64>,
@@ -170,12 +170,12 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         rx
     }
 
-    /// Get the latest finalized height (may not yet have all blocks to this height available yet).
-    pub async fn get_finalized_height(&mut self) -> oneshot::Receiver<u64> {
+    /// Get the latest finalized height and digest (may not yet have all blocks to this height available yet).
+    pub async fn get_finalized(&mut self) -> oneshot::Receiver<(u64, B::Commitment)> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
-            .send(Message::GetFinalizedHeight { response: tx })
+            .send(Message::GetFinalized { response: tx })
             .await
             .is_err()
         {

@@ -304,6 +304,12 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         self.intervals.next_gap(index)
     }
 
+    /// Get the last index in the ordinal.
+    pub fn last_index(&self) -> Option<u64> {
+        let last = self.intervals.iter().last()?;
+        Some(*last.1)
+    }
+
     /// Get up to the next `max` missing items after `start`.
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         self.intervals.missing_items(start, max)
