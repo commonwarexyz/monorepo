@@ -701,4 +701,106 @@ mod tests {
             assert_eq!(received5.height(), 5);
         })
     }
+
+    #[test_traced("WARN")]
+    fn test_mailbox_getters_on_running_actor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(120));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone());
+            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+
+            let mut applications = Vec::new();
+            let mut actors = Vec::new();
+            for (i, secret) in schemes.iter().enumerate() {
+                let (application, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    coordinator.clone(),
+                    secret.clone(),
+                    identity,
+                )
+                .await;
+                applications.push(application);
+                actors.push(actor);
+            }
+
+            let application = applications[0].clone();
+            let mut actor = actors[0].clone();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            setup_network_links(&mut oracle, &peers, link).await;
+
+            let expect_none = actor.get_block_by_height(1).await;
+            assert!(expect_none.await.expect("mailbox closed").is_none());
+
+            let initial_finalized = actor.get_finalized_height().await;
+            assert_eq!(initial_finalized.await.expect("mailbox closed"), 0);
+
+            let initial_processed = actor.get_processed_height().await;
+            assert_eq!(initial_processed.await.expect("mailbox closed"), 0);
+
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
+            let commitment = block.digest();
+
+            actor.verified(1, block.clone()).await;
+
+            let proposal = Proposal {
+                view: 1,
+                parent: 0,
+                payload: commitment,
+            };
+            let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
+            actor.report(Activity::Notarization(notarization)).await;
+
+            let finalization = make_finalization(proposal, &shares, QUORUM);
+            actor.report(Activity::Finalization(finalization)).await;
+
+            let mut attempts = 0;
+            while !application.blocks().contains_key(&1) {
+                attempts += 1;
+                assert!(attempts < 1000, "application did not receive block");
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let mut fetched_block = None;
+            for _ in 0..100 {
+                let rx = actor.get_block_by_height(1).await;
+                if let Some(b) = rx.await.expect("mailbox closed") {
+                    fetched_block = Some(b);
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let fetched_block = fetched_block.expect("expected finalized block");
+            assert_eq!(fetched_block.digest(), block.digest());
+            assert_eq!(fetched_block.height(), block.height());
+
+            let mut finalized_height = 0;
+            for _ in 0..100 {
+                let rx = actor.get_finalized_height().await;
+                finalized_height = rx.await.expect("mailbox closed");
+                if finalized_height == 1 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(finalized_height, 1);
+
+            let mut processed_height = 0;
+            for _ in 0..100 {
+                let rx = actor.get_processed_height().await;
+                processed_height = rx.await.expect("mailbox closed");
+                if processed_height == 1 {
+                    break;
+                }
+            }
+            assert_eq!(processed_height, 1);
+        });
+    }
 }
