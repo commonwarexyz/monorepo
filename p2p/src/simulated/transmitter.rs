@@ -248,6 +248,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
         let completions = self.launch(origin, recipient, now);
         self.schedule(now);
+
         completions
     }
 
@@ -275,6 +276,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             completions.extend(self.launch(origin, recipient, now));
         }
         self.schedule(now);
+
         completions
     }
 
