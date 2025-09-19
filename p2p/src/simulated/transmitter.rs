@@ -94,6 +94,20 @@ struct Status<P: PublicKey> {
 }
 
 /// Deterministic scheduler responsible for simulating link bandwidth and delivery ordering.
+///
+/// Orchestration overview:
+/// - `enqueue` is the public entry point for sending; it records the request, then immediately
+///   calls `launch`, which may start a new flow. When a flow is created, `begin` installs it and
+///   invokes `rebalance` so the bandwidth planner can recompute rates.
+/// - The runtime drives progression with `next`/`process`. `next` reports the earlier of the
+///   next bandwidth event or transmission-ready time. `process(now)` first `wake`s transmissions
+///   whose start time has arrived, then keeps draining events occurring at `now`. Inside this loop
+///   `rebalance` advances active flows and calls `finish` on completions, while another `wake`
+///   handles newly eligible queued work.
+/// - `finish` produces `Completion`s (via `stash` + `drain`) and immediately tries to `launch` the
+///   next queued message for that peer pair, allowing back-to-back transmissions without waiting
+///   for another outer tick. `schedule` keeps track of the earliest queued start time so `next`
+///   always reflects both bandwidth expiries and queue readiness.
 pub struct State<P: PublicKey + Ord + Clone> {
     bandwidth_limits: BTreeMap<P, Bandwidth>,
     next_flow_id: u64,
