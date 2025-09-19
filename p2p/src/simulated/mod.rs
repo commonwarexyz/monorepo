@@ -23,10 +23,9 @@
 //! 1. **Collect Active Flows:** Gather every in-flight transfer that still has
 //!    bytes to send. A flow is bound to one sender and, when the message will be
 //!    delivered, one receiver.
-//! 2. **Solve Water Filling:** Run a max-min water-filling algorithm that raises
-//!    the rate of every active flow in lock-step until some sender's egress or
-//!    receiver's ingress limit saturates. The result is a fair, work-conserving
-//!    rate for each flow.
+//! 2. **Solve Progressive Filling:** Run progressive filling to raise the rate of
+//!    every active flow in lock-step until some sender's egress or receiver's ingress
+//!    limit saturates. The result is a max-min fair, work-conserving rate for each flow.
 //! 3. **Pick the Next Event:** Using those rates, determine which flow will
 //!    finish first by computing how long it needs to transmit its remaining
 //!    bytes.

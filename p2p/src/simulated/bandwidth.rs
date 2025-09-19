@@ -1,10 +1,10 @@
-//! Fair-queue bandwidth planner shared by the simulated network.
+//! Max-min fairness (via progressive filling) bandwidth planner.
 //!
-//! The planner performs a single "water filling" step over the active flows to
+//! The planner performs progressive filling over the active flows to
 //! compute per-flow transmission rates that respect both sender egress limits
-//! and receiver ingress limits. The caller is responsible for advancing flow
-//! progress according to the returned rates and re-running the planner whenever
-//! the active set changes (for example when a message finishes or a new message
+//! and receiver ingress limits (to achieve max-min fairness). The caller is responsible
+//! for advancing flow progress according to the returned rates and invoking the planner
+//! whenever the active set changes (for example when a message finishes or a new message
 //! arrives).
 
 use commonware_utils::math::u128::Ratio;
@@ -87,10 +87,10 @@ fn ensure_resource<P: Clone + Ord>(
 /// Computes a fair allocation for the provided `flows`, returning per-flow rates.
 ///
 /// Each sender/receiver cap is modelled as a shared resource. Every flow registers
-/// with the resources it touches, after which we perform a single water-filling pass:
-/// raise the rate of all unfrozen flows uniformly until a resource is depleted, freeze
-/// flows using that resource, and repeat. This yields a deterministic, starvation-free
-/// assignment that honours both ingress and egress limits.
+/// with the resources it touches, after which we perform progressive filling: raise
+/// the rate of all unfrozen flows uniformly until a resource is depleted, freeze flows
+/// using that resource, and repeat. This yields a deterministic, starvation-free assignment
+/// that honors both ingress and egress limits.
 pub fn allocate<P, E, I>(
     flows: &[Flow<P>],
     mut egress_limit: E,
@@ -155,7 +155,7 @@ where
     result
 }
 
-/// Water-filling loop that distributes capacity among the constrained flows.
+/// Distribute capacity among the constrained flows.
 ///
 /// `active` indexes flows that are limited by some resource. Each iteration identifies the
 /// tightest remaining resource, increases rates for all unfrozen flows by the same delta,
@@ -169,7 +169,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
     // Track how much capacity each resource still has to hand out.
     let mut remaining: Vec<Ratio> = resources.iter().map(|res| res.capacity.clone()).collect();
 
-    // `unfrozen[idx] == true` means the flow is still participating in the water-filling step.
+    // `unfrozen[idx] == true` means the flow is still participating in progressive filling.
     let mut unfrozen = vec![false; rates.len()];
     for &idx in active {
         unfrozen[idx] = true;
