@@ -258,10 +258,16 @@ impl Transcript {
 
 // Utility methods which can be created using the other methods.
 impl Transcript {
+    /// Use a signer to create a signature over this transcript.
+    ///
+    /// Conceptually, this is the same as:
+    /// - signing the operations that have been performed on the transcript,
+    /// - or, equivalently, signing randomness or a summary extracted from the transcript.
     pub fn sign<S: Signer>(&self, s: &S) -> <S as Signer>::Signature {
         s.sign(None, self.summarize().hash.as_bytes())
     }
 
+    /// Verify a signature produced by [Transcript::sign].
     pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
         v.verify(None, self.summarize().hash.as_bytes(), sig)
     }
