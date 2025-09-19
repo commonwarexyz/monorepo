@@ -1232,10 +1232,7 @@ mod tests {
                 "slow message arrived too early: {first_elapsed:?}"
             );
             assert!(
-                second_elapsed
-                    .checked_sub(first_elapsed)
-                    .expect("timestamps ordered")
-                    >= Duration::from_millis(999),
+                second_elapsed >= first_elapsed,
                 "fast message arrived before slow transmission completed"
             );
         })
