@@ -10,6 +10,7 @@
 use commonware_utils::math::u128::Ratio;
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
+/// Number of nanoseconds in a second.
 pub const NS_PER_SEC: u128 = 1_000_000_000;
 
 /// Minimal description of a simulated transmission path.
@@ -22,27 +23,11 @@ pub struct Flow<P> {
 }
 
 /// Resulting per-flow throughput expressed as bytes/second.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Rate {
     Unlimited,
     Finite(Ratio),
 }
-
-impl Rate {}
-
-impl PartialEq for Rate {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Rate::Unlimited, Rate::Unlimited) => true,
-            (Rate::Finite(left), Rate::Finite(right)) => {
-                left.num == right.num && left.den == right.den
-            }
-            _ => false,
-        }
-    }
-}
-
-impl Eq for Rate {}
 
 /// Shared capacity constraint (either egress or ingress) tracked by the planner.
 #[derive(Debug)]

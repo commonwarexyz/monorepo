@@ -1,7 +1,7 @@
 use core::cmp::Ordering;
 
 /// Rational helper that stores rates as `num/den` with `u128` precision.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Ratio {
     pub num: u128,
     pub den: u128,
@@ -21,11 +21,6 @@ impl Ratio {
     /// Returns true if the value is exactly zero.
     pub fn is_zero(&self) -> bool {
         self.num == 0
-    }
-
-    /// Compare two ratios without floating point conversions.
-    pub fn cmp(&self, other: &Self) -> Ordering {
-        (self.num * other.den).cmp(&(other.num * self.den))
     }
 
     /// Add another ratio to this one in place.
@@ -96,6 +91,18 @@ impl Ratio {
         let gcd = gcd(self.num, self.den);
         self.num /= gcd;
         self.den /= gcd;
+    }
+}
+
+impl PartialOrd for Ratio {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Ratio {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.num * other.den).cmp(&(other.num * self.den))
     }
 }
 
