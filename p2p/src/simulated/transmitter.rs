@@ -289,7 +289,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             }
         }
 
-        completed.sort_unstable();
+        completed.sort();
         completed.dedup();
 
         let mut active: Vec<Flow<P>> = Vec::new();
@@ -338,7 +338,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             }
         }
 
-        completed.sort_unstable();
+        completed.sort();
         completed.dedup();
 
         // Record the next time at which a bandwidth event should fire.
