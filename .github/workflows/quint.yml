@@ -6,7 +6,8 @@ on:
   pull_request:
 
 env:
-  QUINT_VERSION: "0.27.0"
+  QUINT_VERSION: "0.28.0"
+  NODE_VERSION: "20.19.5"
 
 permissions:
   contents: read
@@ -20,8 +21,7 @@ jobs:
       - name: Install node
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 20
-          check-latest: true
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install quint
         run: npm i @informalsystems/quint@${{ env.QUINT_VERSION }} -g
       - name: Run test

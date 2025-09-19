@@ -1,4 +1,7 @@
-use crate::threshold_simplex::types::{Notarization, Nullification, View};
+use crate::{
+    threshold_simplex::types::{Notarization, Nullification},
+    types::View,
+};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use futures::{channel::mpsc, SinkExt};
 

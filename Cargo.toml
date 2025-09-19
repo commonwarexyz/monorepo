@@ -23,6 +23,7 @@ members = [
     "examples/vrf",
 
     # Fuzz builds
+    "broadcast/fuzz",
     "codec/fuzz",
     "coding/fuzz",
     "collector/fuzz",

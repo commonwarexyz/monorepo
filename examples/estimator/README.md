@@ -215,14 +215,14 @@ The DSL supports complex conditional logic using AND (`&&`) and OR (`||`) operat
 
 ## Simulating an Alto-Like Network
 
-To simulate the performance of HotStuff, Simplicity, and Minimmit on an [Alto-like Network](https://alto.commonware.xyz), run the following commands:
+To simulate the performance of HotStuff, Simplex, and Minimmit on an [Alto-like Network](https://alto.commonware.xyz), run the following commands:
 
 ```
 # Basic simulation without bandwidth constraints
 cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 hotstuff.lazy
 
 # With realistic bandwidth limits (1 Gbps symmetric)
-cargo run -- --distribution us-west-1:5:125000000,us-east-1:5:125000000,eu-west-1:5:125000000,ap-northeast-1:5:125000000,eu-north-1:5:125000000,ap-south-1:5:125000000,sa-east-1:5:125000000,eu-central-1:5:125000000,ap-northeast-2:5:125000000,ap-southeast-2:5:125000000 simplex_with_sizes.lazy
+cargo run -- --distribution us-west-1:5:125000000,us-east-1:5:125000000,eu-west-1:5:125000000,ap-northeast-1:5:125000000,eu-north-1:5:125000000,ap-south-1:5:125000000,sa-east-1:5:125000000,eu-central-1:5:125000000,ap-northeast-2:5:125000000,ap-southeast-2:5:125000000 simplex.lazy
 
 # With asymmetric bandwidth (varying by region to simulate different network conditions)
 cargo run -- --distribution us-west-1:5:200000000/100000000,us-east-1:5:200000000/100000000,eu-west-1:5:150000000/75000000,ap-northeast-1:5:100000000/50000000 minimmit.lazy
