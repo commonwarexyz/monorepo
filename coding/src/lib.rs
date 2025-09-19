@@ -10,4 +10,34 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use bytes::Buf;
+use rand_core::CryptoRngCore;
+
 pub mod reed_solomon;
+
+pub struct Config {
+    pub minimum_shards: usize,
+    pub extra_shards: usize,
+}
+
+trait Scheme {
+    type Commitment;
+    type Shard;
+    type Proof;
+    type Error;
+
+    fn encode(
+        rng: impl CryptoRngCore,
+        config: Config,
+        data: impl Buf,
+    ) -> (Self::Commitment, Vec<(Self::Shard, Self::Proof)>);
+    fn check(
+        commitment: &Self::Commitment,
+        shard: &Self::Shard,
+        proof: &Self::Proof,
+    ) -> Result<(), Self::Error>;
+    fn decode(
+        commitment: &Self::Commitment,
+        shards: &[Self::Shard],
+    ) -> Result<Vec<u8>, Self::Error>;
+}
