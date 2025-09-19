@@ -226,3 +226,54 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{deterministic, Metrics, Runner, Spawner};
+    use futures::future;
+
+    #[test]
+    fn test_abort_token_immediate_gauge_decrement() {
+        // Constants for the test
+        const LABEL: &str = "abort_token_test";
+        const RUNTIME_LABEL: &str = "runtime_tasks_running{";
+        const LABEL_FORMAT: &str = "name=\"abort_token_test\"";
+        const TASK_FORMAT: &str = "task=\"Future\"";
+
+        // Run the test
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            // Use a label so we can target the metric line precisely
+            let context = context.with_label(LABEL);
+
+            // Spawn a task that never completes
+            let handle = context.clone().spawn(|_| async move {
+                future::pending::<()>().await;
+            });
+
+            // Running gauge should be 1 for this label
+            let before = context.encode();
+            let before_ok = before.lines().any(|line| {
+                line.starts_with(RUNTIME_LABEL)
+                    && line.contains(LABEL_FORMAT)
+                    && line.contains(TASK_FORMAT)
+                    && line.trim_end().ends_with(" 1")
+            });
+            assert!(before_ok, "metrics before abort: {}", before);
+
+            // Abort via AbortToken, which should decrement the gauge immediately
+            let token = handle.abort_token().expect("abort token not present");
+            token.abort();
+
+            // Gauge should now be 0 without requiring an additional poll
+            let after = context.encode();
+            let after_ok = after.lines().any(|line| {
+                line.starts_with(RUNTIME_LABEL)
+                    && line.contains(LABEL_FORMAT)
+                    && line.contains(TASK_FORMAT)
+                    && line.trim_end().ends_with(" 0")
+            });
+            assert!(after_ok, "metrics after abort: {}", after);
+        });
+    }
+}
