@@ -13,10 +13,10 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
+use either::Either;
 use futures::{
     channel::{mpsc, oneshot},
-    future::pending,
-    SinkExt, StreamExt,
+    future, SinkExt, StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
@@ -225,10 +225,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.transmitter.tune(&public_key, egress, ingress);
 
                     let now = self.context.current();
-                    let completions = self.transmitter.process(now);
-                    if !completions.is_empty() {
-                        self.process_completions(completions);
-                    }
+                    let completions = self.transmitter.refresh(now);
+                    self.process_completions(completions);
+
                     send_result(result, Ok(()));
                 }
                 false => send_result(result, Err(Error::PeerMissing)),
@@ -399,21 +398,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     async fn run(mut self) {
         loop {
-            let now = self.context.current();
-            let completions = self.transmitter.process(now);
-            self.process_completions(completions);
-
-            let deadline = self.transmitter.next();
-            let context = self.context.clone();
-            let event_sleep = async move {
-                if let Some(when) = deadline {
-                    context.sleep_until(when).await;
-                    Some(when)
-                } else {
-                    pending::<Option<SystemTime>>().await
-                }
+            let tick = match self.transmitter.next() {
+                Some(when) => Either::Left(self.context.sleep_until(when)),
+                None => Either::Right(future::pending()),
             };
-            futures::pin_mut!(event_sleep);
             select! {
                 message = self.ingress.next() => {
                     // If ingress is closed, exit
@@ -431,11 +419,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     };
                     self.handle_task(task);
                 },
-                tick = &mut event_sleep => {
-                    if let Some(when) = tick {
-                        let completions = self.transmitter.process(when);
-                        self.process_completions(completions);
-                    }
+                _ = tick => {
+                    let now = self.context.current();
+                    let completions = self.transmitter.process(now);
+                    self.process_completions(completions);
                 }
             }
         }

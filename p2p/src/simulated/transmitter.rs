@@ -151,6 +151,15 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         );
     }
 
+    /// Forces an immediate bandwidth rebalance using the most recent limits.
+    pub fn refresh(&mut self, now: SystemTime) -> Vec<Completion<P>> {
+        if self.all_flows.is_empty() {
+            self.schedule(now);
+            return Vec::new();
+        }
+        self.rebalance(now)
+    }
+
     /// Returns the egress bandwidth limit for `peer`.
     fn egress_limit(&self, peer: &P) -> Option<u128> {
         self.bandwidth_limits
@@ -1013,6 +1022,43 @@ mod tests {
         assert!(!state.active_flows.contains_key(&pair));
 
         // Queue drained, no further events expected.
+        assert!(state.next().is_none());
+    }
+
+    #[test]
+    fn refresh_rebalances_active_flow() {
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin = key(50);
+        let recipient = key(51);
+
+        state.tune(&origin, Some(1_000), None); // 1 KB/s egress
+
+        let msg = Bytes::from(vec![0xDD; 1_000]);
+        let completions = state.enqueue(
+            now,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            msg.clone(),
+            Duration::ZERO,
+            true,
+        );
+        assert!(completions.is_empty());
+
+        let finish = state
+            .next()
+            .expect("completion scheduled under limited bandwidth");
+        assert_eq!(finish, now + Duration::from_secs(1));
+
+        state.tune(&origin, None, None); // unlimited egress
+        let completions = state.refresh(now);
+        assert_eq!(completions.len(), 1);
+        let completion = &completions[0];
+        assert!(completion.deliver);
+        assert_eq!(completion.message.len(), msg.len());
+        assert_eq!(completion.arrival_complete_at, Some(now));
+
         assert!(state.next().is_none());
     }
 
