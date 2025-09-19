@@ -94,6 +94,8 @@ pub struct Actor<
     codec_config: B::Cfg,
     // Partition prefix
     partition_prefix: String,
+    // Skip application wait
+    skip_application_wait: bool,
 
     // ---------- State ----------
     // Last view processed
@@ -250,6 +252,7 @@ impl<
                 finalized_height,
                 processed_height,
                 partition_prefix: config.partition_prefix,
+                skip_application_wait: config.skip_application_wait,
             },
             Mailbox::new(sender),
         )
@@ -279,10 +282,18 @@ impl<
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
+        
+        // If skip_application_wait is true, pass None to make finalizer not wait for application
+        let reporter = if self.skip_application_wait {
+            None
+        } else {
+            Some(application)
+        };
+        
         let finalizer = Finalizer::new(
             self.context.with_label("finalizer"),
             format!("{}-finalizer", self.partition_prefix.clone()),
-            application,
+            reporter,
             orchestrator,
             notifier_rx,
         )
