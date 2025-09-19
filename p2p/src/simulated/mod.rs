@@ -1834,30 +1834,17 @@ mod tests {
             //   - Msg 1: tx 0-500ms, delivered at 1500ms
             //   - Msg 2: tx 500-1000ms, delivered at 2000ms
             //   - Msg 3: tx 1000-1500ms, delivered at 2500ms
-
             let start = context.current();
 
             // Send all messages in quick succession
-            let mut handles = Vec::new();
             for i in 0..3 {
                 let mut sender_tx = sender_tx.clone();
                 let receiver = receiver.clone();
                 let msg = Bytes::from(vec![i; 500]);
-                let handle = context.clone().spawn(move |_| async move {
-                    sender_tx
-                        .send(Recipients::One(receiver), msg, false)
-                        .await
-                        .unwrap();
-                });
-                handles.push(handle);
-
-                // Small delay between spawns to ensure ordering
-                context.sleep(Duration::from_millis(1)).await;
-            }
-
-            // Wait for all sends to complete
-            for handle in handles {
-                handle.await.unwrap();
+                sender_tx
+                    .send(Recipients::One(receiver), msg, false)
+                    .await
+                    .unwrap();
             }
 
             // Wait for all receives to complete and record their completion times
