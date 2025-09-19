@@ -387,7 +387,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             let now = self.context.current();
 
-            let completions = self.transmissions.queue_transmission(
+            let completions = self.transmissions.enqueue(
                 now,
                 origin.clone(),
                 recipient.clone(),

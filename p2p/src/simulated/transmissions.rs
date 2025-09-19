@@ -189,7 +189,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         completions
     }
 
-    pub fn queue_transmission(
+    pub fn enqueue(
         &mut self,
         now: SystemTime,
         origin: P,
@@ -615,7 +615,7 @@ mod tests {
         let origin = key(1);
         let recipient = key(2);
 
-        let completions = state.queue_transmission(
+        let completions = state.enqueue(
             now,
             origin,
             recipient,
@@ -638,7 +638,7 @@ mod tests {
         let origin = key(3);
         let recipient = key(4);
 
-        let completions = state.queue_transmission(
+        let completions = state.enqueue(
             now,
             origin,
             recipient,
@@ -663,7 +663,7 @@ mod tests {
 
         state.update_bandwidth(&origin, Some(1_000), None);
 
-        let completions = state.queue_transmission(
+        let completions = state.enqueue(
             now,
             origin.clone(),
             recipient.clone(),
@@ -686,7 +686,7 @@ mod tests {
             Some(first_finish + Duration::from_secs(1))
         );
 
-        let completions = state.queue_transmission(
+        let completions = state.enqueue(
             now,
             origin.clone(),
             recipient.clone(),
@@ -730,7 +730,7 @@ mod tests {
         let msg_a = Bytes::from(vec![0xAA; 1_000_000]);
         let msg_b = Bytes::from(vec![0xBB; 500_000]);
 
-        let completions = state.queue_transmission(
+        let completions = state.enqueue(
             start,
             origin.clone(),
             recipient.clone(),
@@ -741,7 +741,7 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let completions = state.queue_transmission(
+        let completions = state.enqueue(
             start,
             origin.clone(),
             recipient.clone(),
@@ -810,7 +810,7 @@ mod tests {
         let msg_b = Bytes::from(vec![0xBB; 1_000]);
         let msg_c = Bytes::from(vec![0xCC; 1_000]);
 
-        let completions = state.queue_transmission(
+        let completions = state.enqueue(
             now,
             origin.clone(),
             recipient_b.clone(),
@@ -821,7 +821,7 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let completions = state.queue_transmission(
+        let completions = state.enqueue(
             now,
             origin.clone(),
             recipient_c.clone(),
