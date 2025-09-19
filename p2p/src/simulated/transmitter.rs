@@ -67,7 +67,7 @@ struct Queued {
     message: Bytes,
     latency: Duration,
     should_deliver: bool,
-    ready_at: SystemTime,
+    ready_at: Option<SystemTime>,
 }
 
 /// Bandwidth limits for a peer (bytes per second, `None` => unlimited).
@@ -224,22 +224,14 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         should_deliver: bool,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
-        let mut entry = Queued {
+        let entry = Queued {
             channel,
             message,
             latency,
             should_deliver,
-            ready_at: now,
+            ready_at: None,
         };
 
-        entry.ready_at = entry.ready_at.max(now);
-        if let Some(arrival_complete) = self.last_arrival_complete.get(&key) {
-            // Respect per-link serialization: ensure the new flow cannot arrive before the
-            // previous one has finished propagating.
-            if let Some(limit) = arrival_complete.checked_sub(entry.latency) {
-                entry.ready_at = entry.ready_at.max(limit);
-            }
-        }
         self.queued.entry(key.clone()).or_default().push_back(entry);
 
         let completions = self.launch(origin, recipient, now);
@@ -248,24 +240,58 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         completions
     }
 
+    fn compute_ready_at(
+        stored: Option<SystemTime>,
+        now: SystemTime,
+        last_arrival_complete: Option<SystemTime>,
+        latency: Duration,
+    ) -> SystemTime {
+        let mut ready_at = stored.unwrap_or(now).max(now);
+        if let Some(arrival_complete) = last_arrival_complete {
+            if let Some(limit) = arrival_complete.checked_sub(latency) {
+                ready_at = ready_at.max(limit);
+            }
+        }
+        ready_at
+    }
+
+    fn refresh_front_ready_at(
+        queue: &mut VecDeque<Queued>,
+        now: SystemTime,
+        last_arrival_complete: Option<SystemTime>,
+    ) -> Option<SystemTime> {
+        let front = queue.front_mut()?;
+        let stored = front.ready_at;
+        let ready_at = Self::compute_ready_at(stored, now, last_arrival_complete, front.latency);
+        if ready_at <= now {
+            front.ready_at = None;
+        } else {
+            front.ready_at = Some(ready_at);
+        }
+        Some(ready_at)
+    }
+
     /// Awakens any queued transmissions that have become ready to send at `now`.
     fn wake(&mut self, now: SystemTime) -> Vec<Completion<P>> {
-        let ready_pairs: Vec<(P, P)> = self
-            .queued
-            .iter()
-            .filter_map(|(key, queue)| {
-                if self.active_flows.contains_key(key) {
-                    return None;
+        let queued_keys: Vec<(P, P)> = self.queued.keys().cloned().collect();
+        let mut ready_pairs = Vec::new();
+
+        for key in queued_keys {
+            if self.active_flows.contains_key(&key) {
+                continue;
+            }
+
+            let last_arrival = self.last_arrival_complete.get(&key).cloned();
+            let Some(queue) = self.queued.get_mut(&key) else {
+                continue;
+            };
+
+            if let Some(ready_at) = Self::refresh_front_ready_at(queue, now, last_arrival) {
+                if ready_at <= now {
+                    ready_pairs.push(key.clone());
                 }
-                queue.front().and_then(|entry| {
-                    if entry.ready_at <= now {
-                        Some(key.clone())
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
+            }
+        }
 
         let mut completions = Vec::new();
         for (origin, recipient) in ready_pairs {
@@ -481,23 +507,28 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
     /// Updates `next_transmission_ready` by peeking at each queue head.
     fn schedule(&mut self, now: SystemTime) {
+        let queued_keys: Vec<(P, P)> = self.queued.keys().cloned().collect();
         let mut next_ready: Option<SystemTime> = None;
-        for (key, queue) in self.queued.iter() {
-            if self.active_flows.contains_key(key) {
+
+        for key in queued_keys {
+            if self.active_flows.contains_key(&key) {
                 continue;
             }
-            if let Some(entry) = queue.front() {
-                let candidate = if entry.ready_at <= now {
-                    now
-                } else {
-                    entry.ready_at
-                };
+
+            let last_arrival = self.last_arrival_complete.get(&key).cloned();
+            let Some(queue) = self.queued.get_mut(&key) else {
+                continue;
+            };
+
+            if let Some(ready_at) = Self::refresh_front_ready_at(queue, now, last_arrival) {
+                let candidate = if ready_at <= now { now } else { ready_at };
                 next_ready = match next_ready {
                     None => Some(candidate),
                     Some(current) => Some(current.min(candidate)),
                 };
             }
         }
+
         self.next_transmission_ready = next_ready;
     }
 
@@ -512,25 +543,18 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         let mut remove_queue = false;
 
         if let Some(queue) = self.queued.get_mut(&key) {
-            if let Some(front) = queue.front_mut() {
-                let mut ready_at = front.ready_at.max(now);
-                if let Some(arrival_complete) = self.last_arrival_complete.get(&key) {
-                    // Enforce per-link serialization: the next hop cannot depart until the
-                    // previous arrival (plus latency) has fully cleared.
-                    if let Some(limit) = arrival_complete.checked_sub(front.latency) {
-                        ready_at = ready_at.max(limit);
-                    }
-                }
-                if ready_at <= now {
+            let last_arrival = self.last_arrival_complete.get(&key).cloned();
+            match Self::refresh_front_ready_at(queue, now, last_arrival) {
+                Some(ready_at) if ready_at <= now => {
                     entry_to_start = queue.pop_front();
                     if queue.is_empty() {
                         remove_queue = true;
                     }
-                } else {
-                    front.ready_at = ready_at;
                 }
-            } else {
-                remove_queue = true;
+                Some(_) => {}
+                None => {
+                    remove_queue = true;
+                }
             }
         }
 
@@ -813,6 +837,179 @@ mod tests {
             completion_b.arrival_complete_at,
             Some(start + Duration::from_millis(3500))
         );
+    }
+
+    #[test]
+    fn wake_schedule_launch_coordinate_serialization() {
+        let mut state = State::new();
+        let start = SystemTime::UNIX_EPOCH;
+        let origin = key(40);
+        let recipient = key(41);
+
+        // Restrict egress so flows take measurable time to complete.
+        state.tune(&origin, Some(1_000_000), None); // 1 MB/s
+
+        let msg_a = Bytes::from(vec![0xAA; 3_000_000]);
+        let msg_b = Bytes::from(vec![0xBB; 1_000_000]);
+        let msg_c = Bytes::from(vec![0xCC; 1_000_000]);
+
+        let completions = state.enqueue(
+            start,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            msg_a.clone(),
+            Duration::from_secs(10),
+            true,
+        );
+        assert!(completions.is_empty());
+
+        let completions = state.enqueue(
+            start,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            msg_b.clone(),
+            Duration::from_secs(8),
+            true,
+        );
+        assert!(completions.is_empty());
+
+        let completions = state.enqueue(
+            start,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            msg_c.clone(),
+            Duration::from_secs(2),
+            true,
+        );
+        assert!(completions.is_empty());
+
+        let pair = (origin.clone(), recipient.clone());
+
+        // The second and third messages remain in the queue without readiness timestamps yet.
+        {
+            let queued = state
+                .queued
+                .get(&pair)
+                .expect("messages remain queued while first in flight");
+            assert_eq!(queued.len(), 2);
+            assert!(queued
+                .front()
+                .expect("front queued entry")
+                .ready_at
+                .is_none());
+            assert!(queued
+                .get(1)
+                .expect("second queued entry")
+                .ready_at
+                .is_none());
+        }
+        assert!(state.active_flows.contains_key(&pair));
+
+        // First send completes after transmitting the payload (3 seconds at 1 MB/s).
+        let first_finish = state.next().expect("first completion scheduled");
+        assert_eq!(first_finish, start + Duration::from_secs(3));
+
+        let completions = state.process(first_finish);
+        assert_eq!(completions.len(), 1);
+        let completion_a = &completions[0];
+        assert!(completion_a.deliver);
+        assert_eq!(completion_a.message.len(), msg_a.len());
+
+        // Flow is idle, but the next launch is postponed until the prior arrival clears.
+        assert!(!state.active_flows.contains_key(&pair));
+        {
+            let queued = state
+                .queued
+                .get(&pair)
+                .expect("second message still queued after first finishes");
+            assert_eq!(queued.len(), 2);
+            let ready_at = queued
+                .front()
+                .expect("front queued entry present")
+                .ready_at
+                .expect("ready_at populated once head inspected");
+            assert_eq!(ready_at, start + Duration::from_secs(5));
+            assert!(queued
+                .get(1)
+                .expect("third message queued")
+                .ready_at
+                .is_none());
+        }
+
+        // schedule() should advertise the next wake-up using the refreshed ready_at.
+        assert_eq!(
+            state.next().expect("next transmission readiness scheduled"),
+            start + Duration::from_secs(5)
+        );
+
+        // Advancing exactly to ready_at wakes the queue and triggers launch of the second flow.
+        let wake_outputs = state.process(start + Duration::from_secs(5));
+        assert!(wake_outputs.is_empty());
+        assert!(state.active_flows.contains_key(&pair));
+        {
+            let queued = state
+                .queued
+                .get(&pair)
+                .expect("third message remains queued while second active");
+            assert_eq!(queued.len(), 1);
+            assert!(queued
+                .front()
+                .expect("third queued entry")
+                .ready_at
+                .is_none());
+        }
+
+        // The second send now proceeds and completes one second later.
+        let second_finish = state.next().expect("second completion scheduled");
+        assert_eq!(second_finish, start + Duration::from_secs(6));
+
+        let completions = state.process(second_finish);
+        assert_eq!(completions.len(), 1);
+        let completion_b = &completions[0];
+        assert!(completion_b.deliver);
+        assert_eq!(completion_b.message.len(), msg_b.len());
+        assert!(!state.active_flows.contains_key(&pair));
+
+        // Third message now becomes the head and receives a future ready_at.
+        let third_ready = {
+            let queued = state
+                .queued
+                .get(&pair)
+                .expect("third message queued after second completion");
+            assert_eq!(queued.len(), 1);
+            queued
+                .front()
+                .expect("third queued entry present")
+                .ready_at
+                .expect("third ready_at populated")
+        };
+        assert_eq!(third_ready, start + Duration::from_secs(12));
+
+        // schedule() should surface the third ready time.
+        assert_eq!(state.next().expect("third ready scheduled"), third_ready);
+
+        // Advance to third ready to wake and launch it.
+        let wake_outputs = state.process(third_ready);
+        assert!(wake_outputs.is_empty());
+        assert!(state.active_flows.contains_key(&pair));
+        assert!(state.queued.get(&pair).is_none());
+
+        // Third completes one second later.
+        let third_finish = state.next().expect("third completion scheduled");
+        assert_eq!(third_finish, start + Duration::from_secs(13));
+
+        let completions = state.process(third_finish);
+        assert_eq!(completions.len(), 1);
+        let completion_c = &completions[0];
+        assert!(completion_c.deliver);
+        assert_eq!(completion_c.message.len(), msg_c.len());
+        assert!(!state.active_flows.contains_key(&pair));
+
+        // Queue drained, no further events expected.
+        assert!(state.next().is_none());
     }
 
     #[test]
