@@ -57,6 +57,7 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 
 /// First handshake message sent by the dialer.
 /// Contains dialer's ephemeral key and timestamp signature.
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Syn<S> {
     time_ms: i64,
     epk: EphemeralPublicKey,
@@ -94,6 +95,7 @@ impl<S: Read> Read for Syn<S> {
 
 /// Second handshake message sent by the listener.
 /// Contains listener's ephemeral key, signature, and confirmation tag.
+#[cfg_attr(test, derive(PartialEq))]
 pub struct SynAck<S> {
     time_ms: i64,
     epk: EphemeralPublicKey,
@@ -137,6 +139,7 @@ impl<S: Read> Read for SynAck<S> {
 
 /// Third handshake message sent by the dialer.
 /// Contains dialer's confirmation tag to complete the handshake.
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Ack {
     confirmation: Summary,
 }
@@ -357,8 +360,13 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 mod test {
     use super::*;
     use crate::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+    use commonware_codec::{Codec, DecodeExt};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+
+    fn test_encode_roundtrip<T: Codec<Cfg = ()> + PartialEq>(value: &T) {
+        assert!(value == &<T as DecodeExt<_>>::decode(value.encode()).unwrap());
+    }
 
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
@@ -375,6 +383,7 @@ mod test {
                 peer_identity: listener_crypto.public_key(),
             },
         );
+        test_encode_roundtrip(&msg1);
         let (l_state, msg2) = listen_start(
             &mut rng,
             Context {
@@ -385,7 +394,9 @@ mod test {
             },
             msg1,
         )?;
+        test_encode_roundtrip(&msg2);
         let (msg3, mut d_send, mut d_recv) = dial_end(d_state, msg2)?;
+        test_encode_roundtrip(&msg3);
         let (mut l_send, mut l_recv) = listen_end(l_state, msg3)?;
 
         let m1: &'static [u8] = b"message 1";

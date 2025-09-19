@@ -15,6 +15,7 @@ impl AsRef<[u8]> for SharedSecret {
 }
 
 /// An ephemeral X25519 public key used during handshake.
+#[cfg_attr(test, derive(PartialEq))]
 pub struct EphemeralPublicKey {
     inner: x25519_dalek::PublicKey,
 }
