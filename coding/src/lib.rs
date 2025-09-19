@@ -16,27 +16,29 @@ use rand_core::CryptoRngCore;
 pub mod reed_solomon;
 
 pub struct Config {
-    pub minimum_shards: usize,
-    pub extra_shards: usize,
+    pub minimum_shards: u16,
+    pub extra_shards: u16,
 }
 
-trait Scheme {
+pub trait Scheme {
     type Commitment;
-    type Shard;
+    type Shard: Clone;
     type Proof;
     type Error;
 
+    #[allow(clippy::type_complexity)]
     fn encode(
         rng: impl CryptoRngCore,
-        config: Config,
+        config: &Config,
         data: impl Buf,
-    ) -> (Self::Commitment, Vec<(Self::Shard, Self::Proof)>);
+    ) -> Result<(Self::Commitment, Vec<(Self::Shard, Self::Proof)>), Self::Error>;
     fn check(
         commitment: &Self::Commitment,
         shard: &Self::Shard,
         proof: &Self::Proof,
     ) -> Result<(), Self::Error>;
     fn decode(
+        config: &Config,
         commitment: &Self::Commitment,
         shards: &[Self::Shard],
     ) -> Result<Vec<u8>, Self::Error>;
