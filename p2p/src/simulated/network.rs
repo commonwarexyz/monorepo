@@ -403,6 +403,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 None => Either::Right(future::pending()),
             };
             select! {
+                _ = tick => {
+                    let now = self.context.current();
+                    let completions = self.transmitter.process(now);
+                    self.process_completions(completions);
+                },
                 message = self.ingress.next() => {
                     // If ingress is closed, exit
                     let message = match message {
@@ -419,11 +424,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     };
                     self.handle_task(task);
                 },
-                _ = tick => {
-                    let now = self.context.current();
-                    let completions = self.transmitter.process(now);
-                    self.process_completions(completions);
-                }
             }
         }
     }
