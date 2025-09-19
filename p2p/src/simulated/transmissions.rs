@@ -117,13 +117,14 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         }
     }
 
-    pub fn update_bandwidth(&mut self, peer: &P, egress: Option<u128>, ingress: Option<u128>) {
-        if egress.is_none() && ingress.is_none() {
-            self.bandwidth_limits.remove(peer);
-        } else {
-            self.bandwidth_limits
-                .insert(peer.clone(), PeerBandwidth { egress, ingress });
-        }
+    pub fn update_bandwidth(&mut self, peer: &P, egress: Option<usize>, ingress: Option<usize>) {
+        self.bandwidth_limits.insert(
+            peer.clone(),
+            PeerBandwidth {
+                egress: egress.map(|bps| bps as u128),
+                ingress: ingress.map(|bps| bps as u128),
+            },
+        );
     }
 
     fn egress_limit(&self, peer: &P) -> Option<u128> {
@@ -660,7 +661,7 @@ mod tests {
         let recipient = key(11);
         let make_bytes = |value: u8| Bytes::from(vec![value; 1_000]);
 
-        state.update_bandwidth(&origin, Some(1_000u128), None);
+        state.update_bandwidth(&origin, Some(1_000), None);
 
         let completions = state.queue_transmission(
             now,
@@ -724,7 +725,7 @@ mod tests {
         let origin = key(21);
         let recipient = key(22);
 
-        state.update_bandwidth(&origin, Some(500_000u128), None); // 500 KB/s
+        state.update_bandwidth(&origin, Some(500_000), None); // 500 KB/s
 
         let msg_a = Bytes::from(vec![0xAA; 1_000_000]);
         let msg_b = Bytes::from(vec![0xBB; 500_000]);
@@ -804,7 +805,7 @@ mod tests {
         let recipient_b = key(31);
         let recipient_c = key(32);
 
-        state.update_bandwidth(&origin, Some(1_000u128), None);
+        state.update_bandwidth(&origin, Some(1_000), None);
 
         let msg_b = Bytes::from(vec![0xBB; 1_000]);
         let msg_c = Bytes::from(vec![0xCC; 1_000]);

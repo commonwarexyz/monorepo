@@ -209,21 +209,29 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 egress_bps,
                 ingress_bps,
                 result,
-            } => match self.peers.get_mut(&public_key) {
-                Some(peer) => {
-                    peer.set_bandwidth(egress_bps, ingress_bps);
-                    let egress = peer.egress_limit();
-                    let ingress = peer.ingress_limit();
+            } => match self.peers.contains_key(&public_key) {
+                true => {
+                    // Set bandwidth limits
+                    let egress_bps = if egress_bps == usize::MAX {
+                        None
+                    } else {
+                        Some(egress_bps)
+                    };
+                    let ingress_bps = if ingress_bps == usize::MAX {
+                        None
+                    } else {
+                        Some(ingress_bps)
+                    };
                     self.transmissions
-                        .update_bandwidth(&public_key, egress, ingress);
+                        .update_bandwidth(&public_key, egress_bps, ingress_bps);
+
+                    // Trigger processing (we may need to recompute bandwidth limits)
                     let now = self.context.current();
                     let completions = self.transmissions.process(now);
-                    if !completions.is_empty() {
-                        self.process_completions(completions);
-                    }
+                    self.process_completions(completions);
                     send_result(result, Ok(()));
                 }
-                None => send_result(result, Err(Error::PeerMissing)),
+                false => send_result(result, Err(Error::PeerMissing)),
             },
             ingress::Message::AddLink {
                 sender,
@@ -388,10 +396,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 latency,
                 should_deliver,
             );
-
-            if !completions.is_empty() {
-                self.process_completions(completions);
-            }
+            self.process_completions(completions);
 
             sent.push(recipient);
         }
@@ -413,9 +418,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         loop {
             let now = self.context.current();
             let completions = self.transmissions.process(now);
-            if !completions.is_empty() {
-                self.process_completions(completions);
-            }
+            self.process_completions(completions);
 
             let deadline = self.transmissions.next();
             let context = self.context.clone();
@@ -448,9 +451,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 tick = &mut event_sleep => {
                     if let Some(when) = tick {
                         let completions = self.transmissions.process(when);
-                        if !completions.is_empty() {
-                            self.process_completions(completions);
-                        }
+                        self.process_completions(completions);
                     }
                 }
             }
@@ -719,32 +720,6 @@ impl<P: PublicKey> Peer<P> {
             .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)?
-    }
-
-    /// Set bandwidth limits for the peer.
-    ///
-    /// Bandwidth is specified for the peer's egress (upload) and ingress
-    /// (download) rates in bytes per second. Use `usize::MAX` for effectively
-    /// unlimited bandwidth.
-    fn set_bandwidth(&mut self, egress_bps: usize, ingress_bps: usize) {
-        self.egress_bps = egress_bps;
-        self.ingress_bps = ingress_bps;
-    }
-
-    fn egress_limit(&self) -> Option<u128> {
-        if self.egress_bps == usize::MAX {
-            None
-        } else {
-            Some(self.egress_bps as u128)
-        }
-    }
-
-    fn ingress_limit(&self) -> Option<u128> {
-        if self.ingress_bps == usize::MAX {
-            None
-        } else {
-            Some(self.ingress_bps as u128)
-        }
     }
 }
 
