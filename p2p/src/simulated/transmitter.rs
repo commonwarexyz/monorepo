@@ -240,6 +240,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         completions
     }
 
+    /// Computes the time at which the message can start being sent.
     fn compute_ready_at(
         stored: Option<SystemTime>,
         now: SystemTime,
@@ -255,6 +256,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         ready_at
     }
 
+    /// Refresh the time at which the front of the queue can be sent.
     fn refresh_front_ready_at(
         queue: &mut VecDeque<Queued>,
         now: SystemTime,
@@ -995,7 +997,7 @@ mod tests {
         let wake_outputs = state.process(third_ready);
         assert!(wake_outputs.is_empty());
         assert!(state.active_flows.contains_key(&pair));
-        assert!(state.queued.get(&pair).is_none());
+        assert!(!state.queued.contains_key(&pair));
 
         // Third completes one second later.
         let third_finish = state.next().expect("third completion scheduled");
