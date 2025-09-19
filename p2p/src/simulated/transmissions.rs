@@ -2,7 +2,7 @@ use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::math::u128::Ratio;
+use commonware_utils::Ratio;
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
     time::{Duration, SystemTime},

@@ -1,6 +1,9 @@
 use core::cmp::Ordering;
 
 /// Rational helper that stores rates as `num/den` with `u128` precision.
+///
+/// This is a deterministic alternative to floating point numbers that is useful for
+/// representing rates and other fractional quantities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Ratio {
     pub num: u128,
@@ -107,7 +110,7 @@ impl Ord for Ratio {
 }
 
 /// Greatest common divisor using Euclid's algorithm.
-pub fn gcd(mut a: u128, mut b: u128) -> u128 {
+fn gcd(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
         let tmp = b;
         b = a % b;
@@ -117,7 +120,7 @@ pub fn gcd(mut a: u128, mut b: u128) -> u128 {
 }
 
 /// Least common multiple.
-pub fn lcm(a: u128, b: u128) -> u128 {
+fn lcm(a: u128, b: u128) -> u128 {
     if a == 0 || b == 0 {
         return 0;
     }

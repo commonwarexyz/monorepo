@@ -7,7 +7,7 @@
 //! whenever the active set changes (for example when a message finishes or a new message
 //! arrives).
 
-use commonware_utils::math::u128::Ratio;
+use commonware_utils::Ratio;
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 /// Number of nanoseconds in a second.
