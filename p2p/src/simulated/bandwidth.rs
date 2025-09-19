@@ -344,6 +344,8 @@ pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u12
                 return remaining;
             }
             let numerator = ratio.num.saturating_mul(delta_ns);
+            // Any remainder from the integer division is stored in `carry` so the next tick can
+            // honour fractional bytes-per-nanosecond that would otherwise be rounded away.
             let total = numerator.saturating_add(*carry);
             let bytes = total / denom;
             *carry = total % denom;
