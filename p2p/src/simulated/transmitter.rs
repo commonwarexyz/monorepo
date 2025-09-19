@@ -141,7 +141,14 @@ impl<P: PublicKey + Ord + Clone> State<P> {
     }
 
     /// Records the latest bandwidth limits for `peer`.
-    pub fn tune(&mut self, peer: &P, egress: Option<usize>, ingress: Option<usize>) {
+    pub fn tune(
+        &mut self,
+        now: SystemTime,
+        peer: &P,
+        egress: Option<usize>,
+        ingress: Option<usize>,
+    ) -> Vec<Completion<P>> {
+        // Update bandwidth limits
         self.bandwidth_limits.insert(
             peer.clone(),
             Bandwidth {
@@ -149,10 +156,8 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 ingress: ingress.map(|bps| bps as u128),
             },
         );
-    }
 
-    /// Forces an immediate bandwidth rebalance using the most recent limits.
-    pub fn refresh(&mut self, now: SystemTime) -> Vec<Completion<P>> {
+        // Attempt to rebalance flows
         if self.all_flows.is_empty() {
             self.schedule(now);
             return Vec::new();
@@ -721,7 +726,8 @@ mod tests {
         let recipient = key(11);
         let make_bytes = |value: u8| Bytes::from(vec![value; 1_000]);
 
-        state.tune(&origin, Some(1_000), None);
+        let completions = state.tune(now, &origin, Some(1_000), None);
+        assert!(completions.is_empty());
 
         let completions = state.enqueue(
             now,
@@ -785,7 +791,8 @@ mod tests {
         let origin = key(21);
         let recipient = key(22);
 
-        state.tune(&origin, Some(500_000), None); // 500 KB/s
+        let completions = state.tune(start, &origin, Some(500_000), None); // 500 KB/s
+        assert!(completions.is_empty());
 
         let msg_a = Bytes::from(vec![0xAA; 1_000_000]);
         let msg_b = Bytes::from(vec![0xBB; 500_000]);
@@ -865,7 +872,8 @@ mod tests {
         let recipient = key(41);
 
         // Restrict egress so flows take measurable time to complete.
-        state.tune(&origin, Some(1_000_000), None); // 1 MB/s
+        let completions = state.tune(start, &origin, Some(1_000_000), None); // 1 MB/s
+        assert!(completions.is_empty());
 
         let msg_a = Bytes::from(vec![0xAA; 3_000_000]);
         let msg_b = Bytes::from(vec![0xBB; 1_000_000]);
@@ -1037,7 +1045,8 @@ mod tests {
         let origin = key(50);
         let recipient = key(51);
 
-        state.tune(&origin, Some(1_000), None); // 1 KB/s egress
+        let completions = state.tune(now, &origin, Some(1_000), None); // 1 KB/s egress
+        assert!(completions.is_empty());
 
         let msg = Bytes::from(vec![0xDD; 1_000]);
         let completions = state.enqueue(
@@ -1056,8 +1065,7 @@ mod tests {
             .expect("completion scheduled under limited bandwidth");
         assert_eq!(finish, now + Duration::from_secs(1));
 
-        state.tune(&origin, None, None); // unlimited egress
-        let completions = state.refresh(now);
+        let completions = state.tune(now, &origin, None, None); // unlimited egress
         assert_eq!(completions.len(), 1);
         let completion = &completions[0];
         assert!(completion.deliver);
@@ -1075,7 +1083,8 @@ mod tests {
         let recipient_b = key(31);
         let recipient_c = key(32);
 
-        state.tune(&origin, Some(1_000), None);
+        let completions = state.tune(now, &origin, Some(1_000), None);
+        assert!(completions.is_empty());
 
         let msg_b = Bytes::from(vec![0xBB; 1_000]);
         let msg_c = Bytes::from(vec![0xCC; 1_000]);

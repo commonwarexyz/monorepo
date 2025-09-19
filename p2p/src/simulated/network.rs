@@ -210,6 +210,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 result,
             } => match self.peers.contains_key(&public_key) {
                 true => {
+                    // Parse bandwidth limits
                     assert!(egress_bps > 0, "egress bandwidth must be greater than 0");
                     assert!(ingress_bps > 0, "ingress bandwidth must be greater than 0");
                     let egress = if egress_bps == usize::MAX {
@@ -222,12 +223,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     } else {
                         Some(ingress_bps)
                     };
-                    self.transmitter.tune(&public_key, egress, ingress);
 
+                    // Update bandwidth limits
                     let now = self.context.current();
-                    let completions = self.transmitter.refresh(now);
+                    let completions = self.transmitter.tune(now, &public_key, egress, ingress);
                     self.process_completions(completions);
 
+                    // Alert application of update
                     send_result(result, Ok(()));
                 }
                 false => send_result(result, Err(Error::PeerMissing)),
