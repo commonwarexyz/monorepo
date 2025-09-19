@@ -14,6 +14,32 @@ use std::{
 };
 use tracing::error;
 
+/// A wrapper around `AbortHandle` that also decrements the running gauge exactly once.
+#[derive(Clone)]
+pub(crate) struct AbortToken {
+    inner: AbortHandle,
+    running: Gauge,
+    once: Arc<Once>,
+}
+
+impl AbortToken {
+    pub(crate) fn new(inner: AbortHandle, running: Gauge, once: Arc<Once>) -> Self {
+        Self {
+            inner,
+            running,
+            once,
+        }
+    }
+
+    /// Abort the associated task and decrement the running gauge immediately.
+    pub(crate) fn abort(&self) {
+        self.inner.abort();
+        self.once.call_once(|| {
+            self.running.dec();
+        });
+    }
+}
+
 /// Handle to a spawned task.
 pub struct Handle<T>
 where
@@ -34,7 +60,7 @@ where
         f: F,
         running: Gauge,
         catch_panic: bool,
-        children: Arc<Mutex<Vec<AbortHandle>>>,
+        children: Arc<Mutex<Vec<AbortToken>>>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -162,9 +188,11 @@ where
         });
     }
 
-    /// Returns an [AbortHandle] that can be used to abort the task.
-    pub(crate) fn abort_token(&self) -> Option<AbortHandle> {
-        self.aborter.clone()
+    /// Returns an [AbortToken] that can be used to abort the task.
+    pub(crate) fn abort_token(&self) -> Option<AbortToken> {
+        self.aborter
+            .clone()
+            .map(|inner| AbortToken::new(inner, self.running.clone(), self.once.clone()))
     }
 }
 
@@ -233,8 +261,8 @@ mod tests {
             });
             assert!(before_ok, "metrics before abort: {}", before);
 
-            // Abort via AbortHandle, which should decrement the gauge immediately
-            let token = handle.abort_token().expect("abort handle not present");
+            // Abort via AbortToken, which should decrement the gauge immediately
+            let token = handle.abort_token().expect("abort token not present");
             token.abort();
 
             // Gauge should now be 0 without requiring an additional poll
