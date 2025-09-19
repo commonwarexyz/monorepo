@@ -322,7 +322,8 @@ mod tests {
     #[test]
     fn test_unit() {
         let x = ();
-        assert_eq!(<()>::decode(x.encode()).unwrap(), x)
+        // Not using an equality check, since that will always pass.
+        assert!(<()>::decode(x.encode()).is_ok());
     }
 
     #[test]
