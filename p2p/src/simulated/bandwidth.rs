@@ -444,6 +444,13 @@ mod tests {
         assert_eq!(time.as_secs(), 2);
     }
 
+    fn rate_of(map: &BTreeMap<u64, FlowRate>, id: u64) -> Ratio {
+        match map.get(&id).expect("missing flow") {
+            FlowRate::Finite(ratio) => ratio.clone(),
+            FlowRate::Unlimited => panic!("unexpected unlimited rate"),
+        }
+    }
+
     #[test]
     fn three_peer_fair_sharing() {
         let flows = vec![
@@ -495,31 +502,25 @@ mod tests {
             },
         );
 
-        fn rate_of(map: &BTreeMap<u64, FlowRate>, id: u64) -> Ratio {
-            match map.get(&id).expect("missing flow") {
-                FlowRate::Finite(ratio) => ratio.clone(),
-                FlowRate::Unlimited => panic!("unexpected unlimited rate"),
-            }
-        }
+        let rate_ab1 = rate_of(&allocations, 1);
+        assert_eq!(rate_ab1.num, 250_000);
+        assert_eq!(rate_ab1.den, 3);
 
-        let rate_a1 = rate_of(&allocations, 1);
-        let rate_a2 = rate_of(&allocations, 2);
-        let rate_c_b = rate_of(&allocations, 5);
+        let rate_ab2 = rate_of(&allocations, 2);
+        assert_eq!(rate_ab2.num, 250_000);
+        assert_eq!(rate_ab2.den, 3);
 
-        assert_eq!(rate_a1.num, 250_000);
-        assert_eq!(rate_a1.den, 3);
-        assert_eq!(rate_a2.num, 250_000);
-        assert_eq!(rate_a2.den, 3);
-        assert_eq!(rate_c_b.num, 250_000);
-        assert_eq!(rate_c_b.den, 3);
+        let rate_ac = rate_of(&allocations, 4);
+        assert_eq!(rate_ac.num, 500_000);
+        assert_eq!(rate_ac.den, 1);
 
-        let rate_b_c = rate_of(&allocations, 3);
-        assert_eq!(rate_b_c.num, 500_000);
-        assert_eq!(rate_b_c.den, 1);
+        let rate_bc = rate_of(&allocations, 3);
+        assert_eq!(rate_bc.num, 500_000);
+        assert_eq!(rate_bc.den, 1);
 
-        let rate_a_c = rate_of(&allocations, 4);
-        assert_eq!(rate_a_c.num, 500_000);
-        assert_eq!(rate_a_c.den, 1);
+        let rate_cb = rate_of(&allocations, 5);
+        assert_eq!(rate_cb.num, 250_000);
+        assert_eq!(rate_cb.den, 3);
     }
 
     #[test]
@@ -555,17 +556,11 @@ mod tests {
             },
         );
 
-        let rate_ab = match allocations.get(&1).expect("missing flow 1") {
-            FlowRate::Finite(ratio) => ratio.clone(),
-            FlowRate::Unlimited => panic!("unexpected unlimited"),
-        };
-        let rate_bc = match allocations.get(&2).expect("missing flow 2") {
-            FlowRate::Finite(ratio) => ratio.clone(),
-            FlowRate::Unlimited => panic!("unexpected unlimited"),
-        };
-
+        let rate_ab = rate_of(&allocations, 1);
         assert_eq!(rate_ab.num, 1_000);
         assert_eq!(rate_ab.den, 1);
+
+        let rate_bc = rate_of(&allocations, 2);
         assert_eq!(rate_bc.num, 500_000);
         assert_eq!(rate_bc.den, 1);
     }
@@ -603,17 +598,11 @@ mod tests {
             },
         );
 
-        let rate_ab = match allocations.get(&1).expect("missing flow 1") {
-            FlowRate::Finite(ratio) => ratio.clone(),
-            FlowRate::Unlimited => panic!("unexpected unlimited"),
-        };
-        let rate_bc = match allocations.get(&2).expect("missing flow 2") {
-            FlowRate::Finite(ratio) => ratio.clone(),
-            FlowRate::Unlimited => panic!("unexpected unlimited"),
-        };
-
+        let rate_ab = rate_of(&allocations, 1);
         assert_eq!(rate_ab.num, 1_000);
         assert_eq!(rate_ab.den, 1);
+
+        let rate_bc = rate_of(&allocations, 2);
         assert_eq!(rate_bc.num, 49_000);
         assert_eq!(rate_bc.den, 1);
     }
