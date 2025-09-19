@@ -261,6 +261,11 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
             }
         }
 
+        // Charge each resource for the extra `delta` assigned to its active members. When a
+        // resource is fully consumed, we freeze all flows that depend on it so future rounds
+        // no longer consider them when distributing remaining capacity. Freezing is safe even if
+        // only one resource is depleted: that constraint alone prevents the flow from ever
+        // increasing its rate beyond the current allocation.
         let mut newly_frozen = Vec::new();
         for (res_idx, resource) in resources.iter().enumerate() {
             let users: u128 = resource
@@ -282,6 +287,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
             }
         }
 
+        // Remove newly frozen flows from the active set so subsequent iterations ignore them.
         for idx in newly_frozen {
             if unfrozen[idx] {
                 unfrozen[idx] = false;
