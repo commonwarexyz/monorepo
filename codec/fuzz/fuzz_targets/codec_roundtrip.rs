@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use bytes::Bytes;
 use commonware_codec::{
     varint::{SInt, UInt},
-    Decode, DecodeExt, DecodeRangeExt, Encode, EncodeSize, RangeCfg, Read, Write,
+    Decode, DecodeExt, DecodeRangeExt, Encode, EncodeSize, Error, RangeCfg, Read, Write,
 };
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -14,7 +14,8 @@ use std::{
 };
 
 const MAX_INPUT_SIZE: usize = 10000;
-const MAX_COLLECTION_SIZE: usize = 1000;
+const MIN_COLLECTION_SIZE: usize = 0;
+const MAX_COLLECTION_SIZE: usize = 10000;
 
 fn roundtrip_socket(socket: SocketAddr) {
     let encoded = socket.encode();
@@ -38,9 +39,23 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
     let input_len = input_data_bytes.len();
     let encoded_bytes = input_data_bytes.encode();
 
+    // Decode with too long length
+    assert!(matches!(
+        Bytes::decode_cfg(encoded_bytes.clone(), &(0..input_len).into()),
+        Err(Error::InvalidLength(_))
+    ));
+
+    // Decode with too short length
+    assert!(matches!(
+        Bytes::decode_cfg(encoded_bytes.clone(), &(input_len + 1..).into()),
+        Err(Error::InvalidLength(_))
+    ));
+
+    // Decode with full length
     let decoded_bytes = Bytes::decode_cfg(encoded_bytes, &(input_len..=input_len).into())
         .expect("Failed to decode bytes!");
 
+    // Check matching
     assert_eq!(input_data_bytes, decoded_bytes);
 }
 
@@ -96,6 +111,18 @@ where
     let encoded_vec = vec.encode();
     assert_eq!(encoded_vec.len(), vec.encode_size());
 
+    // Decode with too long length
+    assert!(matches!(
+        Vec::<T>::decode_cfg(encoded_vec.clone(), &((0..input_len).into(), ())),
+        Err(Error::InvalidLength(_))
+    ));
+
+    // Decode with too short length
+    assert!(matches!(
+        Vec::<T>::decode_cfg(encoded_vec.clone(), &((input_len + 1..).into(), ())),
+        Err(Error::InvalidLength(_))
+    ));
+
     let decoded = Vec::<T>::decode_cfg(encoded_vec, &((input_len..=input_len).into(), ()))
         .expect("Failed to decode Vec<T>!");
 
@@ -118,6 +145,7 @@ enum FuzzOperation {
     DecodeRawData {
         data: Vec<u8>,
         target: DecodeTarget,
+        min_size: u16,
         max_size: u16,
     },
 }
@@ -170,8 +198,7 @@ enum DecodeTarget {
     HashSetU32,
 
     // Bytes
-    BytesSmall,
-    BytesLarge,
+    Bytes,
 
     // Tuples
     Tuple2U32U64,
@@ -200,13 +227,14 @@ enum DecodeTarget {
     BTreeMapU8U8,
 }
 
-fn fuzz_decode_raw(data: &[u8], target: DecodeTarget, max_size: u16) {
+fn fuzz_decode_raw(data: &[u8], target: DecodeTarget, min_size: u16, max_size: u16) {
     if data.len() > MAX_INPUT_SIZE {
         return;
     }
 
-    let max_size = (max_size as usize).min(MAX_COLLECTION_SIZE);
-    let range_cfg: RangeCfg = (0..=max_size).into();
+    let min_size = (min_size as usize).clamp(MIN_COLLECTION_SIZE, MAX_COLLECTION_SIZE);
+    let max_size = (max_size as usize).clamp(MIN_COLLECTION_SIZE, MAX_COLLECTION_SIZE);
+    let range_cfg: RangeCfg = (min_size..=max_size).into();
 
     match target {
         // Primitives
@@ -282,11 +310,7 @@ fn fuzz_decode_raw(data: &[u8], target: DecodeTarget, max_size: u16) {
         }
 
         // Bytes
-        DecodeTarget::BytesSmall => {
-            let small_range: RangeCfg = (0..=100).into();
-            let _ = Bytes::decode_cfg(data, &small_range);
-        }
-        DecodeTarget::BytesLarge => {
+        DecodeTarget::Bytes => {
             let _ = Bytes::decode_cfg(data, &range_cfg);
         }
 
@@ -383,9 +407,10 @@ fn fuzz(operation: FuzzOperation) {
         FuzzOperation::DecodeRawData {
             data,
             target,
+            min_size,
             max_size,
         } => {
-            fuzz_decode_raw(&data, target, max_size);
+            fuzz_decode_raw(&data, target, min_size, max_size);
         }
     }
 }
