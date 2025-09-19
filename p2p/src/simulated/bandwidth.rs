@@ -146,13 +146,14 @@ where
     result
 }
 
-/// Distribute capacity among the constrained flows.
+/// Distribute capacity among constrained flows.
 ///
 /// `active` indexes flows that are limited by some resource. Each iteration identifies the
 /// tightest remaining resource, increases rates for all unfrozen flows by the same delta,
 /// and freezes any flow that now sits on a saturated resource. When no constrained flows
 /// remain, `rates` captures the final allocation (with `None` meaning unlimited).
 fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<Ratio>]) {
+    // If there are no active flows, there is nothing to allocate.
     if active.is_empty() {
         return;
     }
@@ -165,13 +166,13 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
     for &idx in active {
         unfrozen[idx] = true;
     }
-    let mut active_left = active.len();
 
     // Continue allocating until every flow is either unlimited or fully constrained.
+    let mut active_left = active.len();
     while active_left > 0 {
+        // Find the resource with the smallest remaining capacity.
         let mut limiting = Vec::new();
         let mut min_delta: Option<Ratio> = None;
-
         for (res_idx, resource) in resources.iter().enumerate() {
             // Count how many still-active flows are drawing from this resource.
             let users: u128 = resource
@@ -183,6 +184,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
                 continue;
             }
 
+            // If the resource is exhausted, freeze all flows depending on it.
             if remaining[res_idx].is_zero() {
                 limiting.clear();
                 limiting.push(res_idx);
@@ -210,6 +212,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
             }
         }
 
+        // If there is no resource with a remaining capacity, freeze all flows.
         if min_delta.is_none() {
             for &idx in active {
                 if unfrozen[idx] {
@@ -219,10 +222,9 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
             break;
         }
 
+        // Freeze flows depending on the resource with the smallest remaining capacity (if exhausted).
         let delta = min_delta.unwrap();
-
         if delta.is_zero() {
-            // Capacity exhausted: freeze every flow depending on the limiting resources.
             let mut newly_frozen = Vec::new();
             for &res_idx in &limiting {
                 for &flow_idx in &resources[res_idx].members {
@@ -244,7 +246,7 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
             continue;
         }
 
-        // Otherwise share the incremental `delta` evenly across every unfrozen flow.
+        // If the resource has a remaining capacity, distribute it evenly among the unfrozen flows.
         for &idx in active {
             if !unfrozen[idx] {
                 continue;
@@ -270,7 +272,6 @@ fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<R
                 continue;
             }
             let usage = delta.mul_int(users);
-            // Consume the matching share of resource capacity.
             remaining[res_idx].sub_assign(&usage);
             if remaining[res_idx].is_zero() {
                 for &flow_idx in &resource.members {
