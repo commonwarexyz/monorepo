@@ -512,9 +512,11 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
     /// Updates `next_transmission_ready` by peeking at each queue head.
     fn schedule(&mut self, now: SystemTime) {
+        // Collect all queued keys
         let queued_keys: Vec<(P, P)> = self.queued.keys().cloned().collect();
-        let mut next_ready: Option<SystemTime> = None;
 
+        // Check the ready_at values for each queued item
+        let mut next_ready: Option<SystemTime> = None;
         for key in queued_keys {
             if self.active_flows.contains_key(&key) {
                 continue;
