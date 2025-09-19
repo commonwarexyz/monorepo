@@ -213,14 +213,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 Some(peer) => {
                     peer.set_bandwidth(egress_bps, ingress_bps);
                     let now = self.context.current();
-                    let peers = &self.peers;
-                    let mut egress_limit = |pk: &P| peers.get(pk).and_then(|p| p.egress_limit());
-                    let mut ingress_limit = |pk: &P| peers.get(pk).and_then(|p| p.ingress_limit());
-                    let completions = self.transmissions.recompute_bandwidth(
-                        now,
-                        &mut egress_limit,
-                        &mut ingress_limit,
-                    );
+                    let completions = {
+                        let peers = &self.peers;
+                        let mut egress_limit = |pk: &P| {
+                            peers.get(pk).and_then(|p| p.egress_limit())
+                        };
+                        let mut ingress_limit = |pk: &P| {
+                            peers.get(pk).and_then(|p| p.ingress_limit())
+                        };
+                        self.transmissions
+                            .process(now, &mut egress_limit, &mut ingress_limit)
+                    };
                     if !completions.is_empty() {
                         self.process_completions(completions);
                     }
@@ -420,27 +423,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     async fn run(mut self) {
         loop {
             let now = self.context.current();
-            let peers = &self.peers;
-            let mut egress_limit = |pk: &P| peers.get(pk).and_then(|peer| peer.egress_limit());
-            let mut ingress_limit = |pk: &P| peers.get(pk).and_then(|peer| peer.ingress_limit());
-            let completions = self.transmissions.start_due_transmissions(
-                now,
-                &mut egress_limit,
-                &mut ingress_limit,
-            );
+            let completions = {
+                let peers = &self.peers;
+                let mut egress_limit = |pk: &P| peers.get(pk).and_then(|peer| peer.egress_limit());
+                let mut ingress_limit = |pk: &P| peers.get(pk).and_then(|peer| peer.ingress_limit());
+                self.transmissions
+                    .process(now, &mut egress_limit, &mut ingress_limit)
+            };
             if !completions.is_empty() {
                 self.process_completions(completions);
             }
 
-            let deadline = match (
-                self.transmissions.next_bandwidth_event(),
-                self.transmissions.next_transmission_ready(),
-            ) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            let deadline = self.transmissions.next();
             let context = self.context.clone();
             let event_sleep = async move {
                 if let Some(when) = deadline {
@@ -470,13 +464,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 },
                 tick = &mut event_sleep => {
                     if let Some(when) = tick {
-                        if self
-                            .transmissions
-                            .next_bandwidth_event()
-                            .map(|event| event <= when)
-                            .unwrap_or(false)
-                        {
-                            self.transmissions.clear_next_bandwidth_event();
+                        let completions = {
                             let peers = &self.peers;
                             let mut egress_limit = |pk: &P| {
                                 peers.get(pk).and_then(|peer| peer.egress_limit())
@@ -484,38 +472,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                             let mut ingress_limit = |pk: &P| {
                                 peers.get(pk).and_then(|peer| peer.ingress_limit())
                             };
-                            let completions = self.transmissions.recompute_bandwidth(
-                                when,
-                                &mut egress_limit,
-                                &mut ingress_limit,
-                            );
-                            if !completions.is_empty() {
-                                self.process_completions(completions);
-                            }
-                        }
-
-                        if self
-                            .transmissions
-                            .next_transmission_ready()
-                            .map(|event| event <= when)
-                            .unwrap_or(false)
-                        {
-                            self.transmissions.clear_next_transmission_ready();
-                            let peers = &self.peers;
-                            let mut egress_limit = |pk: &P| {
-                                peers.get(pk).and_then(|peer| peer.egress_limit())
-                            };
-                            let mut ingress_limit = |pk: &P| {
-                                peers.get(pk).and_then(|peer| peer.ingress_limit())
-                            };
-                            let completions = self.transmissions.start_due_transmissions(
-                                when,
-                                &mut egress_limit,
-                                &mut ingress_limit,
-                            );
-                            if !completions.is_empty() {
-                                self.process_completions(completions);
-                            }
+                            self.transmissions
+                                .process(when, &mut egress_limit, &mut ingress_limit)
+                        };
+                        if !completions.is_empty() {
+                            self.process_completions(completions);
                         }
                     }
                 }

@@ -109,20 +109,65 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         }
     }
 
-    pub fn next_bandwidth_event(&self) -> Option<SystemTime> {
-        self.next_bandwidth_event
+    pub fn next(&self) -> Option<SystemTime> {
+        match (self.next_bandwidth_event, self.next_transmission_ready) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
     }
 
-    pub fn clear_next_bandwidth_event(&mut self) {
-        self.next_bandwidth_event = None;
-    }
+    pub fn process<F, G>(
+        &mut self,
+        now: SystemTime,
+        egress_limit: &mut F,
+        ingress_limit: &mut G,
+    ) -> Vec<Completion<P>>
+    where
+        F: FnMut(&P) -> Option<u128>,
+        G: FnMut(&P) -> Option<u128>,
+    {
+        let mut completions = self.start_due_transmissions(now, egress_limit, ingress_limit);
 
-    pub fn next_transmission_ready(&self) -> Option<SystemTime> {
-        self.next_transmission_ready
-    }
+        loop {
+            let Some(next_event) = self.next() else { break };
+            if next_event > now {
+                break;
+            }
 
-    pub fn clear_next_transmission_ready(&mut self) {
-        self.next_transmission_ready = None;
+            let mut handled = false;
+
+            if self
+                .next_bandwidth_event
+                .map(|event| event <= now && event == next_event)
+                .unwrap_or(false)
+            {
+                self.next_bandwidth_event = None;
+                let mut outcomes =
+                    self.recompute_bandwidth(next_event, egress_limit, ingress_limit);
+                completions.append(&mut outcomes);
+                handled = true;
+            }
+
+            if self
+                .next_transmission_ready
+                .map(|event| event <= now && event == next_event)
+                .unwrap_or(false)
+            {
+                self.next_transmission_ready = None;
+                let mut outcomes =
+                    self.start_due_transmissions(next_event, egress_limit, ingress_limit);
+                completions.append(&mut outcomes);
+                handled = true;
+            }
+
+            if !handled {
+                break;
+            }
+        }
+
+        completions
     }
 
     pub fn queue_transmission<F, G>(
@@ -164,7 +209,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         self.try_start_transmission_for(origin, recipient, true, now, egress_limit, ingress_limit)
     }
 
-    pub fn start_due_transmissions<F, G>(
+    fn start_due_transmissions<F, G>(
         &mut self,
         now: SystemTime,
         egress_limit: &mut F,
@@ -206,7 +251,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         completions
     }
 
-    pub fn recompute_bandwidth<F, G>(
+    fn recompute_bandwidth<F, G>(
         &mut self,
         now: SystemTime,
         egress_limit: &mut F,
@@ -298,7 +343,7 @@ impl<P: PublicKey + Ord + Clone> TransmissionState<P> {
         self.handle_completed_flows(completed, now, egress_limit, ingress_limit)
     }
 
-    pub fn handle_completed_flows<F, G>(
+    fn handle_completed_flows<F, G>(
         &mut self,
         completed: Vec<u64>,
         now: SystemTime,
@@ -687,13 +732,10 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let first_finish = state
-            .next_bandwidth_event()
-            .expect("first completion scheduled");
+        let first_finish = state.next().expect("first completion scheduled");
         assert_eq!(first_finish, now + Duration::from_secs(1));
 
-        let completions =
-            state.recompute_bandwidth(first_finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(first_finish, &mut egress_cap, &mut ingress_unlimited);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
         assert!(completion_a.deliver);
@@ -715,26 +757,19 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let completions =
-            state.start_due_transmissions(now, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(now, &mut egress_cap, &mut ingress_unlimited);
         assert!(completions.is_empty());
 
-        let next_ready = state
-            .next_transmission_ready()
-            .expect("second transfer should be scheduled");
+        let next_ready = state.next().expect("second transfer should be scheduled");
         assert_eq!(next_ready, first_finish + Duration::from_secs(1));
 
-        let completions =
-            state.start_due_transmissions(next_ready, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(next_ready, &mut egress_cap, &mut ingress_unlimited);
         assert!(completions.is_empty());
 
-        let second_finish = state
-            .next_bandwidth_event()
-            .expect("second completion scheduled");
+        let second_finish = state.next().expect("second completion scheduled");
         assert_eq!(second_finish, next_ready + Duration::from_secs(1));
 
-        let completions =
-            state.recompute_bandwidth(second_finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(second_finish, &mut egress_cap, &mut ingress_unlimited);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
         assert!(completion_b.deliver);
@@ -782,13 +817,10 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let first_finish = state
-            .next_bandwidth_event()
-            .expect("message A completion scheduled");
+        let first_finish = state.next().expect("message A completion scheduled");
         assert_eq!(first_finish, start + Duration::from_millis(2000));
 
-        let completions =
-            state.recompute_bandwidth(first_finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(first_finish, &mut egress_cap, &mut ingress_unlimited);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
         assert!(completion_a.deliver);
@@ -798,25 +830,19 @@ mod tests {
             Some(first_finish + Duration::from_millis(500))
         );
 
-        let next_ready = state
-            .next_transmission_ready()
-            .expect("message B send should be scheduled");
+        let next_ready = state.next().expect("message B send should be scheduled");
         assert_eq!(
             next_ready,
             first_finish + Duration::from_millis(500) - Duration::from_millis(100)
         );
 
-        let completions =
-            state.start_due_transmissions(next_ready, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(next_ready, &mut egress_cap, &mut ingress_unlimited);
         assert!(completions.is_empty());
 
-        let second_finish = state
-            .next_bandwidth_event()
-            .expect("message B completion scheduled");
+        let second_finish = state.next().expect("message B completion scheduled");
         assert_eq!(second_finish, next_ready + Duration::from_secs_f64(1.0));
 
-        let completions =
-            state.recompute_bandwidth(second_finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(second_finish, &mut egress_cap, &mut ingress_unlimited);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
         assert!(completion_b.deliver);
@@ -876,11 +902,10 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let finish = state.next_bandwidth_event().expect("completion scheduled");
+        let finish = state.next().expect("completion scheduled");
         assert_eq!(finish, now + Duration::from_secs(2));
 
-        let completions =
-            state.recompute_bandwidth(finish, &mut egress_cap, &mut ingress_unlimited);
+        let completions = state.process(finish, &mut egress_cap, &mut ingress_unlimited);
         assert_eq!(completions.len(), 2);
 
         let mut recipients: Vec<_> = completions
@@ -897,6 +922,6 @@ mod tests {
         expected.sort();
         assert_eq!(recipients, expected);
 
-        assert!(state.next_bandwidth_event().is_none());
+        assert!(state.next().is_none());
     }
 }
