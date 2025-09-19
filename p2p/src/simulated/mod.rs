@@ -12,47 +12,32 @@
 //!
 //! # Bandwidth Simulation
 //!
-//! The simulator provides a realistic model of bandwidth contention where network
-//! capacity is a shared, finite resource. This is achieved without the overhead
-//! of simulating byte-by-byte transfers.
+//! The simulator models contention with a deterministic, event-driven fair queue
+//! instead of simulating the transmission of every byte.
 //!
-//! ## Core Model
+//! ## Core Loop
 //!
-//! The bandwidth model is built on an event-based timeline. Instead of simulating
-//! continuous data flow, the scheduler calculates the key points in time where
-//! bandwidth availability changes for a peer. When the set of active transfers changes,
-//! a fair division of capacity is computed and schedules are updated accordingly.
+//! Whenever the topology changes—because a transfer starts or finishes, or a
+//! bandwidth limit is updated—we execute a scheduling tick:
 //!
-//! Each peer has a schedule for its egress (upload) and ingress (download)
-//! bandwidth. Whenever the set of in-flight transfers changes we rebuild the
-//! schedules using a progressive-filling algorithm that conserves work and
-//! respects both endpoints of every link:
+//! 1. **Collect Active Flows:** Gather every in-flight transfer that still has
+//!    bytes to send. A flow is bound to one sender and, when the message will be
+//!    delivered, one receiver.
+//! 2. **Solve Water Filling:** Run a max-min water-filling algorithm that raises
+//!    the rate of every active flow in lock-step until some sender's egress or
+//!    receiver's ingress limit saturates. The result is a fair, work-conserving
+//!    rate for each flow.
+//! 3. **Pick the Next Event:** Using those rates, determine which flow will
+//!    finish first by computing how long it needs to transmit its remaining
+//!    bytes.
+//! 4. **Advance Time:** Jump simulated time directly to that completion instant.
+//! 5. **Finalize Work:** The flow is removed, latency is applied to determine
+//!    when the receiver observes the delivery, and the scheduler repeats from step 1.
 //!
-//! 1. **Gather Transfers:** Collect all active transfers on the sender and
-//!    receiver, pruning any transfers that finished before the current time.
-//!    Transfers that no longer have bytes remaining are removed from the model.
-//!
-//! 2. **Allocate Capacity:** Treat each transfer as being limited by two
-//!    resources—its sender's egress bucket and, if the message will be delivered,
-//!    the receiver's ingress bucket. We then raise the rate for every active
-//!    transfer in lock-step until some resource saturates, freeze the flows that
-//!    touch that resource, and repeat. The result is a max-min fair allocation
-//!    that is automatically capped by whichever side (egress or ingress) is
-//!    slower.
-//!
-//! 3. **Materialize Segments:** The planner returns piecewise-constant segments
-//!    for every transfer. We install those segments on the sender right away and
-//!    on the receiver after shifting them by the sampled latency. This keeps
-//!    ingress capacity busy only while bytes are in flight, and because the two
-//!    ends share the same plan, any slack that appears on one side automatically
-//!    flows to the others.
-//!
-//! 4. **FIFO Delivery:** Each link tracks the next sequence number expected from
-//!    the sender, so even though transfers share bandwidth fairly, payloads are
-//!    still handed to the socket in strict send order.
-//!
-//! This recomputation is triggered whenever a transfer starts, completes, or a
-//! peer's bandwidth limit changes, ensuring the model remains fair and work conserving.
+//! Messages between the same pair of peers remain strictly ordered. When one
+//! message finishes, the next message on that link may begin sending at
+//! `arrival_time - new_latency` so that its first byte arrives immediately after
+//! the previous one is fully received.
 //!
 //! ## Latency vs. Transmission Delay
 //!
@@ -150,6 +135,7 @@ mod bandwidth;
 mod ingress;
 mod metrics;
 mod network;
+mod transmissions;
 
 use thiserror::Error;
 
@@ -1994,7 +1980,8 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_sender_bandwidth_returns_empty() {
+    #[should_panic(expected = "ingress bandwidth must be greater than 0")]
+    fn test_zero_sender_ingress_bandwidth() {
         // This test verifies that when sender bandwidth is 0, the send returns empty list
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2011,8 +1998,50 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
-            let (_, mut receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            let (_sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, _receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            oracle
+                .add_link(
+                    pk_sender.clone(),
+                    pk_receiver.clone(),
+                    Link {
+                        latency: Duration::from_millis(10),
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Set sender bandwidth to 0
+            oracle
+                .set_bandwidth(pk_sender.clone(), usize::MAX, 0)
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "egress bandwidth must be greater than 0")]
+    fn test_zero_sender_egress_bandwidth() {
+        // This test verifies that when sender bandwidth is 0, the send returns empty list
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+            network.start();
+
+            let pk_sender = PrivateKey::from_seed(1).public_key();
+            let pk_receiver = PrivateKey::from_seed(2).public_key();
+
+            // Register peers and establish link
+            let (_sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, _receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
             oracle
                 .add_link(
                     pk_sender.clone(),
@@ -2031,126 +2060,6 @@ mod tests {
                 .set_bandwidth(pk_sender.clone(), 0, usize::MAX)
                 .await
                 .unwrap();
-            oracle
-                .set_bandwidth(pk_receiver.clone(), usize::MAX, 10_000)
-                .await
-                .unwrap();
-
-            let msg = Bytes::from(vec![1u8; 1000]);
-
-            // Try to send, this should return empty list
-            let mut sender = sender_tx.clone();
-            let result = sender
-                .send(Recipients::One(pk_receiver.clone()), msg.clone(), false)
-                .await
-                .unwrap();
-
-            // Should get empty list since sender has zero bandwidth
-            assert!(result.is_empty());
-
-            // Try to receive with timeout, should timeout since nothing was sent
-            select! {
-              _ = receiver_rx.recv() => {
-                panic!(
-                  "Should not receive message when sender bandwidth is 0"
-                );
-              },
-              _ = context.clone().sleep(Duration::from_secs(2)) => {},
-            };
-        });
-    }
-
-    #[test]
-    fn test_zero_receiver_bandwidth_uses_sender_bandwidth() {
-        // When receiver bandwidth is 0, the transfer is acknowledged immediately by the
-        // sender (egress-only) path and the payload is dropped instead of being delivered.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                },
-            );
-            network.start();
-
-            let pk_sender = PrivateKey::from_seed(1).public_key();
-            let pk_receiver_blocked = PrivateKey::from_seed(2).public_key();
-            let pk_receiver_observing = PrivateKey::from_seed(3).public_key();
-
-            // Register peers and establish links
-            let (mut sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
-            let (_, mut blocked_rx) = oracle
-                .register(pk_receiver_blocked.clone(), 0)
-                .await
-                .unwrap();
-            let (_, mut observing_rx) = oracle
-                .register(pk_receiver_observing.clone(), 0)
-                .await
-                .unwrap();
-
-            for receiver in [&pk_receiver_blocked, &pk_receiver_observing] {
-                oracle
-                    .add_link(
-                        pk_sender.clone(),
-                        receiver.clone(),
-                        Link {
-                            latency: Duration::from_millis(10),
-                            jitter: Duration::ZERO,
-                            success_rate: 1.0,
-                        },
-                    )
-                    .await
-                    .unwrap();
-            }
-
-            oracle
-                .set_bandwidth(pk_sender.clone(), 10_000, usize::MAX)
-                .await
-                .unwrap();
-            oracle
-                .set_bandwidth(pk_receiver_blocked.clone(), usize::MAX, 0)
-                .await
-                .unwrap();
-            oracle
-                .set_bandwidth(pk_receiver_observing.clone(), usize::MAX, 10_000)
-                .await
-                .unwrap();
-
-            // First send goes to the receiver with zero ingress bandwidth. The transfer is
-            // acknowledged immediately and effectively dropped, so we verify that other
-            // recipients are still serviced promptly.
-            let start = context.current();
-            let msg_blocked = Bytes::from(vec![2u8; 10_000]);
-            let msg_observing = Bytes::from(vec![3u8; 10]);
-
-            sender_tx
-                .send(Recipients::One(pk_receiver_blocked.clone()), msg_blocked, false)
-                .await
-                .unwrap();
-
-            sender_tx
-                .send(Recipients::One(pk_receiver_observing.clone()), msg_observing.clone(), false)
-                .await
-                .unwrap();
-
-            let (_, observed_msg) = observing_rx.recv().await.unwrap();
-            assert_eq!(observed_msg, msg_observing);
-            let elapsed = context.current().duration_since(start).unwrap();
-
-            assert!(
-                elapsed <= Duration::from_millis(50),
-                "Observing receiver should get response quickly when other receiver is bandwidth constrained, got {elapsed:?}",
-            );
-
-            // Blocked receiver never receives the payload.
-            select! {
-              _ = blocked_rx.recv() => {
-                panic!("Blocked receiver should not receive data");
-              },
-              _ = context.clone().sleep(Duration::from_millis(50)) => {},
-            };
         });
     }
 }

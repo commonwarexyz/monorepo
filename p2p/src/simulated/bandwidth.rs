@@ -1,405 +1,188 @@
-//! Progressive-filling bandwidth planner shared by the simulated network.
+//! Fair-queue bandwidth planner shared by the simulated network.
 //!
-//! The planner consumes a snapshot of all in-flight transfers and emits
-//! piecewise-constant schedules that respect both the sender's egress limit and
-//! the receiver's ingress limit. Rates are computed with a water-filling
-//! algorithm using exact rational arithmetic so the resulting plan is
-//! deterministic and work-conserving.
+//! The planner performs a single "water filling" step over the active flows to
+//! compute per-flow transmission rates that respect both sender egress limits
+//! and receiver ingress limits. The caller is responsible for advancing flow
+//! progress according to the returned rates and re-running the planner whenever
+//! the active set changes (for example when a message finishes or a new message
+//! arrives).
 
 use commonware_utils::math::u128::Ratio;
-use std::{
-    cmp::Ordering,
-    collections::BTreeMap,
-    time::{Duration, SystemTime},
-};
+use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
-const NS_PER_SEC: u128 = 1_000_000_000;
+pub const NS_PER_SEC: u128 = 1_000_000_000;
 
+/// Minimal description of a simulated transmission path.
 #[derive(Clone, Debug)]
-/// Portion of a transfer executed at a constant rate within the generated schedule.
-pub(super) struct Segment {
-    start: SystemTime,
-    end: SystemTime,
-    bytes: u128,
+pub struct Flow<P> {
+    pub id: u64,
+    pub origin: P,
+    pub recipient: P,
+    pub requires_ingress: bool,
 }
 
-impl Segment {
-    fn duration_ns(&self) -> u128 {
-        self.end
-            .duration_since(self.start)
-            .unwrap_or(Duration::ZERO)
-            .as_nanos()
-    }
+/// Resulting per-flow throughput expressed as bytes/second.
+#[derive(Clone, Debug)]
+pub enum Rate {
+    Unlimited,
+    Finite(Ratio),
+}
 
-    pub(super) fn start_time(&self) -> SystemTime {
-        self.start
-    }
+impl Rate {}
 
-    pub(super) fn shifted(&self, delta: Duration) -> Segment {
-        Segment {
-            start: self
-                .start
-                .checked_add(delta)
-                .expect("shift would overflow start time"),
-            end: self
-                .end
-                .checked_add(delta)
-                .expect("shift would overflow end time"),
-            bytes: self.bytes,
+impl PartialEq for Rate {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Rate::Unlimited, Rate::Unlimited) => true,
+            (Rate::Finite(left), Rate::Finite(right)) => {
+                left.num == right.num && left.den == right.den
+            }
+            _ => false,
         }
     }
 }
 
+impl Eq for Rate {}
+
+/// Shared capacity constraint (either egress or ingress) tracked by the planner.
 #[derive(Debug)]
-/// Private state recorded for each flow inside a peer-local schedule.
-struct Flow {
-    bytes_total: u128,
-    bytes_delivered: u128,
-    ready_time: SystemTime,
-    segment: Option<Segment>,
+struct Resource {
+    capacity: Ratio,
+    members: Vec<usize>,
 }
 
-impl Flow {
-    fn new(bytes: usize, ready_time: SystemTime) -> Self {
+impl Resource {
+    fn new(limit: u128) -> Self {
         Self {
-            bytes_total: bytes as u128,
-            bytes_delivered: 0,
-            ready_time,
-            segment: None,
-        }
-    }
-
-    fn remaining(&self) -> u128 {
-        self.bytes_total.saturating_sub(self.bytes_delivered)
-    }
-
-    fn reset_segment(&mut self, segment: Option<Segment>, ready_time: SystemTime) {
-        self.segment = segment;
-        self.ready_time = ready_time;
-    }
-
-    fn snapshot(&self) -> FlowSnapshot {
-        FlowSnapshot {
-            remaining: self.remaining(),
-            ready_time: self.ready_time,
+            capacity: Ratio::from_int(limit),
+            members: Vec::new(),
         }
     }
 }
 
-#[derive(Clone, Debug)]
-/// Snapshot of flow progress exposed to the planner.
-pub(super) struct FlowSnapshot {
-    pub remaining: u128,
-    pub ready_time: SystemTime,
-}
-
-/// Per-peer view of the active flows and their assigned segments.
-pub(super) struct Schedule {
-    pub(super) bps: usize,
-    flows: BTreeMap<u64, Flow>,
-}
-
-impl Schedule {
-    pub(super) fn new(bps: usize) -> Self {
-        Self {
-            bps,
-            flows: BTreeMap::new(),
-        }
-    }
-
-    pub(super) fn add_flow(&mut self, flow_id: u64, start: SystemTime, bytes: usize) {
-        let flow = Flow::new(bytes, start);
-        let replaced = self.flows.insert(flow_id, flow);
-        debug_assert!(replaced.is_none(), "flow id reused");
-    }
-
-    /// Discard segments that end before `now`, crediting their bytes to the flow and
-    /// trimming partially-completed segments. Returns the ids of flows that
-    /// completed during this prune.
-    pub(super) fn prune(&mut self, now: SystemTime) -> Vec<u64> {
-        let mut completed = Vec::new();
-        for (&id, flow) in self.flows.iter_mut() {
-            let mut segment = flow.segment.take();
-            if let Some(mut current) = segment {
-                if current.end <= now {
-                    flow.bytes_delivered = flow.bytes_delivered.saturating_add(current.bytes);
-                    segment = None;
-                } else if current.start < now {
-                    let total_ns = current.duration_ns().max(1);
-                    let elapsed_ns = now
-                        .duration_since(current.start)
-                        .unwrap_or(Duration::ZERO)
-                        .as_nanos();
-                    let credited = current.bytes * elapsed_ns / total_ns;
-                    let credited = credited.min(current.bytes);
-                    flow.bytes_delivered = flow.bytes_delivered.saturating_add(credited);
-                    let remaining_bytes = current.bytes.saturating_sub(credited);
-                    if remaining_bytes > 0 {
-                        current.start = now;
-                        current.bytes = remaining_bytes;
-                        segment = Some(current);
-                    } else {
-                        segment = None;
-                    }
-                } else {
-                    segment = Some(current);
-                }
-            }
-
-            let previous_ready = flow.ready_time;
-            flow.segment = segment;
-            flow.ready_time = flow
-                .segment
-                .as_ref()
-                .map(|s| s.start)
-                .unwrap_or_else(|| previous_ready.max(now));
-
-            if flow.remaining() == 0 {
-                completed.push(id);
-            }
-        }
-
-        for id in &completed {
-            self.flows.remove(id);
-        }
-
-        completed
-    }
-
-    pub(super) fn reset_flow_segment(
-        &mut self,
-        flow_id: u64,
-        segment: Option<Segment>,
-        ready_time: SystemTime,
-        offset: Option<Duration>,
-    ) {
-        let flow = self
-            .flows
-            .get_mut(&flow_id)
-            .expect("attempted to reset unknown flow");
-
-        let adjusted = segment.map(|segment| match offset {
-            Some(delta) => segment.shifted(delta),
-            None => segment,
-        });
-        let ready_time = match offset {
-            Some(delta) => ready_time
-                .checked_add(delta)
-                .expect("shifted ready time overflow"),
-            None => ready_time,
-        };
-        flow.reset_segment(adjusted, ready_time);
-    }
-
-    pub(super) fn flow_snapshot(&self, flow_id: u64) -> Option<FlowSnapshot> {
-        self.flows.get(&flow_id).map(|flow| flow.snapshot())
-    }
-}
-
+/// Identifier used to deduplicate resource entries across flows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ResourceKey<P> {
     Egress(P),
     Ingress(P),
 }
 
-#[derive(Clone, Debug)]
-struct ResourceState {
-    limit: Ratio,
-    members: Vec<usize>,
-}
-
-impl ResourceState {
-    fn new(limit: u128) -> Self {
-        Self {
-            limit: Ratio::from_int(limit),
-            members: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-/// Transfer snapshot supplied to the planner. `ready_time` denotes the first
-/// instant at which the sender can resume transmitting bytes.
-pub(super) struct Transfer<P> {
-    pub id: u64,
-    pub origin: P,
-    pub recipient: P,
-    pub remaining: u128,
-    pub ready_time: SystemTime,
-    pub deliver: bool,
-}
-
-#[derive(Clone, Debug)]
-/// Planner output for a single flow.
-pub(super) struct FlowAssignment {
-    pub segment: Option<Segment>,
-    pub ready_time: SystemTime,
-}
-
-pub(super) struct PlanOutcome {
-    pub plans: BTreeMap<u64, FlowAssignment>,
-    pub next_event: Option<SystemTime>,
-}
-
-/// Planner-internal representation of a transfer while rates are being derived.
-struct PlannerFlow {
-    id: u64,
-    ready_time: SystemTime,
-    remaining: u128,
-    segment: Option<Segment>,
-}
-
-/// Lazily allocate a resource slot. If `limit` is `None` the resource is treated as unbounded.
+/// Ensures an entry exists for the given resource, returning its index if limited.
 fn ensure_resource<P: Clone + Ord>(
     key: ResourceKey<P>,
     limit: Option<u128>,
-    indices: &mut BTreeMap<ResourceKey<P>, Option<usize>>,
-    resources: &mut Vec<ResourceState>,
+    indices: &mut BTreeMap<ResourceKey<P>, usize>,
+    resources: &mut Vec<Resource>,
 ) -> Option<usize> {
-    if let Some(idx) = indices.get(&key) {
-        return *idx;
+    if let Some(index) = indices.get(&key) {
+        return Some(*index);
     }
-    let idx = limit.map(|value| {
-        let index = resources.len();
-        resources.push(ResourceState::new(value));
-        index
-    });
+
+    let idx = resources.len();
+    resources.push(Resource::new(limit?));
     indices.insert(key, idx);
-    idx
+    Some(idx)
 }
 
-/// Convert an abstract nanosecond interval into a concrete `Duration`.
+/// Computes a fair allocation for the provided `flows`, returning per-flow rates.
 ///
-/// The planner works in `u128` nanoseconds so it can represent very long
-/// intervals without overflow. `std::time::Duration`, however, is capped at
-/// `u64::MAX` seconds with nanosecond precision. We therefore clamp extremely
-/// large values to that maximum and otherwise split the `u128` into whole seconds
-/// and the remaining nanoseconds.
-fn ns_to_duration(ns: u128) -> Duration {
-    if ns == 0 {
-        return Duration::ZERO;
+/// Each sender/receiver cap is modelled as a shared resource. Every flow registers
+/// with the resources it touches, after which we perform a single water-filling pass:
+/// raise the rate of all unfrozen flows uniformly until a resource is depleted, freeze
+/// flows using that resource, and repeat. This yields a deterministic, starvation-free
+/// assignment that honours both ingress and egress limits.
+pub fn allocate<P, E, I>(
+    flows: &[Flow<P>],
+    mut egress_limit: E,
+    mut ingress_limit: I,
+) -> BTreeMap<u64, Rate>
+where
+    P: Clone + Ord,
+    E: FnMut(&P) -> Option<u128>,
+    I: FnMut(&P) -> Option<u128>,
+{
+    let mut result = BTreeMap::new();
+    if flows.is_empty() {
+        return result;
     }
-    let max_ns = u128::from(u64::MAX) * NS_PER_SEC;
-    if ns >= max_ns {
-        return Duration::from_secs(u64::MAX);
-    }
-    let secs = (ns / NS_PER_SEC) as u64;
-    let nanos = (ns % NS_PER_SEC) as u32;
-    Duration::new(secs, nanos)
-}
 
-fn div_ceil_or_max(num: u128, denom: u128) -> u128 {
-    // `denom` reflects the instantaneous rate allocated to a flow. If contention
-    // evaporates we treat the horizon as effectively infinite so callers can
-    // clamp the finishing time to their own limits; returning `u128::MAX` lets
-    // the planner detect that scenario without introducing special cases.
-    if denom == 0 {
-        return u128::MAX;
-    }
-    num.div_ceil(denom)
-}
+    let mut indices: BTreeMap<ResourceKey<P>, usize> = BTreeMap::new();
+    let mut resources: Vec<Resource> = Vec::new();
+    let mut rates: Vec<Option<Ratio>> = vec![None; flows.len()];
+    let mut active_indices: Vec<usize> = Vec::new();
 
-fn bytes_over_interval(
-    rate: &Option<Ratio>,
-    delta_ns: u128,
-    finishing: bool,
-    remaining: u128,
-) -> u128 {
-    match rate {
-        None => remaining,
-        Some(r) if r.is_zero() => {
-            if finishing {
-                remaining
-            } else {
-                0
+    for (idx, flow) in flows.iter().enumerate() {
+        let mut limited = false;
+
+        if let Some(resource_idx) = ensure_resource(
+            ResourceKey::Egress(flow.origin.clone()),
+            egress_limit(&flow.origin),
+            &mut indices,
+            &mut resources,
+        ) {
+            resources[resource_idx].members.push(idx);
+            limited = true;
+        }
+
+        if flow.requires_ingress {
+            if let Some(resource_idx) = ensure_resource(
+                ResourceKey::Ingress(flow.recipient.clone()),
+                ingress_limit(&flow.recipient),
+                &mut indices,
+                &mut resources,
+            ) {
+                resources[resource_idx].members.push(idx);
+                limited = true;
             }
         }
-        Some(r) => {
-            if delta_ns == 0 {
-                return if finishing { remaining } else { 0 };
-            }
-            let numerator = r.num.saturating_mul(delta_ns);
-            let denominator = r.den.saturating_mul(NS_PER_SEC);
-            let mut bytes = if denominator > 0 {
-                numerator / denominator
-            } else {
-                0
-            };
-            if finishing {
-                bytes = remaining;
-            }
-            bytes.min(remaining)
-        }
-    }
-}
 
-fn compute_finish_times(
-    time: SystemTime,
-    active: &[usize],
-    flows: &[PlannerFlow],
-    rates: &[Option<Ratio>],
-) -> (Option<SystemTime>, Vec<Option<u128>>) {
-    let mut finish_ns: Vec<Option<u128>> = vec![None; flows.len()];
-    let mut next_finish: Option<SystemTime> = None;
-
-    for &idx in active {
-        match &rates[idx] {
-            None => {
-                finish_ns[idx] = Some(0);
-                next_finish = Some(time);
-            }
-            Some(rate) if rate.is_zero() => {}
-            Some(rate) => {
-                let remaining = flows[idx].remaining;
-                if remaining == 0 {
-                    finish_ns[idx] = Some(0);
-                    next_finish = Some(time);
-                    continue;
-                }
-                let numerator = remaining
-                    .saturating_mul(rate.den)
-                    .saturating_mul(NS_PER_SEC);
-                let ns = div_ceil_or_max(numerator, rate.num);
-                finish_ns[idx] = Some(ns);
-                let finish_time = time
-                    .checked_add(ns_to_duration(ns))
-                    .expect("finish time overflow");
-                next_finish = match next_finish {
-                    None => Some(finish_time),
-                    Some(current) => Some(current.min(finish_time)),
-                };
-            }
+        if limited {
+            rates[idx] = Some(Ratio::zero());
+            active_indices.push(idx);
         }
     }
 
-    (next_finish, finish_ns)
+    compute_rates(&active_indices, &resources, &mut rates);
+
+    for (idx, flow) in flows.iter().enumerate() {
+        let rate = match &rates[idx] {
+            None => Rate::Unlimited,
+            Some(ratio) => Rate::Finite(ratio.clone()),
+        };
+        result.insert(flow.id, rate);
+    }
+
+    result
 }
 
-/// Core progressive-filling loop. Returns the instantaneous rate (bytes/sec) for
-/// each active flow expressed as a `Ratio<num, den>` where `num / den == Bps`.
-fn compute_rates(
-    active: &[usize],
-    flows: &[PlannerFlow],
-    resources: &[ResourceState],
-) -> Vec<Option<Ratio>> {
-    let mut rates = vec![None; flows.len()];
+/// Water-filling loop that distributes capacity among the constrained flows.
+///
+/// `active` indexes flows that are limited by some resource. Each iteration identifies the
+/// tightest remaining resource, increases rates for all unfrozen flows by the same delta,
+/// and freezes any flow that now sits on a saturated resource. When no constrained flows
+/// remain, `rates` captures the final allocation (with `None` meaning unlimited).
+fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<Ratio>]) {
     if active.is_empty() {
-        return rates;
+        return;
     }
 
-    let mut remaining: Vec<Ratio> = resources.iter().map(|res| res.limit.clone()).collect();
-    let mut unfrozen: Vec<bool> = vec![false; flows.len()];
+    // Track how much capacity each resource still has to hand out.
+    let mut remaining: Vec<Ratio> = resources.iter().map(|res| res.capacity.clone()).collect();
+
+    // `unfrozen[idx] == true` means the flow is still participating in the water-filling step.
+    let mut unfrozen = vec![false; rates.len()];
     for &idx in active {
         unfrozen[idx] = true;
     }
-
     let mut active_left = active.len();
 
+    // Continue allocating until every flow is either unlimited or fully constrained.
     while active_left > 0 {
-        let mut limiting: Vec<usize> = Vec::new();
+        let mut limiting = Vec::new();
         let mut min_delta: Option<Ratio> = None;
 
         for (res_idx, resource) in resources.iter().enumerate() {
+            // Count how many still-active flows are drawing from this resource.
             let users: u128 = resource
                 .members
                 .iter()
@@ -408,11 +191,15 @@ fn compute_rates(
             if users == 0 {
                 continue;
             }
+
             if remaining[res_idx].is_zero() {
+                limiting.clear();
                 limiting.push(res_idx);
                 min_delta = Some(Ratio::zero());
-                continue;
+                break;
             }
+
+            // Potential additional rate every user could receive before hitting this limit.
             let delta = remaining[res_idx].div_int(users);
             match &min_delta {
                 None => {
@@ -433,7 +220,6 @@ fn compute_rates(
         }
 
         if min_delta.is_none() {
-            // No resource constrains the remaining flows (everything is unlimited).
             for &idx in active {
                 if unfrozen[idx] {
                     rates[idx] = None;
@@ -443,28 +229,31 @@ fn compute_rates(
         }
 
         let delta = min_delta.unwrap();
+
         if delta.is_zero() {
+            // Capacity exhausted: freeze every flow depending on the limiting resources.
             let mut newly_frozen = Vec::new();
             for &res_idx in &limiting {
-                for &flow_idx in resources[res_idx].members.iter() {
+                for &flow_idx in &resources[res_idx].members {
                     if unfrozen[flow_idx] {
                         newly_frozen.push(flow_idx);
                     }
                 }
                 remaining[res_idx] = Ratio::zero();
             }
-            for flow_idx in newly_frozen {
-                if rates[flow_idx].is_none() {
-                    rates[flow_idx] = Some(Ratio::zero());
+            for idx in newly_frozen {
+                if rates[idx].is_none() {
+                    rates[idx] = Some(Ratio::zero());
                 }
-                if unfrozen[flow_idx] {
-                    unfrozen[flow_idx] = false;
+                if unfrozen[idx] {
+                    unfrozen[idx] = false;
                     active_left -= 1;
                 }
             }
             continue;
         }
 
+        // Otherwise share the incremental `delta` evenly across every unfrozen flow.
         for &idx in active {
             if !unfrozen[idx] {
                 continue;
@@ -481,7 +270,7 @@ fn compute_rates(
 
         let mut newly_frozen = Vec::new();
         for (res_idx, resource) in resources.iter().enumerate() {
-            let users = resource
+            let users: u128 = resource
                 .members
                 .iter()
                 .filter(|&&flow_idx| unfrozen[flow_idx])
@@ -490,9 +279,10 @@ fn compute_rates(
                 continue;
             }
             let usage = delta.mul_int(users);
+            // Consume the matching share of resource capacity.
             remaining[res_idx].sub_assign(&usage);
             if remaining[res_idx].is_zero() {
-                for &flow_idx in resource.members.iter() {
+                for &flow_idx in &resource.members {
                     if unfrozen[flow_idx] {
                         newly_frozen.push(flow_idx);
                     }
@@ -500,634 +290,349 @@ fn compute_rates(
             }
         }
 
-        for flow_idx in newly_frozen {
-            if unfrozen[flow_idx] {
-                unfrozen[flow_idx] = false;
+        for idx in newly_frozen {
+            if unfrozen[idx] {
+                unfrozen[idx] = false;
                 active_left -= 1;
             }
         }
     }
-
-    rates
 }
 
-/// Produce bandwidth plans for every active transfer at `now`.
-///
-/// The closures expose per-peer limits. Returning `None` signals "unlimited" for that side.
-/// The resulting `FlowPlan` objects contain sender-oriented segments; callers can shift them
-/// by latency for ingress scheduling.
-pub(super) fn plan_transmissions<P, E, I>(
-    now: SystemTime,
-    transfers: &[Transfer<P>],
-    mut egress_limit: E,
-    mut ingress_limit: I,
-) -> PlanOutcome
-where
-    P: Clone + Ord,
-    E: FnMut(&P) -> Option<u128>,
-    I: FnMut(&P) -> Option<u128>,
-{
-    if transfers.is_empty() {
-        return PlanOutcome {
-            plans: BTreeMap::new(),
-            next_event: None,
-        };
-    }
-
-    let mut resource_indices: BTreeMap<ResourceKey<P>, Option<usize>> = BTreeMap::new();
-    let mut resources: Vec<ResourceState> = Vec::new();
-
-    let mut flows: Vec<PlannerFlow> = Vec::with_capacity(transfers.len());
-    for transfer in transfers.iter() {
-        // Egress is always considered; ingress only matters when the transfer
-        // should be delivered (i.e. not dropped due to link failure).
-        let sender_limit = egress_limit(&transfer.origin);
-        let sender_idx = ensure_resource(
-            ResourceKey::Egress(transfer.origin.clone()),
-            sender_limit,
-            &mut resource_indices,
-            &mut resources,
-        );
-
-        let receiver_idx = if transfer.deliver {
-            let limit = ingress_limit(&transfer.recipient);
-            ensure_resource(
-                ResourceKey::Ingress(transfer.recipient.clone()),
-                limit,
-                &mut resource_indices,
-                &mut resources,
-            )
-        } else {
-            None
-        };
-
-        flows.push(PlannerFlow {
-            id: transfer.id,
-            ready_time: transfer.ready_time,
-            remaining: transfer.remaining,
-            segment: None,
-        });
-        let flow_idx = flows.len() - 1;
-        if let Some(idx) = sender_idx {
-            resources[idx].members.push(flow_idx);
-        }
-        if let Some(idx) = receiver_idx {
-            resources[idx].members.push(flow_idx);
-        }
-    }
-
-    let active: Vec<usize> = flows
-        .iter()
-        .enumerate()
-        .filter(|(_, flow)| flow.remaining > 0 && flow.ready_time <= now)
-        .map(|(idx, _)| idx)
-        .collect();
-
-    let next_event = if active.is_empty() {
-        flows
-            .iter()
-            .filter(|flow| flow.remaining > 0 && flow.ready_time > now)
-            .map(|flow| flow.ready_time)
-            .min()
-    } else {
-        let time = now;
-
-        // At this point at least one flow is active; derive its instantaneous rate.
-        let rates = compute_rates(&active, &flows, &resources);
-
-        let (next_finish, finish_ns) = compute_finish_times(time, &active, &flows, &rates);
-
-        let next_ready = flows
-            .iter()
-            .filter(|flow| flow.remaining > 0 && flow.ready_time > time)
-            .map(|flow| flow.ready_time)
-            .min();
-
-        // Jump to the next "interesting" instant: either the earliest completion or
-        // the arrival of a new flow.
-        let event_time = match (next_finish, next_ready) {
-            (Some(finish), Some(ready)) => finish.min(ready),
-            (Some(finish), None) => finish,
-            (None, Some(ready)) => ready,
-            (None, None) => time,
-        };
-
-        let delta_ns = event_time
-            .duration_since(time)
-            .unwrap_or(Duration::ZERO)
-            .as_nanos();
-
-        for &idx in active.iter() {
-            let flow = &mut flows[idx];
-            let finishing = match finish_ns[idx] {
-                Some(ns) => {
-                    let finish_time = time
-                        .checked_add(ns_to_duration(ns))
-                        .expect("finish time overflow");
-                    finish_time <= event_time
+pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
+    match rate {
+        Rate::Unlimited => Some(Duration::ZERO),
+        Rate::Finite(ratio) => {
+            if ratio.is_zero() {
+                if bytes == 0 {
+                    Some(Duration::ZERO)
+                } else {
+                    None
                 }
-                None => false,
-            };
+            } else {
+                let numerator = bytes.saturating_mul(ratio.den).saturating_mul(NS_PER_SEC);
+                let ns = div_ceil(numerator, ratio.num);
+                Some(duration_from_ns(ns))
+            }
+        }
+    }
+}
 
-            let bytes = bytes_over_interval(&rates[idx], delta_ns, finishing, flow.remaining);
-            if bytes > 0 {
-                let segment = Segment {
-                    start: time,
-                    end: event_time,
-                    bytes,
-                };
-                debug_assert!(
-                    flow.segment.is_none(),
-                    "flow produced multiple segments within a single planning tick",
-                );
-                flow.segment = Some(segment);
-                flow.remaining = flow.remaining.saturating_sub(bytes);
+pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u128) -> u128 {
+    if remaining == 0 {
+        return 0;
+    }
+
+    match rate {
+        Rate::Unlimited => {
+            // No throttling – consume everything immediately.
+            *carry = 0;
+            remaining
+        }
+        Rate::Finite(ratio) => {
+            if ratio.is_zero() {
+                return 0;
+            }
+            let delta_ns = elapsed.as_nanos();
+            if delta_ns == 0 {
+                return 0;
             }
 
-            flow.ready_time = event_time;
+            let denom = ratio.den.saturating_mul(NS_PER_SEC);
+            if denom == 0 {
+                *carry = 0;
+                return remaining;
+            }
+            let numerator = ratio.num.saturating_mul(delta_ns);
+            // Any remainder from the integer division is stored in `carry` so the next tick can
+            // honour fractional bytes-per-nanosecond that would otherwise be rounded away.
+            let total = numerator.saturating_add(*carry);
+            let bytes = total / denom;
+            *carry = total % denom;
+            bytes.min(remaining)
         }
-
-        Some(event_time)
-    };
-
-    PlanOutcome {
-        plans: flows
-            .into_iter()
-            .map(|flow| {
-                (
-                    flow.id,
-                    FlowAssignment {
-                        segment: flow.segment,
-                        ready_time: flow.ready_time,
-                    },
-                )
-            })
-            .collect(),
-        next_event,
     }
+}
+
+fn div_ceil(num: u128, denom: u128) -> u128 {
+    if denom == 0 {
+        return u128::MAX;
+    }
+    let div = num / denom;
+    if num % denom == 0 {
+        div
+    } else {
+        div.saturating_add(1)
+    }
+}
+
+fn duration_from_ns(ns: u128) -> Duration {
+    if ns == 0 {
+        return Duration::ZERO;
+    }
+    let max_ns = u128::from(u64::MAX) * NS_PER_SEC;
+    if ns >= max_ns {
+        return Duration::from_secs(u64::MAX);
+    }
+    let secs = (ns / NS_PER_SEC) as u64;
+    let nanos = (ns % NS_PER_SEC) as u32;
+    Duration::new(secs, nanos)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::collections::BTreeMap;
 
-    fn capacity_map(value: u128) -> impl FnMut(&u8) -> Option<u128> {
-        move |_| Some(value)
+    fn constant(limit: u128) -> impl FnMut(&u8) -> Option<u128> {
+        move |_| Some(limit)
     }
 
-    #[derive(Clone)]
-    struct TransferState<P> {
-        origin: P,
-        recipient: P,
-        remaining: u128,
-        ready_time: SystemTime,
-        deliver: bool,
+    fn unlimited() -> impl FnMut(&u8) -> Option<u128> {
+        move |_| None
     }
 
-    fn run_to_completion<P, E, I>(
-        start: SystemTime,
-        transfers: &[Transfer<P>],
-        mut egress_limit: E,
-        mut ingress_limit: I,
-    ) -> BTreeMap<u64, Vec<Segment>>
-    where
-        P: Clone + Ord,
-        E: FnMut(&P) -> Option<u128>,
-        I: FnMut(&P) -> Option<u128>,
-    {
-        let mut now = start;
-        let mut state: BTreeMap<u64, TransferState<P>> = transfers
-            .iter()
-            .map(|transfer| {
-                (
-                    transfer.id,
-                    TransferState {
-                        origin: transfer.origin.clone(),
-                        recipient: transfer.recipient.clone(),
-                        remaining: transfer.remaining,
-                        ready_time: transfer.ready_time,
-                        deliver: transfer.deliver,
-                    },
-                )
-            })
-            .collect();
+    #[test]
+    fn equal_share_on_single_egress() {
+        let flows = vec![
+            Flow {
+                id: 1,
+                origin: 1,
+                recipient: 10,
+                requires_ingress: true,
+            },
+            Flow {
+                id: 2,
+                origin: 1,
+                recipient: 11,
+                requires_ingress: true,
+            },
+        ];
 
-        let mut plans: BTreeMap<u64, Vec<Segment>> = BTreeMap::new();
-        let mut guard = 0usize;
+        let allocations = allocate(&flows, constant(1_000), unlimited());
+        assert_eq!(allocations.len(), 2);
 
-        while state.values().any(|entry| entry.remaining > 0) {
-            guard += 1;
-            assert!(guard < 10_000, "planner failed to converge");
-
-            let active: Vec<Transfer<P>> = state
-                .iter()
-                .map(|(&id, entry)| Transfer {
-                    id,
-                    origin: entry.origin.clone(),
-                    recipient: entry.recipient.clone(),
-                    remaining: entry.remaining,
-                    ready_time: entry.ready_time,
-                    deliver: entry.deliver,
-                })
-                .collect();
-
-            let outcome = plan_transmissions(now, &active, &mut egress_limit, &mut ingress_limit);
-
-            let next_event = outcome
-                .next_event
-                .expect("planner must produce a next event while work remains");
-
-            let mut progressed = false;
-            for (id, assignment) in outcome.plans {
-                let entry = state.get_mut(&id).expect("missing transfer state for plan");
-                if let Some(segment) = assignment.segment {
-                    let transferred = segment.bytes;
-                    if transferred > 0 {
-                        plans.entry(id).or_default().push(segment);
-                        entry.remaining = entry.remaining.saturating_sub(transferred);
-                        progressed = true;
-                    }
-                }
-                entry.ready_time = assignment.ready_time;
-            }
-
-            if !progressed && next_event == now {
-                panic!("planner stalled without progress");
-            }
-
-            now = next_event;
+        for rate in allocations.values() {
+            let Rate::Finite(ratio) = rate else {
+                panic!("expected finite rate");
+            };
+            assert_eq!(ratio.num, 500);
+            assert_eq!(ratio.den, 1);
         }
-
-        plans
     }
 
     #[test]
-    fn test_progressive_share_two_transfers() {
-        let now = UNIX_EPOCH;
-        let transfers = vec![
-            Transfer {
-                id: 1,
-                origin: 1,
-                recipient: 2,
-                remaining: 2000,
-                ready_time: now,
-                deliver: true,
-            },
-            Transfer {
-                id: 2,
-                origin: 1,
-                recipient: 2,
-                remaining: 1000,
-                ready_time: now + Duration::from_secs(1),
-                deliver: true,
-            },
-        ];
-
-        let plans = run_to_completion(now, &transfers, capacity_map(1000), capacity_map(1000));
-
-        let seg1 = plans.get(&1).unwrap();
-        let seg2 = plans.get(&2).unwrap();
-
-        assert_eq!(seg1.len(), 2);
-        assert_eq!(seg2.len(), 1);
-
-        assert_eq!(seg1[0].start, now);
-        assert_eq!(seg1[0].end, now + Duration::from_secs(1));
-        assert_eq!(seg1[0].bytes, 1000);
-
-        assert_eq!(seg1[1].start, now + Duration::from_secs(1));
-        assert_eq!(seg1[1].end, now + Duration::from_secs(3));
-        assert_eq!(seg1[1].bytes, 1000);
-
-        assert_eq!(seg2[0].start, now + Duration::from_secs(1));
-        assert_eq!(seg2[0].end, now + Duration::from_secs(3));
-        assert_eq!(seg2[0].bytes, 1000);
-    }
-
-    #[test]
-    fn test_prune_preserves_future_ready_time() {
-        let now = UNIX_EPOCH;
-        let future = now + Duration::from_secs(5);
-        let mut schedule = Schedule::new(1_000);
-        schedule.add_flow(0, now, 1024);
-        schedule.reset_flow_segment(0, None, future, None);
-
-        let completed = schedule.prune(now);
-        assert!(completed.is_empty());
-
-        let snapshot = schedule.flow_snapshot(0).expect("flow missing after prune");
-        assert_eq!(snapshot.ready_time, future);
-    }
-
-    #[test]
-    fn test_progressive_share_three_transfers() {
-        let now = UNIX_EPOCH;
-        let transfers = vec![
-            Transfer {
-                id: 1,
-                origin: 1,
-                recipient: 2,
-                remaining: 1200,
-                ready_time: now,
-                deliver: true,
-            },
-            Transfer {
-                id: 2,
-                origin: 1,
-                recipient: 2,
-                remaining: 600,
-                ready_time: now + Duration::from_millis(200),
-                deliver: true,
-            },
-            Transfer {
-                id: 3,
-                origin: 3,
-                recipient: 2,
-                remaining: 600,
-                ready_time: now + Duration::from_millis(200),
-                deliver: true,
-            },
-        ];
-
-        let egress_cap = |pk: &u8| match pk {
-            1 => Some(1200),
-            3 => Some(600),
-            _ => Some(u128::MAX),
-        };
-
-        let ingress_cap = |_: &u8| Some(1200);
-
-        let plans = run_to_completion(now, &transfers, egress_cap, ingress_cap);
-
-        let seg1 = plans.get(&1).unwrap();
-        let seg2 = plans.get(&2).unwrap();
-        let seg3 = plans.get(&3).unwrap();
-
-        assert_eq!(seg1.len(), 3);
-        assert_eq!(seg2.len(), 1);
-        assert_eq!(seg3.len(), 1);
-
-        assert_eq!(seg1[0].start, now);
-        assert_eq!(seg1[0].end, now + Duration::from_millis(200));
-        assert_eq!(seg1[0].bytes, 240);
-
-        assert_eq!(seg1[1].start, now + Duration::from_millis(200));
-        assert_eq!(seg1[1].end, now + Duration::from_millis(1700));
-        assert_eq!(seg1[1].bytes, 600);
-
-        assert_eq!(seg1[2].start, now + Duration::from_millis(1700));
-        assert_eq!(seg1[2].end, now + Duration::from_secs(2));
-        assert_eq!(seg1[2].bytes, 360);
-
-        assert_eq!(seg2[0].start, now + Duration::from_millis(200));
-        assert_eq!(seg2[0].end, now + Duration::from_millis(1700));
-        assert_eq!(seg2[0].bytes, 600);
-
-        assert_eq!(seg3[0].start, seg2[0].start);
-        assert_eq!(seg3[0].end, seg2[0].end);
-        assert_eq!(seg3[0].bytes, 600);
-    }
-
-    #[test]
-    fn test_unlimited_capacity() {
-        let now = UNIX_EPOCH;
-        let transfers = vec![Transfer {
+    fn ingress_limit_enforced() {
+        let flows = vec![Flow {
             id: 1,
             origin: 1,
-            recipient: 2,
-            remaining: 1024,
-            ready_time: now,
-            deliver: true,
+            recipient: 5,
+            requires_ingress: true,
         }];
 
-        let plans = run_to_completion(now, &transfers, |_pk| None, |_pk| None);
-
-        let seg = plans.get(&1).unwrap();
-        assert_eq!(seg.len(), 1);
-        assert_eq!(seg[0].start, now);
-        assert_eq!(seg[0].end, now);
-        assert_eq!(seg[0].bytes, 1024);
+        let allocations = allocate(&flows, unlimited(), constant(2_000));
+        let rate = allocations.get(&1).expect("missing flow");
+        let Rate::Finite(ratio) = rate else {
+            panic!("expected finite rate");
+        };
+        assert_eq!(ratio.num, 2_000);
+        assert_eq!(ratio.den, 1);
     }
 
     #[test]
-    fn test_capacity_respected() {
-        let now = UNIX_EPOCH;
-        let transfers = vec![
-            Transfer {
+    fn unlimited_flow_finishes_immediately() {
+        let flows = vec![Flow {
+            id: 7,
+            origin: 1,
+            recipient: 2,
+            requires_ingress: false,
+        }];
+
+        let allocations = allocate(&flows, unlimited(), unlimited());
+        assert_eq!(allocations[&7], Rate::Unlimited);
+    }
+
+    #[test]
+    fn transfer_accumulates_carry() {
+        let ratio = Ratio { num: 1, den: 2 }; // 0.5 bytes per second
+        let mut carry = 0;
+        let rate = Rate::Finite(ratio);
+        let first = transfer(&rate, Duration::from_millis(500), &mut carry, 10);
+        assert_eq!(first, 0); // 0.25 bytes rounded down
+        assert_ne!(carry, 0);
+        let second = transfer(&rate, Duration::from_millis(1500), &mut carry, 10);
+        // 0.75 + previous 0.25 == 1 byte
+        assert_eq!(first + second, 1);
+    }
+
+    #[test]
+    fn completion_time_calculation() {
+        let ratio = Ratio::from_int(500);
+        let rate = Rate::Finite(ratio);
+        let time = time_to_deplete(&rate, 1_000).expect("finite time");
+        assert_eq!(time.as_secs(), 2);
+    }
+
+    fn rate_of(map: &BTreeMap<u64, Rate>, id: u64) -> Ratio {
+        match map.get(&id).expect("missing flow") {
+            Rate::Finite(ratio) => ratio.clone(),
+            Rate::Unlimited => panic!("unexpected unlimited rate"),
+        }
+    }
+
+    #[test]
+    fn three_peer_fair_sharing() {
+        let flows = vec![
+            Flow {
                 id: 1,
-                origin: 1,
-                recipient: 4,
-                remaining: 1500,
-                ready_time: now,
-                deliver: true,
+                origin: 'A',
+                recipient: 'B',
+                requires_ingress: true,
             },
-            Transfer {
+            Flow {
                 id: 2,
-                origin: 2,
-                recipient: 4,
-                remaining: 1500,
-                ready_time: now,
-                deliver: true,
+                origin: 'A',
+                recipient: 'B',
+                requires_ingress: true,
             },
-            Transfer {
+            Flow {
                 id: 3,
-                origin: 3,
-                recipient: 4,
-                remaining: 1500,
-                ready_time: now,
-                deliver: true,
+                origin: 'B',
+                recipient: 'C',
+                requires_ingress: true,
+            },
+            Flow {
+                id: 4,
+                origin: 'A',
+                recipient: 'C',
+                requires_ingress: true,
+            },
+            Flow {
+                id: 5,
+                origin: 'C',
+                recipient: 'B',
+                requires_ingress: true,
             },
         ];
 
-        let egress = |_pk: &u8| Some(1500);
-        let ingress = |_pk: &u8| Some(1500);
-
-        let plans = run_to_completion(now, &transfers, egress, ingress);
-
-        let mut boundaries = Vec::new();
-        for segments in plans.values() {
-            for segment in segments {
-                boundaries.push(segment.start);
-                boundaries.push(segment.end);
-            }
-        }
-
-        boundaries.sort();
-        boundaries.dedup();
-
-        for pair in boundaries.windows(2) {
-            let interval_start = pair[0];
-            let interval_end = pair[1];
-            if interval_end <= interval_start {
-                continue;
-            }
-
-            let interval_ns = interval_end
-                .duration_since(interval_start)
-                .unwrap()
-                .as_nanos();
-
-            let mut bytes_in_interval = 0u128;
-
-            for segments in plans.values() {
-                for segment in segments {
-                    if segment.end <= interval_start || segment.start >= interval_end {
-                        continue;
-                    }
-                    let seg_start = segment.start.max(interval_start);
-                    let seg_end = segment.end.min(interval_end);
-                    let overlap_ns = seg_end.duration_since(seg_start).unwrap().as_nanos();
-                    let total_ns = segment.duration_ns().max(1);
-                    let contributed = segment.bytes * overlap_ns / total_ns;
-                    bytes_in_interval += contributed;
-                }
-            }
-
-            let rate = bytes_in_interval * NS_PER_SEC / interval_ns;
-            assert!(rate <= 1500, "rate {rate} exceeds capacity");
-        }
-    }
-
-    #[test]
-    fn test_receiver_bottleneck_shared_across_origins() {
-        let now = UNIX_EPOCH;
-        let transfers = vec![
-            Transfer {
-                id: 1,
-                origin: 1u8,
-                recipient: 10,
-                remaining: 1000,
-                ready_time: now,
-                deliver: true,
+        let allocations = allocate(
+            &flows,
+            |origin: &char| match origin {
+                'A' => Some(1_000_000), // 1_000 KB/s
+                'B' => Some(750_000),
+                'C' => Some(100_000),
+                _ => None,
             },
-            Transfer {
-                id: 2,
-                origin: 2u8,
-                recipient: 10,
-                remaining: 1000,
-                ready_time: now,
-                deliver: true,
+            |recipient: &char| match recipient {
+                'A' => Some(500_000),
+                'B' => Some(250_000),
+                'C' => Some(1_000_000),
+                _ => None,
             },
-        ];
-
-        let plans = run_to_completion(
-            now,
-            &transfers,
-            |_origin| Some(2000),
-            |_recipient| Some(1000),
         );
 
-        for id in [1u64, 2] {
-            let segments = plans.get(&id).unwrap();
-            assert_eq!(segments.len(), 1);
-            let segment = &segments[0];
-            assert_eq!(segment.start, now);
-            assert_eq!(segment.end, now + Duration::from_secs(2));
-            assert_eq!(segment.bytes, 1000);
-        }
+        let rate_ab1 = rate_of(&allocations, 1);
+        assert_eq!(rate_ab1.num, 250_000);
+        assert_eq!(rate_ab1.den, 3);
+
+        let rate_ab2 = rate_of(&allocations, 2);
+        assert_eq!(rate_ab2.num, 250_000);
+        assert_eq!(rate_ab2.den, 3);
+
+        let rate_ac = rate_of(&allocations, 4);
+        assert_eq!(rate_ac.num, 500_000);
+        assert_eq!(rate_ac.den, 1);
+
+        let rate_bc = rate_of(&allocations, 3);
+        assert_eq!(rate_bc.num, 500_000);
+        assert_eq!(rate_bc.den, 1);
+
+        let rate_cb = rate_of(&allocations, 5);
+        assert_eq!(rate_cb.num, 250_000);
+        assert_eq!(rate_cb.den, 3);
     }
 
     #[test]
-    fn test_sender_bottleneck_limits_all_outgoing_flows() {
-        let now = UNIX_EPOCH;
-        let transfers = vec![
-            Transfer {
+    fn upstream_bottleneck_propagates() {
+        let flows = vec![
+            Flow {
                 id: 1,
-                origin: 1u8,
-                recipient: 10,
-                remaining: 1000,
-                ready_time: now,
-                deliver: true,
+                origin: 'A',
+                recipient: 'B',
+                requires_ingress: true,
             },
-            Transfer {
+            Flow {
                 id: 2,
-                origin: 1u8,
-                recipient: 11,
-                remaining: 1000,
-                ready_time: now,
-                deliver: true,
+                origin: 'A',
+                recipient: 'C',
+                requires_ingress: true,
             },
         ];
 
-        let plans = run_to_completion(
-            now,
-            &transfers,
-            |_origin| Some(1000),
-            |_recipient| Some(10_000),
+        let allocations = allocate(
+            &flows,
+            |origin: &char| match origin {
+                'A' => Some(1_000_000),
+                'B' => Some(1_000_000),
+                'C' => Some(1_000_000),
+                _ => None,
+            },
+            |recipient: &char| match recipient {
+                'A' => Some(500_000),
+                'B' => Some(1_000),
+                'C' => Some(500_000),
+                _ => None,
+            },
         );
 
-        let seg1 = plans.get(&1).unwrap();
-        let seg2 = plans.get(&2).unwrap();
+        let rate_ab = rate_of(&allocations, 1);
+        assert_eq!(rate_ab.num, 1_000);
+        assert_eq!(rate_ab.den, 1);
 
-        assert_eq!(seg1.len(), 1);
-        assert_eq!(seg2.len(), 1);
-        assert_eq!(seg1[0].start, now);
-        assert_eq!(seg2[0].start, now);
-        assert_eq!(seg1[0].end, now + Duration::from_secs(2));
-        assert_eq!(seg2[0].end, now + Duration::from_secs(2));
-        assert_eq!(seg1[0].bytes, 1000);
-        assert_eq!(seg2[0].bytes, 1000);
+        let rate_bc = rate_of(&allocations, 2);
+        assert_eq!(rate_bc.num, 500_000);
+        assert_eq!(rate_bc.den, 1);
     }
 
     #[test]
-    fn test_zero_capacity_produces_no_segments() {
-        let now = UNIX_EPOCH;
-        let transfers = vec![Transfer {
-            id: 1,
-            origin: 1u8,
-            recipient: 2,
-            remaining: 1024,
-            ready_time: now,
-            deliver: true,
-        }];
-
-        let outcome =
-            plan_transmissions(now, &transfers, |_origin| Some(0), |_recipient| Some(1024));
-        let plans = outcome.plans;
-
-        let seg = plans.get(&1).unwrap();
-        assert!(seg.segment.is_none());
-    }
-
-    #[test]
-    fn test_future_ready_time_deferred_start() {
-        let now = UNIX_EPOCH;
-        let transfers = vec![
-            Transfer {
+    fn limited_capacity_still_guarantees_fair_share() {
+        let flows = vec![
+            Flow {
                 id: 1,
-                origin: 1u8,
-                recipient: 2,
-                remaining: 1000,
-                ready_time: now,
-                deliver: true,
+                origin: 'A',
+                recipient: 'B',
+                requires_ingress: true,
             },
-            Transfer {
+            Flow {
                 id: 2,
-                origin: 1u8,
-                recipient: 3,
-                remaining: 1000,
-                ready_time: now + Duration::from_secs(1),
-                deliver: true,
+                origin: 'A',
+                recipient: 'C',
+                requires_ingress: true,
             },
         ];
 
-        let plans = run_to_completion(
-            now,
-            &transfers,
-            |_origin| Some(1000),
-            |_recipient| Some(1000),
+        let allocations = allocate(
+            &flows,
+            |origin: &char| match origin {
+                'A' => Some(50_000),
+                'B' => Some(1_000_000),
+                'C' => Some(1_000_000),
+                _ => None,
+            },
+            |recipient: &char| match recipient {
+                'A' => Some(500_000),
+                'B' => Some(1_000),
+                'C' => Some(500_000),
+                _ => None,
+            },
         );
 
-        let seg1 = plans.get(&1).unwrap();
-        let seg2 = plans.get(&2).unwrap();
+        let rate_ab = rate_of(&allocations, 1);
+        assert_eq!(rate_ab.num, 1_000);
+        assert_eq!(rate_ab.den, 1);
 
-        assert_eq!(seg1.len(), 1);
-        assert_eq!(seg1[0].start, now);
-        assert_eq!(seg1[0].end, now + Duration::from_secs(1));
-
-        assert_eq!(seg2.len(), 1);
-        assert_eq!(seg2[0].start, now + Duration::from_secs(1));
-        assert_eq!(seg2[0].end, now + Duration::from_secs(2));
+        let rate_bc = rate_of(&allocations, 2);
+        assert_eq!(rate_bc.num, 49_000);
+        assert_eq!(rate_bc.den, 1);
     }
 }

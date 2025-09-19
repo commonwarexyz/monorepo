@@ -1,9 +1,10 @@
 //! Implementation of a simulated p2p network.
 
 use super::{
-    bandwidth,
     ingress::{self, Oracle},
-    metrics, Error,
+    metrics,
+    transmissions::{self, Completion},
+    Error,
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
@@ -21,7 +22,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{btree_map::Entry, BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, SystemTime},
 };
@@ -75,17 +76,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map of peers blocking each other
     blocks: HashSet<(P, P)>,
 
-    // Sequence management for bandwidth scheduling and FIFO delivery
-    next_flow_id: u64,
-    assign_sequences: BTreeMap<(P, P), u64>,
-    active_flows: BTreeMap<(P, P), u64>,
-    flow_meta: BTreeMap<u64, FlowMeta<P>>,
-    pending_transmissions: BTreeMap<(P, P), VecDeque<QueuedTransmission>>,
-    last_arrival_complete: BTreeMap<(P, P), SystemTime>,
-    next_bandwidth_event: Option<SystemTime>,
-    next_transmission_ready: Option<SystemTime>,
-    expected_sequences: BTreeMap<(P, P), u64>,
-    pending_deliveries: BTreeMap<(P, P), BTreeMap<u64, PendingDelivery>>,
+    transmissions: transmissions::State<P>,
 
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
@@ -126,16 +117,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 blocks: HashSet::new(),
-                next_flow_id: 0,
-                assign_sequences: BTreeMap::new(),
-                active_flows: BTreeMap::new(),
-                flow_meta: BTreeMap::new(),
-                pending_transmissions: BTreeMap::new(),
-                last_arrival_complete: BTreeMap::new(),
-                next_bandwidth_event: None,
-                next_transmission_ready: None,
-                expected_sequences: BTreeMap::new(),
-                pending_deliveries: BTreeMap::new(),
+                transmissions: transmissions::State::new(),
                 received_messages,
                 sent_messages,
             },
@@ -198,8 +180,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         &mut self.context.clone(),
                         public_key.clone(),
                         self.get_next_socket(),
-                        usize::MAX,
-                        usize::MAX,
                         self.max_size,
                     );
                     self.peers.insert(public_key.clone(), peer);
@@ -227,17 +207,30 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 egress_bps,
                 ingress_bps,
                 result,
-            } => match self.peers.get_mut(&public_key) {
-                Some(peer) => {
-                    peer.set_bandwidth(egress_bps, ingress_bps);
+            } => match self.peers.contains_key(&public_key) {
+                true => {
+                    assert!(egress_bps > 0, "egress bandwidth must be greater than 0");
+                    assert!(ingress_bps > 0, "ingress bandwidth must be greater than 0");
+                    let egress = if egress_bps == usize::MAX {
+                        None
+                    } else {
+                        Some(egress_bps)
+                    };
+                    let ingress = if ingress_bps == usize::MAX {
+                        None
+                    } else {
+                        Some(ingress_bps)
+                    };
+                    self.transmissions.tune(&public_key, egress, ingress);
+
                     let now = self.context.current();
-                    let completed = self.recompute_bandwidth(now);
-                    if !completed.is_empty() {
-                        self.handle_completed_flows(completed, now);
+                    let completions = self.transmissions.process(now);
+                    if !completions.is_empty() {
+                        self.process_completions(completions);
                     }
                     send_result(result, Ok(()));
                 }
-                None => send_result(result, Err(Error::PeerMissing)),
+                false => send_result(result, Err(Error::PeerMissing)),
             },
             ingress::Message::AddLink {
                 sender,
@@ -296,405 +289,36 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 }
 
 impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
-    fn recompute_bandwidth(&mut self, now: SystemTime) -> Vec<u64> {
-        let mut completed = Vec::new();
-        for peer in self.peers.values_mut() {
-            completed.extend(peer.egress.prune(now));
-            peer.ingress.prune(now);
-        }
-
-        if self.flow_meta.is_empty() {
-            self.next_bandwidth_event = None;
-            return completed;
-        }
-
-        let mut transfers = Vec::new();
-        for (&flow_id, meta) in self.flow_meta.iter() {
-            let sender_peer = match self.peers.get(&meta.origin) {
-                Some(peer) => peer,
-                None => continue,
-            };
-            if let Some(snapshot) = sender_peer.egress.flow_snapshot(flow_id) {
-                if snapshot.remaining == 0 {
+    fn process_completions(&mut self, completions: Vec<Completion<P>>) {
+        for completion in completions {
+            if completion.deliver {
+                let key = (completion.origin.clone(), completion.recipient.clone());
+                let Some(arrival_complete_at) = completion.arrival_complete_at else {
                     continue;
-                }
-                transfers.push(bandwidth::Transfer {
-                    id: flow_id,
-                    origin: meta.origin.clone(),
-                    recipient: meta.recipient.clone(),
-                    remaining: snapshot.remaining,
-                    ready_time: snapshot.ready_time.max(now),
-                    deliver: meta.deliver,
-                });
-            }
-        }
-
-        if transfers.is_empty() {
-            self.next_bandwidth_event = None;
-            return completed;
-        }
-
-        let outcome = bandwidth::plan_transmissions(
-            now,
-            &transfers,
-            |origin: &P| {
-                self.peers.get(origin).and_then(|peer| {
-                    if peer.egress.bps == usize::MAX {
-                        None
-                    } else {
-                        Some(peer.egress.bps as u128)
-                    }
-                })
-            },
-            |recipient: &P| {
-                self.peers.get(recipient).and_then(|peer| {
-                    if peer.ingress.bps == usize::MAX {
-                        None
-                    } else {
-                        Some(peer.ingress.bps as u128)
-                    }
-                })
-            },
-        );
-
-        for (flow_id, assignment) in outcome.plans {
-            let (origin, recipient, latency, deliver) = {
-                let meta = self
-                    .flow_meta
-                    .get(&flow_id)
-                    .expect("missing metadata for scheduled flow");
-                (
-                    meta.origin.clone(),
-                    meta.recipient.clone(),
-                    meta.latency,
-                    meta.deliver,
-                )
-            };
-
-            if let Some(peer) = self.peers.get_mut(&origin) {
-                peer.egress.reset_flow_segment(
-                    flow_id,
-                    assignment.segment.clone(),
-                    assignment.ready_time,
-                    None,
-                );
-            }
-
-            if deliver {
-                if let Some(peer) = self.peers.get_mut(&recipient) {
-                    peer.ingress.reset_flow_segment(
-                        flow_id,
-                        assignment.segment.clone(),
-                        assignment.ready_time,
-                        Some(latency),
-                    );
-                }
-            }
-
-            if let Some(meta) = self.flow_meta.get_mut(&flow_id) {
-                if meta.first_segment_start.is_none() {
-                    if let Some(segment) = assignment.segment.as_ref() {
-                        meta.first_segment_start = Some(segment.start_time());
-                    }
-                }
-            }
-        }
-
-        self.next_bandwidth_event = outcome.next_event;
-        completed
-    }
-
-    fn next_sequence_id(&mut self, origin: &P, recipient: &P) -> u64 {
-        let key = (origin.clone(), recipient.clone());
-        let counter = self.assign_sequences.entry(key).or_insert(0);
-        let seq = *counter;
-        *counter += 1;
-        seq
-    }
-
-    fn enqueue_delivery(&mut self, origin: &P, recipient: &P, seq: u64, pending: PendingDelivery) {
-        let key = (origin.clone(), recipient.clone());
-        self.pending_deliveries
-            .entry(key.clone())
-            .or_default()
-            .insert(seq, pending);
-        self.flush_delivery_queue(key);
-    }
-
-    fn flush_delivery_queue(&mut self, key: (P, P)) {
-        let expected_entry = self.expected_sequences.entry(key.clone()).or_insert(0);
-        loop {
-            let pending = match self.pending_deliveries.entry(key.clone()) {
-                Entry::Occupied(mut occ) => {
-                    if let Some(p) = occ.get_mut().remove(expected_entry) {
-                        if occ.get().is_empty() {
-                            occ.remove();
+                };
+                match self.links.get_mut(&key) {
+                    Some(link) => {
+                        if let Err(err) =
+                            link.send(completion.channel, completion.message, arrival_complete_at)
+                        {
+                            error!(?err, "failed to send");
                         }
-                        Some(p)
-                    } else {
-                        None
                     }
-                }
-                Entry::Vacant(_) => None,
-            };
-
-            let Some(pending) = pending else { break };
-
-            if let Some(link) = self.links.get_mut(&key) {
-                // Deliver only when all earlier sequence numbers are already flushed.
-                let (origin_key, recipient_key) = (&key.0, &key.1);
-                assert!(
-                    pending.arrival_complete_at >= pending.first_byte_arrival_at,
-                    "arrival completed before first byte for {origin_key:?}->{recipient_key:?}",
-                );
-
-                if let Err(err) = link.send(
-                    pending.channel,
-                    pending.message,
-                    pending.arrival_complete_at,
-                ) {
-                    error!(?err, "failed to send");
-                }
-            }
-
-            *expected_entry += 1;
-        }
-    }
-
-    fn queue_transmission(&mut self, origin: P, recipient: P, mut entry: QueuedTransmission) {
-        let key = (origin.clone(), recipient.clone());
-        entry.ready_at = self.context.current();
-        self.pending_transmissions
-            .entry(key.clone())
-            .or_default()
-            .push_back(entry);
-
-        self.try_start_transmission_for(origin, recipient);
-    }
-
-    fn try_start_transmission_for(&mut self, origin: P, recipient: P) {
-        self.try_start_transmission_for_inner(origin, recipient, true);
-    }
-
-    fn try_start_transmission_for_inner(
-        &mut self,
-        origin: P,
-        recipient: P,
-        refresh_schedule: bool,
-    ) {
-        let key = (origin.clone(), recipient.clone());
-        if self.active_flows.contains_key(&key) {
-            if refresh_schedule {
-                self.refresh_next_transmission_ready();
-            }
-            return;
-        }
-
-        let mut entry_to_start = None;
-        let mut remove_queue = false;
-        let now = self.context.current();
-        if let Some(queue) = self.pending_transmissions.get_mut(&key) {
-            if let Some(front) = queue.front_mut() {
-                let mut ready_at = front.ready_at.max(now);
-                if let Some(arrival_complete) = self.last_arrival_complete.get(&key) {
-                    if let Some(limit) = arrival_complete.checked_sub(front.latency) {
-                        ready_at = ready_at.max(limit);
+                    None => {
+                        trace!(
+                            origin = ?completion.origin,
+                            recipient = ?completion.recipient,
+                            "missing link for completion",
+                        );
                     }
-                }
-                if ready_at <= now {
-                    entry_to_start = queue.pop_front();
-                    if queue.is_empty() {
-                        remove_queue = true;
-                    }
-                } else {
-                    front.ready_at = ready_at;
-                }
-            } else {
-                remove_queue = true;
-            }
-        }
-
-        if remove_queue {
-            self.pending_transmissions.remove(&key);
-        }
-
-        if let Some(entry) = entry_to_start {
-            let flow_id = self.next_flow_id;
-            self.next_flow_id += 1;
-            self.active_flows.insert(key, flow_id);
-            self.start_transmission(origin, recipient, flow_id, entry);
-        }
-
-        if refresh_schedule {
-            self.refresh_next_transmission_ready();
-        }
-    }
-
-    fn handle_completed_flows(&mut self, completed: Vec<u64>, now: SystemTime) {
-        for flow_id in completed {
-            let Some(meta) = self.flow_meta.remove(&flow_id) else {
-                continue;
-            };
-            let FlowMeta {
-                origin,
-                recipient,
-                latency,
-                deliver,
-                channel,
-                message,
-                sequence,
-                first_segment_start,
-            } = meta;
-
-            self.active_flows
-                .remove(&(origin.clone(), recipient.clone()));
-            let queue_origin = origin.clone();
-            let queue_recipient = recipient.clone();
-
-            let arrival_complete_at = if deliver {
-                now.checked_add(latency)
-                    .expect("latency overflow computing arrival completion")
-            } else {
-                now
-            };
-
-            if deliver {
-                if let Some(seq) = sequence {
-                    let first_start = first_segment_start.unwrap_or(now);
-                    let first_byte_arrival_at = first_start
-                        .checked_add(latency)
-                        .expect("latency overflow computing first byte arrival");
-                    let pending = PendingDelivery {
-                        channel,
-                        message,
-                        arrival_complete_at,
-                        first_byte_arrival_at,
-                    };
-                    self.enqueue_delivery(&origin, &recipient, seq, pending);
                 }
             } else {
                 trace!(
-                    ?origin,
-                    ?recipient,
-                    reason = "random link failure",
-                    "dropping message",
+                    origin = ?completion.origin,
+                    recipient = ?completion.recipient,
+                    "message dropped before delivery",
                 );
             }
-
-            self.last_arrival_complete
-                .insert((origin.clone(), recipient.clone()), arrival_complete_at);
-
-            self.try_start_transmission_for(queue_origin, queue_recipient);
-        }
-    }
-
-    fn start_due_transmissions(&mut self, now: SystemTime) {
-        let ready_pairs: Vec<(P, P)> = self
-            .pending_transmissions
-            .iter()
-            .filter_map(|(key, queue)| {
-                if self.active_flows.contains_key(key) {
-                    return None;
-                }
-                queue.front().and_then(|entry| {
-                    if entry.ready_at <= now {
-                        Some(key.clone())
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-
-        for (origin, recipient) in ready_pairs {
-            self.try_start_transmission_for_inner(origin, recipient, false);
-        }
-
-        self.refresh_next_transmission_ready();
-    }
-
-    fn refresh_next_transmission_ready(&mut self) {
-        let now = self.context.current();
-        let mut next_ready: Option<SystemTime> = None;
-        for (key, queue) in self.pending_transmissions.iter() {
-            if self.active_flows.contains_key(key) {
-                continue;
-            }
-            if let Some(entry) = queue.front() {
-                let candidate = if entry.ready_at <= now {
-                    now
-                } else {
-                    entry.ready_at
-                };
-                next_ready = match next_ready {
-                    None => Some(candidate),
-                    Some(current) => Some(current.min(candidate)),
-                };
-            }
-        }
-        self.next_transmission_ready = next_ready;
-    }
-
-    fn start_transmission(
-        &mut self,
-        origin: P,
-        recipient: P,
-        flow_id: u64,
-        entry: QueuedTransmission,
-    ) {
-        let QueuedTransmission {
-            channel,
-            message,
-            latency,
-            should_deliver,
-            ..
-        } = entry;
-
-        let now = self.context.current();
-        let size = message.len();
-        let deliver = should_deliver && origin != recipient;
-
-        {
-            let sender_peer = self.peers.get_mut(&origin).expect("sender not found");
-            sender_peer.egress.add_flow(flow_id, now, size);
-        }
-
-        if deliver {
-            let receiver_peer = self.peers.get_mut(&recipient).expect("receiver not found");
-            receiver_peer.ingress.add_flow(flow_id, now, size);
-        }
-
-        let sequence = if deliver {
-            Some(self.next_sequence_id(&origin, &recipient))
-        } else {
-            None
-        };
-
-        self.flow_meta.insert(
-            flow_id,
-            FlowMeta {
-                origin: origin.clone(),
-                recipient: recipient.clone(),
-                latency,
-                deliver,
-                channel,
-                message,
-                sequence,
-                first_segment_start: None,
-            },
-        );
-
-        trace!(
-            ?origin,
-            ?recipient,
-            latency_ms = latency.as_millis(),
-            delivered = deliver,
-            "sending message",
-        );
-
-        let completed = self.recompute_bandwidth(now);
-        if !completed.is_empty() {
-            self.handle_completed_flows(completed, now);
         }
     }
 
@@ -712,6 +336,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         };
 
         // Send to all recipients
+        let now = self.context.current();
         let mut sent = Vec::new();
         for recipient in recipients {
             if recipient == origin {
@@ -742,33 +367,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
                 (latency, link.success_rate)
             };
+            let should_deliver = self.context.gen_bool(success_rate);
 
-            let (sender_has_bandwidth, receiver_has_bandwidth) = {
-                let sender_peer = self.peers.get(&origin).expect("sender must exist");
-                let receiver_peer = self.peers.get(&recipient).expect("receiver must exist");
-                (sender_peer.egress.bps > 0, receiver_peer.ingress.bps > 0)
-            };
-
-            if !sender_has_bandwidth {
-                trace!(
-                    ?origin,
-                    ?recipient,
-                    "sender has zero bandwidth, skipping recipient"
-                );
-                continue;
-            }
-
-            let should_deliver = receiver_has_bandwidth && self.context.gen_bool(success_rate);
-
-            let entry = QueuedTransmission {
+            let completions = self.transmissions.enqueue(
+                now,
+                origin.clone(),
+                recipient.clone(),
                 channel,
-                message: message.clone(),
+                message.clone(),
                 latency,
                 should_deliver,
-                ready_at: self.context.current(),
-            };
-
-            self.queue_transmission(origin.clone(), recipient.clone(), entry);
+            );
+            self.process_completions(completions);
 
             sent.push(recipient);
         }
@@ -789,14 +399,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     async fn run(mut self) {
         loop {
             let now = self.context.current();
-            self.start_due_transmissions(now);
+            let completions = self.transmissions.process(now);
+            self.process_completions(completions);
 
-            let deadline = match (self.next_bandwidth_event, self.next_transmission_ready) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            let deadline = self.transmissions.next();
             let context = self.context.clone();
             let event_sleep = async move {
                 if let Some(when) = deadline {
@@ -826,26 +432,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 },
                 tick = &mut event_sleep => {
                     if let Some(when) = tick {
-                        if self
-                            .next_bandwidth_event
-                            .map(|event| event <= when)
-                            .unwrap_or(false)
-                        {
-                            self.next_bandwidth_event = None;
-                            let completed = self.recompute_bandwidth(when);
-                            if !completed.is_empty() {
-                                self.handle_completed_flows(completed, when);
-                            }
-                        }
-
-                        if self
-                            .next_transmission_ready
-                            .map(|event| event <= when)
-                            .unwrap_or(false)
-                        {
-                            self.next_transmission_ready = None;
-                            self.start_due_transmissions(when);
-                        }
+                        let completions = self.transmissions.process(when);
+                        self.process_completions(completions);
                     }
                 }
             }
@@ -964,10 +552,6 @@ struct Peer<P: PublicKey> {
 
     // Control to register new channels
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
-
-    // Bandwidth schedules for egress and ingress
-    egress: bandwidth::Schedule,
-    ingress: bandwidth::Schedule,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -979,8 +563,6 @@ impl<P: PublicKey> Peer<P> {
         context: &mut E,
         public_key: P,
         socket: SocketAddr,
-        egress_bps: usize,
-        ingress_bps: usize,
         max_size: usize,
     ) -> Self {
         // The control is used to register channels.
@@ -1098,8 +680,6 @@ impl<P: PublicKey> Peer<P> {
         Self {
             socket,
             control: control_sender,
-            egress: bandwidth::Schedule::new(egress_bps),
-            ingress: bandwidth::Schedule::new(ingress_bps),
         }
     }
 
@@ -1115,16 +695,6 @@ impl<P: PublicKey> Peer<P> {
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)?
     }
-
-    /// Set bandwidth limits for the peer.
-    ///
-    /// Bandwidth is specified for the peer's egress (upload) and ingress
-    /// (download) rates in bytes per second. Use `usize::MAX` for effectively
-    /// unlimited bandwidth.
-    fn set_bandwidth(&mut self, egress_bps: usize, ingress_bps: usize) {
-        self.egress.bps = egress_bps;
-        self.ingress.bps = ingress_bps;
-    }
 }
 
 // A unidirectional link between two peers.
@@ -1137,32 +707,6 @@ struct Link {
 }
 
 /// Buffered payload waiting for earlier messages on the same link to complete.
-struct PendingDelivery {
-    channel: Channel,
-    message: Bytes,
-    arrival_complete_at: SystemTime,
-    first_byte_arrival_at: SystemTime,
-}
-
-struct QueuedTransmission {
-    channel: Channel,
-    message: Bytes,
-    latency: Duration,
-    should_deliver: bool,
-    ready_at: SystemTime,
-}
-
-struct FlowMeta<P: PublicKey> {
-    origin: P,
-    recipient: P,
-    latency: Duration,
-    deliver: bool,
-    channel: Channel,
-    message: Bytes,
-    sequence: Option<u64>,
-    first_segment_start: Option<SystemTime>,
-}
-
 impl Link {
     #[allow(clippy::too_many_arguments)]
     fn new<E: Spawner + RNetwork + Clock + Metrics, P: PublicKey>(
