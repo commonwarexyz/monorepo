@@ -1,3 +1,7 @@
+//! A memory-efficient index that uses an unordered map internally to map translated keys to
+//! arbitrary values. If you require ordering over the map's keys, consider
+//! [crate::index::ordered::Index] instead.
+
 use crate::{
     index::{
         storage::{prune_with_cursor, Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
