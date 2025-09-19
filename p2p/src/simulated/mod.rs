@@ -12,31 +12,30 @@
 //!
 //! # Bandwidth Simulation
 //!
-//! The simulator models contention with a deterministic, event-driven fair queue
-//! instead of simulating the transmission of every byte.
+//! The simulator provides a realistic model of bandwidth contention where network
+//! capacity is a shared, finite resource. Bandwidth is allocated via progressive
+//! filling to ensure max-min fairness.
 //!
-//! ## Core Loop
+//! ## Core Model
 //!
-//! Whenever the topology changes—because a transfer starts or finishes, or a
-//! bandwidth limit is updated—we execute a scheduling tick:
+//! Whenever a transfer starts or finishes, or a bandwidth limit is updated, we execute a scheduling tick:
 //!
-//! 1. **Collect Active Flows:** Gather every in-flight transfer that still has
-//!    bytes to send. A flow is bound to one sender and, when the message will be
-//!    delivered, one receiver.
-//! 2. **Solve Progressive Filling:** Run progressive filling to raise the rate of
+//! 1. **Collect Active Flows:** Gather every active transfer that still has
+//!    bytes to send. A flow is bound to one sender and to one receiver (if the message will be delivered).
+//! 2. **Compute Progressive Filling:** Run progressive filling to raise the rate of
 //!    every active flow in lock-step until some sender's egress or receiver's ingress
-//!    limit saturates. The result is a max-min fair, work-conserving rate for each flow.
-//! 3. **Pick the Next Event:** Using those rates, determine which flow will
+//!    limit saturates (at which point the flow is frozen and the process repeats with what remains).
+//! 3. **Wait for the Next Event:** Using those rates, determine which flow will
 //!    finish first by computing how long it needs to transmit its remaining
-//!    bytes.
-//! 4. **Advance Time:** Jump simulated time directly to that completion instant.
-//! 5. **Finalize Work:** The flow is removed, latency is applied to determine
-//!    when the receiver observes the delivery, and the scheduler repeats from step 1.
+//!    bytes. Advance simulated time directly to that completion instant (advancing all other flows
+//!    by the bytes transferred over the interval).
+//! 4. **Finalize Work:** Remove the completed flow and pass the message to the receiver. Repeat from step 1
+//!    until all flows are processed.
 //!
-//! Messages between the same pair of peers remain strictly ordered. When one
+//! _Messages between the same pair of peers remain strictly ordered. When one
 //! message finishes, the next message on that link may begin sending at
 //! `arrival_time - new_latency` so that its first byte arrives immediately after
-//! the previous one is fully received.
+//! the previous one is fully received._
 //!
 //! ## Latency vs. Transmission Delay
 //!
