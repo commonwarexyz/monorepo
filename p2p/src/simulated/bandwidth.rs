@@ -53,7 +53,7 @@ enum ResourceKey<P> {
 }
 
 /// Ensures an entry exists for the given resource, returning its index if limited.
-fn ensure_resource<P: Clone + Ord>(
+fn insert<P: Clone + Ord>(
     key: ResourceKey<P>,
     limit: Option<u128>,
     indices: &mut BTreeMap<ResourceKey<P>, usize>,
@@ -71,7 +71,7 @@ fn ensure_resource<P: Clone + Ord>(
 
 /// Computes a fair allocation for the provided `flows`, returning per-flow rates.
 ///
-/// Each sender/receiver cap is modelled as a shared resource. Every flow registers
+/// Each sender/receiver cap is modeled as a shared resource. Every flow registers
 /// with the resources it touches, after which we perform progressive filling: raise
 /// the rate of all unfrozen flows uniformly until a resource is depleted, freeze flows
 /// using that resource, and repeat. This yields a deterministic, starvation-free assignment
@@ -86,20 +86,21 @@ where
     E: FnMut(&P) -> Option<u128>,
     I: FnMut(&P) -> Option<u128>,
 {
+    // If there are no flows, there is nothing to allocate.
     let mut result = BTreeMap::new();
     if flows.is_empty() {
         return result;
     }
 
+    // Register all flows with the resources they touch.
     let mut indices: BTreeMap<ResourceKey<P>, usize> = BTreeMap::new();
     let mut resources: Vec<Resource> = Vec::new();
     let mut rates: Vec<Option<Ratio>> = vec![None; flows.len()];
     let mut active_indices: Vec<usize> = Vec::new();
-
     for (idx, flow) in flows.iter().enumerate() {
+        // Always insert the egress resource.
         let mut limited = false;
-
-        if let Some(resource_idx) = ensure_resource(
+        if let Some(resource_idx) = insert(
             ResourceKey::Egress(flow.origin.clone()),
             egress_limit(&flow.origin),
             &mut indices,
@@ -109,8 +110,10 @@ where
             limited = true;
         }
 
+        // If the flow requires ingress, insert the ingress resource (may be a no-op
+        // if the message will be dropped).
         if flow.requires_ingress {
-            if let Some(resource_idx) = ensure_resource(
+            if let Some(resource_idx) = insert(
                 ResourceKey::Ingress(flow.recipient.clone()),
                 ingress_limit(&flow.recipient),
                 &mut indices,
@@ -121,14 +124,17 @@ where
             }
         }
 
+        // If the flow is limited by a resource, set its rate to zero (we'll increase it later).
         if limited {
             rates[idx] = Some(Ratio::zero());
             active_indices.push(idx);
         }
     }
 
+    // Compute the rates for the constrained flows.
     compute_rates(&active_indices, &resources, &mut rates);
 
+    // Convert the rates to the result format.
     for (idx, flow) in flows.iter().enumerate() {
         let rate = match &rates[idx] {
             None => Rate::Unlimited,
