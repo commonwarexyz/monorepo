@@ -865,6 +865,48 @@ mod tests {
     }
 
     #[test]
+    fn processing_long_after_next_drains_once() {
+        let mut state = State::new();
+        let start = SystemTime::UNIX_EPOCH;
+        let origin = key(42);
+        let recipient = key(43);
+
+        let completions = state.tune(start, &origin, Some(1_000), None);
+        assert!(completions.is_empty());
+
+        state.enqueue(
+            start,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from_static(&[7u8; 1_000]),
+            Duration::from_millis(250),
+            true,
+        );
+
+        let first_deadline = state.next().expect("bandwidth event scheduled");
+        assert_eq!(first_deadline, start + Duration::from_secs(1));
+
+        let late_time = first_deadline + Duration::from_secs(5);
+        let completions = state.process(late_time);
+        assert_eq!(completions.len(), 1);
+
+        let completion = &completions[0];
+        assert!(completion.deliver);
+        assert_eq!(completion.origin, origin);
+        assert_eq!(completion.recipient, recipient);
+        assert_eq!(
+            completion.arrival_complete_at,
+            Some(first_deadline + Duration::from_millis(250))
+        );
+
+        assert!(state.next().is_none());
+
+        let more = state.process(late_time + Duration::from_secs(1));
+        assert!(more.is_empty());
+    }
+
+    #[test]
     fn wake_schedule_launch_coordinate_serialization() {
         let mut state = State::new();
         let start = SystemTime::UNIX_EPOCH;
