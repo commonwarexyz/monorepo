@@ -1,32 +1,37 @@
-//! Any database types and helpers for the sync example.
+//! Variable-size Any database types and helpers for the sync example.
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{self, any::fixed},
-    mmr::{Proof, StandardHasher as Standard},
+    adb::{self, any::variable},
+    mmr::{hasher::Standard, Proof},
     store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
 
-/// Database type alias.
-pub type Database<E> = fixed::Any<E, Key, Value, Hasher, Translator>;
+/// Variable-size Any database type alias.
+pub type Database<E> = variable::Any<E, Key, Value, Hasher, Translator>;
 
-/// Operation type alias.
-pub type Operation = operation::Fixed<Key, Value>;
+/// Variable operation type alias.
+pub type Operation = operation::Variable<Key, Value>;
 
 /// Create a database configuration for use in tests.
-pub fn create_config() -> fixed::Config<Translator> {
-    fixed::Config {
+pub fn create_config() -> variable::Config<Translator, ()> {
+    variable::Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
         mmr_items_per_blob: NZU64!(4096),
         mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: "log_journal".into(),
-        log_items_per_blob: NZU64!(4096),
+        log_items_per_section: NZU64!(512),
+        log_compression: None,
+        log_codec_config: (),
         log_write_buffer: NZUsize!(1024),
+        locations_journal_partition: "locations_journal".into(),
+        locations_items_per_blob: NZU64!(4096),
+        metadata_partition: "metadata".into(),
         translator: Translator::default(),
         thread_pool: None,
         buffer_pool: buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
@@ -39,6 +44,7 @@ where
 {
     type Operation = Operation;
 
+    // Only returns Update and Commit operations
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
         let mut hasher = <Hasher as CryptoHasher>::new();
         let mut operations = Vec::new();
@@ -58,15 +64,16 @@ where
             operations.push(Operation::Update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(i as u64 + 1));
+                operations.push(Operation::Commit(None));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(count as u64));
+        operations.push(Operation::Commit(None));
         operations
     }
 
+    // Expects only Update and Commit operations
     async fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
@@ -76,11 +83,11 @@ where
                 Operation::Update(key, value) => {
                     database.update(key, value).await?;
                 }
-                Operation::Delete(key) => {
-                    database.delete(key).await?;
+                Operation::Commit(metadata) => {
+                    database.commit(metadata).await?;
                 }
-                Operation::CommitFloor(_) => {
-                    database.commit().await?;
+                _ => {
+                    panic!("invalid operation. expected Update or Commit, got {operation:?}");
                 }
             }
         }
@@ -88,7 +95,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit().await
+        self.commit(None).await
     }
 
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
@@ -100,7 +107,7 @@ where
     }
 
     fn lower_bound_ops(&self) -> u64 {
-        self.inactivity_floor_loc()
+        self.oldest_retained_loc().unwrap_or(0)
     }
 
     fn historical_proof(
@@ -113,39 +120,6 @@ where
     }
 
     fn name() -> &'static str {
-        "any"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::databases::Syncable;
-    use commonware_runtime::deterministic;
-
-    type AnyDb = Database<deterministic::Context>;
-
-    #[test]
-    fn test_create_test_operations() {
-        let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
-        assert_eq!(ops.len(), 6); // 5 operations + 1 commit
-
-        if let Operation::CommitFloor(loc) = &ops[5] {
-            assert_eq!(*loc, 5);
-        } else {
-            panic!("Last operation should be a commit");
-        }
-    }
-
-    #[test]
-    fn test_deterministic_operations() {
-        // Operations should be deterministic based on seed
-        let ops1 = <AnyDb as Syncable>::create_test_operations(3, 12345);
-        let ops2 = <AnyDb as Syncable>::create_test_operations(3, 12345);
-        assert_eq!(ops1, ops2);
-
-        // Different seeds should produce different operations
-        let ops3 = <AnyDb as Syncable>::create_test_operations(3, 54321);
-        assert_ne!(ops1, ops3);
+        "any::variable"
     }
 }

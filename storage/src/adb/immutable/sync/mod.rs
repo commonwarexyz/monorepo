@@ -1,6 +1,5 @@
 use crate::{
     adb::{
-        any::variable::sync::{get_size, init_journal},
         immutable,
         sync::{self, Journal as _},
         Error,
@@ -39,7 +38,7 @@ where
         upper_bound_loc: u64,
     ) -> Result<Self::Journal, Error> {
         // Open the journal and discard operations outside the sync range.
-        let (journal, size) = init_journal(
+        let (journal, size) = journal::init_journal(
             context.with_label("log"),
             variable::Config {
                 partition: config.log_journal_partition.clone(),
@@ -128,7 +127,8 @@ where
                 .map_err(crate::adb::Error::from)?;
 
             // Get the size of the journal
-            let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
+            let size =
+                journal::get_size(&variable_journal, config.log_items_per_section.get()).await?;
             if size > upper_bound + 1 {
                 return Err(crate::adb::Error::UnexpectedData(size));
             }
