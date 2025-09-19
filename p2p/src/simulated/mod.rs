@@ -12,47 +12,32 @@
 //!
 //! # Bandwidth Simulation
 //!
-//! The simulator provides a realistic model of bandwidth contention where network
-//! capacity is a shared, finite resource. This is achieved without the overhead
-//! of simulating byte-by-byte transfers.
+//! The simulator models contention with a deterministic, event-driven fair queue
+//! instead of simulating the transmission of every byte.
 //!
-//! ## Core Model
+//! ## Core Loop
 //!
-//! The bandwidth model is built on an event-based timeline. Instead of simulating
-//! continuous data flow, the scheduler calculates the key points in time where
-//! bandwidth availability changes for a peer. When the set of active transfers changes,
-//! a fair division of capacity is computed and schedules are updated accordingly.
+//! Whenever the topology changes—because a transfer starts or finishes, or a
+//! bandwidth limit is updated—we execute a scheduling tick:
 //!
-//! Each peer has a schedule for its egress (upload) and ingress (download)
-//! bandwidth. Whenever the set of in-flight transfers changes we rebuild the
-//! schedules using a progressive-filling algorithm that conserves work and
-//! respects both endpoints of every link:
+//! 1. **Collect Active Flows:** Gather every in-flight transfer that still has
+//!    bytes to send. A flow is bound to one sender and, when the message will be
+//!    delivered, one receiver.
+//! 2. **Solve Water Filling:** Run a max-min water-filling algorithm that raises
+//!    the rate of every active flow in lock-step until some sender's egress or
+//!    receiver's ingress limit saturates. The result is a fair, work-conserving
+//!    rate for each flow.
+//! 3. **Pick the Next Event:** Using those rates, determine which flow will
+//!    finish first by computing how long it needs to transmit its remaining
+//!    bytes.
+//! 4. **Advance Time:** Jump simulated time directly to that completion instant.
+//! 5. **Finalize Work:** The flow is removed, latency is applied to determine
+//!    when the receiver observes the delivery, and the scheduler repeats from step 1.
 //!
-//! 1. **Gather Transfers:** Collect all active transfers on the sender and
-//!    receiver, pruning any transfers that finished before the current time.
-//!    Transfers that no longer have bytes remaining are removed from the model.
-//!
-//! 2. **Allocate Capacity:** Treat each transfer as being limited by two
-//!    resources—its sender's egress bucket and, if the message will be delivered,
-//!    the receiver's ingress bucket. We then raise the rate for every active
-//!    transfer in lock-step until some resource saturates, freeze the flows that
-//!    touch that resource, and repeat. The result is a max-min fair allocation
-//!    that is automatically capped by whichever side (egress or ingress) is
-//!    slower.
-//!
-//! 3. **Materialize Segments:** The planner returns piecewise-constant segments
-//!    for every transfer. We install those segments on the sender right away and
-//!    on the receiver after shifting them by the sampled latency. This keeps
-//!    ingress capacity busy only while bytes are in flight, and because the two
-//!    ends share the same plan, any slack that appears on one side automatically
-//!    flows to the others.
-//!
-//! 4. **FIFO Delivery:** Each link tracks the next sequence number expected from
-//!    the sender, so even though transfers share bandwidth fairly, payloads are
-//!    still handed to the socket in strict send order.
-//!
-//! This recomputation is triggered whenever a transfer starts, completes, or a
-//! peer's bandwidth limit changes, ensuring the model remains fair and work conserving.
+//! Messages between the same pair of peers remain strictly ordered. When one
+//! message finishes, the next message on that link may begin sending at
+//! `arrival_time - new_latency` so that its first byte arrives immediately after
+//! the previous one is fully received.
 //!
 //! ## Latency vs. Transmission Delay
 //!

@@ -1,7 +1,7 @@
 //! Implementation of a simulated p2p network.
 
 use super::{
-    bandwidth,
+    bandwidth::{self, Flow, FlowRate},
     ingress::{self, Oracle},
     metrics, Error,
 };
@@ -12,6 +12,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
+use commonware_utils::math::u128::Ratio;
 use futures::{
     channel::{mpsc, oneshot},
     future::pending,
@@ -298,109 +299,97 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
     fn recompute_bandwidth(&mut self, now: SystemTime) -> Vec<u64> {
         let mut completed = Vec::new();
-        for peer in self.peers.values_mut() {
-            completed.extend(peer.egress.prune(now));
-            peer.ingress.prune(now);
-        }
 
-        if self.flow_meta.is_empty() {
-            self.next_bandwidth_event = None;
-            return completed;
-        }
-
-        let mut transfers = Vec::new();
-        for (&flow_id, meta) in self.flow_meta.iter() {
-            let sender_peer = match self.peers.get(&meta.origin) {
-                Some(peer) => peer,
-                None => continue,
-            };
-            if let Some(snapshot) = sender_peer.egress.flow_snapshot(flow_id) {
-                if snapshot.remaining == 0 {
-                    continue;
+        for (&flow_id, meta) in self.flow_meta.iter_mut() {
+            if meta.remaining > 0 {
+                let elapsed = now
+                    .duration_since(meta.last_update)
+                    .unwrap_or(Duration::ZERO);
+                if !elapsed.is_zero() {
+                    let sent =
+                        bandwidth::transfer(&meta.rate, elapsed, &mut meta.carry, meta.remaining);
+                    if sent > 0 {
+                        meta.remaining = meta.remaining.saturating_sub(sent);
+                    }
                 }
-                transfers.push(bandwidth::Transfer {
-                    id: flow_id,
-                    origin: meta.origin.clone(),
-                    recipient: meta.recipient.clone(),
-                    remaining: snapshot.remaining,
-                    ready_time: snapshot.ready_time.max(now),
-                    deliver: meta.deliver,
-                });
+            }
+            meta.last_update = now;
+            if meta.remaining == 0 {
+                completed.push(flow_id);
             }
         }
 
-        if transfers.is_empty() {
+        completed.sort_unstable();
+        completed.dedup();
+
+        let mut active: Vec<Flow<P>> = Vec::new();
+        for (&flow_id, meta) in self.flow_meta.iter() {
+            if meta.remaining == 0 {
+                continue;
+            }
+            active.push(Flow {
+                id: flow_id,
+                origin: meta.origin.clone(),
+                recipient: meta.recipient.clone(),
+                requires_ingress: meta.deliver,
+            });
+        }
+
+        if active.is_empty() {
             self.next_bandwidth_event = None;
             return completed;
         }
 
-        let outcome = bandwidth::plan_transmissions(
-            now,
-            &transfers,
-            |origin: &P| {
-                self.peers.get(origin).and_then(|peer| {
-                    if peer.egress.bps == usize::MAX {
-                        None
-                    } else {
-                        Some(peer.egress.bps as u128)
-                    }
-                })
-            },
+        let allocations = bandwidth::allocate(
+            &active,
+            |origin: &P| self.peers.get(origin).and_then(|peer| peer.egress_limit()),
             |recipient: &P| {
-                self.peers.get(recipient).and_then(|peer| {
-                    if peer.ingress.bps == usize::MAX {
-                        None
-                    } else {
-                        Some(peer.ingress.bps as u128)
-                    }
-                })
+                self.peers
+                    .get(recipient)
+                    .and_then(|peer| peer.ingress_limit())
             },
         );
 
-        for (flow_id, assignment) in outcome.plans {
-            let (origin, recipient, latency, deliver) = {
-                let meta = self
-                    .flow_meta
-                    .get(&flow_id)
-                    .expect("missing metadata for scheduled flow");
-                (
-                    meta.origin.clone(),
-                    meta.recipient.clone(),
-                    meta.latency,
-                    meta.deliver,
-                )
-            };
+        let mut earliest: Option<Duration> = None;
 
-            if let Some(peer) = self.peers.get_mut(&origin) {
-                peer.egress.reset_flow_segment(
-                    flow_id,
-                    assignment.segment.clone(),
-                    assignment.ready_time,
-                    None,
-                );
-            }
-
-            if deliver {
-                if let Some(peer) = self.peers.get_mut(&recipient) {
-                    peer.ingress.reset_flow_segment(
-                        flow_id,
-                        assignment.segment.clone(),
-                        assignment.ready_time,
-                        Some(latency),
-                    );
-                }
-            }
-
+        for (flow_id, rate) in allocations {
             if let Some(meta) = self.flow_meta.get_mut(&flow_id) {
-                if meta.first_segment_start.is_none() {
-                    if let Some(segment) = assignment.segment.as_ref() {
-                        meta.first_segment_start = Some(segment.start_time());
+                let was_zero = meta.rate.is_zero();
+                meta.rate = rate.clone();
+                meta.carry = 0;
+                meta.last_update = now;
+                if was_zero && !meta.rate.is_zero() && meta.first_send_at.is_none() {
+                    meta.first_send_at = Some(now);
+                }
+
+                if matches!(meta.rate, FlowRate::Unlimited) {
+                    if meta.remaining > 0 {
+                        meta.remaining = 0;
+                        completed.push(flow_id);
                     }
+                    continue;
+                }
+
+                if let Some(duration) = bandwidth::time_to_deplete(&meta.rate, meta.remaining) {
+                    earliest = match earliest {
+                        None => Some(duration),
+                        Some(current) => Some(current.min(duration)),
+                    };
                 }
             }
         }
 
-        self.next_bandwidth_event = outcome.next_event;
+        completed.sort_unstable();
+        completed.dedup();
+
+        self.next_bandwidth_event = earliest.and_then(|duration| {
+            if duration.is_zero() {
+                Some(now)
+            } else {
+                now.checked_add(duration)
+            }
+        });
+
         completed
     }
 
@@ -543,7 +532,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 channel,
                 message,
                 sequence,
-                first_segment_start,
+                first_send_at,
+                ..
             } = meta;
 
             self.active_flows
@@ -560,7 +550,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             if deliver {
                 if let Some(seq) = sequence {
-                    let first_start = first_segment_start.unwrap_or(now);
+                    let first_start = first_send_at.unwrap_or(now);
                     let first_byte_arrival_at = first_start
                         .checked_add(latency)
                         .expect("latency overflow computing first byte arrival");
@@ -651,18 +641,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         } = entry;
 
         let now = self.context.current();
-        let size = message.len();
+        let remaining = message.len() as u128;
         let deliver = should_deliver && origin != recipient;
-
-        {
-            let sender_peer = self.peers.get_mut(&origin).expect("sender not found");
-            sender_peer.egress.add_flow(flow_id, now, size);
-        }
-
-        if deliver {
-            let receiver_peer = self.peers.get_mut(&recipient).expect("receiver not found");
-            receiver_peer.ingress.add_flow(flow_id, now, size);
-        }
 
         let sequence = if deliver {
             Some(self.next_sequence_id(&origin, &recipient))
@@ -680,7 +660,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 channel,
                 message,
                 sequence,
-                first_segment_start: None,
+                remaining,
+                rate: FlowRate::Finite(Ratio::zero()),
+                carry: 0,
+                last_update: now,
+                first_send_at: None,
             },
         );
 
@@ -746,7 +730,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let (sender_has_bandwidth, receiver_has_bandwidth) = {
                 let sender_peer = self.peers.get(&origin).expect("sender must exist");
                 let receiver_peer = self.peers.get(&recipient).expect("receiver must exist");
-                (sender_peer.egress.bps > 0, receiver_peer.ingress.bps > 0)
+                (sender_peer.egress_bps > 0, receiver_peer.ingress_bps > 0)
             };
 
             if !sender_has_bandwidth {
@@ -965,9 +949,9 @@ struct Peer<P: PublicKey> {
     // Control to register new channels
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
 
-    // Bandwidth schedules for egress and ingress
-    egress: bandwidth::Schedule,
-    ingress: bandwidth::Schedule,
+    // Bandwidth limits in bytes per second. `usize::MAX` == unlimited.
+    egress_bps: usize,
+    ingress_bps: usize,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -1098,8 +1082,8 @@ impl<P: PublicKey> Peer<P> {
         Self {
             socket,
             control: control_sender,
-            egress: bandwidth::Schedule::new(egress_bps),
-            ingress: bandwidth::Schedule::new(ingress_bps),
+            egress_bps,
+            ingress_bps,
         }
     }
 
@@ -1122,8 +1106,24 @@ impl<P: PublicKey> Peer<P> {
     /// (download) rates in bytes per second. Use `usize::MAX` for effectively
     /// unlimited bandwidth.
     fn set_bandwidth(&mut self, egress_bps: usize, ingress_bps: usize) {
-        self.egress.bps = egress_bps;
-        self.ingress.bps = ingress_bps;
+        self.egress_bps = egress_bps;
+        self.ingress_bps = ingress_bps;
+    }
+
+    fn egress_limit(&self) -> Option<u128> {
+        if self.egress_bps == usize::MAX {
+            None
+        } else {
+            Some(self.egress_bps as u128)
+        }
+    }
+
+    fn ingress_limit(&self) -> Option<u128> {
+        if self.ingress_bps == usize::MAX {
+            None
+        } else {
+            Some(self.ingress_bps as u128)
+        }
     }
 }
 
@@ -1160,7 +1160,11 @@ struct FlowMeta<P: PublicKey> {
     channel: Channel,
     message: Bytes,
     sequence: Option<u64>,
-    first_segment_start: Option<SystemTime>,
+    remaining: u128,
+    rate: FlowRate,
+    carry: u128,
+    last_update: SystemTime,
+    first_send_at: Option<SystemTime>,
 }
 
 impl Link {
