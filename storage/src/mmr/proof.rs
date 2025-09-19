@@ -47,7 +47,9 @@ pub enum ReconstructionError {
 /// elements within the range, ordered by the position of their parent.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<D: Digest> {
-    /// The total number of nodes in the MMR.
+    /// The total number of nodes in the MMR for MMR proofs, though other authenticated data
+    /// structures may override the meaning of this field. For example the authenticated
+    /// [crate::mmr::bitmap::Bitmap] stores the number of bits in the bitmap within this field.
     pub size: u64,
     /// The digests necessary for proving the inclusion of an element, or range of elements, in the
     /// MMR.
