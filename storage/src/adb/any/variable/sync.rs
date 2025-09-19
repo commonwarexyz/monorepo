@@ -249,8 +249,8 @@ where
         let size = journal.size().await.map_err(adb::Error::from)?;
         if size <= lower_bound {
             let (log, metadata) = journal.into_inner();
-            log.close().await.map_err(adb::Error::from)?;
-            metadata.close().await.map_err(adb::Error::from)?;
+            log.destroy().await.map_err(adb::Error::from)?;
+            metadata.destroy().await.map_err(adb::Error::from)?;
             return Self::create_journal(context, config, lower_bound, upper_bound).await;
         }
 
