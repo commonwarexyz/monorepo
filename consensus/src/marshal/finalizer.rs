@@ -37,7 +37,7 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
         application: Z,
         orchestrator: Orchestrator<B>,
         notifier_rx: mpsc::Receiver<()>,
-    ) -> Self {
+    ) -> (Self, u64) {
         // Initialize metadata
         let metadata = Metadata::init(
             context.with_label("metadata"),
@@ -49,12 +49,18 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
         .await
         .expect("failed to initialize metadata");
 
-        Self {
-            application,
-            orchestrator,
-            notifier_rx,
-            metadata,
-        }
+        // Get latest height
+        let height = *metadata.get(&LATEST_KEY).unwrap_or(&0);
+
+        (
+            Self {
+                application,
+                orchestrator,
+                notifier_rx,
+                metadata,
+            },
+            height,
+        )
     }
 
     /// Run the finalizer, which continuously fetches and processes finalized blocks.

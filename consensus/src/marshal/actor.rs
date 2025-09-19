@@ -309,7 +309,7 @@ impl<
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
-        let finalizer = Finalizer::new(
+        let (finalizer, latest_processed) = Finalizer::new(
             self.context.with_label("finalizer"),
             self.partition_prefix.clone(),
             application,
@@ -317,6 +317,7 @@ impl<
             notifier_rx,
         )
         .await;
+        self.processed_height.set(latest_processed as i64);
         self.context
             .with_label("finalizer")
             .spawn(|_| finalizer.run());
@@ -398,6 +399,18 @@ impl<
                             // Check for block locally
                             let result = self.find_block(&mut buffer, commitment).await;
                             let _ = response.send(result);
+                        }
+                        Message::GetBlockByHeight { height, response } => {
+                            let block = self.get_finalized_block(Identifier::Index(height)).await;
+                            let _ = response.send(block);
+                        }
+                        Message::GetFinalizedHeight { response } => {
+                            let height = self.finalized_height.get();
+                            let _ = response.send(height as u64);
+                        }
+                        Message::GetProcessedHeight { response } => {
+                            let height = self.processed_height.get();
+                            let _ = response.send(height as u64);
                         }
                         Message::Subscribe { view, commitment, response } => {
                             // Check for block locally

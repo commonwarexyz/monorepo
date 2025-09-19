@@ -52,6 +52,9 @@ pub(crate) enum Message<V: Variant, B: Block> {
     GetFinalizedHeight {
         response: oneshot::Sender<u64>,
     },
+    GetProcessedHeight {
+        response: oneshot::Sender<u64>,
+    },
 
     // -------------------- Consensus Engine Messages --------------------
     /// A notarization from the consensus engine.
@@ -167,7 +170,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         rx
     }
 
-    /// Get the latest finalized height.
+    /// Get the latest finalized height (may not yet have all blocks to this height available yet).
     pub async fn get_finalized_height(&mut self) -> oneshot::Receiver<u64> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -177,6 +180,20 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
             .is_err()
         {
             error!("failed to send get finalized height message to actor: receiver dropped");
+        }
+        rx
+    }
+
+    /// Get the latest processed height (all heights up to and including this height have been ack'd by the application).
+    pub async fn get_processed_height(&mut self) -> oneshot::Receiver<u64> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetProcessedHeight { response: tx })
+            .await
+            .is_err()
+        {
+            error!("failed to send get processed height message to actor: receiver dropped");
         }
         rx
     }
