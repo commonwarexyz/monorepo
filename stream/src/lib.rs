@@ -173,17 +173,17 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     .await?;
 
     let (current_time, ok_timestamps) = config.time_information(&ctx);
-    let (state, msg1) = dial_start(
+    let (state, syn) = dial_start(
         &mut ctx,
         Context::new(current_time, ok_timestamps, config.signing_key, peer),
     );
-    send_frame(&mut sink, &msg1.encode(), config.max_message_size).await?;
+    send_frame(&mut sink, &syn.encode(), config.max_message_size).await?;
 
-    let msg2_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-    let msg2 = SynAck::<S::Signature>::decode(msg2_bytes)?;
+    let syn_ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
+    let syn_ack = SynAck::<S::Signature>::decode(syn_ack_bytes)?;
 
-    let (msg3, send, recv) = dial_end(state, msg2)?;
-    send_frame(&mut sink, &msg3.encode(), config.max_message_size).await?;
+    let (ack, send, recv) = dial_end(state, syn_ack)?;
+    send_frame(&mut sink, &ack.encode(), config.max_message_size).await?;
 
     Ok((
         Sender {
@@ -225,7 +225,7 @@ pub async fn listen<
     let msg1 = Syn::<S::Signature>::decode(msg1_bytes)?;
 
     let (current_time, ok_timestamps) = config.time_information(&ctx);
-    let (state, msg2) = listen_start(
+    let (state, syn_ack) = listen_start(
         &mut ctx,
         Context::new(
             current_time,
@@ -235,12 +235,12 @@ pub async fn listen<
         ),
         msg1,
     )?;
-    send_frame(&mut sink, &msg2.encode(), config.max_message_size).await?;
+    send_frame(&mut sink, &syn_ack.encode(), config.max_message_size).await?;
 
-    let msg3_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-    let msg3 = Ack::decode(msg3_bytes)?;
+    let ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
+    let ack = Ack::decode(ack_bytes)?;
 
-    let (send, recv) = listen_end(state, msg3)?;
+    let (send, recv) = listen_end(state, ack)?;
 
     Ok((
         peer,
@@ -360,11 +360,11 @@ mod test {
             let messages: Vec<&'static [u8]> = vec![b"A", b"B", b"C"];
             for msg in &messages {
                 dialer_sender.send(msg).await?;
-                let msg2 = listener_receiver.recv().await?;
-                assert_eq!(msg, &msg2);
+                let syn_ack = listener_receiver.recv().await?;
+                assert_eq!(msg, &syn_ack);
                 listener_sender.send(msg).await?;
-                let msg3 = dialer_receiver.recv().await?;
-                assert_eq!(msg, &msg3);
+                let ack = dialer_receiver.recv().await?;
+                assert_eq!(msg, &ack);
             }
             Ok(())
         })
