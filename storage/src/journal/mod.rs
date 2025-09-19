@@ -25,10 +25,6 @@ where
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         fixed::Journal::append(self, op).await.map(|_| ())
     }
-
-    async fn close(self) -> Result<(), Self::Error> {
-        fixed::Journal::close(self).await
-    }
 }
 
 /// Errors that can occur when interacting with `Journal`.

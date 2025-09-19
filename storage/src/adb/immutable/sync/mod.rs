@@ -113,7 +113,7 @@ where
 
         if size <= lower_bound {
             // Close existing journal and create new one
-            journal.close().await.map_err(crate::adb::Error::from)?;
+            journal.into_inner().destroy().await?;
             Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Extract the Variable journal to perform section-based pruning
