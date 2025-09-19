@@ -227,7 +227,9 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             .or_default()
             .push_back(entry);
 
-        self.launch(origin, recipient, true, now)
+        let completions = self.launch(origin, recipient, now);
+        self.schedule(now);
+        completions
     }
 
     /// Awakens any queued transmissions that have become ready to send at `now`.
@@ -251,7 +253,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
         let mut completions = Vec::new();
         for (origin, recipient) in ready_pairs {
-            completions.extend(self.launch(origin, recipient, false, now));
+            completions.extend(self.launch(origin, recipient, now));
         }
         self.schedule(now);
         completions
@@ -402,8 +404,9 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             self.last_arrival_complete
                 .insert((origin.clone(), recipient.clone()), arrival_complete_at);
 
-            outcomes.extend(self.launch(origin, recipient, true, now));
+            outcomes.extend(self.launch(origin, recipient, now));
         }
+        self.schedule(now);
 
         outcomes
     }
@@ -483,18 +486,9 @@ impl<P: PublicKey + Ord + Clone> State<P> {
     }
 
     /// Attempts to start a new flow for the pair, optionally refreshing scheduling metadata.
-    fn launch(
-        &mut self,
-        origin: P,
-        recipient: P,
-        refresh_schedule: bool,
-        now: SystemTime,
-    ) -> Vec<Completion<P>> {
+    fn launch(&mut self, origin: P, recipient: P, now: SystemTime) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
         if self.active_flows.contains_key(&key) {
-            if refresh_schedule {
-                self.schedule(now);
-            }
             return Vec::new();
         }
 
@@ -533,10 +527,6 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             self.next_flow_id += 1;
             self.active_flows.insert(key, flow_id);
             return self.begin(origin, recipient, flow_id, entry, now);
-        }
-
-        if refresh_schedule {
-            self.schedule(now);
         }
 
         Vec::new()

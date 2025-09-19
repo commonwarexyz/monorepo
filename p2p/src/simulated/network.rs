@@ -180,8 +180,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         &mut self.context.clone(),
                         public_key.clone(),
                         self.get_next_socket(),
-                        usize::MAX,
-                        usize::MAX,
                         self.max_size,
                     );
                     self.peers.insert(public_key.clone(), peer);
@@ -209,10 +207,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 egress_bps,
                 ingress_bps,
                 result,
-            } => match self.peers.get_mut(&public_key) {
-                Some(peer) => {
-                    peer.egress_bps = egress_bps;
-                    peer.ingress_bps = ingress_bps;
+            } => match self.peers.contains_key(&public_key) {
+                true => {
+                    assert!(egress_bps > 0, "egress bandwidth must be greater than 0");
+                    assert!(ingress_bps > 0, "ingress bandwidth must be greater than 0");
                     let egress = if egress_bps == usize::MAX {
                         None
                     } else {
@@ -232,7 +230,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     }
                     send_result(result, Ok(()));
                 }
-                None => send_result(result, Err(Error::PeerMissing)),
+                false => send_result(result, Err(Error::PeerMissing)),
             },
             ingress::Message::AddLink {
                 sender,
@@ -338,6 +336,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         };
 
         // Send to all recipients
+        let now = self.context.current();
         let mut sent = Vec::new();
         for recipient in recipients {
             if recipient == origin {
@@ -368,25 +367,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
                 (latency, link.success_rate)
             };
-
-            let (sender_has_bandwidth, receiver_has_bandwidth) = {
-                let sender_peer = self.peers.get(&origin).expect("sender must exist");
-                let receiver_peer = self.peers.get(&recipient).expect("receiver must exist");
-                (sender_peer.egress_bps > 0, receiver_peer.ingress_bps > 0)
-            };
-
-            if !sender_has_bandwidth {
-                trace!(
-                    ?origin,
-                    ?recipient,
-                    "sender has zero bandwidth, skipping recipient"
-                );
-                continue;
-            }
-
-            let should_deliver = receiver_has_bandwidth && self.context.gen_bool(success_rate);
-
-            let now = self.context.current();
+            let should_deliver = self.context.gen_bool(success_rate);
 
             let completions = self.transmissions.enqueue(
                 now,
@@ -571,10 +552,6 @@ struct Peer<P: PublicKey> {
 
     // Control to register new channels
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
-
-    // Bandwidth limits in bytes per second. `usize::MAX` == unlimited.
-    egress_bps: usize,
-    ingress_bps: usize,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -586,8 +563,6 @@ impl<P: PublicKey> Peer<P> {
         context: &mut E,
         public_key: P,
         socket: SocketAddr,
-        egress_bps: usize,
-        ingress_bps: usize,
         max_size: usize,
     ) -> Self {
         // The control is used to register channels.
@@ -705,8 +680,6 @@ impl<P: PublicKey> Peer<P> {
         Self {
             socket,
             control: control_sender,
-            egress_bps,
-            ingress_bps,
         }
     }
 

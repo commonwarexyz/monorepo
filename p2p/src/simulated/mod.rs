@@ -1980,7 +1980,8 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_sender_bandwidth_returns_empty() {
+    #[should_panic(expected = "ingress bandwidth must be greater than 0")]
+    fn test_zero_sender_ingress_bandwidth() {
         // This test verifies that when sender bandwidth is 0, the send returns empty list
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1997,8 +1998,50 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
-            let (_, mut receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            let (_sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, _receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            oracle
+                .add_link(
+                    pk_sender.clone(),
+                    pk_receiver.clone(),
+                    Link {
+                        latency: Duration::from_millis(10),
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Set sender bandwidth to 0
+            oracle
+                .set_bandwidth(pk_sender.clone(), usize::MAX, 0)
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "egress bandwidth must be greater than 0")]
+    fn test_zero_sender_egress_bandwidth() {
+        // This test verifies that when sender bandwidth is 0, the send returns empty list
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                },
+            );
+            network.start();
+
+            let pk_sender = PrivateKey::from_seed(1).public_key();
+            let pk_receiver = PrivateKey::from_seed(2).public_key();
+
+            // Register peers and establish link
+            let (_sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, _receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
             oracle
                 .add_link(
                     pk_sender.clone(),
@@ -2017,126 +2060,6 @@ mod tests {
                 .set_bandwidth(pk_sender.clone(), 0, usize::MAX)
                 .await
                 .unwrap();
-            oracle
-                .set_bandwidth(pk_receiver.clone(), usize::MAX, 10_000)
-                .await
-                .unwrap();
-
-            let msg = Bytes::from(vec![1u8; 1000]);
-
-            // Try to send, this should return empty list
-            let mut sender = sender_tx.clone();
-            let result = sender
-                .send(Recipients::One(pk_receiver.clone()), msg.clone(), false)
-                .await
-                .unwrap();
-
-            // Should get empty list since sender has zero bandwidth
-            assert!(result.is_empty());
-
-            // Try to receive with timeout, should timeout since nothing was sent
-            select! {
-              _ = receiver_rx.recv() => {
-                panic!(
-                  "Should not receive message when sender bandwidth is 0"
-                );
-              },
-              _ = context.clone().sleep(Duration::from_secs(2)) => {},
-            };
-        });
-    }
-
-    #[test]
-    fn test_zero_receiver_bandwidth_uses_sender_bandwidth() {
-        // When receiver bandwidth is 0, the transfer is acknowledged immediately by the
-        // sender (egress-only) path and the payload is dropped instead of being delivered.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                },
-            );
-            network.start();
-
-            let pk_sender = PrivateKey::from_seed(1).public_key();
-            let pk_receiver_blocked = PrivateKey::from_seed(2).public_key();
-            let pk_receiver_observing = PrivateKey::from_seed(3).public_key();
-
-            // Register peers and establish links
-            let (mut sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
-            let (_, mut blocked_rx) = oracle
-                .register(pk_receiver_blocked.clone(), 0)
-                .await
-                .unwrap();
-            let (_, mut observing_rx) = oracle
-                .register(pk_receiver_observing.clone(), 0)
-                .await
-                .unwrap();
-
-            for receiver in [&pk_receiver_blocked, &pk_receiver_observing] {
-                oracle
-                    .add_link(
-                        pk_sender.clone(),
-                        receiver.clone(),
-                        Link {
-                            latency: Duration::from_millis(10),
-                            jitter: Duration::ZERO,
-                            success_rate: 1.0,
-                        },
-                    )
-                    .await
-                    .unwrap();
-            }
-
-            oracle
-                .set_bandwidth(pk_sender.clone(), 10_000, usize::MAX)
-                .await
-                .unwrap();
-            oracle
-                .set_bandwidth(pk_receiver_blocked.clone(), usize::MAX, 0)
-                .await
-                .unwrap();
-            oracle
-                .set_bandwidth(pk_receiver_observing.clone(), usize::MAX, 10_000)
-                .await
-                .unwrap();
-
-            // First send goes to the receiver with zero ingress bandwidth. The transfer is
-            // acknowledged immediately and effectively dropped, so we verify that other
-            // recipients are still serviced promptly.
-            let start = context.current();
-            let msg_blocked = Bytes::from(vec![2u8; 10_000]);
-            let msg_observing = Bytes::from(vec![3u8; 10]);
-
-            sender_tx
-                .send(Recipients::One(pk_receiver_blocked.clone()), msg_blocked, false)
-                .await
-                .unwrap();
-
-            sender_tx
-                .send(Recipients::One(pk_receiver_observing.clone()), msg_observing.clone(), false)
-                .await
-                .unwrap();
-
-            let (_, observed_msg) = observing_rx.recv().await.unwrap();
-            assert_eq!(observed_msg, msg_observing);
-            let elapsed = context.current().duration_since(start).unwrap();
-
-            assert!(
-                elapsed <= Duration::from_millis(50),
-                "Observing receiver should get response quickly when other receiver is bandwidth constrained, got {elapsed:?}",
-            );
-
-            // Blocked receiver never receives the payload.
-            select! {
-              _ = blocked_rx.recv() => {
-                panic!("Blocked receiver should not receive data");
-              },
-              _ = context.clone().sleep(Duration::from_millis(50)) => {},
-            };
         });
     }
 }
