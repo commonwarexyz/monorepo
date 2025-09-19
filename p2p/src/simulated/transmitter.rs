@@ -279,30 +279,25 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         should_deliver: bool,
     ) -> Vec<Completion<P>> {
         let key = (origin.clone(), recipient.clone());
-        let deliver = should_deliver && origin != recipient;
+        let last_arrival = self.last_arrival_complete.get(&key).cloned();
 
-        let mut completions = Vec::new();
-
-        if deliver {
-            let last_arrival = self.last_arrival_complete.get(&key).cloned();
+        let completions = if should_deliver {
             let ready_at = Self::compute_ready_at(None, now, last_arrival, latency);
             let arrival_complete_at = ready_at
                 .checked_add(latency)
                 .expect("latency overflow computing arrival completion");
-            self.last_arrival_complete
-                .insert(key.clone(), arrival_complete_at);
-
-            let seq = self.tag(&origin, &recipient);
-            let buffered = Buffered {
+            self.register_completion(
+                origin,
+                recipient,
                 channel,
                 message,
+                true,
                 arrival_complete_at,
-            };
-            completions.extend(self.stash(origin, recipient, seq, buffered));
+                None,
+            )
         } else {
-            self.last_arrival_complete.insert(key, now);
-            completions.push(Completion::dropped(origin, recipient, channel, message));
-        }
+            self.register_completion(origin, recipient, channel, message, false, now, None)
+        };
 
         self.next_bandwidth_event = None;
         self.schedule(now);
@@ -487,8 +482,8 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 ..
             } = meta;
 
-            self.active_flows
-                .remove(&(origin.clone(), recipient.clone()));
+            let key = (origin.clone(), recipient.clone());
+            self.active_flows.remove(&key);
 
             let arrival_complete_at = if deliver {
                 now.checked_add(latency)
@@ -497,38 +492,55 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 now
             };
 
-            if deliver {
-                if let Some(seq) = sequence {
-                    let buffered = Buffered {
-                        channel,
-                        message,
-                        arrival_complete_at,
-                    };
-                    outcomes.extend(self.stash(origin.clone(), recipient.clone(), seq, buffered));
-                }
-            } else {
-                trace!(
-                    ?origin,
-                    ?recipient,
-                    reason = "random link failure",
-                    "dropping message",
-                );
-                outcomes.push(Completion::dropped(
-                    origin.clone(),
-                    recipient.clone(),
-                    channel,
-                    message,
-                ));
-            }
-
-            self.last_arrival_complete
-                .insert((origin.clone(), recipient.clone()), arrival_complete_at);
+            outcomes.extend(self.register_completion(
+                origin.clone(),
+                recipient.clone(),
+                channel,
+                message,
+                deliver,
+                arrival_complete_at,
+                sequence,
+            ));
 
             outcomes.extend(self.launch(origin, recipient, now));
         }
         self.schedule(now);
 
         outcomes
+    }
+
+    /// Records the outcome of a transmission, handling sequencing and delivery bookkeeping.
+    #[allow(clippy::too_many_arguments)]
+    fn register_completion(
+        &mut self,
+        origin: P,
+        recipient: P,
+        channel: Channel,
+        message: Bytes,
+        deliver: bool,
+        arrival_complete_at: SystemTime,
+        sequence: Option<u64>,
+    ) -> Vec<Completion<P>> {
+        let key = (origin.clone(), recipient.clone());
+        self.last_arrival_complete.insert(key, arrival_complete_at);
+
+        if deliver {
+            let seq = sequence.unwrap_or_else(|| self.tag(&origin, &recipient));
+            let buffered = Buffered {
+                channel,
+                message,
+                arrival_complete_at,
+            };
+            self.stash(origin, recipient, seq, buffered)
+        } else {
+            trace!(
+                ?origin,
+                ?recipient,
+                reason = "random link failure",
+                "dropping message",
+            );
+            vec![Completion::dropped(origin, recipient, channel, message)]
+        }
     }
 
     /// Buffers an arrival until preceding transmissions are released.
