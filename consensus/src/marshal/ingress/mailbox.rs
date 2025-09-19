@@ -45,6 +45,17 @@ pub(crate) enum Message<V: Variant, B: Block> {
         block: B,
     },
 
+    GetBlockByHeight {
+        height: u64,
+        response: oneshot::Sender<Option<B>>,
+    },
+    GetFinalized {
+        response: oneshot::Sender<Option<(u64, B::Commitment)>>,
+    },
+    GetProcessedHeight {
+        response: oneshot::Sender<u64>,
+    },
+
     // -------------------- Consensus Engine Messages --------------------
     /// A notarization from the consensus engine.
     Notarization {
@@ -140,6 +151,51 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         {
             error!("failed to send verified message to actor: receiver dropped");
         }
+    }
+
+    /// Get a block by its height.
+    pub async fn get_block_by_height(&mut self, height: u64) -> oneshot::Receiver<Option<B>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetBlockByHeight {
+                height,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            error!("failed to send get block by height message to actor: receiver dropped");
+        }
+        rx
+    }
+
+    /// Get the latest finalized height and digest (may not yet have all blocks to this height available yet).
+    pub async fn get_finalized(&mut self) -> oneshot::Receiver<Option<(u64, B::Commitment)>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetFinalized { response: tx })
+            .await
+            .is_err()
+        {
+            error!("failed to send get finalized height message to actor: receiver dropped");
+        }
+        rx
+    }
+
+    /// Get the latest processed height (all heights up to and including this height have been ack'd by the application).
+    pub async fn get_processed_height(&mut self) -> oneshot::Receiver<u64> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetProcessedHeight { response: tx })
+            .await
+            .is_err()
+        {
+            error!("failed to send get processed height message to actor: receiver dropped");
+        }
+        rx
     }
 }
 

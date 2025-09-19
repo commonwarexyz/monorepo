@@ -223,6 +223,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         self.metadata.put(key, Record::Ordinal(Some(bits)));
         debug!(section, "initialized section");
     }
+
+    /// Get the last index in the archive.
+    pub fn last_index(&self) -> Option<u64> {
+        self.ordinal.last_index()
+    }
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
