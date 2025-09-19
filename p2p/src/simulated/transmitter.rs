@@ -177,39 +177,36 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
     /// Advances the simulation to `now`, draining any completed transmissions.
     pub fn process(&mut self, now: SystemTime) -> Vec<Completion<P>> {
-        // Process events until the next event is in the future.
-        let mut completions = self.wake(now);
-        while let Some(next_event) = self.next() {
-            if next_event > now {
-                break;
-            }
+        // Process all events until we arrive at now
+        let mut completions = Vec::new();
+        loop {
+            let next_bandwidth = self.next_bandwidth_event.filter(|event| *event <= now);
+            let next_ready = self.next_transmission_ready.filter(|event| *event <= now);
 
-            let mut handled = false;
-            if self
-                .next_bandwidth_event
-                .map(|event| event <= now && event == next_event)
-                .unwrap_or(false)
-            {
-                self.next_bandwidth_event = None;
-                let mut outcomes = self.rebalance(next_event);
-                completions.append(&mut outcomes);
-                handled = true;
+            match (next_bandwidth, next_ready) {
+                (None, None) => break,
+                (Some(band), Some(ready)) => {
+                    if band <= ready {
+                        self.next_bandwidth_event = None;
+                        completions.extend(self.rebalance(band));
+                    } else {
+                        self.next_transmission_ready = None;
+                        completions.extend(self.wake(ready));
+                    }
+                }
+                (Some(band), None) => {
+                    self.next_bandwidth_event = None;
+                    completions.extend(self.rebalance(band));
+                }
+                (None, Some(ready)) => {
+                    self.next_transmission_ready = None;
+                    completions.extend(self.wake(ready));
+                }
             }
-
-            if self
-                .next_transmission_ready
-                .map(|event| event <= now && event == next_event)
-                .unwrap_or(false)
-            {
-                self.next_transmission_ready = None;
-                let mut outcomes = self.wake(next_event);
-                completions.append(&mut outcomes);
-                handled = true;
-            }
-
-            // If next returns that something can be handled, we should have handled it.
-            assert!(handled, "no event was handled");
         }
+
+        // Wake explicitly at now
+        completions.extend(self.wake(now));
 
         completions
     }
