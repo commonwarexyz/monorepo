@@ -276,3 +276,79 @@ impl<T: Translator, V: Eq> Drop for Index<T, V> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::translator::OneCap;
+    use commonware_macros::test_traced;
+    use commonware_runtime::{deterministic, Runner};
+
+    #[test_traced]
+    fn test_ordered_index_ordering() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = Index::<_, u64>::init(context, OneCap);
+            assert_eq!(index.keys(), 0);
+
+            let k1 = &[0x0b, 0x02, 0xAA]; // translated key 0b
+            let k2 = &[0x1c, 0x04, 0xCC]; // translated key 1c
+            let k2_collides = &[0x1c, 0xBB, 0x11];
+            let k3 = &[0x2d, 0x06, 0xEE]; // translated key 2d
+            index.insert(k1, 1);
+            index.insert(k2, 21);
+            index.insert(k2_collides, 22);
+            index.insert(k3, 3);
+            assert_eq!(index.keys(), 3);
+
+            // Next translated key is 0b.
+            let mut next = index.get_next(&[0x00]);
+            assert_eq!(next.next().unwrap(), &1);
+            assert_eq!(next.next(), None);
+
+            // Next translated key is 1c.
+            let mut next = index.get_next(&[0x0b, 0x01, 0x02]);
+            assert_eq!(next.next().unwrap(), &21);
+            assert_eq!(next.next().unwrap(), &22);
+            assert_eq!(next.next(), None);
+
+            // Next translated key is 1c.
+            let mut next = index.get_next(&[0x1b, 0x01, 0x02, 0x03]);
+            assert_eq!(next.next().unwrap(), &21);
+            assert_eq!(next.next().unwrap(), &22);
+            assert_eq!(next.next(), None);
+
+            // Next translated key is 2d.
+            let mut next = index.get_next(&[0x2a, 0x01, 0x02, 0x03, 0x04]);
+            assert_eq!(next.next().unwrap(), &3);
+            assert_eq!(next.next(), None);
+
+            // Next translated key is None.
+            let mut next = index.get_next(k3);
+            assert_eq!(next.next(), None);
+
+            let mut next = index.get_next(&[0x2e, 0xFF]);
+            assert_eq!(next.next(), None);
+
+            // Previous translated key is None.
+            let mut prev = index.prev_key(k1);
+            assert_eq!(prev.next(), None);
+
+            // Previous translated key is 0b.
+            let mut prev = index.prev_key(&[0x0c, 0x01, 0x02]);
+            assert_eq!(prev.next().unwrap(), &1);
+            assert_eq!(prev.next(), None);
+
+            // Previous translated key is 1c.
+            let mut prev = index.prev_key(&[0x1d, 0x01, 0x02]);
+            assert_eq!(prev.next().unwrap(), &21);
+            assert_eq!(prev.next().unwrap(), &22);
+            assert_eq!(prev.next(), None);
+
+            // Previous translated key is 2d.
+            let mut prev = index.prev_key(&[0xCC, 0x01, 0x02]);
+            assert_eq!(prev.next().unwrap(), &3);
+            assert_eq!(prev.next(), None);
+        });
+    }
+}
