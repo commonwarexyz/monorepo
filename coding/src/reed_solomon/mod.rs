@@ -112,12 +112,13 @@
 //! assert_eq!(decoded_data, data);
 //! ```
 
+use crate::{Config, Scheme};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::collections::HashSet;
+use std::{collections::HashSet, marker::PhantomData};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
@@ -557,6 +558,59 @@ pub fn decode<H: Hasher>(
 
     // Extract original data
     Ok(extract_data(shards, k))
+}
+
+pub struct ReedSolomon<H> {
+    _marker: PhantomData<H>,
+}
+
+impl<H: Hasher> Scheme for ReedSolomon<H> {
+    type Commitment = H::Digest;
+
+    type Shard = Chunk<H>;
+
+    type Proof = ();
+
+    type Error = Error;
+
+    fn encode(
+        _rng: impl rand_core::CryptoRngCore,
+        config: &Config,
+        mut data: impl Buf,
+    ) -> Result<(Self::Commitment, Vec<(Self::Shard, Self::Proof)>), Self::Error> {
+        let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
+        let (commitment, chunks) = encode(
+            config.minimum_shards + config.extra_shards,
+            config.minimum_shards,
+            data,
+        )?;
+        Ok((commitment, chunks.into_iter().map(|s| (s, ())).collect()))
+    }
+
+    fn check(
+        commitment: &Self::Commitment,
+        shard: &Self::Shard,
+        _proof: &Self::Proof,
+    ) -> Result<(), Self::Error> {
+        if shard.verify(shard.index, commitment) {
+            Ok(())
+        } else {
+            Err(Error::InvalidProof)
+        }
+    }
+
+    fn decode(
+        config: &Config,
+        commitment: &Self::Commitment,
+        shards: &[Self::Shard],
+    ) -> Result<Vec<u8>, Self::Error> {
+        decode(
+            config.minimum_shards + config.extra_shards,
+            config.minimum_shards,
+            commitment,
+            shards.to_vec(),
+        )
+    }
 }
 
 #[cfg(test)]
