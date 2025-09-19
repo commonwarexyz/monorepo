@@ -26,11 +26,7 @@ pub enum FlowRate {
     Finite(Ratio),
 }
 
-impl FlowRate {
-    pub fn is_zero(&self) -> bool {
-        matches!(self, FlowRate::Finite(rate) if rate.is_zero())
-    }
-}
+impl FlowRate {}
 
 impl PartialEq for FlowRate {
     fn eq(&self, other: &Self) -> bool {
