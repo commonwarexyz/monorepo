@@ -85,6 +85,12 @@ fn ensure_resource<P: Clone + Ord>(
 }
 
 /// Computes a fair allocation for the provided `flows`, returning per-flow rates.
+///
+/// Each sender/receiver cap is modelled as a shared resource. Every flow registers
+/// with the resources it touches, after which we perform a single water-filling pass:
+/// raise the rate of all unfrozen flows uniformly until a resource is depleted, freeze
+/// flows using that resource, and repeat. This yields a deterministic, starvation-free
+/// assignment that honours both ingress and egress limits.
 pub fn allocate<P, E, I>(
     flows: &[Flow<P>],
     mut egress_limit: E,
@@ -149,6 +155,12 @@ where
     result
 }
 
+/// Water-filling loop that distributes capacity among the constrained flows.
+///
+/// `active` indexes flows that are limited by some resource. Each iteration identifies the
+/// tightest remaining resource, increases rates for all unfrozen flows by the same delta,
+/// and freezes any flow that now sits on a saturated resource. When no constrained flows
+/// remain, `rates` captures the final allocation (with `None` meaning unlimited).
 fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<Ratio>]) {
     if active.is_empty() {
         return;
