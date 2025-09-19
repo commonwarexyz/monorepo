@@ -1,6 +1,6 @@
-//! Max-min fair (via progressive filling) bandwidth planner.
+//! Max-min fair bandwidth planner.
 //!
-//! The planner performs progressive filling over the active flows to
+//! The planner performs progressive filling over a set of active flows to
 //! compute per-flow transmission rates that respect both sender egress limits
 //! and receiver ingress limits (to provide max-min fairness). The caller is responsible
 //! for advancing flow progress according to the returned rates and invoking the planner
