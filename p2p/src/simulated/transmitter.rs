@@ -907,6 +907,35 @@ mod tests {
     }
 
     #[test]
+    fn processing_same_instant_is_idempotent() {
+        let mut state = State::new();
+        let start = SystemTime::UNIX_EPOCH;
+        let origin = key(44);
+        let recipient = key(45);
+
+        let completions = state.tune(start, &origin, Some(1_000), None);
+        assert!(completions.is_empty());
+
+        state.enqueue(
+            start,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from_static(&[0xAB; 1_000]),
+            Duration::ZERO,
+            true,
+        );
+
+        let deadline = state.next().expect("completion scheduled");
+        let completions = state.process(deadline);
+        assert_eq!(completions.len(), 1);
+        assert!(completions[0].deliver);
+
+        let more = state.process(deadline);
+        assert!(more.is_empty());
+    }
+
+    #[test]
     fn wake_schedule_launch_coordinate_serialization() {
         let mut state = State::new();
         let start = SystemTime::UNIX_EPOCH;
