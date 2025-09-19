@@ -9,6 +9,7 @@ use std::{
 };
 use tracing::trace;
 
+/// Message that is waiting to be delivered.
 #[derive(Clone, Debug)]
 pub struct Completion<P: PublicKey> {
     pub origin: P,
@@ -20,6 +21,7 @@ pub struct Completion<P: PublicKey> {
 }
 
 impl<P: PublicKey> Completion<P> {
+    /// Creates a completion for a delivered message.
     fn delivered(
         origin: P,
         recipient: P,
@@ -37,6 +39,7 @@ impl<P: PublicKey> Completion<P> {
         }
     }
 
+    /// Creates a completion for a dropped message.
     fn dropped(origin: P, recipient: P, channel: Channel, message: Bytes) -> Self {
         Self {
             origin,
@@ -49,6 +52,7 @@ impl<P: PublicKey> Completion<P> {
     }
 }
 
+/// Message that has been delivered.
 #[derive(Clone, Debug)]
 struct Completed {
     channel: Channel,
