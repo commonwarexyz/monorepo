@@ -1,3 +1,9 @@
+//! Implementation of [Index] that uses an ordered map internally to map translated keys to
+//! arbitrary values. Beyond the standard [IndexTrait] implementation, this variant adds the
+//! capability to retrieve values associated with both next and previous translated keys of a given
+//! key. There is no ordering guarantees provided over the values associated with each key. Ordering
+//! applies only to the _translated_ key space.
+
 use crate::{
     index::{
         storage::{prune_with_cursor, Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
@@ -8,11 +14,15 @@ use crate::{
 use commonware_runtime::Metrics;
 use core::hash::Hash;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::{
-    btree_map::{
-        Entry as BTreeEntry, OccupiedEntry as BTreeOccupiedEntry, VacantEntry as BTreeVacantEntry,
+use std::{
+    collections::{
+        btree_map::{
+            Entry as BTreeEntry, OccupiedEntry as BTreeOccupiedEntry,
+            VacantEntry as BTreeVacantEntry,
+        },
+        BTreeMap,
     },
-    BTreeMap,
+    ops::Bound::{Excluded, Unbounded},
 };
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
@@ -104,6 +114,35 @@ impl<T: Translator, V: Eq> Index<T, V> {
             value: v,
             next: None,
         });
+    }
+
+    /// Get the values associated with the translated key that lexicographically follows the result
+    /// of translating `key`.
+    ///
+    /// For example, if the translator is looking only at the first byte of a key, and the index
+    /// contains values for translated keys 0b, 1c, and 2d, then `get_next([0b, 01, 02, ...])` would
+    /// return the values associated with 1c, `get_next([2a, 01, 02, ...])` would return the values
+    /// associated with 2d, and `get_next([2d])` would return `None`.
+    pub fn get_next<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+        let k = self.translator.transform(key);
+        self.map
+            .range((Excluded(k), Unbounded))
+            .next()
+            .map(|(_, record)| ImmutableCursor::new(record))
+            .into_iter()
+            .flatten()
+    }
+
+    /// Get the values associated with the translated key that lexicographically precedes the result
+    /// of translating `key`.
+    pub fn prev_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+        let k = self.translator.transform(key);
+        self.map
+            .range(..k)
+            .next_back()
+            .map(|(_, record)| ImmutableCursor::new(record))
+            .into_iter()
+            .flatten()
     }
 }
 
