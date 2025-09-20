@@ -121,6 +121,16 @@ pub struct State<P: PublicKey + Ord + Clone> {
     buffered: BTreeMap<(P, P), BTreeMap<u128, Buffered>>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct Summary {
+    pub active_flows: usize,
+    pub queued_pairs: usize,
+    pub buffered_pairs: usize,
+    pub next_bandwidth_event: Option<SystemTime>,
+    pub next_transmission_ready: Option<SystemTime>,
+}
+
 fn saturating_deadline(now: SystemTime, duration: Duration) -> SystemTime {
     if duration.is_zero() {
         return now;
@@ -145,6 +155,16 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         self.all_flows.is_empty()
             && self.queued.values().all(|queue| queue.is_empty())
             && self.buffered.is_empty()
+    }
+
+    pub fn summary(&self) -> Summary {
+        Summary {
+            active_flows: self.all_flows.len(),
+            queued_pairs: self.queued.len(),
+            buffered_pairs: self.buffered.len(),
+            next_bandwidth_event: self.next_bandwidth_event,
+            next_transmission_ready: self.next_transmission_ready,
+        }
     }
 
     /// Creates a new scheduler.

@@ -181,6 +181,15 @@ where
             None => Rate::Unlimited,
             Some(ratio) => Rate::Finite(ratio.clone()),
         };
+        if flow.requires_ingress {
+            if let Rate::Finite(ratio) = &rate {
+                debug_assert!(
+                    !ratio.is_zero(),
+                    "zero bandwidth allocated for ingress-limited flow id {}",
+                    flow.id
+                );
+            }
+        }
         result.insert(flow.id, rate);
     }
 
