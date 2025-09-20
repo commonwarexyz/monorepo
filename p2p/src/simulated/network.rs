@@ -763,9 +763,33 @@ impl Link {
 
                 // Process messages in order, waiting for their receive time
                 while let Some((channel, message, receive_complete_at)) = outbox.next().await {
+                    #[cfg(windows)]
+                    {
+                        let now = context.current();
+                        let delta = match receive_complete_at.duration_since(now) {
+                            Ok(d) => d,
+                            Err(_) => Duration::ZERO,
+                        };
+                        eprintln!(
+                            "windows link waiting {:?} to deliver channel {} size {}",
+                            delta,
+                            channel,
+                            message.len()
+                        );
+                    }
                     // Wait until the message should arrive at receiver
                     context.sleep_until(receive_complete_at).await;
 
+                    #[cfg(windows)]
+                    {
+                        let now = context.current();
+                        eprintln!(
+                            "windows link sending channel {} size {} at {:?}",
+                            channel,
+                            message.len(),
+                            now
+                        );
+                    }
                     // Send the message
                     let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
                     data.extend_from_slice(&channel.to_be_bytes());
