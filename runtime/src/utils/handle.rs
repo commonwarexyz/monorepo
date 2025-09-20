@@ -14,6 +14,32 @@ use std::{
 };
 use tracing::error;
 
+/// A wrapper around `AbortHandle` that also decrements the running gauge exactly once.
+#[derive(Clone)]
+pub(crate) struct AbortToken {
+    inner: AbortHandle,
+    running: Gauge,
+    once: Arc<Once>,
+}
+
+impl AbortToken {
+    pub(crate) fn new(inner: AbortHandle, running: Gauge, once: Arc<Once>) -> Self {
+        Self {
+            inner,
+            running,
+            once,
+        }
+    }
+
+    /// Abort the associated task and decrement the running gauge immediately.
+    pub(crate) fn abort(&self) {
+        self.inner.abort();
+        self.once.call_once(|| {
+            self.running.dec();
+        });
+    }
+}
+
 /// Handle to a spawned task.
 pub struct Handle<T>
 where
@@ -34,7 +60,7 @@ where
         f: F,
         running: Gauge,
         catch_panic: bool,
-        children: Arc<Mutex<Vec<AbortHandle>>>,
+        children: Arc<Mutex<Vec<AbortToken>>>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -162,8 +188,11 @@ where
         });
     }
 
-    pub(crate) fn abort_handle(&self) -> Option<AbortHandle> {
-        self.aborter.clone()
+    /// Returns an [AbortToken] that can be used to abort the task.
+    pub(crate) fn abort_token(&self) -> Option<AbortToken> {
+        self.aborter
+            .clone()
+            .map(|inner| AbortToken::new(inner, self.running.clone(), self.once.clone()))
     }
 }
 
@@ -195,5 +224,56 @@ where
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{deterministic, Metrics, Runner, Spawner};
+    use futures::future;
+
+    #[test]
+    fn test_abort_token_immediate_gauge_decrement() {
+        // Constants for the test
+        const LABEL: &str = "abort_token_test";
+        const RUNTIME_LABEL: &str = "runtime_tasks_running{";
+        const LABEL_FORMAT: &str = "name=\"abort_token_test\"";
+        const TASK_FORMAT: &str = "task=\"Future\"";
+
+        // Run the test
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            // Use a label so we can target the metric line precisely
+            let context = context.with_label(LABEL);
+
+            // Spawn a task that never completes
+            let handle = context.clone().spawn(|_| async move {
+                future::pending::<()>().await;
+            });
+
+            // Running gauge should be 1 for this label
+            let before = context.encode();
+            let before_ok = before.lines().any(|line| {
+                line.starts_with(RUNTIME_LABEL)
+                    && line.contains(LABEL_FORMAT)
+                    && line.contains(TASK_FORMAT)
+                    && line.trim_end().ends_with(" 1")
+            });
+            assert!(before_ok, "metrics before abort: {}", before);
+
+            // Abort via AbortToken, which should decrement the gauge immediately
+            let token = handle.abort_token().expect("abort token not present");
+            token.abort();
+
+            // Gauge should now be 0 without requiring an additional poll
+            let after = context.encode();
+            let after_ok = after.lines().any(|line| {
+                line.starts_with(RUNTIME_LABEL)
+                    && line.contains(LABEL_FORMAT)
+                    && line.contains(TASK_FORMAT)
+                    && line.trim_end().ends_with(" 0")
+            });
+            assert!(after_ok, "metrics after abort: {}", after);
+        });
     }
 }

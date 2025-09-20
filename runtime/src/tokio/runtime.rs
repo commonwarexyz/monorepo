@@ -10,12 +10,15 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    network::metered::Network as MeteredNetwork, process::metered::Metrics as MeteredProcess,
-    signal::Signal, storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
-    utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
+    network::metered::Network as MeteredNetwork,
+    process::metered::Metrics as MeteredProcess,
+    signal::Signal,
+    storage::metered::Storage as MeteredStorage,
+    telemetry::metrics::task::Label,
+    utils::{signal::Stopper, AbortToken},
+    Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
-use futures::future::AbortHandle;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -368,7 +371,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    children: Arc<Mutex<Vec<AbortHandle>>>,
+    children: Arc<Mutex<Vec<AbortToken>>>,
 }
 
 impl Context {
@@ -463,8 +466,8 @@ impl crate::Spawner for Context {
         let child_handle = self.spawn(f);
 
         // Register this child with the parent
-        if let Some(abort_handle) = child_handle.abort_handle() {
-            parent_children.lock().unwrap().push(abort_handle);
+        if let Some(abort_token) = child_handle.abort_token() {
+            parent_children.lock().unwrap().push(abort_token);
         }
 
         child_handle
