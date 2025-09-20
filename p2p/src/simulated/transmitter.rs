@@ -430,6 +430,13 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 if !elapsed.is_zero() {
                     let sent =
                         bandwidth::transfer(&meta.rate, elapsed, &mut meta.carry, meta.remaining);
+                    #[cfg(windows)]
+                    if sent == 0 {
+                        eprintln!(
+                            "windows rebalance flow rate {:?} elapsed {:?} remaining {} sent {}",
+                            meta.rate, elapsed, meta.remaining, sent
+                        );
+                    }
                     if sent > 0 {
                         meta.remaining = meta.remaining.saturating_sub(sent);
                     }
@@ -488,6 +495,14 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                         completed.push(flow_id);
                     }
                     continue;
+                }
+
+                #[cfg(windows)]
+                if let Rate::Finite(ratio) = &meta.rate {
+                    eprintln!(
+                        "windows rate assign flow {:?}->{:?} remaining {} ratio {}/{}",
+                        meta.origin, meta.recipient, meta.remaining, ratio.num, ratio.den
+                    );
                 }
 
                 #[cfg(windows)]
