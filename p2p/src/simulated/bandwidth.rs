@@ -13,6 +13,13 @@ use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 /// Number of nanoseconds in a second.
 pub const NS_PER_SEC: u128 = 1_000_000_000;
 
+/// Maximum duration (in seconds) representable without overflowing `SystemTime` on
+/// any supported platform. We clamp to `i64::MAX` seconds since `SystemTime` is
+/// backed by a signed 64-bit counter.
+pub const MAX_DURATION_SECS: u64 = i64::MAX as u64;
+
+const MAX_DURATION_NS: u128 = (MAX_DURATION_SECS as u128) * NS_PER_SEC;
+
 /// Minimal description of a simulated transmission path.
 #[derive(Clone, Debug)]
 pub struct Flow<P> {
@@ -372,9 +379,8 @@ fn duration_from_ns(ns: u128) -> Duration {
     if ns == 0 {
         return Duration::ZERO;
     }
-    let max_ns = u128::from(u64::MAX) * NS_PER_SEC;
-    if ns >= max_ns {
-        return Duration::from_secs(u64::MAX);
+    if ns >= MAX_DURATION_NS {
+        return Duration::from_secs(MAX_DURATION_SECS);
     }
     let secs = (ns / NS_PER_SEC) as u64;
     let nanos = (ns % NS_PER_SEC) as u32;
