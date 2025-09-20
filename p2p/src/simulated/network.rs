@@ -411,7 +411,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     async fn run(mut self) {
         loop {
-            let tick = match self.transmitter.next() {
+            let next_deadline = self.transmitter.next();
+            #[cfg(windows)]
+            eprintln!(
+                "windows network next_deadline={:?} summary={:?}",
+                next_deadline,
+                self.transmitter.summary()
+            );
+            let tick = match next_deadline {
                 Some(when) => {
                     let now = self.context.current();
                     if cfg!(windows)
@@ -444,6 +451,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 _ = tick => {
                     let now = self.context.current();
                     let completions = self.transmitter.process(now);
+                    #[cfg(windows)]
+                    eprintln!(
+                        "windows network processed {} completions at {:?}",
+                        completions.len(),
+                        now
+                    );
                     self.process_completions(completions);
                 },
                 message = self.ingress.next() => {
