@@ -568,6 +568,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     type Commitment = H::Digest;
 
     type Shard = Chunk<H>;
+    type ReShard = Chunk<H>;
 
     type Proof = ();
 
@@ -589,11 +590,11 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 
     fn check(
         commitment: &Self::Commitment,
-        shard: &Self::Shard,
         _proof: &Self::Proof,
-    ) -> Result<(), Self::Error> {
+        shard: &Self::Shard,
+    ) -> Result<Self::ReShard, Self::Error> {
         if shard.verify(shard.index, commitment) {
-            Ok(())
+            Ok(shard.clone())
         } else {
             Err(Error::InvalidProof)
         }
@@ -602,13 +603,16 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     fn decode(
         config: &Config,
         commitment: &Self::Commitment,
-        shards: &[Self::Shard],
+        my_shard: Self::Shard,
+        shards: &[Self::ReShard],
     ) -> Result<Vec<u8>, Self::Error> {
         decode(
             config.minimum_shards + config.extra_shards,
             config.minimum_shards,
             commitment,
-            shards.to_vec(),
+            std::iter::once(my_shard)
+                .chain(shards.iter().cloned())
+                .collect(),
         )
     }
 }
