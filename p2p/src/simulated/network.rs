@@ -21,8 +21,6 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
-#[cfg(windows)]
-use std::time::Instant;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
