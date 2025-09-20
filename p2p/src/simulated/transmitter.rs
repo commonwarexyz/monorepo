@@ -1,4 +1,4 @@
-use super::bandwidth::{self, Flow, Rate, MAX_DURATION_SECS};
+use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -130,9 +130,7 @@ fn saturating_deadline(now: SystemTime, duration: Duration) -> SystemTime {
         return deadline;
     }
 
-    let max_deadline = SystemTime::UNIX_EPOCH
-        .checked_add(Duration::from_secs(MAX_DURATION_SECS))
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let max_deadline = bandwidth::max_deadline();
 
     if now >= max_deadline {
         now
