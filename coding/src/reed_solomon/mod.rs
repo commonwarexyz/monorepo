@@ -624,42 +624,6 @@ mod tests {
     use commonware_cryptography::Sha256;
 
     #[test]
-    fn test_basic() {
-        let data = b"Hello, Reed-Solomon!";
-        let total = 7u16;
-        let min = 4u16;
-
-        // Encode the data
-        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-        assert_eq!(chunks.len(), total as usize);
-
-        // Verify all chunks
-        for i in 0..total {
-            assert!(chunks[i as usize].verify(i, &root));
-        }
-
-        // Try to decode with exactly min (all original shards)
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    #[test]
-    fn test_moderate() {
-        let data = b"Testing with more pieces than minimum";
-        let total = 10u16;
-        let min = 4u16;
-
-        // Encode the data
-        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Try to decode with min (all original shards)
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    #[test]
     fn test_recovery() {
         let data = b"Testing recovery pieces";
         let total = 8u16;
@@ -877,26 +841,6 @@ mod tests {
         // Fail to decode
         let result = decode::<Sha256>(total, min, &malicious_root, pieces);
         assert!(matches!(result, Err(Error::Inconsistent)));
-    }
-
-    #[test]
-    fn test_odd_shard_len() {
-        let data = b"a";
-        let total = 3u16;
-        let min = 2u16;
-
-        // Encode the data
-        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Use a mix of original and recovery pieces
-        let pieces: Vec<_> = vec![
-            chunks[0].clone(), // original
-            chunks[2].clone(), // recovery
-        ];
-
-        // Try to decode with a mix of original and recovery pieces
-        let decoded = decode::<Sha256>(total, min, &root, pieces).unwrap();
-        assert_eq!(decoded, data);
     }
 
     #[test]

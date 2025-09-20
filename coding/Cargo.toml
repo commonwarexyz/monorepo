@@ -25,6 +25,7 @@ bench = false
 [dev-dependencies]
 criterion = { workspace = true }
 rand = { workspace = true }
+rand_chacha = { workspace = true }
 
 [[bench]]
 name = "reed_solomon"
