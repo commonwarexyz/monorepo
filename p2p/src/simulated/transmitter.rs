@@ -468,6 +468,15 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         let mut earliest: Option<Duration> = None;
 
         for (flow_id, rate) in allocations {
+            #[cfg(windows)]
+            let diag_summary = Summary {
+                active_flows: self.all_flows.len(),
+                queued_pairs: self.queued.len(),
+                buffered_pairs: self.buffered.len(),
+                next_bandwidth_event: self.next_bandwidth_event,
+                next_transmission_ready: self.next_transmission_ready,
+            };
+
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
                 meta.rate = rate.clone();
                 meta.carry = 0;
@@ -479,6 +488,20 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                         completed.push(flow_id);
                     }
                     continue;
+                }
+
+                #[cfg(windows)]
+                if let Rate::Finite(ratio) = &meta.rate {
+                    if ratio.is_zero() && meta.remaining > 0 {
+                        panic!(
+                            "zero rate allocation: origin={:?} recipient={:?} remaining={} now={:?} summary={:?}",
+                            meta.origin,
+                            meta.recipient,
+                            meta.remaining,
+                            now,
+                            diag_summary
+                        );
+                    }
                 }
 
                 if let Some(duration) = bandwidth::time_to_deplete(&meta.rate, meta.remaining) {
