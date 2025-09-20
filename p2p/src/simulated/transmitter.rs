@@ -485,8 +485,16 @@ impl<P: PublicKey + Ord + Clone> State<P> {
             };
 
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
+                let prev_rate = meta.rate.clone();
+                let same_finite_rate = matches!(
+                    (&prev_rate, &rate),
+                    (Rate::Finite(prev), Rate::Finite(next)) if prev == next
+                );
+
                 meta.rate = rate.clone();
-                meta.carry = 0;
+                if !same_finite_rate {
+                    meta.carry = 0;
+                }
                 meta.last_update = now;
 
                 if matches!(meta.rate, Rate::Unlimited) {
