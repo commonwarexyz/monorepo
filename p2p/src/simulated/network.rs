@@ -21,6 +21,8 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
+#[cfg(windows)]
+use std::time::Instant;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -410,7 +412,30 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 
     async fn run(mut self) {
+        #[cfg(windows)]
+        let start = Instant::now();
+        #[cfg(windows)]
+        let mut last_report = start;
         loop {
+            #[cfg(windows)]
+            {
+                let elapsed = start.elapsed();
+                if elapsed > Duration::from_secs(20) {
+                    panic!(
+                        "network loop stalled after {:?}, summary {:?}",
+                        elapsed,
+                        self.transmitter.summary()
+                    );
+                }
+                if last_report.elapsed() > Duration::from_secs(5) {
+                    eprintln!(
+                        "windows diagnostic: elapsed={:?} summary={:?}",
+                        elapsed,
+                        self.transmitter.summary()
+                    );
+                    last_report = Instant::now();
+                }
+            }
             let tick = match self.transmitter.next() {
                 Some(when) => {
                     let now = self.context.current();
