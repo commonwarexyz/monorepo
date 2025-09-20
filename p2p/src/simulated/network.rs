@@ -21,6 +21,8 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
+#[cfg(windows)]
+use std::time::Instant;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -412,7 +414,32 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     async fn run(mut self) {
         loop {
             let tick = match self.transmitter.next() {
-                Some(when) => Either::Left(self.context.sleep_until(when)),
+                Some(when) => {
+                    let now = self.context.current();
+                    if cfg!(windows)
+                        && when
+                            > now
+                                .checked_add(Duration::from_secs(30))
+                                .expect("failed to add guard duration")
+                    {
+                        panic!(
+                            "transmitter scheduled far future event: {:?} vs now {:?}, summary {:?}",
+                            when,
+                            now,
+                            self.transmitter.summary()
+                        );
+                    }
+                    Either::Left(self.context.sleep_until(when))
+                }
+                None if self.transmitter.is_idle() => Either::Right(future::pending()),
+                None if cfg!(windows) => Either::Left(
+                    self.context.sleep_until(
+                        self.context
+                            .current()
+                            .checked_add(Duration::from_millis(1))
+                            .expect("sleep guard overflow"),
+                    ),
+                ),
                 None => Either::Right(future::pending()),
             };
             select! {

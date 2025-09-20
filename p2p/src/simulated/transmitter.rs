@@ -121,7 +121,52 @@ pub struct State<P: PublicKey + Ord + Clone> {
     buffered: BTreeMap<(P, P), BTreeMap<u128, Buffered>>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct Summary {
+    pub active_flows: usize,
+    pub queued_pairs: usize,
+    pub buffered_pairs: usize,
+    pub next_bandwidth_event: Option<SystemTime>,
+    pub next_transmission_ready: Option<SystemTime>,
+}
+
+fn saturating_deadline(now: SystemTime, duration: Duration) -> SystemTime {
+    if duration.is_zero() {
+        return now;
+    }
+
+    if let Some(deadline) = now.checked_add(duration) {
+        return deadline;
+    }
+
+    let max_deadline = bandwidth::max_deadline();
+
+    if now >= max_deadline {
+        now
+    } else {
+        max_deadline
+    }
+}
+
 impl<P: PublicKey + Ord + Clone> State<P> {
+    /// Returns true when no flows or queued transmissions remain.
+    pub fn is_idle(&self) -> bool {
+        self.all_flows.is_empty()
+            && self.queued.values().all(|queue| queue.is_empty())
+            && self.buffered.is_empty()
+    }
+
+    pub fn summary(&self) -> Summary {
+        Summary {
+            active_flows: self.all_flows.len(),
+            queued_pairs: self.queued.len(),
+            buffered_pairs: self.buffered.len(),
+            next_bandwidth_event: self.next_bandwidth_event,
+            next_transmission_ready: self.next_transmission_ready,
+        }
+    }
+
     /// Creates a new scheduler.
     pub fn new() -> Self {
         Self {
@@ -423,6 +468,15 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         let mut earliest: Option<Duration> = None;
 
         for (flow_id, rate) in allocations {
+            #[cfg(windows)]
+            let diag_summary = Summary {
+                active_flows: self.all_flows.len(),
+                queued_pairs: self.queued.len(),
+                buffered_pairs: self.buffered.len(),
+                next_bandwidth_event: self.next_bandwidth_event,
+                next_transmission_ready: self.next_transmission_ready,
+            };
+
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
                 meta.rate = rate.clone();
                 meta.carry = 0;
@@ -434,6 +488,20 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                         completed.push(flow_id);
                     }
                     continue;
+                }
+
+                #[cfg(windows)]
+                if let Rate::Finite(ratio) = &meta.rate {
+                    if ratio.is_zero() && meta.remaining > 0 {
+                        panic!(
+                            "zero rate allocation: origin={:?} recipient={:?} remaining={} now={:?} summary={:?}",
+                            meta.origin,
+                            meta.recipient,
+                            meta.remaining,
+                            now,
+                            diag_summary
+                        );
+                    }
                 }
 
                 if let Some(duration) = bandwidth::time_to_deplete(&meta.rate, meta.remaining) {
@@ -449,13 +517,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         completed.dedup();
 
         // Record the next time at which a bandwidth event should fire.
-        self.next_bandwidth_event = earliest.and_then(|duration| {
-            if duration.is_zero() {
-                Some(now)
-            } else {
-                now.checked_add(duration)
-            }
-        });
+        self.next_bandwidth_event = earliest.map(|duration| saturating_deadline(now, duration));
 
         self.finish(completed, now)
     }
@@ -778,6 +840,40 @@ mod tests {
         assert_eq!(completions.len(), 1);
         assert!(!completions[0].deliver);
         assert!(completions[0].arrival_complete_at.is_none());
+    }
+
+    #[test]
+    fn rebalance_schedules_event_for_huge_transfers() {
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin = key(20);
+        let recipient = key(21);
+
+        // Configure bandwidth constraints so the flow is limited by both peers.
+        assert!(state.tune(now, &origin, Some(1), None).is_empty());
+        assert!(state.tune(now, &recipient, None, Some(1)).is_empty());
+
+        // Enqueue a small message to create the flow entry.
+        let completions = state.enqueue(
+            now,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from_static(b"x"),
+            Duration::ZERO,
+            true,
+        );
+        assert!(completions.is_empty());
+
+        let flow_id = *state
+            .active_flows
+            .get(&(origin.clone(), recipient.clone()))
+            .expect("flow registered");
+        let flow = state.all_flows.get_mut(&flow_id).expect("flow metadata");
+        flow.remaining = u128::MAX;
+
+        let _ = state.rebalance(now);
+        assert!(state.next().is_some(), "bandwidth event must be scheduled");
     }
 
     #[test]
