@@ -128,9 +128,9 @@ function insertFooter() {
         <div class="socials">
             <a href="/hiring.html">Hiring</a>
             <a href="/benchmarks.html">Benchmarks</a>
+            <a href="/podcasts.html">Podcasts</a>
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
             <a href="https://x.com/commonwarexyz">X</a>
-            <a href="https://youtube.com/playlist?list=PLnVJ5S1DIyuFQ9cIE_oE-U3Wl3JDgZQ8A">Podcast</a>
         </div>
         &copy; ${currentYear} Commonware, Inc. All rights reserved.
     </div>
