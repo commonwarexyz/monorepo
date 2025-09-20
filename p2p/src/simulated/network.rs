@@ -413,7 +413,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         loop {
             let tick = match self.transmitter.next() {
                 Some(when) => Either::Left(self.context.sleep_until(when)),
-                None => Either::Right(future::pending()),
+                None if self.transmitter.is_idle() => Either::Right(future::pending()),
+                None => {
+                    let now = self.context.current();
+                    Either::Left(self.context.sleep_until(now))
+                }
             };
             select! {
                 _ = tick => {

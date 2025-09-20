@@ -140,6 +140,13 @@ fn saturating_deadline(now: SystemTime, duration: Duration) -> SystemTime {
 }
 
 impl<P: PublicKey + Ord + Clone> State<P> {
+    /// Returns true when no flows or queued transmissions remain.
+    pub fn is_idle(&self) -> bool {
+        self.all_flows.is_empty()
+            && self.queued.values().all(|queue| queue.is_empty())
+            && self.buffered.is_empty()
+    }
+
     /// Creates a new scheduler.
     pub fn new() -> Self {
         Self {
