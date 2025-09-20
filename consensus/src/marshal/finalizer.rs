@@ -15,7 +15,8 @@ const LATEST_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 /// processing from the last processed height after a restart.
 pub struct Finalizer<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>> {
     // Application that processes the finalized blocks.
-    application: Z,
+    // When None, the finalizer won't wait for application processing.
+    application: Option<Z>,
 
     // Orchestrator that stores the finalized blocks.
     orchestrator: Orchestrator<B>,
@@ -34,7 +35,7 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
     pub async fn new(
         context: R,
         partition_prefix: String,
-        application: Z,
+        application: Option<Z>,
         orchestrator: Orchestrator<B>,
         notifier_rx: mpsc::Receiver<()>,
     ) -> Self {
