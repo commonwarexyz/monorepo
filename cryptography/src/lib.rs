@@ -28,6 +28,8 @@ pub mod blake3;
 pub use blake3::{Blake3, CoreBlake3};
 pub mod bloomfilter;
 pub use bloomfilter::BloomFilter;
+#[cfg(feature = "std")]
+pub mod handshake;
 pub mod lthash;
 pub use lthash::LtHash;
 pub mod secp256r1;

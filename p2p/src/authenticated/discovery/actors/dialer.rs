@@ -13,7 +13,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network, SinkOf, Spawner, StreamOf};
-use commonware_stream::public_key::{Config as StreamConfig, Connection};
+use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -108,16 +108,13 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                 debug!(?peer, ?address, "dialed peer");
 
                 // Upgrade connection
-                let instance =
-                    match Connection::upgrade_dialer(context, config, sink, stream, peer.clone())
-                        .await
-                    {
-                        Ok(instance) => instance,
-                        Err(err) => {
-                            debug!(?err, "failed to upgrade connection");
-                            return;
-                        }
-                    };
+                let instance = match dial(context, config, peer.clone(), stream, sink).await {
+                    Ok(instance) => instance,
+                    Err(err) => {
+                        debug!(?err, "failed to upgrade connection");
+                        return;
+                    }
+                };
                 debug!(?peer, ?address, "upgraded connection");
 
                 // Start peer to handle messages

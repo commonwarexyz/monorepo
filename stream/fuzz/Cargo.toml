@@ -18,13 +18,7 @@ arbitrary = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
 libfuzzer-sys = { workspace = true }
 chacha20poly1305 = { workspace = true }
-
-[[bin]]
-name = "handshake"
-path = "fuzz_targets/handshake.rs"
-test = false
-doc = false
-bench = false
+rand_core = { workspace = true }
 
 [[bin]]
 name = "transport"
@@ -43,13 +37,6 @@ bench = false
 [[bin]]
 name = "connection"
 path = "fuzz_targets/connection.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "confirmation"
-path = "fuzz_targets/confirmation.rs"
 test = false
 doc = false
 bench = false

@@ -1,592 +1,272 @@
 #![no_main]
 
-use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
-use commonware_runtime::{deterministic, mocks, Clock, Runner};
+use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner};
 use commonware_stream::{
-    public_key::{
-        handshake::{Hello, Info},
-        x25519, Config, Connection, IncomingConnection,
-    },
+    dial, listen,
     utils::codec::{recv_frame, send_frame},
+    Config, Error, Receiver, Sender,
 };
-use commonware_utils::SystemTimeExt;
+use futures::future::{select, Either};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum StateAction {
-    SendValidHello,
-    SendInvalidHello,
-    SendInvalidConfirmation,
-    SendRandomData,
-    CloseConnection,
-    ReceiveMessage,
-    AttemptUpgrade,
+const NAMESPACE: &[u8] = b"fuzz_transport";
+const MAX_MESSAGE_SIZE: usize = 2048;
+
+#[derive(Debug)]
+enum Direction {
+    D2L,
+    L2D,
 }
 
-impl<'a> arbitrary::Arbitrary<'a> for StateAction {
+impl<'a> arbitrary::Arbitrary<'a> for Direction {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let action = u.int_in_range(0..=6)?;
-        Ok(match action {
-            0 => StateAction::SendValidHello,
-            1 => StateAction::SendInvalidHello,
-            2 => StateAction::SendInvalidConfirmation,
-            3 => StateAction::SendRandomData,
-            4 => StateAction::CloseConnection,
-            5 => StateAction::ReceiveMessage,
-            _ => StateAction::AttemptUpgrade,
-        })
+        let out = if bool::arbitrary(u)? {
+            Self::D2L
+        } else {
+            Self::L2D
+        };
+        Ok(out)
+    }
+}
+
+#[derive(Debug)]
+enum Message {
+    Authenticated(Direction, Vec<u8>),
+    Unauthenticated(Direction, Vec<u8>),
+}
+
+impl<'a> arbitrary::Arbitrary<'a> for Message {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let direction = Direction::arbitrary(u)?;
+        let msg = Vec::arbitrary(u)?;
+        let out = if bool::arbitrary(u)? {
+            Self::Authenticated(direction, msg)
+        } else {
+            Self::Unauthenticated(direction, msg)
+        };
+        Ok(out)
     }
 }
 
 #[derive(Debug)]
 pub struct FuzzInput {
-    // Cryptographic setup
-    dialer_seed: u64,
-    listener_seed: u64,
+    setup_corruption: Vec<u8>,
+    messages: Vec<Message>,
+}
 
-    // Protocol configuration
-    namespace: Vec<u8>,
-    max_message_size: usize,
-    synchrony_bound_secs: u64,
-    max_handshake_age_secs: u64,
-    handshake_timeout_secs: u64,
-
-    // State machine actions
-    dialer_actions: Vec<StateAction>,
-    listener_actions: Vec<StateAction>,
-
-    // Corruption data for invalid messages
-    corrupt_hello_data: Vec<u8>,
-    corrupt_confirmation_data: Vec<u8>,
-    random_data: Vec<u8>,
-
-    // Timing parameters
-    corrupt_timestamp: u64,
-    corrupt_ephemeral_key: [u8; 32],
-
-    // Wrong peer key for invalid scenarios
-    wrong_peer_seed: u64,
+impl FuzzInput {
+    fn has_setup_corruption(&self) -> bool {
+        self.setup_corruption.iter().any(|&x| x != 0)
+    }
 }
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let dialer_seed = u64::arbitrary(u)?;
-        let listener_seed = dialer_seed.wrapping_add(1);
-        let wrong_peer_seed = dialer_seed.wrapping_add(2);
-
-        let namespace_len = u.int_in_range(0..=64)?;
-        let namespace = (0..namespace_len)
-            .map(|_| u8::arbitrary(u))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let max_message_size = u.int_in_range(150..=8192)?;
-        let synchrony_bound_secs = u.int_in_range(1..=10)?;
-        let max_handshake_age_secs = u.int_in_range(1..=10)?;
-        let handshake_timeout_secs = u.int_in_range(1..=10)?;
-
-        let num_dialer_actions = u.int_in_range(1..=8)?;
-        let dialer_actions = (0..num_dialer_actions)
-            .map(|_| StateAction::arbitrary(u))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let num_listener_actions = u.int_in_range(1..=8)?;
-        let listener_actions = (0..num_listener_actions)
-            .map(|_| StateAction::arbitrary(u))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let corrupt_hello_len = u.int_in_range(0..=512)?;
-        let corrupt_hello_data = (0..corrupt_hello_len)
-            .map(|_| u8::arbitrary(u))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let corrupt_confirmation_len = u.int_in_range(0..=512)?;
-        let corrupt_confirmation_data = (0..corrupt_confirmation_len)
-            .map(|_| u8::arbitrary(u))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let random_data_len = u.int_in_range(0..=1024)?;
-        let random_data = (0..random_data_len)
-            .map(|_| u8::arbitrary(u))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let corrupt_timestamp = u64::arbitrary(u)?;
-        let corrupt_ephemeral_key = u.arbitrary::<[u8; 32]>()?;
-
-        Ok(FuzzInput {
-            dialer_seed,
-            listener_seed,
-            namespace,
-            max_message_size,
-            synchrony_bound_secs,
-            max_handshake_age_secs,
-            handshake_timeout_secs,
-            dialer_actions,
-            listener_actions,
-            corrupt_hello_data,
-            corrupt_confirmation_data,
-            random_data,
-            corrupt_timestamp,
-            corrupt_ephemeral_key,
-            wrong_peer_seed,
+        let setup_corruption = if bool::arbitrary(u)? {
+            Vec::arbitrary(u)?
+        } else {
+            Vec::new()
+        };
+        let messages = u.arbitrary_iter()?.collect::<Result<Vec<Message>, _>>()?;
+        Ok(Self {
+            setup_corruption,
+            messages,
         })
-    }
-}
-
-#[derive(Debug, Clone)]
-enum ProtocolState {
-    Initial,
-    WaitingForHello,
-    WaitingForResponse,
-    WaitingForConfirmation,
-    Failed,
-    Upgraded,
-}
-
-struct StateMachine {
-    state: ProtocolState,
-    crypto: PrivateKey,
-    config: Config<PrivateKey>,
-    is_dialer: bool,
-}
-
-impl StateMachine {
-    fn new(crypto: PrivateKey, config: Config<PrivateKey>, is_dialer: bool) -> Self {
-        Self {
-            state: if is_dialer {
-                ProtocolState::Initial
-            } else {
-                ProtocolState::WaitingForHello
-            },
-            crypto,
-            config,
-            is_dialer,
-        }
-    }
-
-    fn transition_to(&mut self, new_state: ProtocolState) {
-        self.state = new_state;
-    }
-
-    fn is_valid_transition(&self, action: StateAction, peer_has_sent_messages: bool) -> bool {
-        // First check ReceiveMessage availability regardless of state
-        if action == StateAction::ReceiveMessage {
-            return peer_has_sent_messages;
-        }
-
-        match (&self.state, action, self.is_dialer) {
-            // Dialer states and actions
-            (ProtocolState::Initial, StateAction::AttemptUpgrade, true) => true,
-            (ProtocolState::Initial, StateAction::SendValidHello, true) => true,
-            (ProtocolState::Initial, StateAction::SendInvalidHello, true) => true,
-            // We only model sending valid confirmations during StateAction::AttemptUpgrade.
-            (ProtocolState::WaitingForResponse, StateAction::SendInvalidConfirmation, true) => true,
-
-            // Listener states and actions
-            (ProtocolState::Initial, StateAction::AttemptUpgrade, false) => true,
-            (ProtocolState::WaitingForHello, StateAction::SendValidHello, false) => true,
-            (ProtocolState::WaitingForHello, StateAction::SendInvalidHello, false) => true,
-            // We only model sending valid confirmations during StateAction::AttemptUpgrade.
-            (ProtocolState::WaitingForHello, StateAction::SendInvalidConfirmation, false) => true,
-
-            // Universal actions valid from any state
-            (_, StateAction::SendRandomData, _) => true,
-            (_, StateAction::CloseConnection, _) => true,
-
-            // Everything else is invalid
-            _ => false,
-        }
     }
 }
 
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let dialer_crypto = PrivateKey::from_seed(input.dialer_seed);
-        let listener_crypto = PrivateKey::from_seed(input.listener_seed);
-        let wrong_peer_crypto = PrivateKey::from_seed(input.wrong_peer_seed);
+    executor.start(|context| async move {
+        let has_setup_corruption = input.has_setup_corruption();
+        let FuzzInput {
+            setup_corruption,
+            messages,
+        } = input;
+        let dialer_crypto = PrivateKey::from_seed(42);
+        let listener_crypto = PrivateKey::from_seed(24);
 
-        let synchrony_bound = Duration::from_secs(input.synchrony_bound_secs);
-        let max_handshake_age = Duration::from_secs(input.max_handshake_age_secs);
-        let handshake_timeout = Duration::from_secs(input.handshake_timeout_secs);
+        let (dialer_sink, mut adversary_d_stream) = mocks::Channel::init();
+        let (mut adversary_d_sink, listener_stream) = mocks::Channel::init();
+        let (listener_sink, mut adversary_l_stream) = mocks::Channel::init();
+        let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_config = Config {
-            crypto: dialer_crypto.clone(),
-            namespace: input.namespace.clone(),
-            max_message_size: input.max_message_size,
-            synchrony_bound,
-            max_handshake_age,
-            handshake_timeout,
+            signing_key: dialer_crypto.clone(),
+            namespace: NAMESPACE.to_vec(),
+            max_message_size: MAX_MESSAGE_SIZE,
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(1),
+            handshake_timeout: Duration::from_secs(1),
         };
 
         let listener_config = Config {
-            crypto: listener_crypto.clone(),
-            namespace: input.namespace.clone(),
-            max_message_size: input.max_message_size,
-            synchrony_bound,
-            max_handshake_age,
-            handshake_timeout,
+            signing_key: listener_crypto.clone(),
+            namespace: NAMESPACE.to_vec(),
+            max_message_size: MAX_MESSAGE_SIZE,
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(1),
+            handshake_timeout: Duration::from_secs(1),
         };
 
-        let (dialer_sink, listener_stream) = mocks::Channel::init();
-        let (listener_sink, dialer_stream) = mocks::Channel::init();
+        let dialer_handle = context.clone().spawn(move |context| async move {
+            dial(
+                context,
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await
+        });
+        let listener_handle = context.clone().spawn(move |context| async move {
+            listen(
+                context,
+                |_| async { true },
+                listener_config,
+                listener_stream,
+                listener_sink,
+            )
+            .await
+        });
+        let adversary_handle: Handle<Result<_, Error>> =
+            context.clone().spawn(move |_context| async move {
+                let mut corruption_i = 0;
 
-        let mut dialer_state =
-            StateMachine::new(dialer_crypto.clone(), dialer_config.clone(), true);
+                let announce = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_d_sink, &announce, MAX_MESSAGE_SIZE).await?;
 
-        let mut listener_state =
-            StateMachine::new(listener_crypto.clone(), listener_config.clone(), false);
-
-        let mut dialer_sink = dialer_sink;
-        let mut listener_sink = listener_sink;
-        let mut dialer_stream = dialer_stream;
-        let mut listener_stream = listener_stream;
-
-        let mut pending_dialer_to_listener_messages: u32 = 0;
-        let mut pending_listener_to_dialer_messages: u32 = 0;
-
-        let max_actions = input.dialer_actions.len().max(input.listener_actions.len());
-
-        for i in 0..max_actions {
-            if let Some(action) = input.dialer_actions.get(i) {
-                if dialer_state
-                    .is_valid_transition(*action, pending_listener_to_dialer_messages > 0)
-                {
-                    match action {
-                        StateAction::SendValidHello => {
-                            let ephemeral_secret = x25519::new(&mut context);
-                            let ephemeral_public_key =
-                                x25519::PublicKey::from_secret(&ephemeral_secret);
-                            let hello = Hello::sign(
-                                &mut dialer_state.crypto.clone(),
-                                &dialer_state.config.namespace,
-                                Info::new(
-                                    listener_crypto.public_key(),
-                                    ephemeral_public_key,
-                                    context.current().epoch_millis(),
-                                ),
-                            );
-                            match send_frame(
-                                &mut dialer_sink,
-                                &hello.encode(),
-                                input.max_message_size,
-                            )
-                            .await
-                            {
-                                Ok(()) => {
-                                    pending_dialer_to_listener_messages += 1;
-                                    dialer_state.transition_to(ProtocolState::WaitingForResponse);
-                                }
-                                Err(_) => dialer_state.transition_to(ProtocolState::Failed),
-                            }
-                        }
-                        StateAction::SendInvalidHello => {
-                            if !input.corrupt_hello_data.is_empty() {
-                                if send_frame(
-                                    &mut dialer_sink,
-                                    &input.corrupt_hello_data,
-                                    input.max_message_size,
-                                )
-                                .await
-                                .is_ok()
-                                {
-                                    pending_dialer_to_listener_messages += 1;
-                                }
-                                dialer_state.transition_to(ProtocolState::Failed);
-                            } else {
-                                let wrong_peer = wrong_peer_crypto.public_key();
-                                let ephemeral_public_key =
-                                    x25519::PublicKey::from_bytes(input.corrupt_ephemeral_key);
-                                let hello = Hello::sign(
-                                    &mut dialer_state.crypto.clone(),
-                                    &dialer_state.config.namespace,
-                                    Info::new(
-                                        wrong_peer,
-                                        ephemeral_public_key,
-                                        input.corrupt_timestamp,
-                                    ),
-                                );
-                                if send_frame(
-                                    &mut dialer_sink,
-                                    &hello.encode(),
-                                    input.max_message_size,
-                                )
-                                .await
-                                .is_ok()
-                                {
-                                    pending_dialer_to_listener_messages += 1;
-                                }
-                            }
-                            dialer_state.transition_to(ProtocolState::Failed);
-                        }
-                        StateAction::SendInvalidConfirmation => {
-                            if send_frame(
-                                &mut dialer_sink,
-                                &input.corrupt_confirmation_data,
-                                input.max_message_size,
-                            )
-                            .await
-                            .is_ok()
-                            {
-                                pending_dialer_to_listener_messages += 1;
-                            }
-                            dialer_state.transition_to(ProtocolState::Failed);
-                        }
-                        StateAction::SendRandomData => {
-                            if send_frame(
-                                &mut dialer_sink,
-                                &input.random_data,
-                                input.max_message_size,
-                            )
-                            .await
-                            .is_ok()
-                            {
-                                pending_dialer_to_listener_messages += 1;
-                            }
-                        }
-                        StateAction::ReceiveMessage => {
-                            pending_listener_to_dialer_messages =
-                                pending_listener_to_dialer_messages
-                                    .checked_sub(1)
-                                    .expect("ReceiveMessage but no peer frame is pending");
-
-                            match recv_frame(&mut dialer_stream, input.max_message_size).await {
-                                Ok(msg) => {
-                                    if let Ok(hello) = Hello::decode(msg.as_ref()) {
-                                        let verify_result = hello.verify(
-                                            &context,
-                                            &dialer_state.config.crypto.public_key(),
-                                            &dialer_state.config.namespace,
-                                            dialer_state.config.synchrony_bound,
-                                            dialer_state.config.max_handshake_age,
-                                            None,
-                                        );
-
-                                        match verify_result {
-                                            Ok(()) => {
-                                                if matches!(
-                                                    dialer_state.state,
-                                                    ProtocolState::WaitingForResponse
-                                                ) {
-                                                    dialer_state.transition_to(
-                                                        ProtocolState::WaitingForConfirmation,
-                                                    );
-                                                }
-                                            }
-                                            Err(_) => {
-                                                dialer_state.transition_to(ProtocolState::Failed);
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    dialer_state.transition_to(ProtocolState::Failed);
-                                }
-                            }
-                        }
-                        StateAction::AttemptUpgrade => {
-                            let upgrade_context = context.clone();
-                            match Connection::upgrade_dialer(
-                                upgrade_context,
-                                dialer_config.clone(),
-                                dialer_sink,
-                                dialer_stream,
-                                listener_crypto.public_key(),
-                            )
-                            .await
-                            {
-                                Ok(_connection) => {
-                                    dialer_state.transition_to(ProtocolState::Upgraded);
-                                    return;
-                                }
-                                Err(_) => {
-                                    dialer_state.transition_to(ProtocolState::Failed);
-                                    return;
-                                }
-                            }
-                        }
-                        StateAction::CloseConnection => {
-                            drop(dialer_sink);
-                            return;
-                        }
+                let mut m1 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
+                    .await?
+                    .to_vec();
+                for byte in m1.iter_mut() {
+                    if corruption_i < setup_corruption.len() {
+                        *byte ^= setup_corruption[corruption_i];
+                        corruption_i += 1;
                     }
                 }
-            }
+                send_frame(&mut adversary_d_sink, &m1, MAX_MESSAGE_SIZE).await?;
 
-            if let Some(action) = input.listener_actions.get(i) {
-                if listener_state
-                    .is_valid_transition(*action, pending_dialer_to_listener_messages > 0)
-                {
-                    match action {
-                        StateAction::SendValidHello => {
-                            let ephemeral_secret = x25519::new(&mut context);
-                            let ephemeral_public_key =
-                                x25519::PublicKey::from_secret(&ephemeral_secret);
-                            let hello = Hello::sign(
-                                &mut listener_state.crypto.clone(),
-                                &listener_state.config.namespace,
-                                Info::new(
-                                    dialer_crypto.public_key(),
-                                    ephemeral_public_key,
-                                    context.current().epoch_millis(),
-                                ),
-                            );
-                            match send_frame(
-                                &mut listener_sink,
-                                &hello.encode(),
-                                input.max_message_size,
-                            )
-                            .await
-                            {
-                                Ok(()) => {
-                                    pending_listener_to_dialer_messages += 1;
-                                    listener_state
-                                        .transition_to(ProtocolState::WaitingForConfirmation);
-                                }
-                                Err(_) => listener_state.transition_to(ProtocolState::Failed),
-                            }
-                        }
-                        StateAction::SendInvalidHello => {
-                            if !input.corrupt_hello_data.is_empty() {
-                                if send_frame(
-                                    &mut listener_sink,
-                                    &input.corrupt_hello_data,
-                                    input.max_message_size,
-                                )
-                                .await
-                                .is_ok()
-                                {
-                                    pending_listener_to_dialer_messages += 1;
-                                }
-                                listener_state.transition_to(ProtocolState::Failed);
-                            } else {
-                                let wrong_peer = wrong_peer_crypto.public_key();
-                                let ephemeral_public_key =
-                                    x25519::PublicKey::from_bytes(input.corrupt_ephemeral_key);
-                                let hello = Hello::sign(
-                                    &mut listener_state.crypto.clone(),
-                                    &listener_state.config.namespace,
-                                    Info::new(
-                                        wrong_peer,
-                                        ephemeral_public_key,
-                                        input.corrupt_timestamp,
-                                    ),
-                                );
-                                if send_frame(
-                                    &mut listener_sink,
-                                    &hello.encode(),
-                                    input.max_message_size,
-                                )
-                                .await
-                                .is_ok()
-                                {
-                                    pending_listener_to_dialer_messages += 1;
-                                }
-                            }
-                            listener_state.transition_to(ProtocolState::Failed);
-                        }
-                        StateAction::SendInvalidConfirmation => {
-                            if send_frame(
-                                &mut listener_sink,
-                                &input.corrupt_confirmation_data,
-                                input.max_message_size,
-                            )
-                            .await
-                            .is_ok()
-                            {
-                                pending_listener_to_dialer_messages += 1;
-                            }
-                            listener_state.transition_to(ProtocolState::Failed);
-                        }
-                        StateAction::SendRandomData => {
-                            if send_frame(
-                                &mut listener_sink,
-                                &input.random_data,
-                                input.max_message_size,
-                            )
-                            .await
-                            .is_ok()
-                            {
-                                pending_listener_to_dialer_messages += 1;
-                            }
-                        }
-                        StateAction::ReceiveMessage => {
-                            pending_dialer_to_listener_messages =
-                                pending_dialer_to_listener_messages
-                                    .checked_sub(1)
-                                    .expect("ReceiveMessage but no peer frame is pending");
-
-                            match recv_frame(&mut listener_stream, input.max_message_size).await {
-                                Ok(msg) => {
-                                    if let Ok(hello) = Hello::decode(msg.as_ref()) {
-                                        let verify_result = hello.verify(
-                                            &context,
-                                            &listener_state.config.crypto.public_key(),
-                                            &listener_state.config.namespace,
-                                            listener_state.config.synchrony_bound,
-                                            listener_state.config.max_handshake_age,
-                                            None,
-                                        );
-
-                                        match verify_result {
-                                            Ok(()) => {
-                                                if matches!(
-                                                    listener_state.state,
-                                                    ProtocolState::WaitingForHello
-                                                ) {
-                                                    listener_state.transition_to(
-                                                        ProtocolState::WaitingForConfirmation,
-                                                    );
-                                                }
-                                            }
-                                            Err(_) => {
-                                                listener_state.transition_to(ProtocolState::Failed);
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    listener_state.transition_to(ProtocolState::Failed);
-                                }
-                            }
-                        }
-                        StateAction::AttemptUpgrade => {
-                            let verify_context = context.clone();
-                            match IncomingConnection::verify(
-                                &verify_context,
-                                listener_config.clone(),
-                                listener_sink,
-                                listener_stream,
-                            )
-                            .await
-                            {
-                                Ok(incoming) => {
-                                    let upgrade_context = context.clone();
-                                    match Connection::upgrade_listener(upgrade_context, incoming)
-                                        .await
-                                    {
-                                        Ok(_connection) => {
-                                            listener_state.transition_to(ProtocolState::Upgraded);
-                                            return;
-                                        }
-                                        Err(_) => {
-                                            listener_state.transition_to(ProtocolState::Failed);
-                                            return;
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    listener_state.transition_to(ProtocolState::Failed);
-                                    return;
-                                }
-                            }
-                        }
-                        StateAction::CloseConnection => {
-                            drop(listener_sink);
-                            return;
-                        }
+                let mut m2 = recv_frame(&mut adversary_l_stream, MAX_MESSAGE_SIZE)
+                    .await?
+                    .to_vec();
+                for byte in m2.iter_mut() {
+                    if corruption_i < setup_corruption.len() {
+                        *byte ^= setup_corruption[corruption_i];
+                        corruption_i += 1;
                     }
+                }
+                send_frame(&mut adversary_l_sink, &m2, MAX_MESSAGE_SIZE).await?;
+
+                let mut m3 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
+                    .await?
+                    .to_vec();
+                for byte in m3.iter_mut() {
+                    if corruption_i < setup_corruption.len() {
+                        *byte ^= setup_corruption[corruption_i];
+                        corruption_i += 1;
+                    }
+                }
+                let sent_corrupted_data =
+                    setup_corruption.iter().take(corruption_i).any(|x| *x != 0);
+                send_frame(&mut adversary_d_sink, &m3, MAX_MESSAGE_SIZE).await?;
+                Ok((
+                    sent_corrupted_data,
+                    adversary_d_stream,
+                    adversary_d_sink,
+                    adversary_l_stream,
+                    adversary_l_sink,
+                ))
+            });
+        // We need to do a selection to correctly assert the errors, avoiding deadlock.
+        //
+        // A deadlock might happen if one side asserts an error, and then we're foolishly waiting
+        // for it to send a message it never will.
+        let (d_res, l_res) = match select(dialer_handle, listener_handle).await {
+            Either::Left((d_res, l_handle)) => {
+                match d_res.inspect_err(|e| println!("A: {:?}", e)).unwrap().ok() {
+                    Some(d_res) => (Some(d_res), l_handle.await.unwrap().ok()),
+                    None => (None, None),
+                }
+            }
+            Either::Right((l_res, d_handle)) => {
+                match l_res.inspect_err(|e| println!("B: {:?}", e)).unwrap().ok() {
+                    Some(l_res) => (d_handle.await.unwrap().ok(), Some(l_res)),
+                    None => (None, None),
+                }
+            }
+        };
+        if d_res.is_none() || l_res.is_none() {
+            assert!(has_setup_corruption, "expected there to be data corruption");
+            return;
+        }
+        let (mut d_sender, mut d_receiver) = d_res.unwrap();
+        let (_, mut l_sender, mut l_receiver) = l_res.unwrap();
+        let (
+            sent_corrupted_data,
+            mut adversary_d_stream,
+            mut adversary_d_sink,
+            mut adversary_l_stream,
+            mut adversary_l_sink,
+        ) = adversary_handle.await.unwrap().unwrap();
+        // Importantly, make sure that if we've gotten to this point, no data corruption
+        // has happened!
+        assert!(!sent_corrupted_data);
+        for msg in messages {
+            match msg {
+                Message::Authenticated(direction, data) => {
+                    let (sender, a_in, a_out, receiver): (
+                        &mut Sender<mocks::Sink>,
+                        &mut mocks::Stream,
+                        &mut mocks::Sink,
+                        &mut Receiver<mocks::Stream>,
+                    ) = match direction {
+                        Direction::D2L => (
+                            &mut d_sender,
+                            &mut adversary_d_stream,
+                            &mut adversary_d_sink,
+                            &mut l_receiver,
+                        ),
+                        Direction::L2D => (
+                            &mut l_sender,
+                            &mut adversary_l_stream,
+                            &mut adversary_l_sink,
+                            &mut d_receiver,
+                        ),
+                    };
+                    sender.send(&data).await.unwrap();
+                    let frame = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
+                    send_frame(a_out, &frame, MAX_MESSAGE_SIZE).await.unwrap();
+                    let data2 = receiver.recv().await.unwrap();
+                    assert_eq!(data, data2, "expected data to match");
+                }
+                Message::Unauthenticated(direction, data) => {
+                    let (sender, a_in, a_out, receiver): (
+                        &mut Sender<mocks::Sink>,
+                        &mut mocks::Stream,
+                        &mut mocks::Sink,
+                        &mut Receiver<mocks::Stream>,
+                    ) = match direction {
+                        Direction::D2L => (
+                            &mut d_sender,
+                            &mut adversary_d_stream,
+                            &mut adversary_d_sink,
+                            &mut l_receiver,
+                        ),
+                        Direction::L2D => (
+                            &mut l_sender,
+                            &mut adversary_l_stream,
+                            &mut adversary_l_sink,
+                            &mut d_receiver,
+                        ),
+                    };
+                    sender.send(&[]).await.unwrap();
+                    let _ = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
+                    send_frame(a_out, &data, MAX_MESSAGE_SIZE).await.unwrap();
+                    let res = receiver.recv().await;
+                    assert!(res.is_err());
                 }
             }
         }

@@ -4,9 +4,10 @@
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
 
+use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
-use commonware_codec::{varint::UInt, EncodeSize, Write};
+use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
 use rand_core::{
     impls::{next_u32_via_fill, next_u64_via_fill},
     CryptoRng, CryptoRngCore, RngCore,
@@ -255,6 +256,23 @@ impl Transcript {
     }
 }
 
+// Utility methods which can be created using the other methods.
+impl Transcript {
+    /// Use a signer to create a signature over this transcript.
+    ///
+    /// Conceptually, this is the same as:
+    /// - signing the operations that have been performed on the transcript,
+    /// - or, equivalently, signing randomness or a summary extracted from the transcript.
+    pub fn sign<S: Signer>(&self, s: &S) -> <S as Signer>::Signature {
+        s.sign(None, self.summarize().hash.as_bytes())
+    }
+
+    /// Verify a signature produced by [Transcript::sign].
+    pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
+        v.verify(None, self.summarize().hash.as_bytes(), sig)
+    }
+}
+
 /// Represents a summary of a transcript.
 ///
 /// This is the primary way to compare two transcripts for equality.
@@ -265,9 +283,30 @@ pub struct Summary {
     hash: blake3::Hash,
 }
 
+impl FixedSize for Summary {
+    const SIZE: usize = blake3::OUT_LEN;
+}
+
+impl Write for Summary {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.hash.as_bytes().write(buf)
+    }
+}
+
+impl Read for Summary {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            hash: blake3::Hash::from_bytes(ReadExt::read(buf)?),
+        })
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use commonware_codec::{DecodeExt as _, Encode};
 
     #[test]
     fn test_namespace_affects_summary() {
@@ -342,7 +381,6 @@ mod test {
             let mut noise = Transcript::new(b"test").noise(b"NOISE");
             noise.fill_bytes(&mut s_prime[..i]);
             noise.fill_bytes(&mut s_prime[i..]);
-            dbg!(i);
             assert_eq!(s, s_prime);
         }
     }
@@ -363,5 +401,11 @@ mod test {
         let s1 = Transcript::new(s.hash.as_bytes()).summarize();
         let s2 = Transcript::resume(s).summarize();
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn test_summary_encode_roundtrip() {
+        let s = Transcript::new(b"test").summarize();
+        assert_eq!(&s, &Summary::decode(s.encode()).unwrap());
     }
 }

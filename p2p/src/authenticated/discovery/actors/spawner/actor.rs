@@ -20,8 +20,8 @@ use tracing::debug;
 
 pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-    Si: Sink,
-    St: Stream,
+    O: Sink,
+    I: Stream,
     C: PublicKey,
 > {
     context: E,
@@ -33,7 +33,7 @@ pub struct Actor<
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
 
-    receiver: mpsc::Receiver<Message<E, Si, St, C>>,
+    receiver: mpsc::Receiver<Message<E, O, I, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -43,13 +43,13 @@ pub struct Actor<
 
 impl<
         E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-        Si: Sink,
-        St: Stream,
+        O: Sink,
+        I: Stream,
         C: PublicKey,
-    > Actor<E, Si, St, C>
+    > Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, Si, St, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, O, I, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();

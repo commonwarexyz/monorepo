@@ -2,10 +2,7 @@
 
 use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
 use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
-use commonware_stream::{
-    public_key::{Config, Connection, IncomingConnection},
-    Receiver as _, Sender as _,
-};
+use commonware_stream::{dial, listen, Config};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
@@ -40,7 +37,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Generate constrained parameters
-        // 210 is the max size of an Info message using an Ed25519 key.
+        // 210 is enough to contain the largest message.
         let max_message_size = u.int_in_range(210..=1024 * 1023)?;
         let synchrony_bound_secs = u.int_in_range(1..=12)?;
         let max_handshake_age_secs = u.int_in_range(1..=12)?;
@@ -96,7 +93,7 @@ fn fuzz(input: FuzzInput) {
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_config = Config {
-            crypto: dialer_crypto.clone(),
+            signing_key: dialer_crypto.clone(),
             namespace: input.namespace.clone(),
             max_message_size,
             synchrony_bound,
@@ -105,7 +102,7 @@ fn fuzz(input: FuzzInput) {
         };
 
         let listener_config = Config {
-            crypto: listener_crypto.clone(),
+            signing_key: listener_crypto.clone(),
             namespace: input.namespace.clone(),
             max_message_size,
             synchrony_bound,
@@ -115,31 +112,30 @@ fn fuzz(input: FuzzInput) {
 
         let listener_handle = context.with_label("listener").spawn({
             move |context| async move {
-                let incoming = IncomingConnection::verify(
-                    &context,
+                listen(
+                    context,
+                    |_| async { true },
                     listener_config,
-                    listener_sink,
                     listener_stream,
+                    listener_sink,
                 )
-                .await?;
-                Connection::upgrade_listener(context, incoming).await
+                .await
             }
         });
 
-        let dialer_result = Connection::upgrade_dialer(
+        let (mut dialer_sender, mut dialer_receiver) = dial(
             context.clone(),
             dialer_config,
-            dialer_sink,
-            dialer_stream,
             listener_crypto.public_key(),
+            dialer_stream,
+            dialer_sink,
         )
         .await
         .unwrap();
 
-        let dialer_connection = dialer_result;
-        let listener_connection = listener_handle.await.unwrap().unwrap();
-        let (mut dialer_sender, mut dialer_receiver) = dialer_connection.split();
-        let (mut listener_sender, mut listener_receiver) = listener_connection.split();
+        let (listener_peer, mut listener_sender, mut listener_receiver) =
+            listener_handle.await.unwrap().unwrap();
+        assert_eq!(listener_peer, dialer_crypto.public_key());
 
         // Exchange messages from dialer to listener
         for (i, msg) in input.messages_to_listener.iter().enumerate() {
@@ -148,7 +144,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             dialer_sender.send(msg).await.unwrap();
-            let received = listener_receiver.receive().await.unwrap();
+            let received = listener_receiver.recv().await.unwrap();
             assert_eq!(&received[..], &msg[..], "Message {i} mismatch");
         }
 
@@ -159,7 +155,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             listener_sender.send(msg).await.unwrap();
-            let received = dialer_receiver.receive().await.unwrap();
+            let received = dialer_receiver.recv().await.unwrap();
             assert_eq!(&received[..], &msg[..], "Message {i} mismatch");
         }
     });

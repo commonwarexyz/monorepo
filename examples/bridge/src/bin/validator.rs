@@ -14,7 +14,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::authenticated;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
-use commonware_stream::public_key::{self, Connection};
+use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, quorum, union, NZUsize, NZU32};
 use governor::Quota;
 use std::{
@@ -145,8 +145,8 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure indexer
-    let indexer_cfg = public_key::Config {
-        crypto: signer.clone(),
+    let indexer_cfg = StreamConfig {
+        signing_key: signer.clone(),
         namespace: INDEXER_NAMESPACE.to_vec(),
         max_message_size: 1024 * 1024,
         synchrony_bound: Duration::from_secs(1),
@@ -171,10 +171,9 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer =
-            Connection::upgrade_dialer(context.clone(), indexer_cfg, sink, stream, indexer)
-                .await
-                .expect("Failed to upgrade connection with indexer");
+        let indexer = dial(context.clone(), indexer_cfg, indexer, stream, sink)
+            .await
+            .expect("Failed to upgrade connection with indexer");
 
         // Setup p2p
         let (mut network, mut oracle) =
