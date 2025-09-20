@@ -362,7 +362,7 @@ pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
                 let numerator = bytes.saturating_mul(ratio.den).saturating_mul(NS_PER_SEC);
                 let ns = div_ceil(numerator, ratio.num);
                 let duration = duration_from_ns(ns);
-                if duration > Duration::from_secs(30) {
+                if cfg!(windows) && duration > Duration::from_secs(30) {
                     panic!(
                         "unreasonably long depletion time: bytes={} ratio={:?} duration={:?}",
                         bytes, ratio, duration

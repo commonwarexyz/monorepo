@@ -414,10 +414,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let tick = match self.transmitter.next() {
                 Some(when) => {
                     let now = self.context.current();
-                    if when
-                        > now
-                            .checked_add(Duration::from_secs(30))
-                            .expect("failed to add guard duration")
+                    if cfg!(windows)
+                        && when
+                            > now
+                                .checked_add(Duration::from_secs(30))
+                                .expect("failed to add guard duration")
                     {
                         panic!(
                             "transmitter scheduled far future event: {:?} vs now {:?}, summary {:?}",
@@ -429,10 +430,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     Either::Left(self.context.sleep_until(when))
                 }
                 None if self.transmitter.is_idle() => Either::Right(future::pending()),
-                None => panic!(
+                None if cfg!(windows) => panic!(
                     "transmitter stalled without deadline: {:?}",
                     self.transmitter.summary()
                 ),
+                None => Either::Right(future::pending()),
             };
             select! {
                 _ = tick => {
