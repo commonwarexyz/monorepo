@@ -233,7 +233,7 @@ fn fuzz_decode_raw(data: &[u8], target: DecodeTarget, min_size: u16, max_size: u
     }
 
     let min_size = (min_size as usize).clamp(MIN_COLLECTION_SIZE, MAX_COLLECTION_SIZE);
-    let max_size = (max_size as usize).clamp(MIN_COLLECTION_SIZE, MAX_COLLECTION_SIZE);
+    let max_size = (max_size as usize).clamp(min_size, MAX_COLLECTION_SIZE);
     let range_cfg: RangeCfg = (min_size..=max_size).into();
 
     match target {
