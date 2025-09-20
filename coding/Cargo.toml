@@ -17,6 +17,7 @@ commonware-storage = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 reed-solomon-simd = "3.0.1"
+rand_core = { workspace = true }
 
 [lib]
 bench = false
@@ -24,6 +25,7 @@ bench = false
 [dev-dependencies]
 criterion = { workspace = true }
 rand = { workspace = true }
+rand_chacha = { workspace = true }
 
 [[bench]]
 name = "reed_solomon"

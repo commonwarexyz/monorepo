@@ -112,12 +112,13 @@
 //! assert_eq!(decoded_data, data);
 //! ```
 
+use crate::{Config, Scheme};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::collections::HashSet;
+use std::{collections::HashSet, marker::PhantomData};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
@@ -559,47 +560,68 @@ pub fn decode<H: Hasher>(
     Ok(extract_data(shards, k))
 }
 
+pub struct ReedSolomon<H> {
+    _marker: PhantomData<H>,
+}
+
+impl<H: Hasher> Scheme for ReedSolomon<H> {
+    type Commitment = H::Digest;
+
+    type Shard = Chunk<H>;
+    type ReShard = Chunk<H>;
+
+    type Proof = ();
+
+    type Error = Error;
+
+    fn encode(
+        _rng: impl rand_core::CryptoRngCore,
+        config: &Config,
+        mut data: impl Buf,
+    ) -> Result<(Self::Commitment, Vec<(Self::Shard, Self::Proof)>), Self::Error> {
+        let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
+        let (commitment, chunks) = encode(
+            config.minimum_shards + config.extra_shards,
+            config.minimum_shards,
+            data,
+        )?;
+        Ok((commitment, chunks.into_iter().map(|s| (s, ())).collect()))
+    }
+
+    fn check(
+        commitment: &Self::Commitment,
+        _proof: &Self::Proof,
+        shard: &Self::Shard,
+    ) -> Result<Self::ReShard, Self::Error> {
+        if shard.verify(shard.index, commitment) {
+            Ok(shard.clone())
+        } else {
+            Err(Error::InvalidProof)
+        }
+    }
+
+    fn decode(
+        config: &Config,
+        commitment: &Self::Commitment,
+        my_shard: Self::Shard,
+        shards: &[Self::ReShard],
+    ) -> Result<Vec<u8>, Self::Error> {
+        decode(
+            config.minimum_shards + config.extra_shards,
+            config.minimum_shards,
+            commitment,
+            std::iter::once(my_shard)
+                .chain(shards.iter().cloned())
+                .collect(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::Sha256;
-
-    #[test]
-    fn test_basic() {
-        let data = b"Hello, Reed-Solomon!";
-        let total = 7u16;
-        let min = 4u16;
-
-        // Encode the data
-        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-        assert_eq!(chunks.len(), total as usize);
-
-        // Verify all chunks
-        for i in 0..total {
-            assert!(chunks[i as usize].verify(i, &root));
-        }
-
-        // Try to decode with exactly min (all original shards)
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    #[test]
-    fn test_moderate() {
-        let data = b"Testing with more pieces than minimum";
-        let total = 10u16;
-        let min = 4u16;
-
-        // Encode the data
-        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Try to decode with min (all original shards)
-        let minimal = chunks.into_iter().take(min as usize).collect();
-        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
-        assert_eq!(decoded, data);
-    }
 
     #[test]
     fn test_recovery() {
@@ -819,26 +841,6 @@ mod tests {
         // Fail to decode
         let result = decode::<Sha256>(total, min, &malicious_root, pieces);
         assert!(matches!(result, Err(Error::Inconsistent)));
-    }
-
-    #[test]
-    fn test_odd_shard_len() {
-        let data = b"a";
-        let total = 3u16;
-        let min = 2u16;
-
-        // Encode the data
-        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Use a mix of original and recovery pieces
-        let pieces: Vec<_> = vec![
-            chunks[0].clone(), // original
-            chunks[2].clone(), // recovery
-        ];
-
-        // Try to decode with a mix of original and recovery pieces
-        let decoded = decode::<Sha256>(total, min, &root, pieces).unwrap();
-        assert_eq!(decoded, data);
     }
 
     #[test]
