@@ -412,7 +412,22 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     async fn run(mut self) {
         loop {
             let tick = match self.transmitter.next() {
-                Some(when) => Either::Left(self.context.sleep_until(when)),
+                Some(when) => {
+                    let now = self.context.current();
+                    if when
+                        > now
+                            .checked_add(Duration::from_secs(30))
+                            .expect("failed to add guard duration")
+                    {
+                        panic!(
+                            "transmitter scheduled far future event: {:?} vs now {:?}, summary {:?}",
+                            when,
+                            now,
+                            self.transmitter.summary()
+                        );
+                    }
+                    Either::Left(self.context.sleep_until(when))
+                }
                 None if self.transmitter.is_idle() => Either::Right(future::pending()),
                 None => panic!(
                     "transmitter stalled without deadline: {:?}",
