@@ -1357,4 +1357,63 @@ mod tests {
 
         assert!(state.next().is_none());
     }
+
+    #[test]
+    fn carry_accumulates_across_rebalances() {
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin_small = key(60);
+        let origin_large = key(61);
+        let recipient = key(62);
+
+        assert!(state.tune(now, &origin_small, Some(30_000), None).is_empty());
+        assert!(state.tune(now, &origin_large, Some(30_000), None).is_empty());
+        assert!(state.tune(now, &recipient, None, Some(30_000)).is_empty());
+
+        let completions = state.enqueue(
+            now,
+            origin_small.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from_static(&[0xAA]),
+            Duration::ZERO,
+            true,
+        );
+        assert!(completions.is_empty());
+
+        let completions = state.enqueue(
+            now,
+            origin_large.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from(vec![0xBB; 10_000]),
+            Duration::ZERO,
+            true,
+        );
+        assert!(completions.is_empty());
+
+        let mut delivered = Vec::new();
+        let mut last_deadline = now;
+        for _ in 0..50_000 {
+            let deadline = state
+                .next()
+                .expect("pending transmissions should advertise a deadline");
+            assert!(deadline >= last_deadline);
+            last_deadline = deadline;
+
+            for completion in state.process(deadline) {
+                assert!(completion.deliver);
+                delivered.push(completion.message.len());
+            }
+
+            if delivered.len() == 2 {
+                break;
+            }
+        }
+
+        assert_eq!(delivered.len(), 2, "flows failed to complete under repeated rebalances");
+        delivered.sort_unstable();
+        assert_eq!(delivered, vec![1, 10_000]);
+        assert!(state.next().is_none());
+    }
 }
