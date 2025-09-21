@@ -141,7 +141,7 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     peaks
 }
 
-/// Returns the number of the leaf at position `leaf_pos` in an MMR, or None if
+/// Returns the location of the leaf at position `pos` in an MMR, or None if
 /// this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
@@ -176,7 +176,7 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
     Some(leaf_num_floor)
 }
 
-/// Returns the position of the leaf with number `leaf_num` in an MMR.
+/// Returns the position of the leaf with location `loc` in an MMR.
 pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     // This will never underflow since 2*n >= count_ones(n).
     leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
