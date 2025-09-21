@@ -72,6 +72,7 @@ pub mod iterator;
 pub mod mem;
 pub mod proof;
 pub mod stability;
+pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -85,6 +86,7 @@ cfg_if::cfg_if! {
 
 pub use hasher::Standard as StandardHasher;
 pub use proof::Proof;
+pub use types::{Location, Position, location_to_position, position_to_location};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with an MMR.
