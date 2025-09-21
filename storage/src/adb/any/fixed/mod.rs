@@ -509,24 +509,20 @@ impl<
             .await
     }
 
-    /// Analogous to proof, but with respect to the state of the MMR when it had `size` elements.
+    /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
+    /// operations.
     pub async fn historical_proof(
         &self,
-        size: u64,
+        op_count: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_loc = std::cmp::min(
-            size.saturating_sub(1),
-            start_loc.saturating_add(max_ops.get()) - 1,
-        );
-        let end_pos = leaf_num_to_pos(end_loc);
-        let mmr_size = leaf_num_to_pos(size);
+        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
 
+        let mmr_size = leaf_num_to_pos(op_count);
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_pos, end_pos)
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)

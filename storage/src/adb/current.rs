@@ -417,21 +417,15 @@ impl<
 
         // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
-        let start_pos = leaf_num_to_pos(start_loc);
         let leaves = mmr.leaves();
         assert!(start_loc < leaves, "start_loc is invalid");
         let max_loc = start_loc + max_ops.get();
-        let end_loc = if max_loc > leaves {
-            leaves - 1
-        } else {
-            max_loc - 1
-        };
-        let end_pos = leaf_num_to_pos(end_loc);
+        let end_loc = core::cmp::min(max_loc, leaves);
 
         // Generate the proof from the grafted MMR.
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
-        let mut proof = verification::range_proof(&grafted_mmr, start_pos, end_pos).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, start_loc..end_loc).await?;
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
@@ -552,11 +546,10 @@ impl<
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound);
         };
-        let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = verification::range_proof(&grafted_mmr, pos, pos).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();
@@ -669,11 +662,10 @@ impl<
     ) -> Result<(Proof<H::Digest>, Fixed<K, V>, u64, [u8; N]), Error> {
         let op = self.any.log.read(loc).await?;
 
-        let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = verification::range_proof(&grafted_mmr, pos, pos).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();

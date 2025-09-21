@@ -586,7 +586,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             .await
     }
 
-    /// Analogous to proof, but with respect to the state of the MMR when it had `size` elements.
+    /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
+    /// operations.
+    ///
     ///
     /// # Panics
     ///
@@ -594,24 +596,22 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// - Panics if `size` is greater than the number of operations.
     pub async fn historical_proof(
         &self,
-        size: u64,
+        op_count: u64,
         start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        assert!(size <= self.op_count());
-        assert!(start_loc < size);
+        assert!(op_count <= self.op_count());
+        assert!(start_loc < op_count);
 
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_index = std::cmp::min(size - 1, start_loc + max_ops - 1);
-        let end_pos = leaf_num_to_pos(end_index);
-        let mmr_size = leaf_num_to_pos(size);
+        let end_loc = std::cmp::min(op_count, start_loc + max_ops);
+        let mmr_size = leaf_num_to_pos(op_count);
 
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_pos, end_pos)
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_index - start_loc + 1) as usize);
-        for loc in start_loc..=end_index {
+        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
+        for loc in start_loc..end_loc {
             let section = loc / self.log_items_per_section;
             let offset = self.locations.read(loc).await?;
             let op = self.log.get(section, offset).await?;

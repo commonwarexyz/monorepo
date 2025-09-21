@@ -43,17 +43,16 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let start_positions = &positions[0..n - range];
+                            let start_positions: Vec<u64> = (0u64..n as u64 - range).collect();
                             let starts = start_positions
                                 .choose_multiple(&mut sampler, SAMPLE_SIZE)
                                 .cloned()
                                 .collect::<Vec<_>>();
                             let mut samples = Vec::with_capacity(SAMPLE_SIZE);
                             block_on(async {
-                                for (start_index, start_pos) in starts {
-                                    let end_index = start_index + range;
-                                    let end_pos = positions[end_index].1;
-                                    samples.push(((start_index, end_index), (start_pos, end_pos)));
+                                for start_index in starts {
+                                    let leaf_range = start_index..(start_index + range);
+                                    samples.push(leaf_range);
                                 }
                                 samples
                             })
@@ -61,12 +60,12 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                         |samples| {
                             let mut hasher = StandardHasher::<Sha256>::new();
                             block_on(async {
-                                for ((start_index, end_index), (start_pos, end_pos)) in samples {
-                                    let proof = mmr.range_proof(start_pos, end_pos).unwrap();
+                                for range in samples {
+                                    let proof = mmr.range_proof(range.clone()).unwrap();
                                     assert!(proof.verify_range_inclusion(
                                         &mut hasher,
-                                        &elements[start_index..=end_index],
-                                        start_pos,
+                                        &elements[range.start as usize..range.end as usize],
+                                        range.start,
                                         &root,
                                     ));
                                 }
