@@ -1722,18 +1722,9 @@ mod tests {
             // not necessarily size order. Collect all messages and sort by
             // receive time to verify timing
             let mut messages = Vec::new();
-            for idx in 0..3 {
-                #[cfg(windows)]
-                eprintln!("windows test waiting for message {idx}");
+            for _ in 0..3 {
                 let (_, msg) = receiver_rx.recv().await.unwrap();
                 let t = context.current().duration_since(start).unwrap();
-                #[cfg(windows)]
-                eprintln!(
-                    "windows test received message {} size {} at {:?}",
-                    msg[0],
-                    msg.len(),
-                    t
-                );
                 messages.push((msg[0] as usize, msg.len(), t));
             }
 

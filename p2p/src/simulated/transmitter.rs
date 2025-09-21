@@ -121,16 +121,6 @@ pub struct State<P: PublicKey + Ord + Clone> {
     buffered: BTreeMap<(P, P), BTreeMap<u128, Buffered>>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct Summary {
-    pub active_flows: usize,
-    pub queued_pairs: usize,
-    pub buffered_pairs: usize,
-    pub next_bandwidth_event: Option<SystemTime>,
-    pub next_transmission_ready: Option<SystemTime>,
-}
-
 fn saturating_deadline(now: SystemTime, duration: Duration) -> SystemTime {
     if duration.is_zero() {
         return now;
@@ -150,23 +140,6 @@ fn saturating_deadline(now: SystemTime, duration: Duration) -> SystemTime {
 }
 
 impl<P: PublicKey + Ord + Clone> State<P> {
-    /// Returns true when no flows or queued transmissions remain.
-    pub fn is_idle(&self) -> bool {
-        self.all_flows.is_empty()
-            && self.queued.values().all(|queue| queue.is_empty())
-            && self.buffered.is_empty()
-    }
-
-    pub fn summary(&self) -> Summary {
-        Summary {
-            active_flows: self.all_flows.len(),
-            queued_pairs: self.queued.len(),
-            buffered_pairs: self.buffered.len(),
-            next_bandwidth_event: self.next_bandwidth_event,
-            next_transmission_ready: self.next_transmission_ready,
-        }
-    }
-
     /// Creates a new scheduler.
     pub fn new() -> Self {
         Self {
@@ -430,13 +403,6 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 if !elapsed.is_zero() {
                     let sent =
                         bandwidth::transfer(&meta.rate, elapsed, &mut meta.carry, meta.remaining);
-                    #[cfg(windows)]
-                    if sent == 0 {
-                        eprintln!(
-                            "windows rebalance flow rate {:?} elapsed {:?} remaining {} sent {}",
-                            meta.rate, elapsed, meta.remaining, sent
-                        );
-                    }
                     if sent > 0 {
                         meta.remaining = meta.remaining.saturating_sub(sent);
                     }
@@ -475,26 +441,12 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         let mut earliest: Option<Duration> = None;
 
         for (flow_id, rate) in allocations {
-            #[cfg(windows)]
-            let diag_summary = Summary {
-                active_flows: self.all_flows.len(),
-                queued_pairs: self.queued.len(),
-                buffered_pairs: self.buffered.len(),
-                next_bandwidth_event: self.next_bandwidth_event,
-                next_transmission_ready: self.next_transmission_ready,
-            };
-
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
-                let prev_rate = meta.rate.clone();
-                let same_finite_rate = matches!(
-                    (&prev_rate, &rate),
-                    (Rate::Finite(prev), Rate::Finite(next)) if prev == next
-                );
-
-                meta.rate = rate.clone();
-                if !same_finite_rate {
+                let keep_carry = matches!((&meta.rate, &rate), (Rate::Finite(prev), Rate::Finite(next)) if prev == next);
+                if !keep_carry {
                     meta.carry = 0;
                 }
+                meta.rate = rate.clone();
                 meta.last_update = now;
 
                 if matches!(meta.rate, Rate::Unlimited) {
@@ -503,28 +455,6 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                         completed.push(flow_id);
                     }
                     continue;
-                }
-
-                #[cfg(windows)]
-                if let Rate::Finite(ratio) = &meta.rate {
-                    eprintln!(
-                        "windows rate assign flow {:?}->{:?} remaining {} ratio {}/{}",
-                        meta.origin, meta.recipient, meta.remaining, ratio.num, ratio.den
-                    );
-                }
-
-                #[cfg(windows)]
-                if let Rate::Finite(ratio) = &meta.rate {
-                    if ratio.is_zero() && meta.remaining > 0 {
-                        panic!(
-                            "zero rate allocation: origin={:?} recipient={:?} remaining={} now={:?} summary={:?}",
-                            meta.origin,
-                            meta.recipient,
-                            meta.remaining,
-                            now,
-                            diag_summary
-                        );
-                    }
                 }
 
                 if let Some(duration) = bandwidth::time_to_deplete(&meta.rate, meta.remaining) {

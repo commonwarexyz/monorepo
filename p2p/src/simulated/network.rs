@@ -411,52 +411,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     async fn run(mut self) {
         loop {
-            let next_deadline = self.transmitter.next();
-            #[cfg(windows)]
-            eprintln!(
-                "windows network next_deadline={:?} summary={:?}",
-                next_deadline,
-                self.transmitter.summary()
-            );
-            let tick = match next_deadline {
-                Some(when) => {
-                    let now = self.context.current();
-                    if cfg!(windows)
-                        && when
-                            > now
-                                .checked_add(Duration::from_secs(30))
-                                .expect("failed to add guard duration")
-                    {
-                        panic!(
-                            "transmitter scheduled far future event: {:?} vs now {:?}, summary {:?}",
-                            when,
-                            now,
-                            self.transmitter.summary()
-                        );
-                    }
-                    Either::Left(self.context.sleep_until(when))
-                }
-                None if self.transmitter.is_idle() => Either::Right(future::pending()),
-                None if cfg!(windows) => Either::Left(
-                    self.context.sleep_until(
-                        self.context
-                            .current()
-                            .checked_add(Duration::from_millis(1))
-                            .expect("sleep guard overflow"),
-                    ),
-                ),
+            let tick = match self.transmitter.next() {
+                Some(when) => Either::Left(self.context.sleep_until(when)),
                 None => Either::Right(future::pending()),
             };
             select! {
                 _ = tick => {
                     let now = self.context.current();
                     let completions = self.transmitter.process(now);
-                    #[cfg(windows)]
-                    eprintln!(
-                        "windows network processed {} completions at {:?}",
-                        completions.len(),
-                        now
-                    );
                     self.process_completions(completions);
                 },
                 message = self.ingress.next() => {
@@ -774,43 +736,9 @@ impl Link {
 
                 // Process messages in order, waiting for their receive time
                 while let Some((channel, message, receive_complete_at)) = outbox.next().await {
-                    #[cfg(windows)]
-                    let now = context.current();
-                    #[cfg(windows)]
-                    let delta = match receive_complete_at.duration_since(now) {
-                        Ok(d) => d,
-                        Err(_) => Duration::ZERO,
-                    };
-                    #[cfg(windows)]
-                    {
-                        eprintln!(
-                            "windows link waiting {:?} to deliver channel {} size {}",
-                            delta,
-                            channel,
-                            message.len()
-                        );
-                        if delta > Duration::from_secs(30) {
-                            panic!(
-                                "link wait too long: channel {} size {} delta {:?}",
-                                channel,
-                                message.len(),
-                                delta
-                            );
-                        }
-                    }
                     // Wait until the message should arrive at receiver
                     context.sleep_until(receive_complete_at).await;
 
-                    #[cfg(windows)]
-                    {
-                        let now = context.current();
-                        eprintln!(
-                            "windows link sending channel {} size {} at {:?}",
-                            channel,
-                            message.len(),
-                            now
-                        );
-                    }
                     // Send the message
                     let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
                     data.extend_from_slice(&channel.to_be_bytes());
