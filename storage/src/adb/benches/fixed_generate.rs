@@ -92,7 +92,6 @@ type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest
 
 /// Benchmark the generation of a large randomly generated any db.
 fn bench_fixed_generate(c: &mut Criterion) {
-    tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {

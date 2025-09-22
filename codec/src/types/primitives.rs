@@ -140,6 +140,24 @@ impl<const N: usize> FixedSize for [u8; N] {
     const SIZE: usize = N;
 }
 
+impl Write for () {
+    #[inline]
+    fn write(&self, _buf: &mut impl BufMut) {}
+}
+
+impl Read for () {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(_buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+        Ok(())
+    }
+}
+
+impl FixedSize for () {
+    const SIZE: usize = 0;
+}
+
 // Option implementation
 impl<T: Write> Write for Option<T> {
     #[inline]
@@ -299,6 +317,13 @@ mod tests {
         let none: Option<u32> = None;
         assert_eq!(none.encode_size(), 1);
         assert_eq!(none.encode().len(), 1);
+    }
+
+    #[test]
+    fn test_unit() {
+        let x = ();
+        // Not using an equality check, since that will always pass.
+        assert!(<()>::decode(x.encode()).is_ok());
     }
 
     #[test]
