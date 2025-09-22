@@ -19,6 +19,9 @@ use std::collections::VecDeque;
 mod prunable;
 pub use prunable::Prunable;
 
+mod historical;
+pub use historical::Historical;
+
 pub const DEFAULT_CHUNK_SIZE: usize = 32;
 
 /// A bitmap that stores data in chunks of N bytes.
