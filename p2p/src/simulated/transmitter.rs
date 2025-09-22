@@ -121,14 +121,6 @@ pub struct State<P: PublicKey + Ord + Clone> {
     buffered: BTreeMap<(P, P), BTreeMap<u128, Buffered>>,
 }
 
-fn saturating_deadline(now: SystemTime, duration: Duration) -> SystemTime {
-    if duration.is_zero() {
-        now
-    } else {
-        saturating_add_system_time(now, duration)
-    }
-}
-
 impl<P: PublicKey + Ord + Clone> State<P> {
     /// Creates a new scheduler.
     pub fn new() -> Self {
@@ -460,7 +452,8 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         completed.dedup();
 
         // Record the next time at which a bandwidth event should fire.
-        self.next_bandwidth_event = earliest.map(|duration| saturating_deadline(now, duration));
+        self.next_bandwidth_event =
+            earliest.map(|duration| saturating_add_system_time(now, duration));
 
         self.finish(completed, now)
     }
