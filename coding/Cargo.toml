@@ -30,4 +30,4 @@ rand_chacha = { workspace = true }
 [[bench]]
 name = "reed_solomon"
 harness = false
-path = "src/reed_solomon/benches/bench.rs"
+path = "src/benches/bench.rs"

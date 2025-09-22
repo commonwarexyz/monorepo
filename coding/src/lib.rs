@@ -14,8 +14,8 @@ use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
 use rand_core::CryptoRngCore;
 
-pub mod reed_solomon;
-pub use reed_solomon::ReedSolomon;
+mod reed_solomon;
+pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
 mod no_coding;
 pub use no_coding::{NoCoding, NoCodingError};
