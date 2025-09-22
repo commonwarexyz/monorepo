@@ -17,6 +17,9 @@ use rand_core::CryptoRngCore;
 pub mod reed_solomon;
 pub use reed_solomon::ReedSolomon;
 
+mod no_coding;
+pub use no_coding::{NoCoding, NoCodingError};
+
 /// Configuration common to all encoding schemes.
 pub struct Config {
     /// The minimum number of shards needed to encode the data.
@@ -333,5 +336,10 @@ mod test {
     #[test]
     fn test_suite_reed_solomon() {
         test_suite::<ReedSolomon<Sha256>>();
+    }
+
+    #[test]
+    fn test_suite_no_coding() {
+        test_suite::<NoCoding<Sha256>>();
     }
 }
