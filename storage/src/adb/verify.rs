@@ -106,11 +106,8 @@ pub async fn create_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
     locations: &[u64],
 ) -> Result<Proof<D>, Error> {
-    // Convert locations to MMR positions
-    let positions: Vec<u64> = locations.iter().map(|&loc| leaf_loc_to_pos(loc)).collect();
-
     // Generate the proof
-    verification::multi_proof(proof_store, &positions).await
+    verification::multi_proof(proof_store, locations).await
 }
 
 /// Verify a Multi-Proof for operations at specific locations.
@@ -128,7 +125,7 @@ where
     // Encode operations and convert locations to positions
     let elements = operations
         .iter()
-        .map(|(loc, op)| (op.encode(), leaf_loc_to_pos(*loc)))
+        .map(|(loc, op)| (op.encode(), *loc))
         .collect::<Vec<_>>();
 
     // Verify the proof
@@ -217,14 +214,12 @@ mod tests {
             // Add operations we want to prove (starting at location 5)
             let operations = vec![10, 11, 12];
             let start_loc = 5u64;
-            let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
-                positions.push(pos);
+                mmr.add(&mut hasher, &encoded);
             }
             let root = mmr.root(&mut hasher);
-            let proof = mmr.range_proof(0..3).unwrap();
+            let proof = mmr.range_proof(5..8).unwrap();
 
             // Verify with correct start location
             assert!(verify_proof(
@@ -490,11 +485,9 @@ mod tests {
 
             // Add operations to the MMR
             let operations: Vec<u64> = (0..20).collect();
-            let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
-                positions.push(pos);
+                mmr.add(&mut hasher, &encoded);
             }
             let root = mmr.root(&mut hasher);
 
@@ -545,8 +538,8 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Generate multi-proof directly from MMR
-            let target_positions = vec![positions[1], positions[4], positions[7]];
-            let multi_proof = verification::multi_proof(&mmr, &target_positions)
+            let target_locations = vec![1, 4, 7];
+            let multi_proof = verification::multi_proof(&mmr, &target_locations)
                 .await
                 .unwrap();
 
