@@ -29,7 +29,7 @@ mod time;
 #[cfg(feature = "std")]
 pub use time::{
     parse_duration, saturating_add_system_time, saturating_duration_from_nanos, system_time_max,
-    SystemTimeExt, MAX_DURATION_SINCE_UNIX_EPOCH,
+    SystemTimeExt, MAX_DURATION_SINCE_UNIX_EPOCH, NANOS_PER_SEC,
 };
 #[cfg(feature = "std")]
 mod priority_set;

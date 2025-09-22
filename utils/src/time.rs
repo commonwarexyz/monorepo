@@ -3,7 +3,8 @@
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 
-const NANOS_PER_SEC: u128 = 1_000_000_000;
+/// Number of nanoseconds in a second.
+pub const NANOS_PER_SEC: u128 = 1_000_000_000;
 
 /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
 /// current platform.

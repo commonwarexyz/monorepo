@@ -7,15 +7,8 @@
 //! whenever the active set changes (for example when a message finishes or a new message
 //! arrives).
 
-use commonware_utils::{saturating_duration_from_nanos, Ratio};
-use std::{
-    cmp::Ordering,
-    collections::BTreeMap,
-    time::{Duration, SystemTime},
-};
-
-/// Number of nanoseconds in a second.
-pub const NS_PER_SEC: u128 = 1_000_000_000;
+use commonware_utils::{saturating_duration_from_nanos, Ratio, NANOS_PER_SEC};
+use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 /// Minimal description of a simulated transmission path.
 #[derive(Clone, Debug)]
@@ -144,15 +137,6 @@ where
             None => Rate::Unlimited,
             Some(ratio) => Rate::Finite(ratio.clone()),
         };
-        if flow.requires_ingress {
-            if let Rate::Finite(ratio) = &rate {
-                debug_assert!(
-                    !ratio.is_zero(),
-                    "zero bandwidth allocated for ingress-limited flow id {}",
-                    flow.id
-                );
-            }
-        }
         result.insert(flow.id, rate);
     }
 
@@ -322,16 +306,11 @@ pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
                     None
                 }
             } else {
-                let numerator = bytes.saturating_mul(ratio.den).saturating_mul(NS_PER_SEC);
+                let numerator = bytes
+                    .saturating_mul(ratio.den)
+                    .saturating_mul(NANOS_PER_SEC);
                 let ns = div_ceil(numerator, ratio.num);
-                let duration = saturating_duration_from_nanos(ns);
-                if cfg!(windows) && bytes < (1u128 << 48) && duration > Duration::from_secs(30) {
-                    panic!(
-                        "unreasonably long depletion time: bytes={} ratio={:?} duration={:?}",
-                        bytes, ratio, duration
-                    );
-                }
-                Some(duration)
+                Some(saturating_duration_from_nanos(ns))
             }
         }
     }
@@ -360,7 +339,7 @@ pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u12
                 return 0;
             }
 
-            let denom = ratio.den.saturating_mul(NS_PER_SEC);
+            let denom = ratio.den.saturating_mul(NANOS_PER_SEC);
             if denom == 0 {
                 *carry = 0;
                 return remaining;
