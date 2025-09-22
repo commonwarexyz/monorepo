@@ -1,10 +1,9 @@
-use std::{cell::LazyCell, ops::DerefMut};
-
 use commonware_coding::{Config, Scheme};
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{seq::SliceRandom, CryptoRng, RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 use rand_core::impls::{next_u32_via_fill, next_u64_via_fill};
+use std::{cell::LazyCell, ops::DerefMut};
 
 mod no_coding;
 mod reed_solomon;
@@ -105,9 +104,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                             let reshards = shards
                                 .iter()
                                 .take(min)
-                                .map(|(shard, proof)| {
-                                    S::check(&commitment, &proof, &shard).unwrap()
-                                })
+                                .map(|(shard, proof)| S::check(&commitment, proof, shard).unwrap())
                                 .collect::<Vec<_>>();
 
                             (commitment, my_shard_and_proof, reshards)

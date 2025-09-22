@@ -41,7 +41,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn shuffle<T>(shuffle_bytes: &[u8], data: &mut Vec<T>) {
+fn shuffle<T>(shuffle_bytes: &[u8], data: &mut [T]) {
     let mut u = Unstructured::new(shuffle_bytes);
 
     for i in (1..data.len()).rev() {
@@ -69,7 +69,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     // Each participant checks their shard
     let mut reshards = shards
         .iter()
-        .map(|(shard, proof)| S::check(&commitment, &proof, &shard).unwrap())
+        .map(|(shard, proof)| S::check(&commitment, proof, shard).unwrap())
         .collect::<Vec<_>>();
     // The last shard is "ours"
     let (my_shard, _) = shards.pop().unwrap();

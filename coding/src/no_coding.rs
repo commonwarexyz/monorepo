@@ -47,7 +47,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         _proof: &Self::Proof,
         shard: &Self::Shard,
     ) -> Result<Self::ReShard, Self::Error> {
-        let my_commitment = H::new().update(&shard).finalize();
+        let my_commitment = H::new().update(shard.as_slice()).finalize();
         if &my_commitment != commitment {
             return Err(NoCodingError::BadData);
         }
