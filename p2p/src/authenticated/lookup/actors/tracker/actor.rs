@@ -8,7 +8,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
@@ -17,8 +17,6 @@ use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: E,
-
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
@@ -62,7 +60,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context,
                 receiver,
                 directory,
                 mailboxes: HashMap::new(),
@@ -72,12 +69,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         )
     }
 
-    /// Start the actor and run it in the background.
-    pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
-    }
-
-    async fn run(mut self) {
+    /// Run the actor.
+    pub async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Register { index, peers } => {

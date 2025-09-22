@@ -33,7 +33,7 @@ pub struct Network<
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
     tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
-    router: router::Actor<E, C::PublicKey>,
+    router: router::Actor<C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
 }
 
@@ -125,10 +125,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
     async fn run(self) {
         // Start tracker
-        let mut tracker_task = self.tracker.start();
+        let mut tracker_task = self
+            .context
+            .with_label("tracker")
+            .spawn_child(|_| self.tracker.run());
 
         // Start router
-        let mut router_task = self.router.start(self.channels);
+        let mut router_task = self
+            .context
+            .with_label("router")
+            .spawn_child(|_| self.router.run(self.channels));
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
@@ -142,8 +148,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
             },
         );
-        let mut spawner_task =
-            spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
+        let tracker = self.tracker_mailbox.clone();
+        let mut spawner_task = self
+            .context
+            .with_label("spawner")
+            .spawn_child(move |_| spawner.run(tracker, self.router_mailbox.clone()));
 
         // Start listener
         let stream_cfg = public_key::Config {
@@ -162,8 +171,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 allowed_incoming_connection_rate: self.cfg.allowed_incoming_connection_rate,
             },
         );
-        let mut listener_task =
-            listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());
+        let tracker = self.tracker_mailbox.clone();
+        let spawner = spawner_mailbox.clone();
+        let mut listener_task = self
+            .context
+            .with_label("listener")
+            .spawn_child(move |_| listener.run(tracker, spawner));
 
         // Start dialer
         let dialer = dialer::Actor::new(
@@ -174,11 +187,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 query_frequency: self.cfg.query_frequency,
             },
         );
-        let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
-
-        // Wait for first actor to exit
+        let mut dialer_task = self
+            .context
+            .with_label("dialer")
+            .spawn_child(move |_| dialer.run(self.tracker_mailbox, spawner_mailbox));
         info!("network started");
-        let err = select! {
+
+        // Wait for any actor to exit or the shutdown signal to be received.
+        // Since each actor is spawned as a child, they will be aborted automatically.
+        let mut shutdown = self.context.stopped();
+        match select! {
             tracker = &mut tracker_task => {
                 debug!("tracker exited");
                 tracker
@@ -199,17 +217,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 debug!("dialer exited");
                 dialer
             },
+            shutdown = &mut shutdown => {
+                shutdown.map(|_| ())
+            },
+        } {
+            Ok(()) => {
+                debug!("shutdown signal received");
+            }
+            Err(err) => {
+                warn!(error=?err, "actor exited abnormally");
+            }
         }
-        .unwrap_err();
-
-        // Ensure all tasks close
-        tracker_task.abort();
-        router_task.abort();
-        spawner_task.abort();
-        listener_task.abort();
-        dialer_task.abort();
-
-        // Log error
-        warn!(error=?err, "network shutdown")
     }
 }
