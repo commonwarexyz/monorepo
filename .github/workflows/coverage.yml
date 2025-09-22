@@ -16,7 +16,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  All:
+  Coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
