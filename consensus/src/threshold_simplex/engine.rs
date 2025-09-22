@@ -13,7 +13,6 @@ use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use tracing::debug;
 
 /// Instance of `threshold-simplex` consensus engine.
 pub struct Engine<
@@ -160,19 +159,13 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context.clone().spawn(|context| {
-            self.run(
-                context,
-                pending_network,
-                recovered_network,
-                resolver_network,
-            )
-        })
+        self.context
+            .clone()
+            .spawn(|_| self.run(pending_network, recovered_network, resolver_network))
     }
 
     async fn run(
         self,
-        context: E,
         pending_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -189,13 +182,14 @@ impl<
         // Start the batcher
         let (pending_sender, pending_receiver) = pending_network;
         let voter_mailbox = self.voter_mailbox.clone();
-        let mut batcher_task = context
+        let mut batcher_task = self
+            .context
             .with_label("batcher")
             .spawn_child(|_| async { self.batcher.run(voter_mailbox, pending_receiver).await });
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_task = context.with_label("resolver").spawn_child(|_| async {
+        let mut resolver_task = self.context.with_label("resolver").spawn_child(|_| async {
             self.resolver
                 .run(self.voter_mailbox, resolver_sender, resolver_receiver)
                 .await
@@ -203,7 +197,7 @@ impl<
 
         // Start the voter
         let (recovered_sender, recovered_receiver) = recovered_network;
-        let mut voter_task = context.with_label("voter").spawn_child(|_| async {
+        let mut voter_task = self.context.with_label("voter").spawn_child(|_| async {
             self.voter
                 .run(
                     self.batcher_mailbox,
@@ -215,23 +209,14 @@ impl<
                 .await
         });
 
-        // Wait for the resolver or voter to finish
+        // Shutdown if any actor finishes or if a shutdown signal is received.
+        // Since each actor is spawned as a child, they will be automatically aborted.
+        let mut shutdown = self.context.stopped();
         select! {
-            _ = &mut voter_task => {
-                debug!("voter finished");
-                resolver_task.abort();
-                batcher_task.abort();
-            },
-            _ = &mut batcher_task => {
-                debug!("batcher finished");
-                voter_task.abort();
-                resolver_task.abort();
-            },
-            _ = &mut resolver_task => {
-                debug!("resolver finished");
-                voter_task.abort();
-                batcher_task.abort();
-            },
+            _ = &mut shutdown => {},
+            _ = &mut voter_task => {},
+            _ = &mut batcher_task => {},
+            _ = &mut resolver_task => {},
         }
     }
 }

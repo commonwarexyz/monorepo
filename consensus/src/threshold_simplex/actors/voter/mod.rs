@@ -213,7 +213,7 @@ mod tests {
                 .unwrap();
 
             // Run the actor
-            context.with_label("voter").spawn(move |_| {
+            context.with_label("voter").spawn(|_| {
                 actor.run(
                     batcher,
                     resolver,
@@ -529,7 +529,7 @@ mod tests {
                 .unwrap();
 
             // Start the actor
-            context.with_label("voter").spawn(move |_| {
+            context.with_label("voter").spawn(|_| {
                 actor.run(
                     batcher_mailbox,
                     resolver_mailbox,

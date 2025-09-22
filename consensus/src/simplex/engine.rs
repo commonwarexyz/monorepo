@@ -10,7 +10,6 @@ use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
@@ -132,26 +131,27 @@ impl<
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
-        let mut voter_task = self
-            .voter
-            .start(self.resolver_mailbox, voter_sender, voter_receiver);
+        let mut voter_task = self.context.with_label("voter").spawn_child(|_| async {
+            self.voter
+                .run(self.resolver_mailbox, voter_sender, voter_receiver)
+                .await
+        });
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_task =
+        let mut resolver_task = self.context.with_label("resolver").spawn_child(|_| async {
             self.resolver
-                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
+                .run(self.voter_mailbox, resolver_sender, resolver_receiver)
+                .await
+        });
 
-        // Wait for the resolver or voter to finish
+        // Shutdown if any actor finishes or if a shutdown signal is received.
+        // Since each actor is spawned as a child, they will be automatically aborted.
+        let mut shutdown = self.context.stopped();
         select! {
-            _ = &mut voter_task => {
-                debug!("voter finished");
-                resolver_task.abort();
-            },
-            _ = &mut resolver_task => {
-                debug!("resolver finished");
-                voter_task.abort();
-            },
+            _ = &mut shutdown => {},
+            _ = &mut voter_task => {},
+            _ = &mut resolver_task => {},
         }
     }
 }
