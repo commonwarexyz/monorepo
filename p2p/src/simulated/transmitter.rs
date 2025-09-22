@@ -2,7 +2,7 @@ use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::Ratio;
+use commonware_utils::{saturating_add_system_time, Ratio};
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
     time::{Duration, SystemTime},
@@ -123,19 +123,9 @@ pub struct State<P: PublicKey + Ord + Clone> {
 
 fn saturating_deadline(now: SystemTime, duration: Duration) -> SystemTime {
     if duration.is_zero() {
-        return now;
-    }
-
-    if let Some(deadline) = now.checked_add(duration) {
-        return deadline;
-    }
-
-    let max_deadline = bandwidth::max_deadline();
-
-    if now >= max_deadline {
         now
     } else {
-        max_deadline
+        saturating_add_system_time(now, duration)
     }
 }
 
@@ -1366,8 +1356,12 @@ mod tests {
         let origin_large = key(61);
         let recipient = key(62);
 
-        assert!(state.tune(now, &origin_small, Some(30_000), None).is_empty());
-        assert!(state.tune(now, &origin_large, Some(30_000), None).is_empty());
+        assert!(state
+            .tune(now, &origin_small, Some(30_000), None)
+            .is_empty());
+        assert!(state
+            .tune(now, &origin_large, Some(30_000), None)
+            .is_empty());
         assert!(state.tune(now, &recipient, None, Some(30_000)).is_empty());
 
         let completions = state.enqueue(
@@ -1411,7 +1405,11 @@ mod tests {
             }
         }
 
-        assert_eq!(delivered.len(), 2, "flows failed to complete under repeated rebalances");
+        assert_eq!(
+            delivered.len(),
+            2,
+            "flows failed to complete under repeated rebalances"
+        );
         delivered.sort_unstable();
         assert_eq!(delivered, vec![1, 10_000]);
         assert!(state.next().is_none());

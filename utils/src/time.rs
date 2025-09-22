@@ -3,6 +3,52 @@
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 
+const NANOS_PER_SEC: u128 = 1_000_000_000;
+
+/// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
+/// current platform.
+#[cfg(windows)]
+pub const SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH: Duration =
+    Duration::new(910_692_730_085, 477_580_700);
+
+/// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
+/// current platform.
+#[cfg(not(windows))]
+pub const SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH: Duration =
+    Duration::new(i64::MAX as u64, 999_999_999);
+
+/// Returns the maximum representable [`SystemTime`].
+pub fn system_time_max() -> SystemTime {
+    SystemTime::UNIX_EPOCH
+        .checked_add(SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH)
+        .expect("maximum system time must be representable")
+}
+
+/// Adds `delta` to `base`, saturating at the platform maximum instead of overflowing.
+pub fn saturating_add_system_time(base: SystemTime, delta: Duration) -> SystemTime {
+    if delta.is_zero() {
+        return base;
+    }
+
+    base.checked_add(delta).unwrap_or_else(system_time_max)
+}
+
+/// Converts nanoseconds into a [`Duration`], saturating at the platform limit.
+pub fn saturating_duration_from_nanos(ns: u128) -> Duration {
+    if ns == 0 {
+        return Duration::ZERO;
+    }
+
+    let max_ns = SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH.as_nanos();
+    if ns >= max_ns {
+        SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH
+    } else {
+        let secs = (ns / NANOS_PER_SEC) as u64;
+        let nanos = (ns % NANOS_PER_SEC) as u32;
+        Duration::new(secs, nanos)
+    }
+}
+
 /// Parse a duration string with time unit suffixes.
 ///
 /// This function accepts duration strings with the following suffixes:
@@ -202,6 +248,24 @@ mod tests {
             assert!(new_time <= time + (jitter * 2));
         }
         assert!(below && above);
+    }
+
+    #[test]
+    fn saturating_add_caps_at_max() {
+        let max = system_time_max();
+        assert_eq!(saturating_add_system_time(max, Duration::from_secs(1)), max);
+    }
+
+    #[test]
+    fn saturating_duration_caps() {
+        let max_ns = SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH.as_nanos();
+        assert_eq!(
+            saturating_duration_from_nanos(max_ns + 1),
+            SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH
+        );
+
+        let value = saturating_duration_from_nanos(42);
+        assert_eq!(value, Duration::from_nanos(42));
     }
 
     #[test]

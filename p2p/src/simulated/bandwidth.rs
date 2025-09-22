@@ -7,52 +7,15 @@
 //! whenever the active set changes (for example when a message finishes or a new message
 //! arrives).
 
-use commonware_utils::Ratio;
+use commonware_utils::{saturating_duration_from_nanos, Ratio};
 use std::{
     cmp::Ordering,
     collections::BTreeMap,
-    sync::OnceLock,
     time::{Duration, SystemTime},
 };
 
 /// Number of nanoseconds in a second.
 pub const NS_PER_SEC: u128 = 1_000_000_000;
-
-// Compute (and cache) the largest number of seconds that can be added to
-// `SystemTime::UNIX_EPOCH` without overflowing on the current platform.
-fn max_duration_secs() -> u64 {
-    static MAX_SECS: OnceLock<u64> = OnceLock::new();
-    *MAX_SECS.get_or_init(|| {
-        let mut lo = 0u64;
-        let mut hi = u64::MAX;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2 + 1;
-            if SystemTime::UNIX_EPOCH
-                .checked_add(Duration::from_secs(mid))
-                .is_some()
-            {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        lo
-    })
-}
-
-fn max_duration_ns() -> u128 {
-    static MAX_NS: OnceLock<u128> = OnceLock::new();
-    *MAX_NS.get_or_init(|| (max_duration_secs() as u128) * NS_PER_SEC)
-}
-
-pub(super) fn max_deadline() -> SystemTime {
-    static MAX_DEADLINE: OnceLock<SystemTime> = OnceLock::new();
-    *MAX_DEADLINE.get_or_init(|| {
-        SystemTime::UNIX_EPOCH
-            .checked_add(Duration::from_secs(max_duration_secs()))
-            .expect("maximum duration seconds must be representable")
-    })
-}
 
 /// Minimal description of a simulated transmission path.
 #[derive(Clone, Debug)]
@@ -361,7 +324,7 @@ pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
             } else {
                 let numerator = bytes.saturating_mul(ratio.den).saturating_mul(NS_PER_SEC);
                 let ns = div_ceil(numerator, ratio.num);
-                let duration = duration_from_ns(ns);
+                let duration = saturating_duration_from_nanos(ns);
                 if cfg!(windows) && bytes < (1u128 << 48) && duration > Duration::from_secs(30) {
                     panic!(
                         "unreasonably long depletion time: bytes={} ratio={:?} duration={:?}",
@@ -422,20 +385,6 @@ fn div_ceil(num: u128, denom: u128) -> u128 {
     } else {
         div.saturating_add(1)
     }
-}
-
-/// Convert a number of nanoseconds to a duration, handling overflows.
-fn duration_from_ns(ns: u128) -> Duration {
-    if ns == 0 {
-        return Duration::ZERO;
-    }
-    let max_ns = max_duration_ns();
-    if ns >= max_ns {
-        return Duration::from_secs(max_duration_secs());
-    }
-    let secs = (ns / NS_PER_SEC) as u64;
-    let nanos = (ns % NS_PER_SEC) as u32;
-    Duration::new(secs, nanos)
 }
 
 #[cfg(test)]

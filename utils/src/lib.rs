@@ -27,7 +27,10 @@ pub mod channels;
 #[cfg(feature = "std")]
 mod time;
 #[cfg(feature = "std")]
-pub use time::{parse_duration, SystemTimeExt};
+pub use time::{
+    parse_duration, saturating_add_system_time, saturating_duration_from_nanos, system_time_max,
+    SystemTimeExt, SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH,
+};
 #[cfg(feature = "std")]
 mod priority_set;
 #[cfg(feature = "std")]
