@@ -13,14 +13,13 @@ pub const NANOS_PER_SEC: u128 = 1_000_000_000;
 /// uses unsigned 64-bit ticks (100ns) since 1601-01-01; converting to the Unix epoch offset of
 /// 11_644_473_600 seconds yields the remaining representable span.
 #[cfg(windows)]
-pub const SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH: Duration =
-    Duration::new(910_692_730_085, 477_580_700);
+pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(910_692_730_085, 477_580_700);
 
 /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
 /// current platform.
 ///
 /// Source: `SystemTime` on Unix stores seconds in a signed 64-bit integer; see
-/// [`std::sys::pal::unix::time`](https://github.com/rust-lang/rust/blob/f6092f224d2b1774b31033f12d0bee626943b02f/library/std/src/sys/pal/unix/time.rs#L25-L29),
+/// [`std::sys::pal::unix::time`](https://github.com/rust-lang/rust/blob/master/library/std/src/sys/pal/unix/time.rs),
 /// which bounds additions at `i64::MAX` seconds plus 999_999_999 nanoseconds.
 #[cfg(not(windows))]
 pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
@@ -30,15 +29,6 @@ pub fn system_time_max() -> SystemTime {
     SystemTime::UNIX_EPOCH
         .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
         .expect("maximum system time must be representable")
-}
-
-/// Adds `delta` to `base`, saturating at the platform maximum instead of overflowing.
-pub fn saturating_add_system_time(base: SystemTime, delta: Duration) -> SystemTime {
-    if delta.is_zero() {
-        return base;
-    }
-
-    base.checked_add(delta).unwrap_or_else(system_time_max)
 }
 
 /// Converts nanoseconds into a [`Duration`], saturating at the platform limit.
@@ -174,6 +164,9 @@ pub trait SystemTimeExt {
     /// Adds a random `Duration` to the current time between `0` and `jitter * 2` and returns the
     /// resulting `SystemTime`. The random duration is generated using the provided `context`.
     fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime;
+
+    /// Adds `delta` to the current time, saturating at the platform maximum instead of overflowing.
+    fn saturating_add(&self, delta: Duration) -> SystemTime;
 }
 
 impl SystemTimeExt for SystemTime {
@@ -188,6 +181,14 @@ impl SystemTimeExt for SystemTime {
 
     fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime {
         *self + rng.gen_range(Duration::default()..=jitter * 2)
+    }
+
+    fn saturating_add(&self, delta: Duration) -> SystemTime {
+        if delta.is_zero() {
+            return *self;
+        }
+
+        self.checked_add(delta).unwrap_or_else(system_time_max)
     }
 }
 
@@ -276,7 +277,7 @@ mod tests {
     #[test]
     fn saturating_add_caps_at_max() {
         let max = system_time_max();
-        assert_eq!(saturating_add_system_time(max, Duration::from_secs(1)), max);
+        assert_eq!(max.saturating_add(Duration::from_secs(1)), max);
     }
 
     #[test]

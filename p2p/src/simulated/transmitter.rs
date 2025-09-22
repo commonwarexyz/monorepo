@@ -2,7 +2,7 @@ use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::{saturating_add_system_time, Ratio};
+use commonware_utils::{Ratio, SystemTimeExt};
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
     time::{Duration, SystemTime},
@@ -452,8 +452,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         completed.dedup();
 
         // Record the next time at which a bandwidth event should fire.
-        self.next_bandwidth_event =
-            earliest.map(|duration| saturating_add_system_time(now, duration));
+        self.next_bandwidth_event = earliest.map(|duration| now.saturating_add(duration));
 
         self.finish(completed, now)
     }
