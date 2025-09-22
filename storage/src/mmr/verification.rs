@@ -32,7 +32,7 @@ impl<D: Digest> ProofStore<D> {
         hasher: &mut H,
         proof: &Proof<D>,
         elements: &[E],
-        start_element_pos: u64,
+        start_loc: u64,
         root: &D,
     ) -> Result<Self, Error>
     where
@@ -40,12 +40,8 @@ impl<D: Digest> ProofStore<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let digests = proof.verify_range_inclusion_and_extract_digests(
-            hasher,
-            elements,
-            start_element_pos,
-            root,
-        )?;
+        let digests =
+            proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
 
         Ok(ProofStore::new_from_digests(proof.size, digests))
     }

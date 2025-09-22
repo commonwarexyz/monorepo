@@ -16,7 +16,7 @@ use crate::{
             Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
         },
         hasher::Hasher,
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        iterator::leaf_pos_to_loc,
         verification, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,
@@ -428,8 +428,8 @@ impl<
         let mut proof = verification::range_proof(&grafted_mmr, start_loc..end_loc).await?;
 
         // Collect the operations necessary to verify the proof.
-        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
-        let futures = (start_loc..=end_loc)
+        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
+        let futures = (start_loc..end_loc)
             .map(|i| self.any.log.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -439,8 +439,8 @@ impl<
 
         // Gather the chunks necessary to verify the proof.
         let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let start = start_loc / chunk_bits;
-        let end = end_loc / chunk_bits;
+        let start = start_loc / chunk_bits; // chunk that contains the very first bit.
+        let end = (end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
             let bit_offset = i * chunk_bits;
@@ -469,13 +469,13 @@ impl<
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        let op_count = leaf_pos_to_num(proof.size);
+        let op_count = leaf_pos_to_loc(proof.size);
         let Some(op_count) = op_count else {
             debug!("verification failed, invalid proof size");
             return false;
         };
-        let end_loc = start_loc + ops.len() as u64 - 1;
-        if end_loc >= op_count {
+        let end_loc = start_loc + ops.len() as u64;
+        if end_loc > op_count {
             debug!(
                 loc = end_loc,
                 op_count, "proof verification failed, invalid range"
@@ -483,19 +483,15 @@ impl<
             return false;
         }
 
-        let start_pos = leaf_num_to_pos(start_loc);
-
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let mut verifier = GraftingVerifier::<H>::new(
-            Self::grafting_height(),
-            start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS,
-            chunk_vec,
-        );
+        let start_chunk_loc = start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let mut verifier =
+            GraftingVerifier::<H>::new(Self::grafting_height(), start_chunk_loc, chunk_vec);
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof.verify_range_inclusion(&mut verifier, &elements, start_pos, root);
+            return proof.verify_range_inclusion(&mut verifier, &elements, start_loc, root);
         }
 
         // The proof must contain the partial chunk digest as its last hash.
@@ -507,7 +503,7 @@ impl<
         let last_chunk_digest = proof.digests.pop().unwrap();
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_pos) {
+        let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_loc) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -577,7 +573,7 @@ impl<
         info: &KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let Some(op_count) = leaf_pos_to_num(proof.size) else {
+        let Some(op_count) = leaf_pos_to_loc(proof.size) else {
             debug!("verification failed, invalid proof size");
             return false;
         };
@@ -592,14 +588,13 @@ impl<
             return false;
         }
 
-        let pos = leaf_num_to_pos(info.loc);
         let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier =
             GraftingVerifier::<H>::new(Self::grafting_height(), num, vec![&info.chunk]);
         let element = Fixed::Update(info.key.clone(), info.value.clone()).encode();
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof.verify_element_inclusion(&mut verifier, &element, pos, root);
+            return proof.verify_element_inclusion(&mut verifier, &element, info.loc, root);
         }
 
         // The proof must contain the partial chunk digest as its last hash.
@@ -624,7 +619,7 @@ impl<
         }
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof.reconstruct_root(&mut verifier, &[element], pos) {
+        let mmr_root = match proof.reconstruct_root(&mut verifier, &[element], info.loc) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");

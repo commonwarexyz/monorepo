@@ -789,7 +789,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Mmr<E, H>
 mod tests {
     use super::*;
     use crate::mmr::{
-        hasher::Hasher as _, iterator::leaf_num_to_pos, stability::ROOTS,
+        hasher::Hasher as _, iterator::leaf_loc_to_pos, stability::ROOTS,
         StandardHasher as Standard,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -939,7 +939,7 @@ mod tests {
                     mmr.sync(&mut hasher).await.unwrap();
                 }
             }
-            let leaf_pos = leaf_num_to_pos(50);
+            let leaf_pos = leaf_loc_to_pos(50);
             mmr.prune_to_pos(&mut hasher, leaf_pos).await.unwrap();
             // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
             mmr.pop(80).await.unwrap();

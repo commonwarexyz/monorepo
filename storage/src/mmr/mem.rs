@@ -2,7 +2,7 @@
 
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{leaf_pos_to_num, nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
+    iterator::{leaf_pos_to_loc, nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
     proof, Error,
     Error::*,
     Proof,
@@ -157,7 +157,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the total number of leaves in the MMR.
     pub fn leaves(&self) -> u64 {
-        leaf_pos_to_num(self.size()).expect("invalid mmr size")
+        leaf_pos_to_loc(self.size()).expect("invalid mmr size")
     }
 
     /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
@@ -737,7 +737,7 @@ impl<H: CHasher> Mmr<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, iterator::leaf_num_to_pos, stability::ROOTS};
+    use crate::mmr::{hasher::Standard, iterator::leaf_loc_to_pos, stability::ROOTS};
     use commonware_cryptography::Sha256;
     use commonware_runtime::{create_pool, deterministic, tokio, Runner};
     use commonware_utils::hex;
@@ -1080,7 +1080,7 @@ mod tests {
                 mmr.add(&mut hasher, &element);
             }
 
-            let leaf_pos = leaf_num_to_pos(100);
+            let leaf_pos = leaf_loc_to_pos(100);
             mmr.prune_to_pos(leaf_pos);
             while mmr.size() > leaf_pos {
                 assert!(mmr.pop().is_ok());
