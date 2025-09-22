@@ -194,9 +194,8 @@ impl SystemTimeExt for SystemTime {
 
 #[cfg(test)]
 mod tests {
-    use std::time::UNIX_EPOCH;
-
     use super::*;
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn test_epoch() {
