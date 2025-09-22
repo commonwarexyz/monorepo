@@ -1096,6 +1096,7 @@ dependencies = [
  "commonware-coding",
  "commonware-cryptography",
  "libfuzzer-sys",
+ "rand_chacha 0.3.1",
 ]
 
 [[package]]
