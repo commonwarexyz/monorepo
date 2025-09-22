@@ -7,7 +7,7 @@
 //! whenever the active set changes (for example when a message finishes or a new message
 //! arrives).
 
-use commonware_utils::{saturating_duration_from_nanos, Ratio, NANOS_PER_SEC};
+use commonware_utils::{DurationExt, Ratio, NANOS_PER_SEC};
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 /// Minimal description of a simulated transmission path.
@@ -310,7 +310,7 @@ pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
                     .saturating_mul(ratio.den)
                     .saturating_mul(NANOS_PER_SEC);
                 let ns = div_ceil(numerator, ratio.num);
-                Some(saturating_duration_from_nanos(ns))
+                Some(Duration::from_nanos_saturating(ns))
             }
         }
     }
