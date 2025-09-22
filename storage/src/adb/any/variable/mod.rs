@@ -592,8 +592,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Panics
     ///
-    /// - Panics if `start_loc` greater than or equal to `size`.
-    /// - Panics if `size` is greater than the number of operations.
+    /// - Panics if `start_loc` greater than or equal to `op_count`.
+    /// - Panics if `op_count` is greater than the number of operations.
     pub async fn historical_proof(
         &self,
         op_count: u64,

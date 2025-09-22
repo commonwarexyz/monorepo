@@ -74,10 +74,10 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
-                lower_bound: leaf_num_to_pos(lower_bound),
+                lower_bound,
                 // The last node of an MMR with `upper_bound` + 1 operations is at the position
                 // right before where the next leaf goes.
-                upper_bound: leaf_num_to_pos(upper_bound + 1) - 1,
+                upper_bound,
                 pinned_nodes,
             },
         )
