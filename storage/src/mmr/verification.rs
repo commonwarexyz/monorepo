@@ -114,17 +114,17 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     Ok(Proof { size, digests })
 }
 
-/// Return an inclusion proof for the specified positions. This is analogous to range_proof but
-/// supports non-contiguous positions.
+/// Return an inclusion proof for the elements at the specified locations. This is analogous to
+/// range_proof but supports non-contiguous locations.
 ///
 /// The order of positions does not affect the output (sorted internally).
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
-    positions: &[u64],
+    locations: &[u64],
 ) -> Result<Proof<D>, Error> {
     // If there are no positions, return an empty proof
     let size = mmr.size();
-    if positions.is_empty() {
+    if locations.is_empty() {
         return Ok(Proof {
             size,
             digests: vec![],
@@ -132,7 +132,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     }
 
     // Collect all required node positions
-    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, positions);
+    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations);
 
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions
