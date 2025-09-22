@@ -423,7 +423,7 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<u64>) -> Ve
 
     let start_element_pos = leaf_num_to_pos(range.start);
     let end_element_pos = leaf_num_to_pos(range.end - 1);
-    assert!(end_element_pos <= size, "range is out of bounds");
+    assert!(end_element_pos < size, "range is out of bounds");
 
     // Find the mountains that contain no elements from the range. The peaks of these mountains
     // are required to prove the range, so they are added to the result.
@@ -836,8 +836,7 @@ mod tests {
             );
         }
         // Bad start_loc should cause verification to fail.
-        for (i, _) in elements.iter().enumerate() {
-            let loc = i as u64;
+        for loc in 0..elements.len() as u64 {
             if loc == range.start {
                 continue;
             }
@@ -865,15 +864,15 @@ mod tests {
             mmr.prune_to_pos(i);
             let pruned_root = mmr.root(&mut hasher);
             assert_eq!(root, pruned_root);
-            for (loc, _) in elements.iter().enumerate() {
-                let proof = mmr.proof(loc as u64);
-                if leaf_num_to_pos(loc as u64) < i {
+            for loc in 0..elements.len() as u64 {
+                let proof = mmr.proof(loc);
+                if leaf_num_to_pos(loc) < i {
                     continue;
                 }
                 assert!(proof.is_ok());
                 assert!(proof.unwrap().verify_element_inclusion(
                     &mut hasher,
-                    &elements[loc],
+                    &elements[loc as usize],
                     loc as u64,
                     &root
                 ));

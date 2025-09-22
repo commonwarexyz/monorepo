@@ -2,10 +2,7 @@ use crate::{
     adb::{self, any},
     index::Index,
     journal::fixed,
-    mmr::{
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        StandardHasher,
-    },
+    mmr::{iterator::leaf_pos_to_num, StandardHasher},
     store::operation::Fixed,
     translator::Translator,
 };
