@@ -7,20 +7,27 @@ const NANOS_PER_SEC: u128 = 1_000_000_000;
 
 /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
 /// current platform.
+///
+/// Source: [`FILETIME` range](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime)
+/// uses unsigned 64-bit ticks (100ns) since 1601-01-01; converting to the Unix epoch offset of
+/// 11_644_473_600 seconds yields the remaining representable span.
 #[cfg(windows)]
 pub const SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH: Duration =
     Duration::new(910_692_730_085, 477_580_700);
 
 /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
 /// current platform.
+///
+/// Source: `SystemTime` on Unix stores seconds in a signed 64-bit integer; see
+/// [`std::sys::pal::unix::time`](https://github.com/rust-lang/rust/blob/f6092f224d2b1774b31033f12d0bee626943b02f/library/std/src/sys/pal/unix/time.rs#L25-L29),
+/// which bounds additions at `i64::MAX` seconds plus 999_999_999 nanoseconds.
 #[cfg(not(windows))]
-pub const SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH: Duration =
-    Duration::new(i64::MAX as u64, 999_999_999);
+pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
 
 /// Returns the maximum representable [`SystemTime`].
 pub fn system_time_max() -> SystemTime {
     SystemTime::UNIX_EPOCH
-        .checked_add(SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH)
+        .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
         .expect("maximum system time must be representable")
 }
 
@@ -39,9 +46,9 @@ pub fn saturating_duration_from_nanos(ns: u128) -> Duration {
         return Duration::ZERO;
     }
 
-    let max_ns = SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH.as_nanos();
+    let max_ns = MAX_DURATION_SINCE_UNIX_EPOCH.as_nanos();
     if ns >= max_ns {
-        SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH
+        MAX_DURATION_SINCE_UNIX_EPOCH
     } else {
         let secs = (ns / NANOS_PER_SEC) as u64;
         let nanos = (ns % NANOS_PER_SEC) as u32;
@@ -185,6 +192,8 @@ impl SystemTimeExt for SystemTime {
 
 #[cfg(test)]
 mod tests {
+    use std::time::UNIX_EPOCH;
+
     use super::*;
 
     #[test]
@@ -251,6 +260,19 @@ mod tests {
     }
 
     #[test]
+    fn check_duration_cap() {
+        // Check happy path
+        let epoch = UNIX_EPOCH;
+        epoch
+            .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
+            .expect("unable to add max duration");
+
+        // Check unhappy path
+        let result = epoch.checked_add(MAX_DURATION_SINCE_UNIX_EPOCH + Duration::from_nanos(1));
+        assert!(result.is_none(), "able to exceed max duration");
+    }
+
+    #[test]
     fn saturating_add_caps_at_max() {
         let max = system_time_max();
         assert_eq!(saturating_add_system_time(max, Duration::from_secs(1)), max);
@@ -258,10 +280,10 @@ mod tests {
 
     #[test]
     fn saturating_duration_caps() {
-        let max_ns = SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH.as_nanos();
+        let max_ns = MAX_DURATION_SINCE_UNIX_EPOCH.as_nanos();
         assert_eq!(
             saturating_duration_from_nanos(max_ns + 1),
-            SYSTEM_TIME_MAX_DURATION_SINCE_UNIX_EPOCH
+            MAX_DURATION_SINCE_UNIX_EPOCH
         );
 
         let value = saturating_duration_from_nanos(42);

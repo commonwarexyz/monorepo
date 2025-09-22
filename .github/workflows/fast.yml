@@ -98,32 +98,6 @@ jobs:
           fi
           echo "All tests passed successfully!"
 
-  Diagnostics:
-    name: "Diagnostics (${{ matrix.name }})"
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      matrix:
-        include:
-          - name: p2p-windows
-            os: windows-latest
-            command: |
-              cargo test -p commonware-p2p simulated::tests::test_dynamic_bandwidth_varied_sizes -- --nocapture
-          - name: runtime-iouring
-            os: ubuntu-latest
-            command: |
-              cargo test -p commonware-runtime --features iouring-network iouring::tests::test_shutdown_timeout -- --nocapture
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Run setup
-        uses: ./.github/actions/setup
-      - name: Run targeted diagnostics
-        shell: bash
-        run: |
-          set -euo pipefail
-          ${{ matrix.command }}
-
   Dependencies:
     runs-on: ubuntu-latest
     timeout-minutes: 20
