@@ -11,7 +11,7 @@
 )]
 
 use bytes::Buf;
-use commonware_codec::Codec;
+use commonware_codec::{Codec, FixedSize, Read, Write};
 use rand_core::CryptoRngCore;
 
 pub mod reed_solomon;
@@ -27,6 +27,28 @@ pub struct Config {
     /// `N = extra_shards + minimum_shards`, but by specifying the `extra_shards`
     /// rather than `N`, we avoid needing to check that `minimum_shards <= N`.
     pub extra_shards: u16,
+}
+
+impl FixedSize for Config {
+    const SIZE: usize = 2 * <u16 as FixedSize>::SIZE;
+}
+
+impl Write for Config {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.minimum_shards.write(buf);
+        self.extra_shards.write(buf);
+    }
+}
+
+impl Read for Config {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            minimum_shards: u16::read_cfg(buf, cfg)?,
+            extra_shards: u16::read_cfg(buf, cfg)?,
+        })
+    }
 }
 
 /// A scheme for encoding data into pieces, and recovering the data from those pieces.
