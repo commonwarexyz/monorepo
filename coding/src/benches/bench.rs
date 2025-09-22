@@ -1,5 +1,10 @@
+use commonware_codec::EncodeSize;
 use commonware_coding::{Config, Scheme};
-use criterion::{criterion_main, BatchSize, Criterion};
+use criterion::{
+    criterion_main,
+    measurement::{Measurement, ValueFormatter},
+    BatchSize, Bencher, Criterion,
+};
 use rand::{seq::SliceRandom, CryptoRng, RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 use rand_core::impls::{next_u32_via_fill, next_u64_via_fill};
@@ -117,6 +122,102 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                         BatchSize::SmallInput,
                     );
                 },
+            );
+        }
+    }
+}
+
+struct SizeMeasurement;
+
+impl Measurement for SizeMeasurement {
+    type Intermediate = ();
+
+    type Value = usize;
+
+    fn start(&self) -> Self::Intermediate {
+        ()
+    }
+
+    fn end(&self, _i: Self::Intermediate) -> Self::Value {
+        0
+    }
+
+    fn add(&self, v1: &Self::Value, v2: &Self::Value) -> Self::Value {
+        *v1 + *v2
+    }
+
+    fn zero(&self) -> Self::Value {
+        0
+    }
+
+    fn to_f64(&self, value: &Self::Value) -> f64 {
+        *value as f64
+    }
+
+    fn formatter(&self) -> &dyn ValueFormatter {
+        &SizeFormatter
+    }
+}
+
+struct SizeFormatter;
+
+impl ValueFormatter for SizeFormatter {
+    fn format_value(&self, value: f64) -> String {
+        format!("{} B", value)
+    }
+
+    fn scale_values(&self, _typical_value: f64, _values: &mut [f64]) -> &'static str {
+        "B"
+    }
+
+    fn scale_throughputs(
+        &self,
+        _typical_value: f64,
+        _throughput: &criterion::Throughput,
+        _values: &mut [f64],
+    ) -> &'static str {
+        unimplemented!("size formatter does not support throughput")
+    }
+
+    fn scale_for_machines(&self, _values: &mut [f64]) -> &'static str {
+        "B"
+    }
+}
+
+pub(crate) fn benchmark_size<S: Scheme>(name: &str, c: &mut Criterion<SizeMeasurement>) {
+    let mut rng = ChaCha8Rng::seed_from_u64(0);
+    let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
+    for data_length in cases.into_iter() {
+        for chunks in [10, 25, 50, 100, 250] {
+            let min = chunks / 3;
+            let config = Config {
+                minimum_shards: min as u16,
+                extra_shards: (chunks - min) as u16,
+            };
+            // Generate random data
+            let data = {
+                let mut data = vec![0u8; data_length];
+                rng.fill_bytes(&mut data);
+                data
+            };
+            let (commitment, shard_proofs) =
+                S::encode(&mut LazyRng::new::<1>(), &config, data.as_slice()).unwrap();
+            c.bench_function(
+                &format!("{} (shard)/msg_len={} chunks={}", name, data_length, chunks),
+                |b| b.iter_custom(|_| shard_proofs[0].0.encode_size()),
+            );
+            c.bench_function(
+                &format!("{} (proof)/msg_len={} chunks={}", name, data_length, chunks),
+                |b| b.iter_custom(|_| shard_proofs[0].1.encode_size()),
+            );
+            let (shard, proof) = shard_proofs.get(0).unwrap();
+            let reshard = S::check(&commitment, proof, shard).unwrap();
+            c.bench_function(
+                &format!(
+                    "{} (reshard)/msg_len={} chunks={}",
+                    name, data_length, chunks
+                ),
+                |b| b.iter_custom(|_| reshard.encode_size()),
             );
         }
     }

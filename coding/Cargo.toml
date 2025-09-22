@@ -28,6 +28,11 @@ rand = { workspace = true }
 rand_chacha = { workspace = true }
 
 [[bench]]
-name = "reed_solomon"
+name = "coding_scheme_times"
 harness = false
 path = "src/benches/bench.rs"
+
+[[bench]]
+name = "coding_scheme_sizes"
+harness = false
+path = "src/benches/bench_size.rs"

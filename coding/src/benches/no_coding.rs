@@ -1,8 +1,7 @@
+use crate::{benchmark_decode_generic, benchmark_encode_generic};
 use commonware_coding::NoCoding;
 use commonware_cryptography::Sha256;
 use criterion::{criterion_group, Criterion};
-
-use crate::{benchmark_decode_generic, benchmark_encode_generic};
 
 fn benchmark_encode(c: &mut Criterion) {
     benchmark_encode_generic::<NoCoding<Sha256>>("no_coding_encode", c);
