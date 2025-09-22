@@ -6,7 +6,7 @@ use crate::{
     index::Index,
     journal::{fixed, variable},
     mmr::{
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
         Proof, StandardHasher as Standard,
     },
@@ -211,8 +211,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
-                lower_bound: leaf_num_to_pos(cfg.lower_bound),
-                upper_bound: leaf_num_to_pos(cfg.upper_bound + 1) - 1,
+                lower_bound: leaf_loc_to_pos(cfg.lower_bound),
+                upper_bound: leaf_loc_to_pos(cfg.upper_bound + 1) - 1,
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
@@ -385,7 +385,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         // Confirm post-conditions hold.
-        assert_eq!(log_size, leaf_pos_to_num(mmr.size()).unwrap());
+        assert_eq!(log_size, leaf_pos_to_loc(mmr.size()).unwrap());
         assert_eq!(log_size, locations.size().await?);
 
         Ok((log_size, oldest_retained_loc.unwrap_or(0)))
@@ -426,7 +426,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(self.oldest_retained_loc).await?;
         self.mmr
-            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
+            .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(self.oldest_retained_loc))
             .await?;
         Ok(())
     }
@@ -595,7 +595,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         let end_loc = std::cmp::min(op_count, start_loc + max_ops.get());
-        let mmr_size = leaf_num_to_pos(op_count);
+        let mmr_size = leaf_loc_to_pos(op_count);
 
         let proof = self
             .mmr

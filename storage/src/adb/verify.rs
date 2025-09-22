@@ -1,5 +1,5 @@
 use crate::mmr::{
-    iterator::leaf_num_to_pos, proof, verification, verification::ProofStore, Error, Proof,
+    iterator::leaf_loc_to_pos, proof, verification, verification::ProofStore, Error, Proof,
     StandardHasher as Standard,
 };
 use commonware_codec::Encode;
@@ -51,16 +51,20 @@ where
 }
 
 /// Calculate the digests required to construct a [Proof] for a range of operations.
-pub fn digests_required_for_proof<D: Digest>(size: u64, start_loc: u64, end_loc: u64) -> Vec<u64> {
-    let size = leaf_num_to_pos(size);
+pub fn digests_required_for_proof<D: Digest>(
+    op_count: u64,
+    start_loc: u64,
+    end_loc: u64,
+) -> Vec<u64> {
+    let size = leaf_loc_to_pos(op_count);
     proof::nodes_required_for_range_proof(size, start_loc..(end_loc + 1))
 }
 
-/// Create a [Proof] from a size and a list of digests.
+/// Create a [Proof] from a op_count and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
-pub fn create_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
-    let size = leaf_num_to_pos(size);
+pub fn create_proof<D: Digest>(op_count: u64, digests: Vec<D>) -> Proof<D> {
+    let size = leaf_loc_to_pos(op_count);
     Proof::<D> { size, digests }
 }
 
@@ -78,7 +82,7 @@ where
     D: Digest,
 {
     // Convert operation location to MMR position
-    let start_pos = leaf_num_to_pos(start_loc);
+    let start_pos = leaf_loc_to_pos(start_loc);
 
     // Encode operations for verification
     let elements: Vec<Vec<u8>> = operations.iter().map(|op| op.encode().to_vec()).collect();
@@ -103,7 +107,7 @@ pub async fn create_multi_proof<D: Digest>(
     locations: &[u64],
 ) -> Result<Proof<D>, Error> {
     // Convert locations to MMR positions
-    let positions: Vec<u64> = locations.iter().map(|&loc| leaf_num_to_pos(loc)).collect();
+    let positions: Vec<u64> = locations.iter().map(|&loc| leaf_loc_to_pos(loc)).collect();
 
     // Generate the proof
     verification::multi_proof(proof_store, &positions).await
@@ -124,7 +128,7 @@ where
     // Encode operations and convert locations to positions
     let elements = operations
         .iter()
-        .map(|(loc, op)| (op.encode(), leaf_num_to_pos(*loc)))
+        .map(|(loc, op)| (op.encode(), leaf_loc_to_pos(*loc)))
         .collect::<Vec<_>>();
 
     // Verify the proof
@@ -269,7 +273,7 @@ mod tests {
             assert!(!nodes.is_empty());
 
             // Verify the extracted nodes match what we expect from the proof
-            let start_pos = leaf_num_to_pos(start_loc);
+            let start_pos = leaf_loc_to_pos(start_loc);
             let expected_pinned: Vec<u64> = nodes_to_pin(start_pos).collect();
             assert_eq!(nodes.len(), expected_pinned.len());
         });
@@ -336,12 +340,13 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // The size here is the number of leaves added (15 in this case)
-            let size = 15;
+            let op_count = 15;
             let start_loc = 3u64;
             let end_loc = 7u64;
 
             // Get required digests
-            let required_positions = digests_required_for_proof::<Digest>(size, start_loc, end_loc);
+            let required_positions =
+                digests_required_for_proof::<Digest>(op_count, start_loc, end_loc);
 
             // Fetch the actual digests
             let mut digests = Vec::new();
@@ -352,8 +357,8 @@ mod tests {
             }
 
             // Construct proof
-            let proof = create_proof(size, digests.clone());
-            assert_eq!(proof.size, leaf_num_to_pos(size));
+            let proof = create_proof(op_count, digests.clone());
+            assert_eq!(proof.size, leaf_loc_to_pos(op_count));
             assert_eq!(proof.digests.len(), digests.len());
 
             // Verify the constructed proof works correctly
@@ -375,7 +380,8 @@ mod tests {
             let mut mmr = Mmr::new();
 
             // Add some operations to the MMR
-            let operations: Vec<u64> = (0..15).collect();
+            let op_count = 15;
+            let operations: Vec<u64> = (0..op_count).collect();
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();

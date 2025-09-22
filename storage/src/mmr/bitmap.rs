@@ -14,7 +14,7 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
         hasher::Hasher,
-        iterator::{leaf_num_to_pos, nodes_to_pin},
+        iterator::{leaf_loc_to_pos, nodes_to_pin},
         mem::{Config, Mmr},
         storage::Storage,
         verification, Error,
@@ -151,7 +151,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         if pruned_chunks == 0 {
             return Ok(Self::new());
         }
-        let mmr_size = leaf_num_to_pos(pruned_chunks as u64);
+        let mmr_size = leaf_loc_to_pos(pruned_chunks as u64);
 
         let mut pinned_nodes = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
@@ -210,7 +210,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         metadata.put(key, self.pruned_chunks.to_be_bytes().to_vec());
 
         // Write the pinned nodes.
-        let mmr_size = leaf_num_to_pos(self.pruned_chunks as u64);
+        let mmr_size = leaf_loc_to_pos(self.pruned_chunks as u64);
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
@@ -252,7 +252,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.pruned_chunks = chunk_loc;
         self.authenticated_len = self.bitmap.len() - 1;
 
-        let mmr_pos = leaf_num_to_pos(chunk_loc as u64);
+        let mmr_pos = leaf_loc_to_pos(chunk_loc as u64);
         self.mmr.prune_to_pos(mmr_pos);
     }
 
@@ -359,7 +359,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        leaf_num_to_pos(Self::chunk_loc(bit_offset) as u64)
+        leaf_loc_to_pos(Self::chunk_loc(bit_offset) as u64)
     }
 
     #[inline]
@@ -461,7 +461,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             .dirty_chunks
             .iter()
             .map(|chunk_index| {
-                let pos = leaf_num_to_pos((*chunk_index + self.pruned_chunks) as u64);
+                let pos = leaf_loc_to_pos((*chunk_index + self.pruned_chunks) as u64);
                 (pos, &self.bitmap[*chunk_index])
             })
             .collect::<Vec<_>>();
@@ -592,7 +592,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         let leaves = Self::chunk_loc(bit_count) as u64;
         let mut mmr_proof = Proof::<H::Digest> {
-            size: leaf_num_to_pos(leaves),
+            size: leaf_loc_to_pos(leaves),
             digests: proof.digests.clone(),
         };
 
