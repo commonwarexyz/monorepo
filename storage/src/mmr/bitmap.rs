@@ -358,6 +358,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
+    #[cfg(test)]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
         leaf_loc_to_pos(Self::chunk_loc(bit_offset) as u64)
     }

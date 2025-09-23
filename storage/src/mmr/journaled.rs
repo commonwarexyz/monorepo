@@ -13,7 +13,7 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
         hasher::Hasher,
-        iterator::{leaf_pos_to_loc, nodes_to_pin, PeakIterator},
+        iterator::{nodes_to_pin, PeakIterator},
         mem::{Config as MemConfig, Mmr as MemMmr},
         storage::Storage,
         verification,
