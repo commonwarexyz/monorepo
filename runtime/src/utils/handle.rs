@@ -141,7 +141,8 @@ where
         };
         abort_handle.abort();
 
-        // Mark the task as finished
+        // We might never poll the future again after aborting it, so run the
+        // metrics cleanup right away
         self.metrics.finish();
     }
 
@@ -212,6 +213,9 @@ impl Aborter {
     /// Aborts the task and records completion in the metrics gauge.
     pub(crate) fn abort(self) {
         self.inner.abort();
+
+        // We might never poll the future again after aborting it, so run the
+        // metrics cleanup right away
         self.metrics.finish();
     }
 }
