@@ -24,6 +24,7 @@ mod zoda;
 pub use zoda::{Zoda, ZodaError};
 
 /// Configuration common to all encoding schemes.
+#[derive(Clone, Debug)]
 pub struct Config {
     /// The minimum number of shards needed to encode the data.
     pub minimum_shards: u16,
@@ -392,5 +393,10 @@ mod test {
     #[test]
     fn test_suite_no_coding() {
         test_suite::<NoCoding<Sha256>>();
+    }
+
+    #[test]
+    fn test_suite_zoda() {
+        test_suite::<Zoda<Sha256>>();
     }
 }
