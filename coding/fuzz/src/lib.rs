@@ -68,8 +68,8 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     let mut checked_shards = shards
         .iter()
         .map(|(shard, proof)| {
-            let reshard = S::reshard(&commitment, proof, shard).unwrap();
-            S::check(&commitment, reshard).unwrap()
+            let reshard = S::reshard(&config, &commitment, proof, shard).unwrap();
+            S::check(&config, &commitment, reshard).unwrap()
         })
         .collect::<Vec<_>>();
     // The last shard is "ours"

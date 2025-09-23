@@ -448,6 +448,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     }
 
     fn reshard(
+        _config: &Config,
         commitment: &Self::Commitment,
         _proof: &Self::Proof,
         shard: &Self::Shard,
@@ -460,6 +461,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     }
 
     fn check(
+        _config: &Config,
         commitment: &Self::Commitment,
         reshard: Self::ReShard,
     ) -> Result<Self::CheckedShard, Self::Error> {

@@ -1,3 +1,4 @@
+use crate::Config;
 use commonware_cryptography::Hasher;
 use std::marker::PhantomData;
 use thiserror::Error;
@@ -44,6 +45,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     }
 
     fn reshard(
+        _config: &Config,
         commitment: &Self::Commitment,
         _proof: &Self::Proof,
         shard: &Self::Shard,
@@ -56,6 +58,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     }
 
     fn check(
+        _config: &Config,
         _commitment: &Self::Commitment,
         _reshard: Self::ReShard,
     ) -> Result<Self::CheckedShard, Self::Error> {

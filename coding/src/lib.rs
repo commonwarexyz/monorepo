@@ -74,8 +74,8 @@ impl Read for Config {
 /// let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
 ///         .into_iter()
 ///         .map(|(shard, proof)| {
-///             let reshard = RS::reshard(&commitment, &proof, &shard).unwrap();
-///             let checked_shard = RS::check(&commitment, reshard).unwrap();
+///             let reshard = RS::reshard(&config, &commitment, &proof, &shard).unwrap();
+///             let checked_shard = RS::check(&config, &commitment, reshard).unwrap();
 ///             (shard, checked_shard)
 ///         })
 ///         .collect();
@@ -124,6 +124,7 @@ pub trait Scheme {
     ///
     /// This might have a stronger guarantee, in the case of [ValidatingScheme].
     fn reshard(
+        config: &Config,
         commitment: &Self::Commitment,
         proof: &Self::Proof,
         shard: &Self::Shard,
@@ -131,6 +132,7 @@ pub trait Scheme {
 
     /// Check the integrity of a reshard, producing a checked shard.
     fn check(
+        config: &Config,
         commitment: &Self::Commitment,
         reshard: Self::ReShard,
     ) -> Result<Self::CheckedShard, Self::Error>;
@@ -179,8 +181,8 @@ mod test {
         let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
-                let checked_shard = S::check(&commitment, reshard).unwrap();
+                let reshard = S::reshard(&config, &commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&config, &commitment, reshard).unwrap();
                 (shard, checked_shard)
             })
             .collect();
@@ -209,8 +211,8 @@ mod test {
         let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
-                let checked_shard = S::check(&commitment, reshard).unwrap();
+                let reshard = S::reshard(&config, &commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&config, &commitment, reshard).unwrap();
                 (shard, checked_shard)
             })
             .collect();
@@ -239,8 +241,8 @@ mod test {
         let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
-                let checked_shard = S::check(&commitment, reshard).unwrap();
+                let reshard = S::reshard(&config, &commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&config, &commitment, reshard).unwrap();
                 (shard, checked_shard)
             })
             .collect();
@@ -269,8 +271,8 @@ mod test {
         let (shards, checked_shard): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
-                let checked_shard = S::check(&commitment, reshard).unwrap();
+                let reshard = S::reshard(&config, &commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&config, &commitment, reshard).unwrap();
                 (shard, checked_shard)
             })
             .collect();
@@ -299,8 +301,8 @@ mod test {
         let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
-                let checked_shard = S::check(&commitment, reshard).unwrap();
+                let reshard = S::reshard(&config, &commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&config, &commitment, reshard).unwrap();
                 (shard, checked_shard)
             })
             .collect();
@@ -329,8 +331,8 @@ mod test {
         let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
-                let checked_shard = S::check(&commitment, reshard).unwrap();
+                let reshard = S::reshard(&config, &commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&config, &commitment, reshard).unwrap();
                 (shard, checked_shard)
             })
             .collect();
