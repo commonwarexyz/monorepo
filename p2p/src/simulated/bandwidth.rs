@@ -386,7 +386,7 @@ where
 ///
 /// The computation rounds up so callers receive the minimum duration that guarantees at least the
 /// requested number of bytes were transmitted.
-pub fn lifetime(rate: &Rate, bytes: u128) -> Option<Duration> {
+pub fn duration(rate: &Rate, bytes: u128) -> Option<Duration> {
     match rate {
         Rate::Unlimited => Some(Duration::ZERO),
         Rate::Finite(ratio) => {
@@ -541,10 +541,10 @@ mod tests {
     }
 
     #[test]
-    fn completion_time_calculation() {
+    fn bandwidth_duration() {
         let ratio = Ratio::from_int(500);
         let rate = Rate::Finite(ratio);
-        let time = lifetime(&rate, 1_000).expect("finite time");
+        let time = duration(&rate, 1_000).expect("finite time");
         assert_eq!(time.as_secs(), 2);
     }
 
