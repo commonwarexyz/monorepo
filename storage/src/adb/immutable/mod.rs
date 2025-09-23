@@ -212,7 +212,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
                 lower_bound_pos: leaf_loc_to_pos(cfg.lower_bound),
-                upper_bound_pos: leaf_loc_to_pos(cfg.upper_bound).saturating_sub(1),
+                upper_bound_pos: leaf_loc_to_pos(cfg.upper_bound + 1) - 1,
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
