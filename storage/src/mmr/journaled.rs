@@ -425,8 +425,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     }
 
     /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
-    pub fn last_leaf_pos(&self) -> Option<u64> {
-        self.mem_mmr.last_leaf_pos().map(|pos| pos.into())
+    pub fn last_leaf_pos(&self) -> Option<Position> {
+        self.mem_mmr.last_leaf_pos()
     }
 
     /// Returns whether there are pending updates.

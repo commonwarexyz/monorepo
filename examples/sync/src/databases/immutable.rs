@@ -112,7 +112,7 @@ where
     }
 
     fn lower_bound_ops(&self) -> u64 {
-        self.oldest_retained_loc().unwrap_or(0)
+        self.oldest_retained_loc().map_or(0, |loc| loc.as_u64())
     }
 
     fn historical_proof(

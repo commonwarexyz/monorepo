@@ -114,8 +114,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.mmr.size()
     }
 
-    pub fn get_node(&self, position: u64) -> Option<H::Digest> {
-        self.mmr.get_node(Position::new(position))
+    pub fn get_node(&self, position: Position) -> Option<H::Digest> {
+        self.mmr.get_node(position)
     }
 
     /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
@@ -669,7 +669,7 @@ impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
     }
 
     async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
-        Ok(self.get_node(position.into()))
+        Ok(self.get_node(position))
     }
 }
 

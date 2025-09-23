@@ -212,8 +212,8 @@ impl<
     }
 
     /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
-    pub fn inactivity_floor_loc(&self) -> u64 {
-        self.any.inactivity_floor_loc()
+    pub fn inactivity_floor_loc(&self) -> Location {
+        Location::new(self.any.inactivity_floor_loc())
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -224,8 +224,8 @@ impl<
     /// Get the value of the operation with location `loc` in the db. Returns
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
-    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
-        self.any.get_loc(loc).await
+    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
+        self.any.get_loc(loc.as_u64()).await
     }
 
     /// Get the level of the base MMR into which we are grafting.
@@ -352,8 +352,8 @@ impl<
     /// # Panic
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
-        self.any.prune(target_prune_loc).await
+    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+        self.any.prune(target_prune_loc.as_u64()).await
     }
 
     /// Return the root of the db.
@@ -776,7 +776,7 @@ pub mod test {
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.inactivity_floor_loc(), 0);
+            assert_eq!(db.inactivity_floor_loc(), Location::new(0));
             let root0 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
@@ -1036,7 +1036,7 @@ pub mod test {
             let res = db.key_value_proof(hasher.inner(), bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
-            let start = db.inactivity_floor_loc();
+            let start = db.inactivity_floor_loc().as_u64();
             for i in start..db.status.bit_count() {
                 if !db.status.get_bit(i) {
                     continue;
@@ -1179,7 +1179,9 @@ pub mod test {
             let committed_root = db.root(&mut hasher).await.unwrap();
             let committed_op_count = db.op_count();
             let committed_inactivity_floor = db.any.inactivity_floor_loc;
-            db.prune(committed_inactivity_floor).await.unwrap();
+            db.prune(Location::new(committed_inactivity_floor))
+                .await
+                .unwrap();
 
             // Perform more random operations without committing any of them.
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
@@ -1220,7 +1222,9 @@ pub mod test {
                 .await
                 .unwrap();
             db.commit().await.unwrap();
-            db.prune(db.any.inactivity_floor_loc()).await.unwrap();
+            db.prune(Location::new(db.any.inactivity_floor_loc()))
+                .await
+                .unwrap();
             // State from scenario #2 should match that of a successful commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
             db.close().await.unwrap();
@@ -1279,7 +1283,7 @@ pub mod test {
                     db_no_pruning.commit().await.unwrap();
                     db_pruning.commit().await.unwrap();
                     db_pruning
-                        .prune(db_no_pruning.any.inactivity_floor_loc())
+                        .prune(Location::new(db_no_pruning.any.inactivity_floor_loc()))
                         .await
                         .unwrap();
                 }

@@ -402,11 +402,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<u64> {
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
         if self.log_size == 0 {
             None
         } else {
-            Some(self.oldest_retained_loc)
+            Some(Location::new(self.oldest_retained_loc))
         }
     }
 
@@ -1122,15 +1122,15 @@ pub(super) mod test {
             // items_per_section is 5, so half should be exactly at a blob boundary, in which case
             // the actual pruning location should match the requested.
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
-            assert_eq!(oldest_retained_loc, ELEMENTS / 2);
+            assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
             // Try to fetch a pruned key.
-            let pruned_loc = oldest_retained_loc - 1;
-            let pruned_key = Sha256::hash(&pruned_loc.to_be_bytes());
+            let pruned_loc = oldest_retained_loc.saturating_sub(1);
+            let pruned_key = Sha256::hash(&pruned_loc.as_u64().to_be_bytes());
             assert!(db.get(&pruned_key).await.unwrap().is_none());
 
             // Try to fetch unpruned key.
-            let unpruned_key = Sha256::hash(&oldest_retained_loc.to_be_bytes());
+            let unpruned_key = Sha256::hash(&oldest_retained_loc.as_u64().to_be_bytes());
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1140,7 +1140,7 @@ pub(super) mod test {
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), ELEMENTS + 1);
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
-            assert_eq!(oldest_retained_loc, ELEMENTS / 2);
+            assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
             // Prune to a non-blob boundary.
             db.prune(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1))
@@ -1148,21 +1148,27 @@ pub(super) mod test {
                 .unwrap();
             // Actual boundary should be a multiple of 5.
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
-            assert_eq!(oldest_retained_loc, ELEMENTS / 2 + ITEMS_PER_SECTION);
+            assert_eq!(
+                oldest_retained_loc,
+                Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
+            );
 
             // Confirm boundary persists across restart.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
-            assert_eq!(oldest_retained_loc, ELEMENTS / 2 + ITEMS_PER_SECTION);
+            assert_eq!(
+                oldest_retained_loc,
+                Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
+            );
 
             // Try to fetch a pruned key.
-            let pruned_loc = oldest_retained_loc - 3;
-            let pruned_key = Sha256::hash(&pruned_loc.to_be_bytes());
+            let pruned_loc = oldest_retained_loc.saturating_sub(3);
+            let pruned_key = Sha256::hash(&pruned_loc.as_u64().to_be_bytes());
             assert!(db.get(&pruned_key).await.unwrap().is_none());
 
             // Try to fetch unpruned key.
-            let unpruned_key = Sha256::hash(&oldest_retained_loc.to_be_bytes());
+            let unpruned_key = Sha256::hash(&oldest_retained_loc.as_u64().to_be_bytes());
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
             // Confirm behavior of trying to create a proof of pruned items is as expected.

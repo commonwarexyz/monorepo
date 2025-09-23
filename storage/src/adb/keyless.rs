@@ -400,8 +400,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Returns the location of the last commit, if any.
-    pub fn last_commit_loc(&self) -> Option<u64> {
-        self.last_commit_loc
+    pub fn last_commit_loc(&self) -> Option<Location> {
+        self.last_commit_loc.map(Location::new)
     }
 
     /// Returns the section of the operations log where we are currently writing new operations.
@@ -770,7 +770,7 @@ mod test {
             assert_eq!(db.op_count(), 1); // commit op should remain after re-open.
             assert_eq!(db.get_metadata().await.unwrap(), Some((0, metadata)));
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.last_commit_loc(), Some(0));
+            assert_eq!(db.last_commit_loc(), Some(Location::new(0)));
 
             db.destroy().await.unwrap();
         });
@@ -960,7 +960,7 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.last_commit_loc(), Some(op_count - 1));
+            assert_eq!(db.last_commit_loc(), Some(Location::new(op_count - 1)));
             db.close().await.unwrap();
 
             async fn apply_more_ops(db: &mut Db) {
@@ -1019,7 +1019,7 @@ mod test {
                 let db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
                 assert_eq!(db.root(hasher), root);
-                assert_eq!(db.last_commit_loc(), Some(op_count - 1));
+                assert_eq!(db.last_commit_loc(), Some(Location::new(op_count - 1)));
             }
 
             recover_from_failure(context.clone(), root, &mut hasher, op_count).await;
@@ -1027,7 +1027,9 @@ mod test {
             // Simulate a failure during pruning and ensure we recover.
             let db = open_db(context.clone()).await;
             let last_commit_loc = db.last_commit_loc().unwrap();
-            db.simulate_prune_failure(last_commit_loc).await.unwrap();
+            db.simulate_prune_failure(last_commit_loc.as_u64())
+                .await
+                .unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(&mut hasher), root);
@@ -1035,7 +1037,9 @@ mod test {
 
             // Repeat recover_from_failure tests after successfully pruning to the last commit.
             let mut db = open_db(context.clone()).await;
-            db.prune(db.last_commit_loc().unwrap()).await.unwrap();
+            db.prune(db.last_commit_loc().unwrap().as_u64())
+                .await
+                .unwrap();
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(&mut hasher), root);
             db.close().await.unwrap();
@@ -1049,7 +1053,7 @@ mod test {
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > op_count);
             assert_ne!(db.root(&mut hasher), root);
-            assert_eq!(db.last_commit_loc(), Some(db.op_count() - 1));
+            assert_eq!(db.last_commit_loc(), Some(Location::new(db.op_count() - 1)));
 
             db.destroy().await.unwrap();
         });
@@ -1397,7 +1401,7 @@ mod test {
             );
             assert_eq!(
                 db.last_commit_loc(),
-                Some(committed_size - 1),
+                Some(Location::new(committed_size - 1)),
                 "Last commit location should be correct"
             );
 
@@ -1441,7 +1445,7 @@ mod test {
             );
             assert_eq!(
                 db.last_commit_loc(),
-                Some(new_committed_size - 1),
+                Some(Location::new(new_committed_size - 1)),
                 "Last commit location should be correct after multiple appends"
             );
 

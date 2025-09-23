@@ -151,11 +151,11 @@ fn fuzz(data: FuzzInput) {
                         }
 
                         let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
-                        let adjusted_start = *start_loc % current_op_count;
+                        let adjusted_start = start_loc % current_op_count;
                         let adjusted_max_ops = (*max_ops % 50).max(1);
 
                         let oldest_loc = db.inactivity_floor_loc();
-                        if adjusted_start >= oldest_loc {
+                        if adjusted_start >= oldest_loc.as_u64() {
                             let (proof, ops, chunks) = db
                                 .range_proof(hasher.inner(), adjusted_start, NZU64!(adjusted_max_ops))
                                 .await
