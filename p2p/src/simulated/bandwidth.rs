@@ -8,7 +8,7 @@
 //! arrives).
 
 use commonware_utils::{time::NANOS_PER_SEC, DurationExt, Ratio};
-use std::{cmp::Ordering, collections::BTreeMap, marker::PhantomData, time::Duration};
+use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 /// Minimal description of a simulated transmission path.
 #[derive(Clone, Debug)]
@@ -68,17 +68,8 @@ impl FlowState {
     }
 }
 
-struct Registered;
-struct Solved;
-
-/// Bandwidth planner with typestate to enforce the register → solve → materialize sequence.
-struct BandwidthPlanner<'a, P, S> {
-    core: PlannerCore<'a, P>,
-    _marker: PhantomData<S>,
-}
-
-/// Progressive filling helper that owns the resource index and flow membership state.
-struct PlannerCore<'a, P> {
+/// Planner once all flows have been registered.
+struct RegisteredPlanner<'a, P> {
     flows: &'a [Flow<P>],
     resources: Vec<Resource>,
     indices: BTreeMap<ResourceKey<P>, usize>,
@@ -88,10 +79,22 @@ struct PlannerCore<'a, P> {
     current_fill: Ratio,
 }
 
-impl<'a, P: Clone + Ord> PlannerCore<'a, P> {
-    /// Construct a planner ready to register resources for `flows`.
-    fn new(flows: &'a [Flow<P>]) -> Self {
-        Self {
+/// Planner after progressive filling finished.
+struct SolvedPlanner<'a, P> {
+    flows: &'a [Flow<P>],
+    flow_states: Vec<FlowState>,
+    rates: Vec<Option<Ratio>>,
+    current_fill: Ratio,
+}
+
+impl<'a, P: Clone + Ord> RegisteredPlanner<'a, P> {
+    /// Build and register resources for all flows up front.
+    fn new<E, I>(flows: &'a [Flow<P>], egress_limit: &mut E, ingress_limit: &mut I) -> Self
+    where
+        E: FnMut(&P) -> Option<u128>,
+        I: FnMut(&P) -> Option<u128>,
+    {
+        let mut planner = Self {
             flows,
             resources: Vec::new(),
             indices: BTreeMap::new(),
@@ -99,22 +102,29 @@ impl<'a, P: Clone + Ord> PlannerCore<'a, P> {
             rates: vec![None; flows.len()],
             active_flows: 0,
             current_fill: Ratio::zero(),
+        };
+        planner.register_flows(egress_limit, ingress_limit);
+        planner
+    }
+
+    /// Perform progressive filling until every constrained flow is frozen.
+    fn solve(mut self) -> SolvedPlanner<'a, P> {
+        self.progressive_fill();
+        let RegisteredPlanner {
+            flows,
+            flow_states,
+            rates,
+            current_fill,
+            ..
+        } = self;
+        SolvedPlanner {
+            flows,
+            flow_states,
+            rates,
+            current_fill,
         }
     }
 
-    /// Ensure we have a resource entry for `key`, returning `None` for unlimited capacity.
-    fn ensure_resource(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
-        if let Some(index) = self.indices.get(&key) {
-            return Some(*index);
-        }
-        let limit = limit?;
-        let idx = self.resources.len();
-        self.resources.push(Resource::new(limit));
-        self.indices.insert(key, idx);
-        Some(idx)
-    }
-
-    /// Attach each flow to its egress/ingress resources.
     fn register_flows<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
     where
         E: FnMut(&P) -> Option<u128>,
@@ -151,6 +161,17 @@ impl<'a, P: Clone + Ord> PlannerCore<'a, P> {
         }
     }
 
+    fn ensure_resource(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
+        if let Some(index) = self.indices.get(&key) {
+            return Some(*index);
+        }
+        let limit = limit?;
+        let idx = self.resources.len();
+        self.resources.push(Resource::new(limit));
+        self.indices.insert(key, idx);
+        Some(idx)
+    }
+
     /// Link a flow to a resource, marking it as constrained.
     fn attach(&mut self, resource_idx: usize, flow_idx: usize, state: &mut FlowState) {
         let resource = &mut self.resources[resource_idx];
@@ -160,8 +181,8 @@ impl<'a, P: Clone + Ord> PlannerCore<'a, P> {
         state.limited = true;
     }
 
-    /// Perform progressive filling until every constrained flow is frozen.
-    fn solve(&mut self) {
+    /// Run the progressive filling algorithm until every constrained flow is frozen.
+    fn progressive_fill(&mut self) {
         if self.active_flows == 0 {
             return;
         }
@@ -283,12 +304,13 @@ impl<'a, P: Clone + Ord> PlannerCore<'a, P> {
             }
         }
     }
+}
 
+impl<'a, P: Clone + Ord> SolvedPlanner<'a, P> {
     /// Convert the computed ratios back into the public map keyed by flow id.
     fn into_rates(mut self) -> BTreeMap<u64, Rate> {
-        debug_assert_eq!(self.active_flows, 0, "planner left flows active");
-
-        for (idx, state) in self.flow_states.iter().enumerate() {
+        for idx in 0..self.flow_states.len() {
+            let state = &self.flow_states[idx];
             if state.limited && self.rates[idx].is_none() {
                 // Defensive path: if a constrained flow never froze, give it whatever fill remains.
                 self.rates[idx] = Some(self.current_fill.clone());
@@ -304,42 +326,6 @@ impl<'a, P: Clone + Ord> PlannerCore<'a, P> {
             result.insert(flow.id, rate);
         }
         result
-    }
-}
-
-impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P, Registered> {
-    /// Build and register resources for all flows up front.
-    fn new<E, I>(flows: &'a [Flow<P>], egress_limit: &mut E, ingress_limit: &mut I) -> Self
-    where
-        E: FnMut(&P) -> Option<u128>,
-        I: FnMut(&P) -> Option<u128>,
-    {
-        let mut core = PlannerCore::new(flows);
-        core.register_flows(egress_limit, ingress_limit);
-        Self {
-            core,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P, Registered> {
-    /// Perform progressive filling until every constrained flow is frozen.
-    fn solve(self) -> BandwidthPlanner<'a, P, Solved> {
-        let mut core = self.core;
-        core.solve();
-        BandwidthPlanner {
-            core,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P, Solved> {
-    /// Convert the computed ratios back into the public map keyed by flow id.
-    fn into_rates(self) -> BTreeMap<u64, Rate> {
-        let core = self.core;
-        core.into_rates()
     }
 }
 
@@ -365,8 +351,8 @@ where
         return BTreeMap::new();
     }
 
-    let planner = BandwidthPlanner::new(flows, &mut egress_limit, &mut ingress_limit);
-    planner.solve().into_rates()
+    let planner = RegisteredPlanner::new(flows, &mut egress_limit, &mut ingress_limit).solve();
+    planner.into_rates()
 }
 
 /// Calculate the time it will take to deplete a given amount of capacity at some [Rate].
