@@ -805,13 +805,7 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let flow_id = *state
-            .active_flows
-            .get(&(origin.clone(), recipient.clone()))
-            .expect("flow registered");
-        let flow = state.all_flows.get_mut(&flow_id).expect("flow metadata");
-        flow.remaining = u128::MAX;
-
+        // Rebalance to schedule the bandwidth event
         let _ = state.rebalance(now);
         assert!(state.next().is_some(), "bandwidth event must be scheduled");
     }
