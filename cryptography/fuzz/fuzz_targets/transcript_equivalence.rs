@@ -117,7 +117,7 @@ impl CommitOperation {
     }
 }
 
-const FORK_LABELS: &[&'static [u8]] = &[b"fork1", b"fork2", b"test", b"branch", b"split", b""];
+const FORK_LABELS: &[&[u8]] = &[b"fork1", b"fork2", b"test", b"branch", b"split", b""];
 
 impl<'a> Arbitrary<'a> for ForkOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
