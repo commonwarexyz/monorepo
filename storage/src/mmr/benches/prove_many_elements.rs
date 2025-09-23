@@ -15,16 +15,14 @@ fn bench_prove_many_elements(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
         let mut mmr = Mmr::<Sha256>::new();
-        let mut positions = Vec::with_capacity(n);
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         let mut hasher = StandardHasher::new();
 
         block_on(async {
-            for i in 0..n {
+            for _ in 0..n {
                 let element = sha256::Digest::random(&mut sampler);
-                let pos = mmr.add(&mut hasher, &element);
-                positions.push((i, pos));
+                mmr.add(&mut hasher, &element);
                 elements.push(element);
             }
         });
@@ -43,14 +41,14 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let start_positions: Vec<u64> = (0u64..n as u64 - range).collect();
-                            let starts = start_positions
+                            let start_locs: Vec<u64> = (0u64..n as u64 - range).collect();
+                            let start_loc_samples = start_locs
                                 .choose_multiple(&mut sampler, SAMPLE_SIZE)
                                 .cloned()
                                 .collect::<Vec<_>>();
                             let mut samples = Vec::with_capacity(SAMPLE_SIZE);
                             block_on(async {
-                                for start_index in starts {
+                                for start_index in start_loc_samples {
                                     let leaf_range = start_index..(start_index + range);
                                     samples.push(leaf_range);
                                 }
