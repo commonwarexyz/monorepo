@@ -215,7 +215,6 @@ impl SystemTimeExt for SystemTime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::UNIX_EPOCH;
 
     #[test]
     fn test_epoch() {
@@ -282,11 +281,14 @@ mod tests {
 
     #[test]
     fn check_duration_limit() {
-        let result = UNIX_EPOCH
-            .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
-            .unwrap()
-            .checked_add(Duration::from_nanos(1));
-        // TODO: won't error but returned value won't be equal? -> doesn't hit next interval (won't panic) but can't be represented?
+        // Rollback to limit
+        let result = SystemTime::limit()
+            .checked_add(SYSTEM_TIME_PRECISION - Duration::from_nanos(1))
+            .expect("addition within precision should round down");
+        assert_eq!(result, SystemTime::limit(), "unexpected precision");
+
+        // Exceed limit
+        let result = SystemTime::limit().checked_add(SYSTEM_TIME_PRECISION);
         assert!(result.is_none(), "able to exceed max duration");
     }
 
