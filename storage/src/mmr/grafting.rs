@@ -946,33 +946,20 @@ mod tests {
             // Confirm we can generate and verify inclusion proofs for the "orphaned" leaf as well
             // as an existing one.
             let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
-            let loc = 0;
-            let proof =
-                verification::range_proof(&grafted_mmr, Location::new(loc)..Location::new(loc + 1))
-                    .await
-                    .unwrap();
+            let loc = Location::new(0);
+            let proof = verification::range_proof(&grafted_mmr, loc..loc.saturating_add(1))
+                .await
+                .unwrap();
 
-            let mut verifier =
-                Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(loc), vec![&p1]);
-            assert!(proof.verify_element_inclusion(
-                &mut verifier,
-                &b1,
-                Location::new(loc),
-                &grafted_storage_root
-            ));
+            let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, loc, vec![&p1]);
+            assert!(proof.verify_element_inclusion(&mut verifier, &b1, loc, &grafted_storage_root));
 
-            let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(loc), vec![]);
-            let loc = 4;
-            let proof =
-                verification::range_proof(&grafted_mmr, Location::new(loc)..Location::new(loc + 1))
-                    .await
-                    .unwrap();
-            assert!(proof.verify_element_inclusion(
-                &mut verifier,
-                &b5,
-                Location::new(loc),
-                &grafted_storage_root
-            ));
+            let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, loc, vec![]);
+            let loc = Location::new(4);
+            let proof = verification::range_proof(&grafted_mmr, loc..loc.saturating_add(1))
+                .await
+                .unwrap();
+            assert!(proof.verify_element_inclusion(&mut verifier, &b5, loc, &grafted_storage_root));
         });
     }
 }

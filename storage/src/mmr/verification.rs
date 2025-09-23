@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 /// A store derived from a [Proof] that can be used to generate proofs over any sub-range of the
 /// original range.
 pub struct ProofStore<D> {
-    digests: HashMap<u64, D>,
+    digests: HashMap<Position, D>,
     size: u64,
 }
 
@@ -56,10 +56,7 @@ impl<D: Digest> ProofStore<D> {
     pub fn new_from_digests(size: u64, digests: Vec<(Position, D)>) -> Self {
         Self {
             size,
-            digests: digests
-                .into_iter()
-                .map(|(pos, digest)| (pos.as_u64(), digest))
-                .collect(),
+            digests: digests.into_iter().collect(),
         }
     }
 
@@ -76,7 +73,7 @@ impl<D: Digest> ProofStore<D> {
 
 impl<D: Digest> Storage<D> for ProofStore<D> {
     async fn get_node(&self, pos: Position) -> Result<Option<D>, Error> {
-        Ok(self.digests.get(&pos.as_u64()).cloned())
+        Ok(self.digests.get(&pos).cloned())
     }
 
     fn size(&self) -> u64 {
