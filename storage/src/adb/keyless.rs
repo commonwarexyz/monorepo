@@ -16,9 +16,7 @@ use crate::{
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{
-        iterator::leaf_loc_to_pos,
-        journaled::{Config as MmrConfig, Mmr},
-        Proof, StandardHasher as Standard,
+        iterator::leaf_loc_to_pos, journaled::{Config as MmrConfig, Mmr}, Location, Position, Proof, StandardHasher as Standard
     },
     store::operation::Keyless as Operation,
 };
@@ -450,7 +448,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // Prune locations and the MMR to the corresponding positions.
         try_join!(
             self.mmr
-                .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(prune_loc))
+                .prune_to_pos(
+                    &mut self.hasher,
+                    Position::from(Location::from(prune_loc)).as_u64()
+                )
                 .map_err(Error::Mmr),
             self.locations.prune(prune_loc).map_err(Error::Journal),
         )?;
@@ -604,10 +605,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
         let end_loc = std::cmp::min(op_count, start_loc + max_ops.get());
-        let mmr_size = leaf_loc_to_pos(op_count);
+        let mmr_size = leaf_loc_to_pos(Location::new(op_count));
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_loc..end_loc)
+            .historical_range_proof(mmr_size.into(), start_loc..end_loc)
             .await?;
         let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
         for loc in start_loc..end_loc {

@@ -115,7 +115,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     }
 
     pub fn get_node(&self, position: u64) -> Option<H::Digest> {
-        self.mmr.get_node(position)
+        self.mmr.get_node(Position::new(position))
     }
 
     /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
@@ -360,7 +360,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        leaf_loc_to_pos(Location::new(Self::chunk_loc(bit_offset) as u64))
+        leaf_loc_to_pos(Location::new(Self::chunk_loc(bit_offset) as u64)).into()
     }
 
     #[inline]
@@ -588,13 +588,13 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         let leaves = Self::chunk_loc(bit_count) as u64;
         let mut mmr_proof = Proof::<H::Digest> {
-            size: leaf_loc_to_pos(Location::new(leaves)),
+            size: leaf_loc_to_pos(Location::new(leaves)).into(),
             digests: proof.digests.clone(),
         };
 
         let loc = Self::chunk_loc(bit_offset) as u64;
         if bit_count % Self::CHUNK_SIZE_BITS == 0 {
-            return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
+            return mmr_proof.verify_element_inclusion(hasher, chunk, Location::new(loc), root);
         }
 
         if proof.digests.is_empty() {
@@ -627,7 +627,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc) {
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new(loc)) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -663,8 +663,8 @@ impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
         self.size()
     }
 
-    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        Ok(self.get_node(position))
+    async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
+        Ok(self.get_node(position.into()))
     }
 }
 

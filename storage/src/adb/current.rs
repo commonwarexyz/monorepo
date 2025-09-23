@@ -104,7 +104,7 @@ pub struct KeyValueProofInfo<K, V, const N: usize> {
     pub value: V,
 
     /// The location of the operation that assigned this value to the key.
-    pub loc: u64,
+    pub loc: Location,
 
     /// The status bitmap chunk that contains the bit corresponding the operation's location.
     pub chunk: [u8; N],
@@ -464,17 +464,17 @@ impl<
     pub fn verify_range_proof(
         hasher: &mut Standard<H>,
         proof: &Proof<H::Digest>,
-        start_loc: u64,
+        start_loc: Location,
         ops: &[Fixed<K, V>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        let op_count = Location::from(Position::from(proof.size)).as_u64(); // TODO fix
-        let Some(op_count) = op_count else {
+        let Ok(op_count) = Location::try_from(Position::from(proof.size)) else {
             debug!("verification failed, invalid proof size");
             return false;
         };
-        let end_loc = start_loc + ops.len() as u64;
+        let op_count = op_count.as_u64();
+        let end_loc = start_loc.as_u64() + ops.len() as u64;
         if end_loc > op_count {
             debug!(
                 loc = end_loc,
@@ -486,7 +486,7 @@ impl<
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let start_chunk_loc = start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let start_chunk_loc = start_loc.as_u64() / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier =
             GraftingVerifier::<H>::new(Self::grafting_height(), start_chunk_loc, chunk_vec);
 
@@ -559,7 +559,7 @@ impl<
             KeyValueProofInfo {
                 key,
                 value,
-                loc,
+                loc: Location::from(loc),
                 chunk,
             },
         ))
@@ -573,22 +573,23 @@ impl<
         info: &KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let Some(op_count) = leaf_pos_to_loc(proof.size) else {
+        let Ok(op_count) = Location::try_from(Position::from(proof.size)) else {
             debug!("verification failed, invalid proof size");
             return false;
         };
+        let op_count = op_count.as_u64();
 
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
-        if !Bitmap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc) {
+        if !Bitmap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc.as_u64()) {
             debug!(
-                loc = info.loc,
+                loc = info.loc.as_u64(),
                 "proof verification failed, operation is inactive"
             );
             return false;
         }
 
-        let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let num = info.loc.as_u64() / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier =
             GraftingVerifier::<H>::new(Self::grafting_height(), num, vec![&info.chunk]);
         let element = Fixed::Update(info.key.clone(), info.value.clone()).encode();
@@ -609,7 +610,8 @@ impl<
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of info.chunk, since these bits are not part of
         // the mmr.
-        if info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS == op_count / Bitmap::<H, N>::CHUNK_SIZE_BITS
+        if info.loc.as_u64() / Bitmap::<H, N>::CHUNK_SIZE_BITS
+            == op_count / Bitmap::<H, N>::CHUNK_SIZE_BITS
         {
             let expected_last_chunk_digest = verifier.digest(&info.chunk);
             if last_chunk_digest != expected_last_chunk_digest {

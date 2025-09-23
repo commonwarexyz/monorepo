@@ -43,7 +43,7 @@ impl PeakIterator {
     /// This is an O(log2(n)) operation.
     pub fn last_leaf_pos(size: u64) -> Position {
         if size == 0 {
-            return Position::ZERO;
+            return Position::new(0);
         }
 
         let last_peak = PeakIterator::new(size)
@@ -150,13 +150,13 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<Position
 /// if this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
-pub(crate) const fn leaf_pos_to_loc(leaf_pos: Position) -> Option<Location> {
-    Location::from_position(leaf_pos)
+pub(crate) fn leaf_pos_to_loc(leaf_pos: Position) -> Option<Location> {
+    Location::try_from(leaf_pos).ok()
 }
 
 /// Returns the position of the leaf with location `leaf_loc` in an MMR.
-pub(crate) const fn leaf_loc_to_pos(leaf_loc: Location) -> Position {
-    Position::from_location(leaf_loc)
+pub(crate) fn leaf_loc_to_pos(leaf_loc: Location) -> Position {
+    Position::from(leaf_loc)
 }
 
 /// Returns the height of the node at position `pos` in an MMR.

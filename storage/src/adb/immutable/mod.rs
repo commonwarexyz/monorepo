@@ -8,7 +8,7 @@ use crate::{
     mmr::{
         iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
-        Proof, StandardHasher as Standard,
+        Location, Position, Proof, StandardHasher as Standard,
     },
     store::operation::Variable,
     translator::Translator,
@@ -211,8 +211,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
-                lower_bound_pos: leaf_loc_to_pos(cfg.lower_bound),
-                upper_bound_pos: leaf_loc_to_pos(cfg.upper_bound + 1) - 1,
+                lower_bound_pos: leaf_loc_to_pos(Location::new(cfg.lower_bound)).into(),
+                upper_bound_pos: leaf_loc_to_pos(Location::new(cfg.upper_bound + 1))
+                    .saturating_sub(1)
+                    .into(),
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
@@ -385,7 +387,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         // Confirm post-conditions hold.
-        assert_eq!(log_size, leaf_pos_to_loc(mmr.size()).unwrap());
+        assert_eq!(
+            log_size,
+            leaf_pos_to_loc(Position::new(mmr.size())).unwrap().as_u64()
+        );
         assert_eq!(log_size, locations.size().await?);
 
         Ok((log_size, oldest_retained_loc.unwrap_or(0)))
@@ -426,7 +431,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(self.oldest_retained_loc).await?;
         self.mmr
-            .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(self.oldest_retained_loc))
+            .prune_to_pos(
+                &mut self.hasher,
+                leaf_loc_to_pos(Location::new(self.oldest_retained_loc)).into(),
+            )
             .await?;
         Ok(())
     }
@@ -595,11 +603,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         let end_loc = std::cmp::min(op_count, start_loc + max_ops.get());
-        let mmr_size = leaf_loc_to_pos(op_count);
+        let mmr_size = leaf_loc_to_pos(Location::new(op_count));
 
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_loc..end_loc)
+            .historical_range_proof(mmr_size.into(), start_loc..end_loc)
             .await?;
         let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
         for loc in start_loc..end_loc {

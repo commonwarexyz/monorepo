@@ -602,14 +602,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn historical_proof(
         &self,
         op_count: u64,
-        start_loc: u64,
+        start_loc: u64, // TODO make Location
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         assert!(op_count <= self.op_count());
         assert!(start_loc < op_count);
 
         let end_loc = std::cmp::min(op_count, start_loc + max_ops);
-        let mmr_size = leaf_loc_to_pos(op_count);
+        let mmr_size = Position::from(Location::from(op_count)).as_u64();
 
         let proof = self
             .mmr
@@ -790,7 +790,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 .prune(self.oldest_retained_loc)
                 .map_err(Error::Journal),
             self.mmr
-                .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(self.oldest_retained_loc))
+                .prune_to_pos(
+                    &mut self.hasher,
+                    Position::from(Location::from(self.oldest_retained_loc)).as_u64()
+                )
                 .map_err(Error::Mmr),
         )?;
 

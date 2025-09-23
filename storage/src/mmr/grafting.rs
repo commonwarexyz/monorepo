@@ -176,7 +176,7 @@ fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
 /// Inverse computation of destination_pos, with an analogous implementation involving walks down
 /// corresponding branches of both trees. Returns none if there is no corresponding node.
 pub(super) fn source_pos(base_node_pos: u64, height: u32) -> Option<u64> {
-    if pos_to_height(base_node_pos) < height {
+    if pos_to_height(Position::new(base_node_pos)) < height {
         // Nodes below the grafting height do not have a corresponding peak tree node.
         return None;
     }
@@ -252,7 +252,8 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher.root(destination_pos(size, self.height), peak_digests)
+        self.hasher
+            .root(destination_pos(size, self.height), peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -294,7 +295,7 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
         right_digest: &H::Digest,
     ) -> H::Digest {
         self.hasher
-            .node_digest(self.destination_pos(pos), left_digest, right_digest)
+            .node_digest(Position::new(destination_pos(pos.as_u64(), self.height)), left_digest, right_digest)
     }
 
     fn root<'a>(
@@ -362,44 +363,44 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
-        let pos_u64 = pos.as_u64();
         let digest = self.hasher.node_digest(pos, left_digest, right_digest);
-        if pos_to_height(pos_u64) != self.height {
+        if pos_to_height(pos) != self.height {
             // If we're not at the grafting boundary we use the digest as-is.
             return digest;
         }
 
         // This base tree node corresponds to a peak-tree leaf, so we need to perform the peak-tree
         // leaf digest computation.
+        let pos_u64 = pos.as_u64();
         let source_pos = source_pos(pos_u64, self.height);
         let Some(source_pos) = source_pos else {
             // malformed proof input
-            debug!(pos, "no grafting source pos");
+            debug!(pos = pos.as_u64(), "no grafting source pos");
             return digest;
         };
-        let index = leaf_pos_to_loc(source_pos);
+        let index = leaf_pos_to_loc(Position::new(source_pos));
         let Some(mut index) = index else {
             // malformed proof input
             debug!(pos = source_pos, "grafting source pos is not a leaf");
             return digest;
         };
-        if index < self.loc {
+        if index.as_u64() < self.loc {
             // malformed proof input
-            debug!(index, loc = self.loc, "grafting index is negative");
+            debug!(index = index.as_u64(), loc = self.loc, "grafting index is negative");
             return digest;
         };
-        index -= self.loc;
-        if index >= self.elements.len() as u64 {
+        let index_u64 = index.as_u64() - self.loc;
+        if index_u64 >= self.elements.len() as u64 {
             // malformed proof input
             debug!(
-                index,
+                index = index_u64,
                 len = self.elements.len(),
                 "grafting index is out of bounds"
             );
             return digest;
         }
         self.hasher
-            .update_with_element(self.elements[index as usize]);
+            .update_with_element(self.elements[index_u64 as usize]);
         self.hasher.update_with_digest(&digest);
 
         self.hasher.finalize()
