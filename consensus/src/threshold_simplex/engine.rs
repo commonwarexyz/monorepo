@@ -159,13 +159,19 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(pending_network, recovered_network, resolver_network))
+        self.context.clone().spawn_child(move |context| {
+            self.run(
+                context,
+                pending_network,
+                recovered_network,
+                resolver_network,
+            )
+        })
     }
 
     async fn run(
         self,
+        context: E,
         pending_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -182,14 +188,13 @@ impl<
         // Start the batcher
         let (pending_sender, pending_receiver) = pending_network;
         let voter_mailbox = self.voter_mailbox.clone();
-        let mut batcher_task = self
-            .context
+        let mut batcher_task = context
             .with_label("batcher")
             .spawn_child(|_| async { self.batcher.run(voter_mailbox, pending_receiver).await });
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_task = self.context.with_label("resolver").spawn_child(|_| async {
+        let mut resolver_task = context.with_label("resolver").spawn_child(|_| async {
             self.resolver
                 .run(self.voter_mailbox, resolver_sender, resolver_receiver)
                 .await
@@ -197,7 +202,7 @@ impl<
 
         // Start the voter
         let (recovered_sender, recovered_receiver) = recovered_network;
-        let mut voter_task = self.context.with_label("voter").spawn_child(|_| async {
+        let mut voter_task = context.with_label("voter").spawn_child(|_| async {
             self.voter
                 .run(
                     self.batcher_mailbox,
@@ -211,12 +216,16 @@ impl<
 
         // Shutdown if any actor finishes or if a shutdown signal is received.
         // Since each actor is spawned as a child, they will be automatically aborted.
-        let mut shutdown = self.context.stopped();
+        let mut shutdown = context.stopped();
         select! {
             _ = &mut shutdown => {},
             _ = &mut voter_task => {},
             _ = &mut batcher_task => {},
             _ = &mut resolver_task => {},
         }
+
+        voter_task.abort();
+        batcher_task.abort();
+        resolver_task.abort();
     }
 }

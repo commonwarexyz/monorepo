@@ -3832,6 +3832,10 @@ mod tests {
             assert!(is_running("engine_voter"));
             assert!(is_running("engine_resolver"));
 
+            // Make sure the engine is still running
+            context.sleep(Duration::from_millis(1000)).await;
+            assert!(is_running("engine"));
+
             // Abort engine and ensure children stop
             handle.abort();
             let _ = handle.await; // ensure parent tear-down runs
