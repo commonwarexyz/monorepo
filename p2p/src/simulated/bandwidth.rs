@@ -54,7 +54,7 @@ impl Resource {
 
 /// Identifier used to deduplicate resource entries across flows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Endpoint<P> {
+enum Constraint<P> {
     Egress(P),
     Ingress(P),
 }
@@ -80,7 +80,7 @@ impl State {
 struct Planner<'a, P> {
     flows: &'a [Flow<P>],
     resources: Vec<Resource>,
-    indices: BTreeMap<Endpoint<P>, usize>,
+    indices: BTreeMap<Constraint<P>, usize>,
     states: Vec<State>,
     rates: Vec<Option<Ratio>>,
     active: usize,
@@ -111,14 +111,14 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     ///
     /// Unbounded resources return `None`, allowing callers to skip any additional bookkeeping for
     /// flows that touch them.
-    fn track(&mut self, key: Endpoint<P>, limit: Option<u128>) -> Option<usize> {
-        if let Some(index) = self.indices.get(&key) {
+    fn track(&mut self, constraint: Constraint<P>, limit: Option<u128>) -> Option<usize> {
+        if let Some(index) = self.indices.get(&constraint) {
             return Some(*index);
         }
         let limit = limit?;
         let idx = self.resources.len();
         self.resources.push(Resource::new(limit));
-        self.indices.insert(key, idx);
+        self.indices.insert(constraint, idx);
         Some(idx)
     }
 
@@ -145,7 +145,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
             // Register the flow with its egress resource if the sender is bandwidth-limited.
             if let Some(resource_idx) = self.track(
-                Endpoint::Egress(flow.origin.clone()),
+                Constraint::Egress(flow.origin.clone()),
                 egress_limit(&flow.origin),
             ) {
                 self.attach(resource_idx, flow_idx, &mut state);
@@ -155,7 +155,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             if flow.delivered {
                 // Register the flow with its ingress resource if the recipient is bandwidth-limited.
                 if let Some(resource_idx) = self.track(
-                    Endpoint::Ingress(flow.recipient.clone()),
+                    Constraint::Ingress(flow.recipient.clone()),
                     ingress_limit(&flow.recipient),
                 ) {
                     self.attach(resource_idx, flow_idx, &mut state);
