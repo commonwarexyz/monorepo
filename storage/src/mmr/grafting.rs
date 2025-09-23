@@ -695,11 +695,26 @@ mod tests {
 
                 // Confirm we're now grafting leaves to the positions of their immediate parent in
                 // an MMR.
-                assert_eq!(hasher.destination_pos(Position::from(0)), Position::new(2));
-                assert_eq!(hasher.destination_pos(Position::from(1)), Position::new(5));
-                assert_eq!(hasher.destination_pos(Position::from(2)), Position::new(9));
-                assert_eq!(hasher.destination_pos(Position::from(3)), Position::new(12));
-                assert_eq!(hasher.destination_pos(Position::from(4)), Position::new(17));
+                assert_eq!(
+                    hasher.destination_pos(Position::from(Location::new(0))),
+                    Position::new(2)
+                );
+                assert_eq!(
+                    hasher.destination_pos(Position::from(Location::new(1))),
+                    Position::new(5)
+                );
+                assert_eq!(
+                    hasher.destination_pos(Position::from(Location::new(2))),
+                    Position::new(9)
+                );
+                assert_eq!(
+                    hasher.destination_pos(Position::from(Location::new(3))),
+                    Position::new(12)
+                );
+                assert_eq!(
+                    hasher.destination_pos(Position::from(Location::new(4))),
+                    Position::new(17)
+                );
 
                 let mut peak_mmr = Mmr::new();
                 build_test_mmr(&mut hasher, &mut peak_mmr);
@@ -710,12 +725,21 @@ mod tests {
 
             // Height 2 grafting destination computation check.
             let hasher: Hasher<Sha256> = Hasher::new(&mut standard, 2);
-            assert_eq!(hasher.destination_pos(Position::from(0)), Position::new(6));
-            assert_eq!(hasher.destination_pos(Position::from(1)), Position::new(13));
+            assert_eq!(
+                hasher.destination_pos(Position::from(Location::new(0))),
+                Position::new(6)
+            );
+            assert_eq!(
+                hasher.destination_pos(Position::from(Location::new(1))),
+                Position::new(13)
+            );
 
             // Height 3 grafting destination computation check.
             let hasher: Hasher<Sha256> = Hasher::new(&mut standard, 3);
-            assert_eq!(hasher.destination_pos(Position::from(0)), Position::new(14));
+            assert_eq!(
+                hasher.destination_pos(Position::from(Location::new(0))),
+                Position::new(14)
+            );
         });
     }
 

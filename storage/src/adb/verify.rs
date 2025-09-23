@@ -378,7 +378,7 @@ mod tests {
 
             // Construct proof
             let proof = create_proof(op_count, digests.clone());
-            assert_eq!(proof.size, Position::new(op_count).as_u64());
+            assert_eq!(proof.size, Position::from(Location::new(op_count)).as_u64());
             assert_eq!(proof.digests.len(), digests.len());
 
             // Verify the constructed proof works correctly
