@@ -12,27 +12,26 @@ use std::collections::{BTreeMap, BTreeSet};
 /// # Arguments
 ///
 /// * `lower_bound` - The lower bound of the sync range (inclusive)
-/// * `upper_bound` - The upper bound of the sync range
+/// * `upper_bound` - The upper bound of the sync range (inclusive)
 /// * `fetched_operations` - Map of start_loc -> operation count for fetched batches
 /// * `outstanding_requests` - Set of start locations for outstanding requests
 /// * `fetch_batch_size` - Expected size of each fetch batch
 ///
 /// # Invariants
 ///
-/// - All start locations in `fetched_operations` are in [lower_bound, upper_bound)
-/// - All start locations in `outstanding_requests` are in [lower_bound, upper_bound)
+/// - All start locations in `fetched_operations` are in [lower_bound, upper_bound]
+/// - All start locations in `outstanding_requests` are in [lower_bound, upper_bound]
 /// - All operation counts in `fetched_operations` are > 0
 pub fn find_next(
     lower_bound: u64,
-    mut upper_bound: u64,
+    upper_bound: u64,
     fetched_operations: &BTreeMap<u64, u64>, // start_loc -> operation_count
     outstanding_requests: &BTreeSet<u64>,
     fetch_batch_size: u64,
 ) -> Option<(u64, u64)> {
-    if lower_bound >= upper_bound {
+    if lower_bound > upper_bound {
         return None;
     }
-    upper_bound -= 1;
 
     let mut current_covered_end: Option<u64> = None; // Nothing covered yet
 

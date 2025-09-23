@@ -10,7 +10,7 @@ pub struct Target<D: Digest> {
     pub root: D,
     /// Lower bound of operations to sync (inclusive)
     pub lower_bound_ops: u64,
-    /// Upper bound of operations to sync
+    /// Upper bound of operations to sync (inclusive)
     pub upper_bound_ops: u64,
 }
 
@@ -33,10 +33,10 @@ impl<D: Digest> Read for Target<D> {
         let root = D::read(buf)?;
         let lower_bound_ops = u64::read(buf)?;
         let upper_bound_ops = u64::read(buf)?;
-        if lower_bound_ops >= upper_bound_ops {
+        if lower_bound_ops > upper_bound_ops {
             return Err(CodecError::Invalid(
                 "storage::adb::sync::Target",
-                "lower_bound_ops >= upper_bound_ops",
+                "lower_bound_ops > upper_bound_ops",
             ));
         }
         Ok(Self {
@@ -92,7 +92,7 @@ mod tests {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
             lower_bound_ops: 100,
-            upper_bound_ops: 501,
+            upper_bound_ops: 500,
         };
 
         // Serialize
@@ -118,7 +118,7 @@ mod tests {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
             lower_bound_ops: 100, // greater than upper_bound_ops
-            upper_bound_ops: 51,
+            upper_bound_ops: 50,
         };
 
         let mut buffer = Vec::new();
@@ -127,44 +127,44 @@ mod tests {
         let mut cursor = Cursor::new(buffer);
         assert!(matches!(
             Target::<sha256::Digest>::read(&mut cursor),
-            Err(CodecError::Invalid(_, "lower_bound_ops >= upper_bound_ops"))
+            Err(CodecError::Invalid(_, "lower_bound_ops > upper_bound_ops"))
         ));
     }
 
     type TestError = sync::Error<std::io::Error, sha256::Digest>;
 
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 101 },
-        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 50, upper_bound_ops: 201 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
         Ok(());
         "valid update"
     )]
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 101 },
-        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 200, upper_bound_ops: 101 },
-        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: 200, upper_bound_pos: 101 }));
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 200, upper_bound_ops: 100 },
+        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: 200, upper_bound_pos: 100 }));
         "invalid bounds - lower > upper"
     )]
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 101 },
-        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 51 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 50 },
         Err(TestError::Engine(EngineError::SyncTargetMovedBackward {
             old: Target {
                 root: sha256::Digest::from([0; 32]),
                 lower_bound_ops: 0,
-                upper_bound_ops: 101,
+                upper_bound_ops: 100,
             },
             new: Target {
                 root: sha256::Digest::from([1; 32]),
                 lower_bound_ops: 0,
-                upper_bound_ops: 51,
+                upper_bound_ops: 50,
             },
         }));
         "moves backward"
     )]
     #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 101 },
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 50, upper_bound_ops: 201 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
         Err(TestError::Engine(EngineError::SyncTargetRootUnchanged));
         "same root"
     )]
