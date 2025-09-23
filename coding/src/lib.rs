@@ -20,6 +20,9 @@ pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 mod no_coding;
 pub use no_coding::{NoCoding, NoCodingError};
 
+mod zoda;
+pub use zoda::{Zoda, ZodaError};
+
 /// Configuration common to all encoding schemes.
 pub struct Config {
     /// The minimum number of shards needed to encode the data.
