@@ -6,7 +6,7 @@
 
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{leaf_loc_to_pos, nodes_to_pin, PathIterator, PeakIterator},
+    iterator::{nodes_to_pin, PathIterator, PeakIterator},
     Error, Location, Position,
 };
 use alloc::{
@@ -354,12 +354,12 @@ impl<D: Digest> Proof<D> {
             return Err(ReconstructionError::MissingElements);
         }
         let start_loc_u64 = start_loc.as_u64();
-        let start_element_pos = leaf_loc_to_pos(start_loc);
+        let start_element_pos = Position::from(start_loc);
         let end_element_pos = if elements.len() == 1 {
             start_element_pos
         } else {
             let end_loc = start_loc_u64 + elements.len() as u64 - 1;
-            leaf_loc_to_pos(Location::new(end_loc))
+            Position::from(Location::new(end_loc))
         };
         if end_element_pos.as_u64() >= self.size {
             return Err(ReconstructionError::InvalidEndLoc);
@@ -429,8 +429,8 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<u64>) -> Ve
         return positions;
     }
 
-    let start_element_pos = leaf_loc_to_pos(Location::new(range.start));
-    let end_element_pos = leaf_loc_to_pos(Location::new(range.end - 1));
+    let start_element_pos = Position::from(Location::new(range.start));
+    let end_element_pos = Position::from(Location::new(range.end - 1));
     assert!(end_element_pos.as_u64() < size, "range is out of bounds");
 
     // Find the mountains that contain no elements from the range. The peaks of these mountains
@@ -884,7 +884,7 @@ mod tests {
             assert_eq!(root, pruned_root);
             for loc in 0..elements.len() as u64 {
                 let proof = mmr.proof(loc);
-                if leaf_loc_to_pos(loc) < i {
+                if Position::from(loc) < i {
                     continue;
                 }
                 assert!(proof.is_ok());
@@ -917,7 +917,7 @@ mod tests {
         // Test range proofs over all possible ranges of at least 2 elements
         let root = mmr.root(&mut hasher);
         for i in 0..elements.len() - 1 {
-            if leaf_loc_to_pos(i as u64) < PRUNE_POS {
+            if Position::from(i as u64) < PRUNE_POS {
                 continue;
             }
             for j in (i + 2)..elements.len() {
@@ -1077,7 +1077,7 @@ mod tests {
                         );
 
                     let pinned_nodes = extract_result.unwrap();
-                    let expected_pinned: Vec<u64> = nodes_to_pin(leaf_loc_to_pos(leaf)).collect();
+                    let expected_pinned: Vec<u64> = nodes_to_pin(Position::from(leaf)).collect();
 
                     // Verify count matches expected
                     assert_eq!(

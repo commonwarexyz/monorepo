@@ -69,10 +69,10 @@ pub struct SyncConfig<D: Digest> {
     pub config: Config,
 
     /// Pruning boundary - nodes below this position are considered pruned.
-    pub lower_bound_pos: u64,
+    pub lower_bound_pos: Position,
 
     /// Sync boundary - nodes above this position are rewound if present.
-    pub upper_bound_pos: u64,
+    pub upper_bound_pos: Position,
 
     /// The pinned nodes the MMR needs at the pruning boundary given by `lower_bound`, in the order
     /// specified by `nodes_to_pin`. If `None`, the pinned nodes are expected to already be in the
@@ -101,7 +101,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
-    pruned_to_pos: u64,
+    pruned_to_pos: Position,
 }
 
 /// Prefix used for nodes in the metadata prefixed U8 key.
@@ -179,7 +179,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             journal,
             journal_size: mmr_size,
             metadata,
-            pruned_to_pos: mmr_size,
+            pruned_to_pos: Position::new(mmr_size),
         })
     }
 
@@ -214,7 +214,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 journal,
                 journal_size,
                 metadata,
-                pruned_to_pos: 0,
+                pruned_to_pos: Position::new(0),
             });
         }
 
@@ -285,7 +285,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             journal,
             journal_size,
             metadata,
-            pruned_to_pos: metadata_prune_pos,
+            pruned_to_pos: Position::new(metadata_prune_pos),
         };
 
         if let Some(leaf) = orphaned_leaf {
@@ -348,12 +348,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 write_buffer: cfg.config.write_buffer,
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
-            cfg.lower_bound_pos,
-            cfg.upper_bound_pos,
+            cfg.lower_bound_pos.as_u64(),
+            cfg.upper_bound_pos.as_u64(),
         )
         .await?;
         let journal_size = journal.size().await?;
-        assert!(journal_size <= cfg.upper_bound_pos + 1);
+        assert!(journal_size <= cfg.upper_bound_pos.as_u64() + 1);
 
         // Open the metadata.
         let metadata_cfg = MConfig {
@@ -366,12 +366,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
-            cfg.lower_bound_pos.to_be_bytes().into(),
+            cfg.lower_bound_pos.as_u64().to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
-            let nodes_to_pin_persisted = nodes_to_pin(Position::new(cfg.lower_bound_pos));
+            let nodes_to_pin_persisted = nodes_to_pin(cfg.lower_bound_pos);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, pos.into()), digest.to_vec());
             }
@@ -393,9 +393,14 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         });
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
-        if cfg.lower_bound_pos < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound_pos)
-                .await?;
+        if cfg.lower_bound_pos.as_u64() < journal_size {
+            Self::add_extra_pinned_nodes(
+                &mut mem_mmr,
+                &metadata,
+                &journal,
+                cfg.lower_bound_pos.as_u64(),
+            )
+            .await?;
         }
         metadata.sync().await?;
 
@@ -528,7 +533,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 return Err(Error::Empty);
             }
             new_size -= 1;
-            if new_size < self.pruned_to_pos {
+            if new_size < self.pruned_to_pos.as_u64() {
                 return Err(Error::ElementPruned(new_size));
             }
             if PeakIterator::check_validity(new_size) {
@@ -558,7 +563,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             &mut self.mem_mmr,
             &self.metadata,
             &self.journal,
-            self.pruned_to_pos,
+            self.pruned_to_pos.as_u64(),
         )
         .await?;
 
@@ -596,7 +601,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
         let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(Position::new(self.pruned_to_pos)) {
+        for pos in nodes_to_pin(self.pruned_to_pos) {
             let digest = self.mem_mmr.get_node_unchecked(pos);
             pinned_nodes.insert(pos, *digest);
         }
@@ -615,7 +620,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         &mut self,
         prune_to_pos: u64,
     ) -> Result<BTreeMap<u64, H::Digest>, Error> {
-        assert!(prune_to_pos >= self.pruned_to_pos);
+        assert!(prune_to_pos >= self.pruned_to_pos.as_u64());
 
         let mut pinned_nodes = BTreeMap::new();
         for pos in nodes_to_pin(Position::new(prune_to_pos)) {
@@ -683,7 +688,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// requiring it sync the MMR to write any potential unprocessed updates.
     pub async fn prune_to_pos(&mut self, h: &mut impl Hasher<H>, pos: u64) -> Result<(), Error> {
         assert!(pos <= self.size());
-        if pos <= self.pruned_to_pos {
+        if pos <= self.pruned_to_pos.as_u64() {
             return Ok(());
         }
 
@@ -700,24 +705,24 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             .map(|(pos, digest)| (Position::new(pos), digest))
             .collect();
         self.mem_mmr.add_pinned_nodes(pinned_nodes_converted);
-        self.pruned_to_pos = pos;
+        self.pruned_to_pos = Position::new(pos);
 
         Ok(())
     }
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
-    pub fn pruned_to_pos(&self) -> u64 {
+    pub fn pruned_to_pos(&self) -> Position {
         self.pruned_to_pos
     }
 
     /// Return the position of the oldest retained node in the MMR, not including pinned nodes.
     pub fn oldest_retained_pos(&self) -> Option<u64> {
-        if self.pruned_to_pos == self.size() {
+        if self.pruned_to_pos.as_u64() == self.size() {
             return None;
         }
 
-        Some(self.pruned_to_pos)
+        Some(self.pruned_to_pos.as_u64())
     }
 
     /// Close the MMR, syncing any cached elements to disk and closing the journal.
@@ -765,7 +770,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     }
 
     #[cfg(test)]
-    pub fn get_pinned_nodes(&self) -> BTreeMap<u64, H::Digest> {
+    pub fn get_pinned_nodes(&self) -> BTreeMap<Position, H::Digest> {
         self.mem_mmr.pinned_nodes()
     }
 
@@ -802,10 +807,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Mmr<E, H>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        hasher::Hasher as _, iterator::leaf_loc_to_pos, stability::ROOTS,
-        StandardHasher as Standard,
-    };
+    use crate::mmr::{hasher::Hasher as _, stability::ROOTS, StandardHasher as Standard};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
@@ -953,7 +955,7 @@ mod tests {
                     mmr.sync(&mut hasher).await.unwrap();
                 }
             }
-            let leaf_pos = leaf_loc_to_pos(50);
+            let leaf_pos = Position::from(50);
             mmr.prune_to_pos(&mut hasher, leaf_pos).await.unwrap();
             // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
             mmr.pop(80).await.unwrap();

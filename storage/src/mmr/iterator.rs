@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use super::{Location, Position};
+use super::Position;
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
 /// in decreasing order of height.
@@ -146,19 +146,6 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<Position
     peaks
 }
 
-/// Returns the location of the leaf at position `leaf_pos` in an MMR, or None
-/// if this is not a leaf.
-///
-/// This computation is O(log2(n)) in the given position.
-pub(crate) fn leaf_pos_to_loc(leaf_pos: Position) -> Option<Location> {
-    Location::try_from(leaf_pos).ok()
-}
-
-/// Returns the position of the leaf with location `leaf_loc` in an MMR.
-pub(crate) fn leaf_loc_to_pos(leaf_loc: Location) -> Position {
-    Position::from(leaf_loc)
-}
-
 /// Returns the height of the node at position `pos` in an MMR.
 pub(crate) const fn pos_to_height(pos: Position) -> u32 {
     let mut pos = pos.as_u64();
@@ -276,7 +263,7 @@ mod tests {
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.iter().enumerate() {
             let leaf_loc_got = leaf_pos_to_loc(*leaf_pos).unwrap();
             assert_eq!(leaf_loc_got, Location::new(leaf_loc_expected as u64));
-            let leaf_pos_got = leaf_loc_to_pos(leaf_loc_got);
+            let leaf_pos_got = Position::from(leaf_loc_got);
             assert_eq!(leaf_pos_got, *leaf_pos);
             for i in last_leaf_pos + 1..leaf_pos.as_u64() {
                 assert!(leaf_pos_to_loc(Position::new(i)).is_none());

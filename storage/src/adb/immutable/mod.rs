@@ -6,7 +6,6 @@ use crate::{
     index::Index,
     journal::{fixed, variable},
     mmr::{
-        iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
@@ -211,10 +210,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
-                lower_bound_pos: leaf_loc_to_pos(Location::new(cfg.lower_bound)).into(),
-                upper_bound_pos: leaf_loc_to_pos(Location::new(cfg.upper_bound + 1))
-                    .saturating_sub(1)
-                    .into(),
+                lower_bound_pos: Position::from(Location::new(cfg.lower_bound)),
+                upper_bound_pos: Position::from(Location::new(cfg.upper_bound + 1))
+                    .saturating_sub(1),
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
@@ -389,7 +387,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Confirm post-conditions hold.
         assert_eq!(
             log_size,
-            leaf_pos_to_loc(Position::new(mmr.size())).unwrap().as_u64()
+            Location::try_from(Position::new(mmr.size()))
+                .unwrap()
+                .as_u64()
         );
         assert_eq!(log_size, locations.size().await?);
 
@@ -433,7 +433,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.mmr
             .prune_to_pos(
                 &mut self.hasher,
-                leaf_loc_to_pos(Location::new(self.oldest_retained_loc)).into(),
+                Position::from(Location::new(self.oldest_retained_loc)).as_u64(),
             )
             .await?;
         Ok(())
@@ -603,7 +603,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         let end_loc = std::cmp::min(op_count, start_loc + max_ops.get());
-        let mmr_size = leaf_loc_to_pos(Location::new(op_count));
+        let mmr_size = Position::from(Location::new(op_count));
 
         let proof = self
             .mmr

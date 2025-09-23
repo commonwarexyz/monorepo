@@ -47,7 +47,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                                 assert!(proof.verify_element_inclusion(
                                     &mut hasher,
                                     &element,
-                                    Location::from(loc),
+                                    Location::from(loc as u64),
                                     &root,
                                 ));
                             }

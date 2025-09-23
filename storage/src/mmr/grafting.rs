@@ -60,7 +60,7 @@
 
 use crate::mmr::{
     hasher::Hasher as HasherTrait,
-    iterator::{leaf_loc_to_pos, leaf_pos_to_loc, pos_to_height, PeakIterator},
+    iterator::{pos_to_height, PeakIterator},
     storage::Storage as StorageTrait,
     Error, Location, Position, StandardHasher,
 };
@@ -105,7 +105,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     ) -> Result<(), Error> {
         let mut futures = Vec::with_capacity(leaves.len());
         for leaf_loc in leaves {
-            let dest_pos = self.destination_pos(leaf_loc_to_pos(Location::new(*leaf_loc)));
+            let dest_pos = self.destination_pos(Position::from(Location::new(*leaf_loc)));
             let future = mmr.get_node(dest_pos);
             futures.push(future);
         }
@@ -114,7 +114,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
             let Some(digest) = digest else {
                 panic!("missing grafted digest for leaf {}", leaves[i]);
             };
-            let leaf_pos = leaf_loc_to_pos(Location::new(leaves[i]));
+            let leaf_pos = Position::from(Location::new(leaves[i]));
             self.grafted_digests.insert(leaf_pos, digest);
         }
 
@@ -381,8 +381,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
             debug!(pos = pos.as_u64(), "no grafting source pos");
             return digest;
         };
-        let index = leaf_pos_to_loc(Position::new(source_pos));
-        let Some(index) = index else {
+        let Ok(index) = Location::try_from(Position::new(source_pos)) else {
             // malformed proof input
             debug!(pos = source_pos, "grafting source pos is not a leaf");
             return digest;
@@ -493,7 +492,7 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
 mod tests {
     use super::*;
     use crate::mmr::{
-        iterator::leaf_loc_to_pos,
+        iterator::Position::from,
         mem::Mmr,
         stability::{build_test_mmr, ROOTS},
         verification, Position, StandardHasher,
@@ -675,7 +674,7 @@ mod tests {
                 // Since we're grafting 1-1, the destination position computation should be the
                 // identity function.
                 assert_eq!(hasher.destination_pos(0), 0);
-                let rand_leaf_pos = leaf_loc_to_pos(1234234);
+                let rand_leaf_pos = Position::from(1234234);
                 assert_eq!(hasher.destination_pos(rand_leaf_pos), rand_leaf_pos);
 
                 let mut peak_mmr = Mmr::new();
@@ -697,11 +696,11 @@ mod tests {
 
                 // Confirm we're now grafting leaves to the positions of their immediate parent in
                 // an MMR.
-                assert_eq!(hasher.destination_pos(leaf_loc_to_pos(0)), 2);
-                assert_eq!(hasher.destination_pos(leaf_loc_to_pos(1)), 5);
-                assert_eq!(hasher.destination_pos(leaf_loc_to_pos(2)), 9);
-                assert_eq!(hasher.destination_pos(leaf_loc_to_pos(3)), 12);
-                assert_eq!(hasher.destination_pos(leaf_loc_to_pos(4)), 17);
+                assert_eq!(hasher.destination_pos(Position::from(0)), 2);
+                assert_eq!(hasher.destination_pos(Position::from(1)), 5);
+                assert_eq!(hasher.destination_pos(Position::from(2)), 9);
+                assert_eq!(hasher.destination_pos(Position::from(3)), 12);
+                assert_eq!(hasher.destination_pos(Position::from(4)), 17);
 
                 let mut peak_mmr = Mmr::new();
                 build_test_mmr(&mut hasher, &mut peak_mmr);
@@ -712,12 +711,12 @@ mod tests {
 
             // Height 2 grafting destination computation check.
             let hasher: Hasher<Sha256> = Hasher::new(&mut standard, 2);
-            assert_eq!(hasher.destination_pos(leaf_loc_to_pos(0)), 6);
-            assert_eq!(hasher.destination_pos(leaf_loc_to_pos(1)), 13);
+            assert_eq!(hasher.destination_pos(Position::from(0)), 6);
+            assert_eq!(hasher.destination_pos(Position::from(1)), 13);
 
             // Height 3 grafting destination computation check.
             let hasher: Hasher<Sha256> = Hasher::new(&mut standard, 3);
-            assert_eq!(hasher.destination_pos(leaf_loc_to_pos(0)), 14);
+            assert_eq!(hasher.destination_pos(Position::from(0)), 14);
         });
     }
 

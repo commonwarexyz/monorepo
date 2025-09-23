@@ -729,7 +729,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::verify_proof,
-        mmr::{iterator::leaf_loc_to_pos, mem::Mmr as MemMmr, StandardHasher as Standard},
+        mmr::{mem::Mmr as MemMmr, StandardHasher as Standard},
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
@@ -1495,10 +1495,7 @@ pub(super) mod test {
 
             // Test singleton database
             let (single_proof, single_ops) = db.historical_proof(1, 0, NZU64!(1)).await.unwrap();
-            assert_eq!(
-                single_proof.size,
-                leaf_loc_to_pos(Location::new(1)).as_u64()
-            );
+            assert_eq!(single_proof.size, Position::from(Location::new(1)).as_u64());
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
@@ -1524,7 +1521,7 @@ pub(super) mod test {
 
             // Test proof at minimum historical position
             let (min_proof, min_ops) = db.historical_proof(3, 0, NZU64!(3)).await.unwrap();
-            assert_eq!(min_proof.size, leaf_loc_to_pos(Location::new(3)).as_u64());
+            assert_eq!(min_proof.size, Position::from(Location::new(3)).as_u64());
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
@@ -1555,7 +1552,7 @@ pub(super) mod test {
 
                 assert_eq!(
                     historical_proof.size,
-                    leaf_loc_to_pos(Location::new(end_loc)).as_u64()
+                    Position::from(Location::new(end_loc)).as_u64()
                 );
 
                 // Create  reference database at the given historical size
@@ -1598,7 +1595,7 @@ pub(super) mod test {
             db.commit().await.unwrap();
 
             let (proof, ops) = db.historical_proof(5, 1, NZU64!(10)).await.unwrap();
-            assert_eq!(proof.size, leaf_loc_to_pos(Location::new(5)).as_u64());
+            assert_eq!(proof.size, Position::from(Location::new(5)).as_u64());
             assert_eq!(ops.len(), 4);
 
             let mut hasher = Standard::<Sha256>::new();

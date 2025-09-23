@@ -2,10 +2,10 @@
 
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{leaf_pos_to_loc, nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
-    proof, Error,
-    Error::*,
-    Position, Proof,
+    iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
+    proof,
+    Error::{self, *},
+    Location, Position, Proof,
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -157,7 +157,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the total number of leaves in the MMR.
     pub fn leaves(&self) -> u64 {
-        leaf_pos_to_loc(Position::new(self.size()))
+        Location::try_from(Position::new(self.size()))
             .expect("invalid mmr size")
             .as_u64()
     }
@@ -747,7 +747,7 @@ impl<H: CHasher> Mmr<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, iterator::leaf_loc_to_pos, stability::ROOTS};
+    use crate::mmr::{hasher::Standard, stability::ROOTS};
     use commonware_cryptography::Sha256;
     use commonware_runtime::{create_pool, deterministic, tokio, Runner};
     use commonware_utils::hex;
@@ -858,7 +858,10 @@ mod tests {
             let peaks_needing_parents = nodes_needing_parents(mmr.peak_iterator());
             assert_eq!(
                 peaks_needing_parents,
-                vec![17, 18].into_iter().map(Position::new).collect::<Vec<_>>(),
+                vec![17, 18]
+                    .into_iter()
+                    .map(Position::new)
+                    .collect::<Vec<_>>(),
                 "mmr nodes needing parents not as expected"
             );
 
@@ -899,8 +902,8 @@ mod tests {
             assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests
-            mmr.prune_to_pos(14); // prune up to the tallest peak
-            assert_eq!(mmr.oldest_retained_pos().unwrap(), 14);
+            mmr.prune_to_pos(Position::new(14)); // prune up to the tallest peak
+            assert_eq!(mmr.oldest_retained_pos().unwrap(), Position::new(14));
 
             // After pruning, we shouldn't be able to generate a proof for any elements before the
             // pruning boundary. (To be precise, due to the maintenance of pinned nodes, we may in
@@ -945,13 +948,13 @@ mod tests {
 
             // Test that clone_pruned produces a valid copy of the MMR as if it had been cloned
             // after being fully pruned.
-            mmr.prune_to_pos(17); // prune up to the second peak
+            mmr.prune_to_pos(Position::new(17)); // prune up to the second peak
             let clone = mmr.clone_pruned();
             assert_eq!(clone.oldest_retained_pos(), None);
-            assert_eq!(clone.pruned_to_pos(), clone.size());
+            assert_eq!(clone.pruned_to_pos().as_u64(), clone.size());
             mmr.prune_all();
             assert_eq!(mmr.oldest_retained_pos(), None);
-            assert_eq!(mmr.pruned_to_pos(), mmr.size());
+            assert_eq!(mmr.pruned_to_pos().as_u64(), mmr.size());
             assert_eq!(mmr.size(), clone.size());
             assert_eq!(mmr.root(&mut hasher), clone.root(&mut hasher));
         });
@@ -1023,7 +1026,7 @@ mod tests {
 
             let mut mmr = Mmr::init(Config {
                 nodes: vec![],
-                pruned_to_pos: 0,
+                pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
                 #[cfg(feature = "std")]
                 pool: Some(pool),
@@ -1058,7 +1061,7 @@ mod tests {
         for i in 0u64..199 {
             c_hasher.update(&i.to_be_bytes());
             let element = c_hasher.finalize();
-            leaves.push(mmr.add(hasher, &element));
+            leaves.push(mmr.add(hasher, &element).as_u64());
         }
         mmr.sync(hasher);
 
@@ -1096,9 +1099,9 @@ mod tests {
                 mmr.add(&mut hasher, &element);
             }
 
-            let leaf_pos = leaf_loc_to_pos(100);
+            let leaf_pos = Position::from(Location::new(100));
             mmr.prune_to_pos(leaf_pos);
-            while mmr.size() > leaf_pos {
+            while mmr.size() > leaf_pos.as_u64() {
                 assert!(mmr.pop().is_ok());
             }
             assert_eq!(hex(&mmr.root(&mut hasher)), ROOTS[100]);
@@ -1194,7 +1197,7 @@ mod tests {
             let pool = create_pool(ctx, 4).unwrap();
             let mut mmr = Mmr::init(Config {
                 nodes: Vec::new(),
-                pruned_to_pos: 0,
+                pruned_to_pos: Position::new(0),
                 pinned_nodes: Vec::new(),
                 #[cfg(feature = "std")]
                 pool: Some(pool),

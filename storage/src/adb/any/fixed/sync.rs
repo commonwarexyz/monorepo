@@ -71,10 +71,13 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
-                lower_bound_pos: Position::from(Location::from(lower_bound)).as_u64(),
+                lower_bound_pos: Position::from(Location::from(lower_bound)),
                 // The last node of an MMR with `upper_bound` + 1 operations is at the position
                 // right before where the next leaf goes.
-                upper_bound_pos: Position::from(Location::from(upper_bound + 1)).as_u64() - 1,
+                upper_bound_pos: Position::from(
+                    // TODO make this less ugly
+                    Position::from(Location::from(upper_bound + 1)).as_u64() - 1,
+                ),
                 pinned_nodes,
             },
         )
@@ -1420,7 +1423,7 @@ mod tests {
             let upper_bound_ops = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes_pos = nodes_to_pin(Position::from((Location::new(lower_bound_ops))));
+            let pinned_nodes_pos = nodes_to_pin(Position::from(Location::new(lower_bound_ops)));
             let pinned_nodes =
                 join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos.as_u64()))).await;
             let pinned_nodes = pinned_nodes

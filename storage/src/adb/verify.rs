@@ -1,5 +1,5 @@
 use crate::mmr::{
-    iterator::leaf_loc_to_pos, proof, verification, verification::ProofStore, Error, Location, Position, Proof,
+    proof, verification, verification::ProofStore, Error, Location, Position, Proof,
     StandardHasher as Standard,
 };
 use commonware_codec::Encode;
@@ -47,8 +47,19 @@ where
     D: Digest,
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion_and_extract_digests(hasher, &elements, Location::new(start_loc), target_root)
-        .map(|result| result.into_iter().map(|(pos, digest)| (pos.into(), digest)).collect())
+    proof
+        .verify_range_inclusion_and_extract_digests(
+            hasher,
+            &elements,
+            Location::new(start_loc),
+            target_root,
+        )
+        .map(|result| {
+            result
+                .into_iter()
+                .map(|(pos, digest)| (pos.into(), digest))
+                .collect()
+        })
 }
 
 /// Calculate the digests required to construct a [Proof] for a range of operations.
@@ -57,17 +68,22 @@ pub fn digests_required_for_proof<D: Digest>(
     start_loc: u64,
     end_loc: u64,
 ) -> Vec<u64> {
-    let size = leaf_loc_to_pos(Location::new(op_count));
+    let size = Position::from(Location::new(op_count));
     proof::nodes_required_for_range_proof(size.into(), start_loc..(end_loc + 1))
-        .into_iter().map(|pos| pos.into()).collect()
+        .into_iter()
+        .map(|pos| pos.into())
+        .collect()
 }
 
 /// Create a [Proof] from a op_count and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
 pub fn create_proof<D: Digest>(op_count: u64, digests: Vec<D>) -> Proof<D> {
-    let size = leaf_loc_to_pos(Location::new(op_count));
-    Proof::<D> { size: size.into(), digests }
+    let size = Position::from(Location::new(op_count));
+    Proof::<D> {
+        size: size.into(),
+        digests,
+    }
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
@@ -84,7 +100,7 @@ where
     D: Digest,
 {
     // Convert operation location to MMR position
-    let start_pos = leaf_loc_to_pos(Location::new(start_loc));
+    let start_pos = Position::from(Location::new(start_loc));
 
     // Encode operations for verification
     let elements: Vec<Vec<u8>> = operations.iter().map(|op| op.encode().to_vec()).collect();
@@ -274,7 +290,7 @@ mod tests {
             assert!(!nodes.is_empty());
 
             // Verify the extracted nodes match what we expect from the proof
-            let start_pos = leaf_loc_to_pos(start_loc);
+            let start_pos = Position::from(start_loc);
             let expected_pinned: Vec<u64> = nodes_to_pin(start_pos).collect();
             assert_eq!(nodes.len(), expected_pinned.len());
         });
@@ -359,7 +375,7 @@ mod tests {
 
             // Construct proof
             let proof = create_proof(op_count, digests.clone());
-            assert_eq!(proof.size, leaf_loc_to_pos(op_count));
+            assert_eq!(proof.size, Position::from(op_count));
             assert_eq!(proof.digests.len(), digests.len());
 
             // Verify the constructed proof works correctly
