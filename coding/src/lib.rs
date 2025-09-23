@@ -69,20 +69,22 @@ impl Read for Config {
 /// let (commitment, shards) =
 ///      RS::encode(&config, data.as_slice()).unwrap();
 ///
-/// // Each shard can be checked, and turn into a ReShard to be shared with others.
-/// let (shards, reshards): (Vec<_>, Vec<_>) = shards
+/// // Each shard can be turned into a reshard to be shared with others,
+/// // and then checked before reconstruction
+/// let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
 ///         .into_iter()
 ///         .map(|(shard, proof)| {
-///             let reshard = RS::check(&commitment, &proof, &shard).unwrap();
-///             (shard, reshard)
+///             let reshard = RS::reshard(&commitment, &proof, &shard).unwrap();
+///             let checked_shard = RS::check(&commitment, reshard).unwrap();
+///             (shard, checked_shard)
 ///         })
 ///         .collect();
 ///
-/// let data2 = RS::decode(&config, &commitment, shards[0].clone(), &reshards[1..2]).unwrap();
+/// let data2 = RS::decode(&config, &commitment, shards[0].clone(), &checked_shards[1..2]).unwrap();
 /// assert_eq!(&data[..], &data2[..]);
 ///
 /// // Decoding works with different shards, with a guarantee to get the same result.
-/// let data3 = RS::decode(&config, &commitment, shards[1].clone(), &reshards[2..]).unwrap();
+/// let data3 = RS::decode(&config, &commitment, shards[1].clone(), &checked_shards[2..]).unwrap();
 /// assert_eq!(&data[..], &data3[..]);
 /// ```
 pub trait Scheme {
@@ -96,6 +98,11 @@ pub trait Scheme {
     /// have extra information in `Shard` that may not be necessary to reconstruct
     /// the data.
     type ReShard: Clone + Codec;
+    /// A shard that has been checked for inclusion in the commitment.
+    ///
+    /// This allows excluding [Scheme::ReShard]s which are invalid, and shouldn't
+    /// be considered as progress towards meeting the minimum number of shards.
+    type CheckedShard: Clone;
     /// A proof that the shard is well-formed.
     type Proof: Codec;
     type Error: std::fmt::Debug;
@@ -110,17 +117,23 @@ pub trait Scheme {
         data: impl Buf,
     ) -> Result<(Self::Commitment, Vec<(Self::Shard, Self::Proof)>), Self::Error>;
 
-    /// Check that integrity of a shard.
+    /// Check the integrity of a shard, producing a reshard to sent to others.
     ///
     /// At a minimum, this checks that the shard is included in the data attested
     /// to by the commitment.
     ///
     /// This might have a stronger guarantee, in the case of [ValidatingScheme].
-    fn check(
+    fn reshard(
         commitment: &Self::Commitment,
         proof: &Self::Proof,
         shard: &Self::Shard,
     ) -> Result<Self::ReShard, Self::Error>;
+
+    /// Check the integrity of a reshard, producing a checked shard.
+    fn check(
+        commitment: &Self::Commitment,
+        reshard: Self::ReShard,
+    ) -> Result<Self::CheckedShard, Self::Error>;
 
     /// Decode the data from shards received from other participants.
     ///
@@ -136,7 +149,7 @@ pub trait Scheme {
         config: &Config,
         commitment: &Self::Commitment,
         my_shard: Self::Shard,
-        shards: &[Self::ReShard],
+        shards: &[Self::CheckedShard],
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
@@ -163,11 +176,12 @@ mod test {
         // Encode the data
         let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
-        let (shards, reshards): (Vec<_>, Vec<_>) = shards
+        let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::check(&commitment, &proof, &shard).unwrap();
-                (shard, reshard)
+                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&commitment, reshard).unwrap();
+                (shard, checked_shard)
             })
             .collect();
 
@@ -176,7 +190,7 @@ mod test {
             &config,
             &commitment,
             shards[0].clone(),
-            &reshards[1..config.minimum_shards as usize],
+            &checked_shards[1..config.minimum_shards as usize],
         )
         .unwrap();
         assert_eq!(decoded, data, "test_basic_failed");
@@ -192,16 +206,23 @@ mod test {
         // Encode the data
         let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
-        let (shards, reshards): (Vec<_>, Vec<_>) = shards
+        let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::check(&commitment, &proof, &shard).unwrap();
-                (shard, reshard)
+                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&commitment, reshard).unwrap();
+                (shard, checked_shard)
             })
             .collect();
 
         // Try to decode with a mix of original and recovery pieces
-        let decoded = S::decode(&config, &commitment, shards[0].clone(), &reshards[1..6]).unwrap();
+        let decoded = S::decode(
+            &config,
+            &commitment,
+            shards[0].clone(),
+            &checked_shards[1..6],
+        )
+        .unwrap();
         assert_eq!(decoded, data, "test_moderate_failed");
     }
 
@@ -215,16 +236,23 @@ mod test {
         // Encode the data
         let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
-        let (shards, reshards): (Vec<_>, Vec<_>) = shards
+        let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::check(&commitment, &proof, &shard).unwrap();
-                (shard, reshard)
+                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&commitment, reshard).unwrap();
+                (shard, checked_shard)
             })
             .collect();
 
         // Try to decode with a mix of original and recovery pieces
-        let decoded = S::decode(&config, &commitment, shards[0].clone(), &reshards[2..]).unwrap();
+        let decoded = S::decode(
+            &config,
+            &commitment,
+            shards[0].clone(),
+            &checked_shards[2..],
+        )
+        .unwrap();
         assert_eq!(decoded, data, "test_odd_shard_len_failed");
     }
 
@@ -238,11 +266,12 @@ mod test {
         // Encode the data
         let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
-        let (shards, reshards): (Vec<_>, Vec<_>) = shards
+        let (shards, checked_shard): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::check(&commitment, &proof, &shard).unwrap();
-                (shard, reshard)
+                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&commitment, reshard).unwrap();
+                (shard, checked_shard)
             })
             .collect();
 
@@ -251,7 +280,7 @@ mod test {
             &config,
             &commitment,
             shards[0].clone(),
-            &[reshards[4].clone(), reshards[6].clone()],
+            &[checked_shard[4].clone(), checked_shard[6].clone()],
         )
         .unwrap();
         assert_eq!(decoded, data, "test_recovery_failed");
@@ -267,11 +296,12 @@ mod test {
         // Encode the data
         let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
-        let (shards, reshards): (Vec<_>, Vec<_>) = shards
+        let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::check(&commitment, &proof, &shard).unwrap();
-                (shard, reshard)
+                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&commitment, reshard).unwrap();
+                (shard, checked_shard)
             })
             .collect();
 
@@ -280,7 +310,7 @@ mod test {
             &config,
             &commitment,
             shards[0].clone(),
-            &reshards[1..config.minimum_shards as usize],
+            &checked_shards[1..config.minimum_shards as usize],
         )
         .unwrap();
         assert_eq!(decoded, data, "test_empty_data_failed");
@@ -296,11 +326,12 @@ mod test {
         // Encode the data
         let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
-        let (shards, reshards): (Vec<_>, Vec<_>) = shards
+        let (shards, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
             .map(|(shard, proof)| {
-                let reshard = S::check(&commitment, &proof, &shard).unwrap();
-                (shard, reshard)
+                let reshard = S::reshard(&commitment, &proof, &shard).unwrap();
+                let checked_shard = S::check(&commitment, reshard).unwrap();
+                (shard, checked_shard)
             })
             .collect();
 
@@ -309,7 +340,7 @@ mod test {
             &config,
             &commitment,
             shards[0].clone(),
-            &reshards[1..config.minimum_shards as usize],
+            &checked_shards[1..config.minimum_shards as usize],
         )
         .unwrap();
         assert_eq!(decoded, data, "test_large_data_failed");

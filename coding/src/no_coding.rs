@@ -25,6 +25,8 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
 
     type ReShard = ();
 
+    type CheckedShard = ();
+
     type Proof = ();
 
     type Error = NoCodingError;
@@ -41,7 +43,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         Ok((commitment, shards))
     }
 
-    fn check(
+    fn reshard(
         commitment: &Self::Commitment,
         _proof: &Self::Proof,
         shard: &Self::Shard,
@@ -53,11 +55,18 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         Ok(())
     }
 
+    fn check(
+        _commitment: &Self::Commitment,
+        _reshard: Self::ReShard,
+    ) -> Result<Self::CheckedShard, Self::Error> {
+        Ok(())
+    }
+
     fn decode(
         _config: &crate::Config,
         _commitment: &Self::Commitment,
         my_shard: Self::Shard,
-        _shards: &[Self::ReShard],
+        _shards: &[Self::CheckedShard],
     ) -> Result<Vec<u8>, Self::Error> {
         Ok(my_shard)
     }
