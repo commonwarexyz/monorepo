@@ -35,8 +35,8 @@ cfg_if::cfg_if! {
 
 /// Extension trait providing additional functionality for [`Duration`].
 pub trait DurationExt {
-    /// Creates a duration from nanoseconds, saturating at the platform limit if it would overflow.
-    fn from_nanos_saturating(ns: u128) -> Duration;
+    /// Creates a duration from nanoseconds represented as a `u128`.
+    fn from_nanos_u128(ns: u128) -> Duration;
 
     /// Parse a duration string with time unit suffixes.
     ///
@@ -91,19 +91,10 @@ pub trait DurationExt {
 }
 
 impl DurationExt for Duration {
-    fn from_nanos_saturating(ns: u128) -> Duration {
-        if ns == 0 {
-            return Duration::ZERO;
-        }
-
-        let max_ns = MAX_DURATION_SINCE_UNIX_EPOCH.as_nanos();
-        if ns >= max_ns {
-            MAX_DURATION_SINCE_UNIX_EPOCH
-        } else {
-            let secs = (ns / NANOS_PER_SEC) as u64;
-            let nanos = (ns % NANOS_PER_SEC) as u32;
-            Duration::new(secs, nanos)
-        }
+    fn from_nanos_u128(ns: u128) -> Duration {
+        let secs = (ns / NANOS_PER_SEC) as u64;
+        let nanos = (ns % NANOS_PER_SEC) as u32;
+        Duration::new(secs, nanos)
     }
 
     fn parse(s: &str) -> Result<Duration, String> {
@@ -295,21 +286,10 @@ mod tests {
     }
 
     #[test]
-    fn saturating_add_caps_at_max() {
+    fn system_time_saturating_add() {
         let max = SystemTime::limit();
         assert_eq!(max.saturating_add(Duration::from_nanos(1)), max);
         assert_eq!(max.saturating_add(Duration::from_secs(1)), max);
-    }
-
-    #[test]
-    fn saturating_duration_caps() {
-        let max_ns = MAX_DURATION_SINCE_UNIX_EPOCH.as_nanos();
-        assert_eq!(
-            Duration::from_nanos_saturating(max_ns + 1),
-            MAX_DURATION_SINCE_UNIX_EPOCH
-        );
-        let value = Duration::from_nanos_saturating(42);
-        assert_eq!(value, Duration::from_nanos(42));
     }
 
     #[test]
