@@ -7,7 +7,7 @@
 //! whenever the active set changes (for example when a message finishes or a new message
 //! arrives).
 
-use commonware_utils::{DurationExt, Ratio, NANOS_PER_SEC};
+use commonware_utils::{time::NANOS_PER_SEC, DurationExt, Ratio};
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 /// Minimal description of a simulated transmission path.
