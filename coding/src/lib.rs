@@ -109,6 +109,7 @@ pub trait Scheme {
         config: &Config,
         data: impl Buf,
     ) -> Result<(Self::Commitment, Vec<(Self::Shard, Self::Proof)>), Self::Error>;
+
     /// Check that integrity of a shard.
     ///
     /// At a minimum, this checks that the shard is included in the data attested
@@ -120,6 +121,7 @@ pub trait Scheme {
         proof: &Self::Proof,
         shard: &Self::Shard,
     ) -> Result<Self::ReShard, Self::Error>;
+
     /// Decode the data from shards received from other participants.
     ///
     /// The data must be decodeable with as few as `config.minimum_shards`,
