@@ -11,6 +11,10 @@ use commonware_utils::{time::NANOS_PER_SEC, DurationExt, Ratio};
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 /// Minimal description of a simulated transmission path.
+///
+/// `delivered == false` means the flow only exercises the sender egress path (for example,
+/// packets that will be dropped before they reach the recipient) so we avoid charging ingress
+/// capacity for it.
 #[derive(Clone, Debug)]
 pub struct Flow<P> {
     pub id: u64,
@@ -27,6 +31,10 @@ pub enum Rate {
 }
 
 /// Shared capacity constraint (either egress or ingress) tracked by the planner.
+///
+/// `remaining` tracks the unassigned bytes/second, `members` contains the flows that consume the
+/// resource, and `active` counts how many of those flows are still eligible for additional
+/// bandwidth in the current filling round.
 #[derive(Debug)]
 struct Resource {
     remaining: Ratio,
@@ -99,6 +107,10 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         planner
     }
 
+    /// Register each flow with the constrained resources it depends on.
+    ///
+    /// Unlimited resources are ignored so we never carry them into the progressive-filling loop,
+    /// keeping the active set as small (and cheap) as possible.
     fn register<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
     where
         E: FnMut(&P) -> Option<u128>,
@@ -135,6 +147,10 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         }
     }
 
+    /// Ensure a resource entry exists, returning its index if the resource is rate-limited.
+    ///
+    /// Unbounded resources return `None`, allowing callers to skip any additional bookkeeping for
+    /// flows that touch them.
     fn spawn(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
         if let Some(index) = self.indices.get(&key) {
             return Some(*index);
@@ -147,6 +163,9 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     /// Freeze all flows that rely on a saturated resource.
+    ///
+    /// We clone the membership list because freezing mutates `resource.active`; iterating over the
+    /// original vector while modifying it would corrupt the traversal.
     fn freeze(&mut self, res_idx: usize) {
         // Clone before iterating: freezing updates `active_users`, which should not disturb the traversal.
         let members = self.resources[res_idx].members.clone();
@@ -156,6 +175,10 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     /// Finalize the rate for `flow_idx` and update every referenced resource.
+    ///
+    /// The flow's share at the moment of freezing becomes its permanent rate; afterwards we
+    /// subtract it from every referenced resource so the next progressive-filling iteration only
+    /// considers the remaining active flows.
     fn deactivate(&mut self, flow_idx: usize) {
         let state = &mut self.flow_states[flow_idx];
         if !state.active {
@@ -177,6 +200,9 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     /// Link a flow to a resource, marking it as constrained.
+    ///
+    /// We have to update both the resource and flow views so freezing can walk in either
+    /// direction without extra lookups.
     fn attach(&mut self, resource_idx: usize, flow_idx: usize, state: &mut State) {
         let resource = &mut self.resources[resource_idx];
         resource.members.push(flow_idx);
@@ -196,6 +222,9 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             limiting.clear();
             let mut min_delta: Option<Ratio> = None;
 
+            // Step 1: among all resources still serving active flows, locate the smallest per-flow
+            // headroom (i.e. the next constraint that will be hit if we increase every active flow
+            // uniformly).
             for (res_idx, resource) in self.resources.iter().enumerate() {
                 if resource.active == 0 {
                     continue;
@@ -230,6 +259,8 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 }
             }
 
+            // Step 2: advance every active flow by the identified delta, or freeze immediately if
+            // we discovered an already saturated resource.
             let delta = match min_delta {
                 Some(delta) => delta,
                 None => {
@@ -271,6 +302,8 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             if saturated.is_empty() {
                 continue;
             }
+            // Step 3: freeze every flow touching the resources that just saturated so they are not
+            // considered in the next iteration.
             saturated.sort_unstable();
             saturated.dedup();
             for res_idx in saturated {
@@ -279,7 +312,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         }
     }
 
-    /// Perform progressive filling until every constrained flow is frozen.
+    /// Consume the planner, finalising the rate for every flow and returning the result map.
     fn solve(mut self) -> BTreeMap<u64, Rate> {
         self.fill();
 
@@ -317,12 +350,16 @@ where
         return BTreeMap::new();
     }
 
-    // Register the flows and solve.
+    // Register the flows and solve. Construction hydrates the planner with all resource
+    // membership data, and `solve` consumes it to run progressive filling and return the final map.
     let planner = Planner::new(flows, &mut egress_limit, &mut ingress_limit);
     planner.solve()
 }
 
 /// Calculate the time it will take to deplete a given amount of capacity at some [Rate].
+///
+/// The computation rounds up so callers receive the minimum duration that guarantees at least the
+/// requested number of bytes were transmitted.
 pub fn lifetime(rate: &Rate, bytes: u128) -> Option<Duration> {
     match rate {
         Rate::Unlimited => Some(Duration::ZERO),
@@ -355,7 +392,9 @@ pub fn lifetime(rate: &Rate, bytes: u128) -> Option<Duration> {
 /// Calculate the number of bytes that can be transferred in a given duration at some [Rate],
 /// accounting for any fractional bytes-per-nanosecond that would otherwise be rounded away.
 ///
-/// This can be used to deduce how many bytes were sent when interrupting a flow at some point in time.
+/// The caller supplies `carry` to preserve sub-byte precision across repeated invocations (useful
+/// when advancing simulation time in small quanta) and can inspect the return value to learn how
+/// much progress a flow made before an interruption.
 pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u128) -> u128 {
     if remaining == 0 {
         return 0;
