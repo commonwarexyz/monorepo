@@ -14,10 +14,10 @@ cfg_if::cfg_if! {
         /// Source: [`FILETIME` range](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime)
         /// uses unsigned 64-bit ticks (100ns) since 1601-01-01; converting to the Unix epoch offset of
         /// 11_644_473_600 seconds yields the remaining representable span.
-        const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(910_692_730_085, 477_580_700);
+        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(910_692_730_085, 477_580_700);
 
         /// The precision of [`SystemTime`] on Windows.
-        const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(100);
+        pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(100);
     } else {
         /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
         /// current platform.
@@ -26,10 +26,10 @@ cfg_if::cfg_if! {
         /// [`std::sys::pal::unix::time`](https://github.com/rust-lang/rust/blob/master/library/std/src/sys/pal/unix/time.rs),
         /// which bounds additions at `i64::MAX` seconds plus 999_999_999 nanoseconds.
         #[cfg(not(windows))]
-        const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
+        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
 
         /// The precision of [`SystemTime`] on Unix.
-        const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(1);
+        pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(1);
     }
 }
 
@@ -286,6 +286,7 @@ mod tests {
             .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
             .unwrap()
             .checked_add(Duration::from_nanos(1));
+        // TODO: won't error but returned value won't be equal? -> doesn't hit next interval (won't panic) but can't be represented?
         assert!(result.is_none(), "able to exceed max duration");
     }
 
@@ -293,6 +294,7 @@ mod tests {
     fn saturating_add_caps_at_max() {
         let max = SystemTime::limit();
         assert_eq!(max.saturating_add(Duration::from_nanos(1)), max);
+        assert_eq!(max.saturating_add(Duration::from_secs(1)), max);
     }
 
     #[test]
