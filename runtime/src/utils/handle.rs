@@ -240,8 +240,8 @@ mod tests {
     }
 
     #[test]
-    fn handle_metrics_finish_after_completion() {
-        const LABEL: &str = "handle_metrics_completion";
+    fn tasks_running_decreased_after_completion() {
+        const LABEL: &str = "tasks_running_after_completion";
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
@@ -268,8 +268,8 @@ mod tests {
     }
 
     #[test]
-    fn handle_metrics_remain_active_when_handle_dropped() {
-        const LABEL: &str = "handle_metrics_drop";
+    fn tasks_running_unchanged_when_handle_dropped() {
+        const LABEL: &str = "tasks_running_unchanged";
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
@@ -297,8 +297,8 @@ mod tests {
     }
 
     #[test]
-    fn handle_abort_finishes_metrics_immediately() {
-        const LABEL: &str = "handle_metrics_abort_via_handle";
+    fn tasks_running_decreased_immediately_on_abort_via_handle() {
+        const LABEL: &str = "tasks_running_abort_via_handle";
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
@@ -326,8 +326,8 @@ mod tests {
     }
 
     #[test]
-    fn handle_metrics_finish_for_blocking_task() {
-        const LABEL: &str = "handle_metrics_blocking";
+    fn tasks_running_decreased_after_blocking_completion() {
+        const LABEL: &str = "tasks_running_after_blocking_completion";
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
@@ -359,8 +359,8 @@ mod tests {
     }
 
     #[test]
-    fn aborter_finishes_metrics_immediately() {
-        const LABEL: &str = "handle_metrics_abort";
+    fn tasks_running_decreased_immediately_on_abort_via_aborter() {
+        const LABEL: &str = "tasks_running_abort_via_aborter";
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
@@ -376,9 +376,7 @@ mod tests {
                 "expected tasks_running gauge to be 1 before abort: {metrics}",
             );
 
-            let aborter = handle
-                .aborter()
-                .expect("aborter missing for non-blocking task");
+            let aborter = handle.aborter().unwrap();
             aborter.abort();
 
             let metrics = context.encode();
