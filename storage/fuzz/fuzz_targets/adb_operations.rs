@@ -130,11 +130,11 @@ fn fuzz(data: FuzzInput) {
                         let current_root = adb.root(&mut hasher);
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
-                        let adjusted_start = *start_loc % actual_op_count;
+                        let adjusted_start =Location::new(*start_loc % actual_op_count);
                         let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 
                         let (proof, log) = adb
-                            .proof(Location::new(adjusted_start), NZU64!(adjusted_max_ops))
+                            .proof(adjusted_start, NZU64!(adjusted_max_ops))
                             .await
                             .expect("proof should not fail");
 

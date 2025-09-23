@@ -11,7 +11,7 @@ use crate::{
             Database, Error as SyncError, Journal, Target,
         },
     },
-    mmr::StandardHasher,
+    mmr::{Location, StandardHasher},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
@@ -419,7 +419,7 @@ where
         let proof_valid = adb::verify_proof(
             &mut self.hasher,
             &proof,
-            start_loc,
+            Location::new(start_loc),
             &operations,
             &self.target.root,
         );
@@ -430,9 +430,11 @@ where
         if proof_valid {
             // Extract pinned nodes if we don't have them and this is the first batch
             if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound_ops {
-                if let Ok(nodes) =
-                    crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
-                {
+                if let Ok(nodes) = crate::adb::extract_pinned_nodes(
+                    &proof,
+                    Location::new(start_loc),
+                    operations_len,
+                ) {
                     self.pinned_nodes = Some(nodes);
                 }
             }

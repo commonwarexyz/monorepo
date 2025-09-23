@@ -1084,7 +1084,13 @@ pub(super) mod test {
 
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
-                assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
+                assert!(verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(i),
+                    &log,
+                    &root
+                ));
             }
 
             db.destroy().await.unwrap();
@@ -1445,7 +1451,7 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
-                5,
+                Location::new(5),
                 &historical_ops,
                 &root_hash
             ));
@@ -1471,7 +1477,7 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
-                5,
+                Location::new(5),
                 &historical_ops,
                 &root_hash
             ));
@@ -1492,7 +1498,10 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
 
             // Test singleton database
-            let (single_proof, single_ops) = db.historical_proof(1, Location::new(0), NZU64!(1)).await.unwrap();
+            let (single_proof, single_ops) = db
+                .historical_proof(1, Location::new(0), NZU64!(1))
+                .await
+                .unwrap();
             assert_eq!(single_proof.size, Position::from(Location::new(1)).as_u64());
             assert_eq!(single_ops.len(), 1);
 
@@ -1506,19 +1515,24 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &single_proof,
-                0,
+                Location::new(0),
                 &single_ops,
                 &single_root
             ));
 
             // Test requesting more operations than available in historical position
-            let (_limited_proof, limited_ops) =
-                db.historical_proof(10, Location::new(5), NZU64!(20)).await.unwrap();
+            let (_limited_proof, limited_ops) = db
+                .historical_proof(10, Location::new(5), NZU64!(20))
+                .await
+                .unwrap();
             assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
             assert_eq!(limited_ops, ops[5..10]);
 
             // Test proof at minimum historical position
-            let (min_proof, min_ops) = db.historical_proof(3, Location::new(0), NZU64!(3)).await.unwrap();
+            let (min_proof, min_ops) = db
+                .historical_proof(3, Location::new(0), NZU64!(3))
+                .await
+                .unwrap();
             assert_eq!(min_proof.size, Position::from(Location::new(3)).as_u64());
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
@@ -1559,7 +1573,10 @@ pub(super) mod test {
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
                 ref_db.sync().await.unwrap();
 
-                let (ref_proof, ref_ops) = ref_db.proof(Location::new(start_loc), max_ops).await.unwrap();
+                let (ref_proof, ref_ops) = ref_db
+                    .proof(Location::new(start_loc), max_ops)
+                    .await
+                    .unwrap();
                 assert_eq!(ref_proof.size, historical_proof.size);
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
@@ -1571,7 +1588,7 @@ pub(super) mod test {
                 assert!(verify_proof(
                     &mut hasher,
                     &historical_proof,
-                    start_loc,
+                    Location::new(start_loc),
                     &historical_ops,
                     &ref_root
                 ),);
@@ -1592,7 +1609,10 @@ pub(super) mod test {
             apply_ops(&mut db, ops).await;
             db.commit().await.unwrap();
 
-            let (proof, ops) = db.historical_proof(5, Location::new(1), NZU64!(10)).await.unwrap();
+            let (proof, ops) = db
+                .historical_proof(5, Location::new(1), NZU64!(10))
+                .await
+                .unwrap();
             assert_eq!(proof.size, Position::from(Location::new(5)).as_u64());
             assert_eq!(ops.len(), 4);
 
@@ -1603,13 +1623,25 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.digests[0] = Sha256::hash(b"invalid");
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
             {
                 let mut proof = proof.clone();
                 proof.digests.push(Sha256::hash(b"invalid"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
 
             // Changing the ops should cause verification to fail
@@ -1617,7 +1649,13 @@ pub(super) mod test {
                 let mut ops = ops.clone();
                 ops[0] = Operation::Update(Sha256::hash(b"key1"), Sha256::hash(b"value1"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
             {
                 let mut ops = ops.clone();
@@ -1626,13 +1664,25 @@ pub(super) mod test {
                     Sha256::hash(b"value1"),
                 ));
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
 
             // Changing the start location should cause verification to fail
             {
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 1, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(1),
+                    &ops,
+                    &root_hash
+                ));
             }
 
             // Changing the root digest should cause verification to fail
@@ -1640,7 +1690,7 @@ pub(super) mod test {
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
-                    0,
+                    Location::new(0),
                     &ops,
                     &Sha256::hash(b"invalid")
                 ));
@@ -1651,7 +1701,13 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.size = 100;
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
 
             db.destroy().await.unwrap();

@@ -1176,7 +1176,7 @@ mod test {
 
                 // Verify the proof
                 assert!(
-                    verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                    verify_proof(&mut hasher, &proof, Location::new(start_loc), &ops, &root),
                     "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops",
                 );
 
@@ -1210,14 +1210,14 @@ mod test {
                 // Verify that proof fails with wrong root
                 let wrong_root = Sha256::hash(&[0xFF; 32]);
                 assert!(
-                    !verify_proof(&mut hasher, &proof, start_loc, &ops, &wrong_root),
+                    !verify_proof(&mut hasher, &proof, Location::new(start_loc), &ops, &wrong_root),
                     "Proof should fail with wrong root"
                 );
 
                 // Verify that proof fails with wrong start location
                 if start_loc > 0 {
                     assert!(
-                        !verify_proof(&mut hasher, &proof, start_loc - 1, &ops, &root),
+                        !verify_proof(&mut hasher, &proof, Location::new(start_loc - 1), &ops, &root),
                         "Proof should fail with wrong start location"
                     );
                 }
@@ -1310,7 +1310,7 @@ mod test {
 
                 // Verify the proof still works
                 assert!(
-                    verify_proof(&mut hasher, &proof, start_loc.as_u64(), &ops, &root),
+                    verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                     "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops after pruning",
                 );
 
@@ -1334,7 +1334,7 @@ mod test {
             // Can still generate proofs for the remaining data
             let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
             assert!(
-                verify_proof(&mut hasher, &proof, new_oldest.as_u64(), &ops, &root),
+                verify_proof(&mut hasher, &proof, new_oldest, &ops, &root),
                 "Proof should still verify after aggressive pruning"
             );
 
@@ -1348,7 +1348,7 @@ mod test {
             if final_oldest.as_u64() < db.op_count() {
                 let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
                 assert!(
-                    verify_proof(&mut hasher, &final_proof, final_oldest.as_u64(), &final_ops, &root),
+                    verify_proof(&mut hasher, &final_proof, final_oldest, &final_ops, &root),
                     "Should be able to prove remaining operations after extensive pruning"
                 );
             }

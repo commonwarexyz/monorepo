@@ -9,7 +9,7 @@ use commonware_cryptography::{Digest, Hasher};
 pub fn verify_proof<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
-    start_loc: u64,
+    start_loc: Location,
     operations: &[Op],
     target_root: &D,
 ) -> bool
@@ -19,17 +19,17 @@ where
     D: Digest,
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion(hasher, &elements, Location::new(start_loc), target_root)
+    proof.verify_range_inclusion(hasher, &elements, start_loc, target_root)
 }
 
 /// Extract pinned nodes from the [Proof] starting at `start_loc`.
 pub fn extract_pinned_nodes<D: Digest>(
     proof: &Proof<D>,
-    start_loc: u64,
+    start_loc: Location,
     operations_len: u64,
 ) -> Result<Vec<D>, Error> {
-    let end_loc = start_loc + operations_len;
-    proof.extract_pinned_nodes(start_loc..end_loc)
+    let end_loc = start_loc.as_u64() + operations_len;
+    proof.extract_pinned_nodes(start_loc.as_u64()..end_loc)
 }
 
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their positions)
@@ -37,7 +37,7 @@ pub fn extract_pinned_nodes<D: Digest>(
 pub fn verify_proof_and_extract_digests<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
-    start_loc: u64,
+    start_loc: Location,
     operations: &[Op],
     target_root: &D,
 ) -> Result<Vec<(u64, D)>, Error>
@@ -48,12 +48,7 @@ where
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
     proof
-        .verify_range_inclusion_and_extract_digests(
-            hasher,
-            &elements,
-            Location::new(start_loc),
-            target_root,
-        )
+        .verify_range_inclusion_and_extract_digests(hasher, &elements, start_loc, target_root)
         .map(|result| {
             result
                 .into_iter()
@@ -65,11 +60,11 @@ where
 /// Calculate the digests required to construct a [Proof] for a range of operations.
 pub fn digests_required_for_proof<D: Digest>(
     op_count: u64,
-    start_loc: u64,
-    end_loc: u64,
+    start_loc: Location,
+    end_loc: Location,
 ) -> Vec<Position> {
     let size = Position::from(Location::new(op_count));
-    proof::nodes_required_for_range_proof(size.into(), start_loc..(end_loc + 1))
+    proof::nodes_required_for_range_proof(size.into(), start_loc.as_u64()..(end_loc.as_u64() + 1))
         .into_iter()
         .collect()
 }
@@ -89,7 +84,7 @@ pub fn create_proof<D: Digest>(op_count: u64, digests: Vec<D>) -> Proof<D> {
 pub fn create_proof_store<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
-    start_loc: u64,
+    start_loc: Location,
     operations: &[Op],
     root: &D,
 ) -> Result<ProofStore<D>, Error>
@@ -99,7 +94,7 @@ where
     D: Digest,
 {
     // Convert operation location to MMR position
-    let start_pos = Position::from(Location::new(start_loc));
+    let start_pos = Position::from(start_loc);
 
     // Encode operations for verification
     let elements: Vec<Vec<u8>> = operations.iter().map(|op| op.encode().to_vec()).collect();
@@ -193,7 +188,7 @@ mod tests {
             assert!(verify_proof(
                 &mut hasher,
                 &proof,
-                0, // start_loc
+                Location::new(0), // start_loc
                 &operations,
                 &root,
             ));
@@ -203,7 +198,7 @@ mod tests {
             assert!(!verify_proof(
                 &mut hasher,
                 &proof,
-                0,
+                Location::new(0),
                 &operations,
                 &wrong_root,
             ));
@@ -213,7 +208,7 @@ mod tests {
             assert!(!verify_proof(
                 &mut hasher,
                 &proof,
-                0,
+                Location::new(0),
                 &wrong_operations,
                 &root,
             ));
@@ -246,7 +241,7 @@ mod tests {
             assert!(verify_proof(
                 &mut hasher,
                 &proof,
-                start_loc,
+                Location::new(start_loc),
                 &operations,
                 &root,
             ));
@@ -255,7 +250,7 @@ mod tests {
             assert!(!verify_proof(
                 &mut hasher,
                 &proof,
-                0, // wrong start_loc
+                Location::new(0), // wrong start_loc
                 &operations,
                 &root,
             ));
@@ -276,13 +271,11 @@ mod tests {
             }
 
             // Generate proof for a range
-            let start_loc = 2u64;
+            let start_loc = Location::new(2);
             let operations_len = 4u64;
-            let end_loc = start_loc + operations_len;
+            let end_loc = Location::new(start_loc.as_u64() + operations_len);
             let range = start_loc..end_loc;
-            let proof = mmr
-                .range_proof(Location::new(range.start)..Location::new(range.end))
-                .unwrap();
+            let proof = mmr.range_proof(range).unwrap();
 
             // Extract pinned nodes
             let pinned_nodes = extract_pinned_nodes(&proof, start_loc, operations_len);
@@ -322,7 +315,7 @@ mod tests {
             let result = verify_proof_and_extract_digests(
                 &mut hasher,
                 &proof,
-                1, // start_loc
+                Location::new(1), // start_loc
                 &operations[range.start as usize..range.end as usize],
                 &root,
             );
@@ -335,7 +328,7 @@ mod tests {
             assert!(verify_proof_and_extract_digests(
                 &mut hasher,
                 &proof,
-                1,
+                Location::new(1),
                 &operations[range.start as usize..range.end as usize],
                 &wrong_root,
             )
@@ -365,8 +358,11 @@ mod tests {
             let end_loc = 7u64;
 
             // Get required digests
-            let required_positions =
-                digests_required_for_proof::<Digest>(op_count, start_loc, end_loc);
+            let required_positions = digests_required_for_proof::<Digest>(
+                op_count,
+                Location::new(start_loc),
+                Location::new(end_loc),
+            );
 
             // Fetch the actual digests
             let mut digests = Vec::new();
@@ -385,7 +381,7 @@ mod tests {
             assert!(verify_proof(
                 &mut hasher,
                 &proof,
-                start_loc,
+                Location::new(start_loc),
                 &operations[start_loc as usize..=end_loc as usize],
                 &root,
             ));
@@ -418,7 +414,7 @@ mod tests {
             let result = create_proof_store(
                 &mut hasher,
                 &proof,
-                0,                                                     // start_loc
+                Location::new(0),                                      // start_loc
                 &operations[range.start as usize..range.end as usize], // Only the first 3 operations covered by the proof
                 &root,
             );
@@ -435,7 +431,7 @@ mod tests {
             assert!(verify_proof(
                 &mut hasher,
                 &sub_proof,
-                0,
+                Location::new(0),
                 &operations[0..2],
                 &root,
             ));
@@ -457,14 +453,19 @@ mod tests {
                 let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let range = 0..2;
-            let proof = mmr
-                .range_proof(Location::new(range.start)..Location::new(range.end))
-                .unwrap();
+            let range = Location::new(0)..Location::new(2);
+            let proof = mmr.range_proof(range).unwrap();
 
             // Should fail with invalid root
             let wrong_root = test_digest(99);
-            assert!(create_proof_store(&mut hasher, &proof, 0, &operations, &wrong_root).is_err());
+            assert!(create_proof_store(
+                &mut hasher,
+                &proof,
+                Location::new(0),
+                &operations,
+                &wrong_root
+            )
+            .is_err());
         });
     }
 
@@ -487,9 +488,14 @@ mod tests {
             let proof = mmr.range_proof(Location::new(0)..Location::new(3)).unwrap();
 
             // First verify and extract digests
-            let digests =
-                verify_proof_and_extract_digests(&mut hasher, &proof, 0, &operations, &root)
-                    .unwrap();
+            let digests = verify_proof_and_extract_digests(
+                &mut hasher,
+                &proof,
+                Location::new(0),
+                &operations,
+                &root,
+            )
+            .unwrap();
 
             // Create proof store from digests
             let proof_store = create_proof_store_from_digests(&proof, digests);
@@ -504,7 +510,7 @@ mod tests {
             assert!(verify_proof(
                 &mut hasher,
                 &sub_proof,
-                0,
+                Location::new(0),
                 &operations[0..2],
                 &root,
             ));
@@ -533,7 +539,8 @@ mod tests {
 
             // Create proof store
             let proof_store =
-                create_proof_store(&mut hasher, &proof, 0, &operations, &root).unwrap();
+                create_proof_store(&mut hasher, &proof, Location::new(0), &operations, &root)
+                    .unwrap();
 
             // Generate multi-proof for specific locations
             let target_locations = vec![
@@ -685,7 +692,8 @@ mod tests {
             // Create proof store for all elements
             let proof = mmr.range_proof(Location::new(0)..Location::new(3)).unwrap();
             let proof_store =
-                create_proof_store(&mut hasher, &proof, 0, &operations, &root).unwrap();
+                create_proof_store(&mut hasher, &proof, Location::new(0), &operations, &root)
+                    .unwrap();
 
             // Generate multi-proof for single element
             let multi_proof = create_multi_proof(&proof_store, &[Location::new(1)])

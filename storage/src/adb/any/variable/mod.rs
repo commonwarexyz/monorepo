@@ -1161,7 +1161,13 @@ pub(super) mod test {
 
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
-                assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
+                assert!(verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(i),
+                    &log,
+                    &root
+                ));
             }
 
             db.destroy().await.unwrap();

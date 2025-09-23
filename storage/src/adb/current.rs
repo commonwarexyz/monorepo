@@ -423,11 +423,8 @@ impl<
         // Generate the proof from the grafted MMR.
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
-        let mut proof = verification::range_proof(
-            &grafted_mmr,
-            start_loc..Location::new(end_loc),
-        )
-        .await?;
+        let mut proof =
+            verification::range_proof(&grafted_mmr, start_loc..Location::new(end_loc)).await?;
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((end_loc - start_loc.as_u64()) as usize);
