@@ -215,4 +215,174 @@ impl Aborter {
         self.metrics.finish();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{deterministic, Metrics, Runner, Spawner};
+    use futures::future;
+
+    const METRIC_PREFIX: &str = "runtime_tasks_running{";
+
+    fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
+        let label_fragment = format!("name=\"{label}\"");
+        metrics.lines().find_map(|line| {
+            if line.starts_with(METRIC_PREFIX) && line.contains(&label_fragment) {
+                line.rsplit_once(' ')
+                    .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn handle_metrics_finish_after_completion() {
+        const LABEL: &str = "handle_metrics_completion";
+
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let context = context.with_label(LABEL);
+            let handle = context.clone().spawn(|_| async move { "done" });
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(1),
+                "expected tasks_running gauge to be 1 before completion: {metrics}",
+            );
+
+            let output = handle.await.expect("task failed");
+            assert_eq!(output, "done");
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(0),
+                "expected tasks_running gauge to return to 0 after completion: {metrics}",
+            );
+        });
+    }
+
+    #[test]
+    fn handle_metrics_remain_active_when_handle_dropped() {
+        const LABEL: &str = "handle_metrics_drop";
+
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let context = context.with_label(LABEL);
+            let handle = context.clone().spawn(|_| async move {
+                future::pending::<()>().await;
+            });
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(1),
+                "expected tasks_running gauge to be 1 before dropping handle: {metrics}",
+            );
+
+            drop(handle);
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(1),
+                "dropping handle should not finish metrics: {metrics}",
+            );
+        });
+    }
+
+    #[test]
+    fn handle_abort_finishes_metrics_immediately() {
+        const LABEL: &str = "handle_metrics_abort_via_handle";
+
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let context = context.with_label(LABEL);
+            let handle = context.clone().spawn(|_| async move {
+                future::pending::<()>().await;
+            });
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(1),
+                "expected tasks_running gauge to be 1 before abort: {metrics}",
+            );
+
+            handle.abort();
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(0),
+                "expected tasks_running gauge to return to 0 after abort: {metrics}",
+            );
+        });
+    }
+
+    #[test]
+    fn handle_metrics_finish_for_blocking_task() {
+        const LABEL: &str = "handle_metrics_blocking";
+
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let context = context.with_label(LABEL);
+            let spawn_blocking = context.clone().spawn_blocking_ref(false);
+
+            let blocking_handle = spawn_blocking(|| {
+                // Simulate some blocking work
+                42
+            });
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(1),
+                "expected tasks_running gauge to be 1 while blocking task runs: {metrics}",
+            );
+
+            let result = blocking_handle.await.expect("blocking task failed");
+            assert_eq!(result, 42);
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(0),
+                "expected tasks_running gauge to return to 0 after blocking task completes: {metrics}",
+            );
+        });
+    }
+
+    #[test]
+    fn aborter_finishes_metrics_immediately() {
+        const LABEL: &str = "handle_metrics_abort";
+
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let context = context.with_label(LABEL);
+            let handle = context.clone().spawn(|_| async move {
+                future::pending::<()>().await;
+            });
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(1),
+                "expected tasks_running gauge to be 1 before abort: {metrics}",
+            );
+
+            let aborter = handle
+                .aborter()
+                .expect("aborter missing for non-blocking task");
+            aborter.abort();
+
+            let metrics = context.encode();
+            assert_eq!(
+                running_tasks_for_label(&metrics, LABEL),
+                Some(0),
+                "expected tasks_running gauge to return to 0 after abort: {metrics}",
+            );
+        });
+    }
 }
