@@ -26,6 +26,8 @@ blst = { workspace = true, features = ["no-threads"] }
 p256 = { workspace = true, features = ["ecdsa"] }
 rand_chacha = { workspace = true }
 cfg-if = { workspace = true }
+x25519-dalek = { workspace = true, features = ["zeroize"] }
+chacha20poly1305 = { workspace = true }
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
@@ -73,3 +75,8 @@ path = "src/blake3/benches/bench.rs"
 name = "lthash"
 harness = false
 path = "src/lthash/benches/bench.rs"
+
+[[bench]]
+name = "handshake"
+harness = false
+path = "src/handshake/benches/bench.rs"
