@@ -14,6 +14,7 @@ use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
 
 mod reed_solomon;
+use commonware_cryptography::Digest;
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
 mod no_coding;
@@ -86,7 +87,7 @@ impl Read for Config {
 /// ```
 pub trait Scheme {
     /// A commitment attesting to the shards of data.
-    type Commitment: Codec;
+    type Commitment: Digest;
     /// A shard of data, to be received by a participant.
     type Shard: Clone + Codec;
     /// A shard shared with other participants, to aid them in reconstruction.
