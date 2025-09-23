@@ -138,7 +138,7 @@ impl ForkOperation {
 enum FuzzedOperation {
     /// Commit with potential splits via append
     Commit(CommitOperation),
-    /// Fork the transcript with a label
+    /// Fork the transcript with a label and update the transcript to the fork
     Fork(ForkOperation),
     /// Extract a summary from the transcript and resume from it
     SummarizeAndResume(SummarizeAndResumeOperation),
@@ -182,10 +182,6 @@ struct TranscriptSequence {
 struct ExecutionContext {
     /// The main transcript
     transcript: Transcript,
-    /// Forked transcripts created during execution
-    forked_transcripts: Vec<Transcript>,
-    /// Summaries extracted during execution
-    summaries: Vec<Summary>,
 }
 
 impl<'a> Arbitrary<'a> for TranscriptSequence {
@@ -215,8 +211,6 @@ impl ExecutionContext {
     fn new(namespace: &[u8]) -> Self {
         Self {
             transcript: Transcript::new(namespace),
-            forked_transcripts: Vec::new(),
-            summaries: Vec::new(),
         }
     }
 
@@ -226,8 +220,7 @@ impl ExecutionContext {
                 commit_op.apply(&mut self.transcript);
             }
             FuzzedOperation::Fork(fork_op) => {
-                let forked = self.transcript.fork(fork_op.label);
-                self.forked_transcripts.push(forked);
+                self.transcript = self.transcript.fork(fork_op.label);
             }
             FuzzedOperation::SummarizeAndResume(_) => {
                 let summary = self.transcript.summarize();
