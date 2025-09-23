@@ -408,7 +408,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 id: flow_id,
                 origin: meta.origin.clone(),
                 recipient: meta.recipient.clone(),
-                requires_ingress: meta.sequence.is_some(),
+                delivered: meta.sequence.is_some(),
             });
         }
 

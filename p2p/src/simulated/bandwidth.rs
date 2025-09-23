@@ -16,7 +16,7 @@ pub struct Flow<P> {
     pub id: u64,
     pub origin: P,
     pub recipient: P,
-    pub requires_ingress: bool,
+    pub delivered: bool,
 }
 
 /// Resulting per-flow throughput expressed as bytes/second.
@@ -31,7 +31,7 @@ pub enum Rate {
 struct Resource {
     remaining: Ratio,
     members: Vec<usize>,
-    active_users: usize,
+    active: usize,
 }
 
 impl Resource {
@@ -39,7 +39,7 @@ impl Resource {
         Self {
             remaining: Ratio::from_int(limit),
             members: Vec::new(),
-            active_users: 0,
+            active: 0,
         }
     }
 }
@@ -116,7 +116,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             }
 
             // Only track ingress when the recipient actually needs to receive the bytes.
-            if flow.requires_ingress {
+            if flow.delivered {
                 if let Some(resource_idx) = self.spawn(
                     ResourceKey::Ingress(flow.recipient.clone()),
                     ingress_limit(&flow.recipient),
@@ -169,9 +169,9 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
         for &res_idx in &state.resources {
             let resource = &mut self.resources[res_idx];
-            if resource.active_users > 0 {
+            if resource.active > 0 {
                 // Stop counting the flow toward future shares once it is frozen.
-                resource.active_users -= 1;
+                resource.active -= 1;
             }
         }
     }
@@ -180,7 +180,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     fn attach(&mut self, resource_idx: usize, flow_idx: usize, state: &mut State) {
         let resource = &mut self.resources[resource_idx];
         resource.members.push(flow_idx);
-        resource.active_users += 1;
+        resource.active += 1;
         state.resources.push(resource_idx);
         state.limited = true;
     }
@@ -197,7 +197,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             let mut min_delta: Option<Ratio> = None;
 
             for (res_idx, resource) in self.resources.iter().enumerate() {
-                if resource.active_users == 0 {
+                if resource.active == 0 {
                     continue;
                 }
 
@@ -209,7 +209,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     break;
                 }
 
-                let share = resource.remaining.div_int(resource.active_users as u128);
+                let share = resource.remaining.div_int(resource.active as u128);
                 match &min_delta {
                     None => {
                         // First candidate: provisionally treat it as the tightest constraint.
@@ -252,11 +252,11 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
             let mut saturated = Vec::new();
             for (res_idx, resource) in self.resources.iter_mut().enumerate() {
-                if resource.active_users == 0 {
+                if resource.active == 0 {
                     continue;
                 }
                 // Charge each resource for the uniform allocation it just handed out.
-                let usage = delta.mul_int(resource.active_users as u128);
+                let usage = delta.mul_int(resource.active as u128);
                 if usage.is_zero() {
                     continue;
                 }
@@ -409,13 +409,13 @@ mod tests {
                 id: 1,
                 origin: 1,
                 recipient: 10,
-                requires_ingress: true,
+                delivered: true,
             },
             Flow {
                 id: 2,
                 origin: 1,
                 recipient: 11,
-                requires_ingress: true,
+                delivered: true,
             },
         ];
 
@@ -437,7 +437,7 @@ mod tests {
             id: 1,
             origin: 1,
             recipient: 5,
-            requires_ingress: true,
+            delivered: true,
         }];
 
         let allocations = allocate(&flows, unlimited(), constant(2_000));
@@ -455,7 +455,7 @@ mod tests {
             id: 7,
             origin: 1,
             recipient: 2,
-            requires_ingress: false,
+            delivered: false,
         }];
 
         let allocations = allocate(&flows, unlimited(), unlimited());
@@ -497,31 +497,31 @@ mod tests {
                 id: 1,
                 origin: 'A',
                 recipient: 'B',
-                requires_ingress: true,
+                delivered: true,
             },
             Flow {
                 id: 2,
                 origin: 'A',
                 recipient: 'B',
-                requires_ingress: true,
+                delivered: true,
             },
             Flow {
                 id: 3,
                 origin: 'B',
                 recipient: 'C',
-                requires_ingress: true,
+                delivered: true,
             },
             Flow {
                 id: 4,
                 origin: 'A',
                 recipient: 'C',
-                requires_ingress: true,
+                delivered: true,
             },
             Flow {
                 id: 5,
                 origin: 'C',
                 recipient: 'B',
-                requires_ingress: true,
+                delivered: true,
             },
         ];
 
@@ -569,13 +569,13 @@ mod tests {
                 id: 1,
                 origin: 'A',
                 recipient: 'B',
-                requires_ingress: true,
+                delivered: true,
             },
             Flow {
                 id: 2,
                 origin: 'A',
                 recipient: 'C',
-                requires_ingress: true,
+                delivered: true,
             },
         ];
 
@@ -611,13 +611,13 @@ mod tests {
                 id: 1,
                 origin: 'A',
                 recipient: 'B',
-                requires_ingress: true,
+                delivered: true,
             },
             Flow {
                 id: 2,
                 origin: 'A',
                 recipient: 'C',
-                requires_ingress: true,
+                delivered: true,
             },
         ];
 
