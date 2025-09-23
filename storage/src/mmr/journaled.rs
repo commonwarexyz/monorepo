@@ -67,11 +67,11 @@ pub struct SyncConfig<D: Digest> {
     /// Base MMR configuration (journal, metadata, etc.)
     pub config: Config,
 
-    /// Pruning boundary - operations below this are considered pruned.
-    pub lower_bound: u64,
+    /// Pruning boundary - nodes below this position are considered pruned.
+    pub lower_bound_pos: u64,
 
-    /// Sync boundary - operations above this are rewound if present.
-    pub upper_bound: u64,
+    /// Sync boundary - nodes above this position are rewound if present.
+    pub upper_bound_pos: u64,
 
     /// The pinned nodes the MMR needs at the pruning boundary given by `lower_bound`, in the order
     /// specified by `nodes_to_pin`. If `None`, the pinned nodes are expected to already be in the
@@ -345,12 +345,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 write_buffer: cfg.config.write_buffer,
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
-            cfg.lower_bound,
-            cfg.upper_bound,
+            cfg.lower_bound_pos,
+            cfg.upper_bound_pos,
         )
         .await?;
         let journal_size = journal.size().await?;
-        assert!(journal_size <= cfg.upper_bound + 1);
+        assert!(journal_size <= cfg.upper_bound_pos + 1);
 
         // Open the metadata.
         let metadata_cfg = MConfig {
@@ -361,11 +361,14 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Write the pruning boundary.
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        metadata.put(pruning_boundary_key, cfg.lower_bound.to_be_bytes().into());
+        metadata.put(
+            pruning_boundary_key,
+            cfg.lower_bound_pos.to_be_bytes().into(),
+        );
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
-            let nodes_to_pin_persisted = nodes_to_pin(cfg.lower_bound);
+            let nodes_to_pin_persisted = nodes_to_pin(cfg.lower_bound_pos);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
             }
@@ -387,8 +390,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         });
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
-        if cfg.lower_bound < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound)
+        if cfg.lower_bound_pos < journal_size {
+            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound_pos)
                 .await?;
         }
         metadata.sync().await?;
@@ -398,7 +401,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             journal,
             journal_size,
             metadata,
-            pruned_to_pos: cfg.lower_bound,
+            pruned_to_pos: cfg.lower_bound_pos,
         })
     }
 
@@ -1679,8 +1682,8 @@ mod tests {
             // Test fresh start scenario with completely new MMR (no existing data)
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(),
-                lower_bound: 0,
-                upper_bound: 100,
+                lower_bound_pos: 0,
+                upper_bound_pos: 100,
                 pinned_nodes: None,
             };
 
@@ -1725,16 +1728,16 @@ mod tests {
             let original_root = mmr.root(&mut hasher);
 
             // Sync with lower_bound ≤ existing_size ≤ upper_bound should reuse data
-            let lower_bound = mmr.pruned_to_pos();
-            let upper_bound = mmr.size() - 1;
+            let lower_bound_pos = mmr.pruned_to_pos();
+            let upper_bound_pos = mmr.size() - 1;
             let mut expected_nodes = BTreeMap::new();
-            for i in lower_bound..=upper_bound {
+            for i in lower_bound_pos..=upper_bound_pos {
                 expected_nodes.insert(i, mmr.get_node(i).await.unwrap().unwrap());
             }
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(),
-                lower_bound,
-                upper_bound,
+                lower_bound_pos,
+                upper_bound_pos,
                 pinned_nodes: None,
             };
 
@@ -1747,10 +1750,10 @@ mod tests {
             // Should have existing data in the sync range.
             assert_eq!(sync_mmr.size(), original_size);
             assert_eq!(sync_mmr.leaves(), original_leaves);
-            assert_eq!(sync_mmr.pruned_to_pos(), lower_bound);
-            assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound));
+            assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
+            assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
             assert_eq!(sync_mmr.root(&mut hasher), original_root);
-            for i in lower_bound..=upper_bound {
+            for i in lower_bound_pos..=upper_bound_pos {
                 assert_eq!(
                     sync_mmr.get_node(i).await.unwrap(),
                     expected_nodes.get(&i).cloned()
@@ -1783,18 +1786,18 @@ mod tests {
             let original_pruned_to = mmr.pruned_to_pos();
 
             // Sync with boundaries that extend beyond existing data (partial overlap).
-            let lower_bound = original_pruned_to;
-            let upper_bound = original_size + 10; // Extend beyond existing data
+            let lower_bound_pos = original_pruned_to;
+            let upper_bound_pos = original_size + 10; // Extend beyond existing data
 
             let mut expected_nodes = BTreeMap::new();
-            for i in lower_bound..original_size {
+            for i in lower_bound_pos..original_size {
                 expected_nodes.insert(i, mmr.get_node(i).await.unwrap().unwrap());
             }
 
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(),
-                lower_bound,
-                upper_bound,
+                lower_bound_pos,
+                upper_bound_pos,
                 pinned_nodes: None,
             };
 
@@ -1806,12 +1809,12 @@ mod tests {
 
             // Should have existing data in the overlapping range.
             assert_eq!(sync_mmr.size(), original_size);
-            assert_eq!(sync_mmr.pruned_to_pos(), lower_bound);
-            assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound));
+            assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
+            assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
             assert_eq!(sync_mmr.root(&mut hasher), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
-            for i in lower_bound..original_size {
+            for i in lower_bound_pos..original_size {
                 assert_eq!(
                     sync_mmr.get_node(i).await.unwrap(),
                     expected_nodes.get(&i).cloned()
