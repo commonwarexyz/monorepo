@@ -424,8 +424,13 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
         for (flow_id, rate) in allocations {
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
-                let keep_carry = matches!((&meta.rate, &rate), (Rate::Finite(prev), Rate::Finite(next)) if prev == next);
-                if !keep_carry {
+                // Preserve any fractional progress (`carry`) accrued at the previous rate so
+                // low-throughput flows keep making forward progress across ticks. If the planner
+                // assigns the exact same finite rate we can keep the remainder; otherwise the
+                // old fraction is expressed in a different rate and must be discarded (we already
+                // accounted for all bytes transferable at the old rate earlier in this rebalance,
+                // and any leftover fraction would be wrong once the rate changes).
+                if meta.rate != rate {
                     meta.carry = 0;
                 }
                 meta.rate = rate.clone();
