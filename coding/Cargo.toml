@@ -18,6 +18,7 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 reed-solomon-simd = "3.0.1"
 rand_core = { workspace = true }
+rand = { workspace = true }
 
 [lib]
 bench = false
