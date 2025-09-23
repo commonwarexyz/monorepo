@@ -424,7 +424,11 @@ impl<
         // Generate the proof from the grafted MMR.
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
-        let mut proof = verification::range_proof(&grafted_mmr, start_loc..end_loc).await?;
+        let mut proof = verification::range_proof(
+            &grafted_mmr,
+            Location::new(start_loc)..Location::new(end_loc),
+        )
+        .await?;
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
@@ -544,7 +548,9 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
+        let mut proof =
+            verification::range_proof(&grafted_mmr, Location::new(loc)..Location::new(loc + 1))
+                .await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();
@@ -661,7 +667,9 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
+        let mut proof =
+            verification::range_proof(&grafted_mmr, Location::new(loc)..Location::new(loc + 1))
+                .await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();

@@ -690,7 +690,7 @@ mod tests {
 
         // confirm the proof of inclusion for each leaf successfully verifies
         for leaf in 0u64..11 {
-            let proof: Proof<Digest> = mmr.proof(leaf).unwrap();
+            let proof: Proof<Digest> = mmr.proof(Location::new(leaf)).unwrap();
             assert!(
                 proof.verify_element_inclusion(&mut hasher, &element, Location::new(leaf), &root),
                 "valid proof should verify successfully"
@@ -699,7 +699,7 @@ mod tests {
 
         // confirm mangling the proof or proof args results in failed validation
         const LEAF: u64 = 10;
-        let proof = mmr.proof(LEAF).unwrap();
+        let proof = mmr.proof(Location::new(LEAF)).unwrap();
         assert!(
             proof.verify_element_inclusion(&mut hasher, &element, Location::new(LEAF), &root),
             "proof verification should be successful"
@@ -786,7 +786,9 @@ mod tests {
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 let range = i as u64..j as u64;
-                let range_proof = mmr.range_proof(range.clone()).unwrap();
+                let range_proof = mmr
+                    .range_proof(Location::new(range.start)..Location::new(range.end))
+                    .unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &mut hasher,
@@ -802,7 +804,9 @@ mod tests {
         // Create a proof over a range of elements, confirm it verifies successfully, then mangle
         // the proof & proof input in various ways, confirming verification fails.
         let range = 33..40;
-        let range_proof = mmr.range_proof(range.clone()).unwrap();
+        let range_proof = mmr
+            .range_proof(Location::new(range.start)..Location::new(range.end))
+            .unwrap();
         let valid_elements = &elements[range.start as usize..range.end as usize];
         assert!(
             range_proof.verify_range_inclusion(
@@ -922,7 +926,7 @@ mod tests {
             let pruned_root = mmr.root(&mut hasher);
             assert_eq!(root, pruned_root);
             for loc in 0..elements.len() as u64 {
-                let proof = mmr.proof(loc);
+                let proof = mmr.proof(Location::new(loc));
                 if Position::from(Location::new(loc)) < Position::new(i) {
                     continue;
                 }
@@ -961,7 +965,9 @@ mod tests {
             }
             for j in (i + 2)..elements.len() {
                 let range = i as u64..j as u64;
-                let range_proof = mmr.range_proof(range.clone()).unwrap();
+                let range_proof = mmr
+                    .range_proof(Location::new(range.start)..Location::new(range.end))
+                    .unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &mut hasher,
@@ -985,7 +991,9 @@ mod tests {
 
         let updated_root = mmr.root(&mut hasher);
         let range = elements.len() as u64 - 10..elements.len() as u64;
-        let range_proof = mmr.range_proof(range.clone()).unwrap();
+        let range_proof = mmr
+            .range_proof(Location::new(range.start)..Location::new(range.end))
+            .unwrap();
         assert!(
                 range_proof.verify_range_inclusion(
                     &mut hasher,
@@ -1013,7 +1021,9 @@ mod tests {
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 let range = i as u64..j as u64;
-                let proof = mmr.range_proof(range.clone()).unwrap();
+                let proof = mmr
+                    .range_proof(Location::new(range.start)..Location::new(range.end))
+                    .unwrap();
 
                 let expected_size = proof.encode_size();
                 let serialized_proof = proof.encode().freeze();
@@ -1105,7 +1115,8 @@ mod tests {
                 for end_loc in test_end_locs {
                     // Generate proof for the range
                     let range = leaf..end_loc;
-                    let proof_result = mmr.range_proof(range.clone());
+                    let proof_result =
+                        mmr.range_proof(Location::new(range.start)..Location::new(range.end));
                     let proof = proof_result.unwrap();
 
                     // Extract pinned nodes
@@ -1158,7 +1169,9 @@ mod tests {
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
-        let proof = mmr.range_proof(0..mmr.leaves()).unwrap();
+        let proof = mmr
+            .range_proof(Location::new(0)..Location::new(mmr.leaves()))
+            .unwrap();
         let mut node_digests = proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1187,7 +1200,9 @@ mod tests {
 
         // Test 2: Single element range (first element)
         let range = 0..1;
-        let single_proof = mmr.range_proof(range.clone()).unwrap();
+        let single_proof = mmr
+            .range_proof(Location::new(range.start)..Location::new(range.end))
+            .unwrap();
         let single_digests = single_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1201,7 +1216,9 @@ mod tests {
         // Test 3: Single element range (middle element)
         let mid_idx = 24;
         let range = mid_idx..mid_idx + 1;
-        let mid_proof = mmr.range_proof(range.clone()).unwrap();
+        let mid_proof = mmr
+            .range_proof(Location::new(range.start)..Location::new(range.end))
+            .unwrap();
         let mid_digests = mid_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1215,7 +1232,9 @@ mod tests {
         // Test 4: Single element range (last element)
         let last_idx = elements.len() - 1;
         let range = last_idx as u64..last_idx as u64 + 1;
-        let last_proof = mmr.range_proof(range.clone()).unwrap();
+        let last_proof = mmr
+            .range_proof(Location::new(range.start)..Location::new(range.end))
+            .unwrap();
         let last_digests = last_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1228,7 +1247,9 @@ mod tests {
 
         // Test 5: Small range at the beginning
         let range = 0..5;
-        let small_proof = mmr.range_proof(range.clone()).unwrap();
+        let small_proof = mmr
+            .range_proof(Location::new(range.start)..Location::new(range.end))
+            .unwrap();
         let small_digests = small_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1242,7 +1263,9 @@ mod tests {
 
         // Test 6: Medium range in the middle
         let range = 10..31;
-        let mid_range_proof = mmr.range_proof(range.clone()).unwrap();
+        let mid_range_proof = mmr
+            .range_proof(Location::new(range.start)..Location::new(range.end))
+            .unwrap();
         let mid_range_digests = mid_range_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1388,8 +1411,8 @@ mod tests {
         }
 
         // Get individual proofs that will share some digests (elements in same subtree)
-        let proof1 = mmr.proof(0).unwrap();
-        let proof2 = mmr.proof(1).unwrap();
+        let proof1 = mmr.proof(Location::new(0)).unwrap();
+        let proof2 = mmr.proof(Location::new(1)).unwrap();
         let total_digests_separate = proof1.digests.len() + proof2.digests.len();
 
         // Generate multi-proof for the same positions

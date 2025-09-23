@@ -297,7 +297,7 @@ fn fuzz(input: FuzzInput) {
                         // Check if the element is pruned
                         let is_pruned = reference.is_leaf_pruned(pos);
 
-                        match mmr.proof(pos.as_u64()) {
+                        match mmr.proof(Location::try_from(pos).unwrap()) {
                             Ok(proof) => {
                                 // If we got a proof for a pruned element, it might be pinned
                                 // Verify the proof with the actual data we stored

@@ -49,7 +49,8 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             let mut samples = Vec::with_capacity(SAMPLE_SIZE);
                             block_on(async {
                                 for start_index in start_loc_samples {
-                                    let leaf_range = start_index..(start_index + range);
+                                    let leaf_range = Location::new(start_index)
+                                        ..Location::new(start_index + range);
                                     samples.push(leaf_range);
                                 }
                                 samples
@@ -62,8 +63,9 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                                     let proof = mmr.range_proof(range.clone()).unwrap();
                                     assert!(proof.verify_range_inclusion(
                                         &mut hasher,
-                                        &elements[range.start as usize..range.end as usize],
-                                        Location::from(range.start),
+                                        &elements[range.start.as_u64() as usize
+                                            ..range.end.as_u64() as usize],
+                                        range.start,
                                         &root,
                                     ));
                                 }

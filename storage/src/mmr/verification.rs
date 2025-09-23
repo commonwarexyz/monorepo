@@ -64,7 +64,7 @@ impl<D: Digest> ProofStore<D> {
     }
 
     /// Return a range proof for the nodes corresponding to the given location range.
-    pub async fn range_proof(&self, range: Range<u64>) -> Result<Proof<D>, Error> {
+    pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
         range_proof(self, range).await
     }
 
@@ -91,9 +91,9 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
 pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
-    range: Range<u64>,
+    range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    historical_range_proof(mmr, mmr.size(), range).await
+    historical_range_proof(mmr, mmr.size(), range.start.as_u64()..range.end.as_u64()).await
 }
 
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
@@ -194,7 +194,9 @@ mod tests {
             while range_start < range_end {
                 let range = range_start..range_end;
                 let range_usize = range_start as usize..range_end as usize;
-                let range_proof = mmr.range_proof(range.clone()).unwrap();
+                let range_proof = mmr
+                    .range_proof(Location::new(range.start)..Location::new(range.end))
+                    .unwrap();
                 let proof_store = ProofStore::new(
                     &mut hasher,
                     &range_proof,
@@ -212,7 +214,10 @@ mod tests {
                     // Verify a proof over a sub-range of the original range.
                     let sub_range = subrange_start..subrange_end;
                     let sub_range_usize = subrange_start as usize..subrange_end as usize;
-                    let sub_range_proof = proof_store.range_proof(sub_range.clone()).await.unwrap();
+                    let sub_range_proof = proof_store
+                        .range_proof(Location::new(sub_range.start)..Location::new(sub_range.end))
+                        .await
+                        .unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
                         &elements[sub_range_usize],

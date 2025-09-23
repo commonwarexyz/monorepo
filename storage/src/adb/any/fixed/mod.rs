@@ -530,7 +530,7 @@ impl<
         let mmr_size = Position::from(Location::from(op_count)).as_u64();
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_loc..end_loc)
+            .historical_range_proof(mmr_size, Location::new(start_loc)..Location::new(end_loc))
             .await?;
         let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
         let futures = (start_loc..end_loc)

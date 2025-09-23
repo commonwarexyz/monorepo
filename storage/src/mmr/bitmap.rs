@@ -560,7 +560,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             ));
         }
 
-        let range = chunk_loc as u64..(chunk_loc + 1) as u64;
+        let range = Location::new(chunk_loc as u64)..Location::new((chunk_loc + 1) as u64);
         let mut proof = verification::range_proof(&self.mmr, range).await?;
         proof.size = self.bit_count();
         if self.next_bit == 0 {

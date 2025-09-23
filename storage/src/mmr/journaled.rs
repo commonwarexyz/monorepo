@@ -14,6 +14,7 @@ use crate::{
     mmr::{
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
+        location::Location,
         mem::{Config as MemConfig, Mmr as MemMmr},
         position::Position,
         storage::Storage,
@@ -643,8 +644,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// # Warning
     ///
     /// Panics if there are unprocessed updates.
-    pub async fn proof(&self, loc: u64) -> Result<Proof<H::Digest>, Error> {
-        self.range_proof(loc..loc + 1).await
+    pub async fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
+        self.range_proof(loc..Location::new(loc.as_u64() + 1)).await
     }
 
     /// Return an inclusion proof for the elements within the specified location range, or
@@ -653,7 +654,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// # Warning
     ///
     /// Panics if there are unprocessed updates.
-    pub async fn range_proof(&self, range: Range<u64>) -> Result<Proof<H::Digest>, Error> {
+    pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
         verification::range_proof(self, range).await
     }
@@ -663,10 +664,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     pub async fn historical_range_proof(
         &self,
         size: u64,
-        range: Range<u64>,
+        range: Range<Location>,
     ) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
-        verification::historical_range_proof(self, size, range).await
+        verification::historical_range_proof(self, size, range.start.as_u64()..range.end.as_u64())
+            .await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
@@ -959,7 +961,9 @@ mod tests {
             // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
             mmr.pop(80).await.unwrap();
             // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
-            mmr.proof(leaf_pos.as_u64()).await.unwrap();
+            mmr.proof(Location::try_from(leaf_pos).unwrap())
+                .await
+                .unwrap();
             // prune all remaining leaves 1 at a time.
             while mmr.size() > leaf_pos.as_u64() {
                 assert!(mmr.pop(1).await.is_ok());
@@ -1002,7 +1006,7 @@ mod tests {
             const TEST_ELEMENT: usize = 133;
             let test_element_loc = TEST_ELEMENT as u64;
 
-            let proof = mmr.proof(test_element_loc).await.unwrap();
+            let proof = mmr.proof(Location::new(test_element_loc)).await.unwrap();
             let root = mmr.root(&mut hasher);
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
@@ -1018,11 +1022,11 @@ mod tests {
 
             // Now that the element is flushed from the in-mem MMR, confirm its proof is still is
             // generated correctly.
-            let proof2 = mmr.proof(test_element_loc).await.unwrap();
+            let proof2 = mmr.proof(Location::new(test_element_loc)).await.unwrap();
             assert_eq!(proof, proof2);
 
             // Generate & verify a proof that spans flushed elements and the last element.
-            let range = TEST_ELEMENT as u64..LEAF_COUNT as u64;
+            let range = Location::new(TEST_ELEMENT as u64)..Location::new(LEAF_COUNT as u64);
             let proof = mmr.range_proof(range).await.unwrap();
             assert!(proof.verify_range_inclusion(
                 &mut hasher,
@@ -1322,7 +1326,7 @@ mod tests {
 
             // Historical proof should match "regular" proof when historical size == current database size
             let historical_proof = mmr
-                .historical_range_proof(original_size, 2..6)
+                .historical_range_proof(original_size, Location::new(2)..Location::new(6))
                 .await
                 .unwrap();
             assert_eq!(historical_proof.size, original_size);
@@ -1333,7 +1337,10 @@ mod tests {
                 Location::new(2),
                 &root
             ));
-            let regular_proof = mmr.range_proof(2..6).await.unwrap();
+            let regular_proof = mmr
+                .range_proof(Location::new(2)..Location::new(6))
+                .await
+                .unwrap();
             assert_eq!(regular_proof.size, historical_proof.size);
             assert_eq!(regular_proof.digests, historical_proof.digests);
 
@@ -1343,7 +1350,7 @@ mod tests {
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
             let new_historical_proof = mmr
-                .historical_range_proof(original_size, 2..6)
+                .historical_range_proof(original_size, Location::new(2)..Location::new(6))
                 .await
                 .unwrap();
             assert_eq!(new_historical_proof.size, historical_proof.size);
@@ -1400,8 +1407,7 @@ mod tests {
             let historical_proof = mmr
                 .historical_range_proof(
                     historical_size,
-                    35.. // Start after prune point
-                    39, // End at historical size
+                    Location::new(35)..Location::new(39), // Start after prune point to end at historical size
                 )
                 .await
                 .unwrap();
@@ -1476,7 +1482,10 @@ mod tests {
 
             // Generate proof from full MMR
             let proof = mmr
-                .historical_range_proof(historical_size, range.start as u64..range.end as u64)
+                .historical_range_proof(
+                    historical_size,
+                    Location::new(range.start as u64)..Location::new(range.end as u64),
+                )
                 .await
                 .unwrap();
 
@@ -1505,7 +1514,10 @@ mod tests {
             mmr.add(&mut hasher, &element).await.unwrap();
 
             // Test single element proof at historical position
-            let single_proof = mmr.historical_range_proof(1, 0..1).await.unwrap();
+            let single_proof = mmr
+                .historical_range_proof(1, Location::new(0)..Location::new(1))
+                .await
+                .unwrap();
 
             let root = mmr.root(&mut hasher);
             assert!(single_proof.verify_range_inclusion(
@@ -1625,8 +1637,11 @@ mod tests {
             ); // Element we just added is the oldest retained
 
             // Proofs generated from the journaled MMR should be the same as the proofs generated from the original MMR
-            let proof = new_mmr.proof(NUM_ELEMENTS).await.unwrap();
-            let original_proof = original_mmr.proof(NUM_ELEMENTS).await.unwrap();
+            let proof = new_mmr.proof(Location::new(NUM_ELEMENTS)).await.unwrap();
+            let original_proof = original_mmr
+                .proof(Location::new(NUM_ELEMENTS))
+                .await
+                .unwrap();
             assert_eq!(proof.digests, original_proof.digests);
             assert_eq!(proof.size, original_proof.size);
 
