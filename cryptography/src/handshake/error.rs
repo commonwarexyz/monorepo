@@ -33,5 +33,5 @@ pub enum Error {
     DecryptionFailed,
     /// The timestamp is not in the allowable bounds
     #[error("timestamp {0} not in {1:?}")]
-    InvalidTimestamp(i64, Range<i64>),
+    InvalidTimestamp(u64, Range<u64>),
 }

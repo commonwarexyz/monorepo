@@ -148,13 +148,14 @@ pub struct Config<S> {
 
 impl<S> Config<S> {
     /// Computes current time and acceptable timestamp range.
-    pub fn time_information(&self, ctx: &impl Clock) -> (i64, Range<i64>) {
-        fn duration_to_i64(d: Duration) -> i64 {
-            i64::try_from(d.as_millis()).expect("duration ms should fit in an i64")
+    pub fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
+        fn duration_to_u64(d: Duration) -> u64 {
+            u64::try_from(d.as_millis()).expect("duration ms should fit in an u64")
         }
-        let current_time_ms = duration_to_i64(ctx.current().epoch());
-        let ok_timestamps = (current_time_ms - duration_to_i64(self.max_handshake_age))
-            ..(current_time_ms + duration_to_i64(self.synchrony_bound));
+        let current_time_ms = duration_to_u64(ctx.current().epoch());
+        let ok_timestamps = (current_time_ms
+            .saturating_sub(duration_to_u64(self.max_handshake_age)))
+            ..(current_time_ms + duration_to_u64(self.synchrony_bound));
         (current_time_ms, ok_timestamps)
     }
 }

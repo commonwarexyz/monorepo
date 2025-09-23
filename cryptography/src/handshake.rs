@@ -59,13 +59,13 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 /// Contains dialer's ephemeral key and timestamp signature.
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Syn<S: Signature> {
-    time_ms: i64,
+    time_ms: u64,
     epk: EphemeralPublicKey,
     sig: S,
 }
 
 impl<S: Signature> FixedSize for Syn<S> {
-    const SIZE: usize = i64::SIZE + EphemeralPublicKey::SIZE + S::SIZE;
+    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE;
 }
 
 impl<S: Signature + Write> Write for Syn<S> {
@@ -95,14 +95,14 @@ impl<S: Signature + Read> Read for Syn<S> {
 /// Contains listener's ephemeral key, signature, and confirmation tag.
 #[cfg_attr(test, derive(PartialEq))]
 pub struct SynAck<S: Signature> {
-    time_ms: i64,
+    time_ms: u64,
     epk: EphemeralPublicKey,
     sig: S,
     confirmation: Summary,
 }
 
 impl<S: Signature> FixedSize for SynAck<S> {
-    const SIZE: usize = i64::SIZE + EphemeralPublicKey::SIZE + S::SIZE + Summary::SIZE;
+    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE + Summary::SIZE;
 }
 
 impl<S: Signature + Write> Write for SynAck<S> {
@@ -166,7 +166,7 @@ pub struct DialState<P> {
     esk: SecretKey,
     peer_identity: P,
     transcript: Transcript,
-    ok_timestamps: Range<i64>,
+    ok_timestamps: Range<u64>,
 }
 
 /// State maintained by the listener during handshake.
@@ -180,8 +180,8 @@ pub struct ListenState {
 /// Handshake context containing timing and identity information.
 /// Used by both dialer and listener to initialize handshake state.
 pub struct Context<S, P> {
-    current_time: i64,
-    ok_timestamps: Range<i64>,
+    current_time: u64,
+    ok_timestamps: Range<u64>,
     my_identity: S,
     peer_identity: P,
 }
@@ -189,8 +189,8 @@ pub struct Context<S, P> {
 impl<S, P> Context<S, P> {
     /// Creates a new handshake context.
     pub fn new(
-        current_time_ms: i64,
-        ok_timestamps: Range<i64>,
+        current_time_ms: u64,
+        ok_timestamps: Range<u64>,
         my_identity: S,
         peer_identity: P,
     ) -> Self {
