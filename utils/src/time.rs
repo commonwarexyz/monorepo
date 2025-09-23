@@ -13,7 +13,7 @@ pub const NANOS_PER_SEC: u128 = 1_000_000_000;
 /// uses unsigned 64-bit ticks (100ns) since 1601-01-01; converting to the Unix epoch offset of
 /// 11_644_473_600 seconds yields the remaining representable span.
 #[cfg(windows)]
-const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(253_402_300_799, 999_999_900);
+const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(910_692_730_085, 477_580_799); // TODO: comment on nuance here (floors to 700)
 
 /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
 /// current platform.
