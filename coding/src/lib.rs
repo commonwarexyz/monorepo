@@ -402,4 +402,9 @@ mod test {
     fn test_suite_no_coding() {
         test_suite::<NoCoding<Sha256>>();
     }
+
+    #[test]
+    fn test_suite_zoda() {
+        test_suite::<Zoda<Sha256>>();
+    }
 }
