@@ -64,8 +64,9 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                 .iter()
                                 .take(min)
                                 .map(|(shard, proof)| {
-                                    let reshard = S::reshard(&commitment, proof, shard).unwrap();
-                                    S::check(&commitment, reshard).unwrap()
+                                    let reshard =
+                                        S::reshard(&config, &commitment, proof, shard).unwrap();
+                                    S::check(&config, &commitment, reshard).unwrap()
                                 })
                                 .collect::<Vec<_>>();
 
@@ -73,7 +74,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                         },
                         // We include the cost of checking your shard as part of decoding
                         |(commitment, (my_shard, my_proof), reshards)| {
-                            S::reshard(&commitment, &my_proof, &my_shard).unwrap();
+                            S::reshard(&config, &commitment, &my_proof, &my_shard).unwrap();
                             S::decode(&config, &commitment, my_shard, &reshards).unwrap();
                         },
                         BatchSize::SmallInput,
