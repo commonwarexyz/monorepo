@@ -5,9 +5,9 @@
 /// Returns a `(Label, MetricHandle)` pair for tracking spawned tasks.
 ///
 /// The `Label` identifies the task in the metrics registry and the
-/// [`MetricHandle`] immediately increments the `tasks_running` gauge for that
-/// label. Call [`MetricHandle::finish`] once the task completes to decrement
-/// the gauge.
+/// `MetricHandle` immediately increments the `tasks_running` gauge for that
+/// label. Call `MetricHandle::finish` once the task completes to decrement the
+/// gauge.
 #[macro_export]
 macro_rules! spawn_metrics {
     // Handle future tasks
