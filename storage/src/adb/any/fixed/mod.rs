@@ -241,7 +241,12 @@ impl<
         }
 
         // At this point the MMR and log should be consistent.
-        assert_eq!(log.size().await?, leaf_pos_to_loc(mmr.size()).unwrap());
+        assert_eq!(
+            log.size().await?,
+            Location::try_from(Position::from(mmr.size()))
+                .unwrap()
+                .as_u64()
+        );
 
         Ok((inactivity_floor_loc, mmr, log))
     }
@@ -389,7 +394,9 @@ impl<
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> u64 {
-        leaf_pos_to_loc(self.mmr.size()).unwrap()
+        Location::try_from(Position::from(self.mmr.size()))
+            .unwrap()
+            .as_u64()
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -521,7 +528,7 @@ impl<
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
 
-        let mmr_size = leaf_loc_to_pos(op_count);
+        let mmr_size = Position::from(Location::from(op_count)).as_u64();
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)

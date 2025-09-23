@@ -108,7 +108,7 @@ impl<D: Digest> Proof<D> {
         &self,
         hasher: &mut H,
         element: &[u8],
-        loc: u64,
+        loc: Location,
         root: &D,
     ) -> bool
     where
@@ -124,7 +124,7 @@ impl<D: Digest> Proof<D> {
         &self,
         hasher: &mut H,
         elements: &[E],
-        start_loc: u64,
+        start_loc: Location,
         root: &D,
     ) -> bool
     where
@@ -149,7 +149,7 @@ impl<D: Digest> Proof<D> {
     pub fn verify_multi_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
-        elements: &[(E, u64)],
+        elements: &[(E, Location)],
         root: &D,
     ) -> bool
     where
@@ -166,7 +166,8 @@ impl<D: Digest> Proof<D> {
         let mut node_positions = BTreeSet::new();
         let mut nodes_required = BTreeMap::new();
         for (_, loc) in elements {
-            let required = nodes_required_for_range_proof(self.size, *loc..(*loc + 1));
+            let loc_u64 = loc.as_u64();
+            let required = nodes_required_for_range_proof(self.size, loc_u64..(loc_u64 + 1));
             for req_pos in &required {
                 node_positions.insert(*req_pos);
             }
@@ -179,7 +180,7 @@ impl<D: Digest> Proof<D> {
         }
 
         // Build position to digest mapping once
-        let node_digests: BTreeMap<u64, D> = node_positions
+        let node_digests: BTreeMap<Position, D> = node_positions
             .iter()
             .zip(self.digests.iter())
             .map(|(&pos, digest)| (pos, *digest))
@@ -236,10 +237,7 @@ impl<D: Digest> Proof<D> {
         let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
 
         // Get all positions required for the proof.
-        let required_positions: Vec<Position> = nodes_required_for_range_proof(self.size, range)
-            .into_iter()
-            .map(|pos| Position::from(pos))
-            .collect();
+        let required_positions = nodes_required_for_range_proof(self.size, range);
 
         if required_positions.len() != self.digests.len() {
             #[cfg(feature = "std")]
@@ -291,15 +289,15 @@ impl<D: Digest> Proof<D> {
         &self,
         hasher: &mut H,
         elements: &[E],
-        start_loc: u64,
+        start_loc: Location,
         root: &I::Digest,
-    ) -> Result<Vec<(u64, D)>, super::Error>
+    ) -> Result<Vec<(Position, D)>, super::Error>
     where
         I: CHasher<Digest = D>,
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let mut collected_digests = Vec::new();
+        let mut collected_digests: Vec<(Position, D)> = Vec::new();
         let Ok(peak_digests) = self.reconstruct_peak_digests(
             hasher,
             elements,
@@ -322,7 +320,7 @@ impl<D: Digest> Proof<D> {
         &self,
         hasher: &mut H,
         elements: &[E],
-        start_loc: u64,
+        start_loc: Location,
     ) -> Result<I::Digest, ReconstructionError>
     where
         I: CHasher<Digest = D>,
@@ -341,8 +339,8 @@ impl<D: Digest> Proof<D> {
         &self,
         hasher: &mut H,
         elements: &[E],
-        start_loc: u64,
-        mut collected_digests: Option<&mut Vec<(u64, I::Digest)>>,
+        start_loc: Location,
+        mut collected_digests: Option<&mut Vec<(Position, I::Digest)>>,
     ) -> Result<Vec<D>, ReconstructionError>
     where
         I: CHasher<Digest = D>,
@@ -350,18 +348,20 @@ impl<D: Digest> Proof<D> {
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
-            if start_loc == 0 {
+            if start_loc.as_u64() == 0 {
                 return Ok(vec![]);
             }
             return Err(ReconstructionError::MissingElements);
         }
+        let start_loc_u64 = start_loc.as_u64();
         let start_element_pos = leaf_loc_to_pos(start_loc);
         let end_element_pos = if elements.len() == 1 {
             start_element_pos
         } else {
-            leaf_loc_to_pos(start_loc + elements.len() as u64 - 1)
+            let end_loc = start_loc_u64 + elements.len() as u64 - 1;
+            leaf_loc_to_pos(Location::new(end_loc))
         };
-        if end_element_pos >= self.size {
+        if end_element_pos.as_u64() >= self.size {
             return Err(ReconstructionError::InvalidEndLoc);
         }
 
@@ -374,15 +374,16 @@ impl<D: Digest> Proof<D> {
         let mut proof_digests_used = 0;
         let mut elements_iter = elements.iter();
         for (peak_pos, height) in PeakIterator::new(self.size) {
-            let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
-            if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
+            let peak_pos_u64 = peak_pos.as_u64();
+            let leftmost_pos = peak_pos_u64 + 2 - (1 << (height + 1));
+            if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos.as_u64() {
                 let hash = peak_digest_from_range(
                     hasher,
                     RangeInfo {
-                        pos: peak_pos,
+                        pos: peak_pos_u64,
                         two_h: 1 << height,
-                        leftmost_pos: start_element_pos,
-                        rightmost_pos: end_element_pos,
+                        leftmost_pos: start_element_pos.as_u64(),
+                        rightmost_pos: end_element_pos.as_u64(),
                     },
                     &mut elements_iter,
                     &mut siblings_iter,
@@ -422,34 +423,34 @@ impl<D: Digest> Proof<D> {
 /// # Panics
 ///
 /// Panics if the range is invalid for an MMR of the provided `size`.
-pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<u64>) -> Vec<u64> {
+pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<u64>) -> Vec<Position> {
     let mut positions = Vec::new();
     if range.is_empty() {
         return positions;
     }
 
-    let start_element_pos = leaf_loc_to_pos(range.start);
-    let end_element_pos = leaf_loc_to_pos(range.end - 1);
-    assert!(end_element_pos < size, "range is out of bounds");
+    let start_element_pos = leaf_loc_to_pos(Location::new(range.start));
+    let end_element_pos = leaf_loc_to_pos(Location::new(range.end - 1));
+    assert!(end_element_pos.as_u64() < size, "range is out of bounds");
 
     // Find the mountains that contain no elements from the range. The peaks of these mountains
     // are required to prove the range, so they are added to the result.
-    let mut start_tree_with_element = (u64::MAX, 0);
-    let mut end_tree_with_element = (u64::MAX, 0);
+    let mut start_tree_with_element: Option<(Position, u32)> = None;
+    let mut end_tree_with_element: Option<(Position, u32)> = None;
     let mut peak_iterator = PeakIterator::new(size);
     while let Some(peak) = peak_iterator.next() {
-        if start_tree_with_element.0 == u64::MAX && peak.0 >= start_element_pos {
+        if start_tree_with_element.is_none() && peak.0 >= start_element_pos {
             // Found the first tree to contain an element in the range
-            start_tree_with_element = peak;
+            start_tree_with_element = Some(peak);
             if peak.0 >= end_element_pos {
                 // Start and end tree are the same
-                end_tree_with_element = peak;
+                end_tree_with_element = Some(peak);
                 continue;
             }
             for peak in peak_iterator.by_ref() {
                 if peak.0 >= end_element_pos {
                     // Found the last tree to contain an element in the range
-                    end_tree_with_element = peak;
+                    end_tree_with_element = Some(peak);
                     break;
                 }
             }
@@ -458,8 +459,12 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<u64>) -> Ve
             positions.push(peak.0);
         }
     }
-    assert!(start_tree_with_element.0 != u64::MAX);
-    assert!(end_tree_with_element.0 != u64::MAX);
+    let Some(start_tree_with_element) = start_tree_with_element else {
+        panic!("invalid range: start tree missing");
+    };
+    let Some(end_tree_with_element) = end_tree_with_element else {
+        panic!("invalid range: end tree missing");
+    };
 
     // Include the positions of any left-siblings of each node on the path from peak to
     // leftmost-leaf, and right-siblings for the path from peak to rightmost-leaf. These are
@@ -482,9 +487,13 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<u64>) -> Ve
             end_tree_with_element.1,
         );
         // filter the right path for right siblings only
-        siblings.extend(right_path_iter.filter(|(parent_pos, pos)| *parent_pos == *pos + 1));
+        siblings.extend(
+            right_path_iter.filter(|(parent_pos, pos)| parent_pos.as_u64() == pos.as_u64() + 1),
+        );
         // filter the left path for left siblings only
-        siblings.extend(left_path_iter.filter(|(parent_pos, pos)| *parent_pos != *pos + 1));
+        siblings.extend(
+            left_path_iter.filter(|(parent_pos, pos)| parent_pos.as_u64() != pos.as_u64() + 1),
+        );
 
         // If the range spans more than one tree, then the digests must already be in the correct
         // order. Otherwise, we enforce the desired order through sorting.
@@ -500,7 +509,7 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<u64>) -> Ve
 /// inclusion of the elements at the specified `locations`.
 ///
 /// The order of positions does not affect the output (sorted internally).
-pub(crate) fn nodes_required_for_multi_proof(size: u64, locations: &[u64]) -> BTreeSet<u64> {
+pub(crate) fn nodes_required_for_multi_proof(size: u64, locations: &[u64]) -> BTreeSet<Position> {
     // Collect all required node positions
     //
     // TODO(#1472): Optimize this loop
@@ -523,7 +532,7 @@ fn peak_digest_from_range<'a, I, H, E, S>(
     range_info: RangeInfo,
     elements: &mut E,
     sibling_digests: &mut S,
-    mut collected_digests: Option<&mut Vec<(u64, I::Digest)>>,
+    mut collected_digests: Option<&mut Vec<(Position, I::Digest)>>,
 ) -> Result<I::Digest, ReconstructionError>
 where
     I: CHasher,
@@ -535,7 +544,7 @@ where
     if range_info.two_h == 1 {
         match elements.next() {
             Some(element) => {
-                return Ok(hasher.leaf_digest(Position::from(range_info.pos), element.as_ref()))
+                return Ok(hasher.leaf_digest(Position::new(range_info.pos), element.as_ref()))
             }
             None => return Err(ReconstructionError::MissingDigests),
         }
@@ -594,17 +603,17 @@ where
 
     if let Some(ref mut collected_digests) = collected_digests {
         collected_digests.push((
-            left_pos,
+            Position::new(left_pos),
             left_digest.expect("left_digest guaranteed to be Some after checks above"),
         ));
         collected_digests.push((
-            right_pos,
+            Position::new(right_pos),
             right_digest.expect("right_digest guaranteed to be Some after checks above"),
         ));
     }
 
     Ok(hasher.node_digest(
-        Position::from(range_info.pos),
+        Position::new(range_info.pos),
         &left_digest.expect("left_digest guaranteed to be Some after checks above"),
         &right_digest.expect("right_digest guaranteed to be Some after checks above"),
     ))

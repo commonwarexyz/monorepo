@@ -4,7 +4,7 @@ use crate::{
     journal::fixed,
     mmr::{
         iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
-        StandardHasher,
+        Location, Position, StandardHasher,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -74,19 +74,20 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
-                lower_bound_pos: leaf_loc_to_pos(lower_bound),
+                lower_bound_pos: Position::from(Location::from(lower_bound)).as_u64(),
                 // The last node of an MMR with `upper_bound` + 1 operations is at the position
                 // right before where the next leaf goes.
-                upper_bound_pos: leaf_loc_to_pos(upper_bound + 1) - 1,
+                upper_bound_pos: Position::from(Location::from(upper_bound + 1)).as_u64() - 1,
                 pinned_nodes,
             },
         )
         .await?;
 
         // Convert MMR size to number of operations.
-        let Some(mmr_ops) = leaf_pos_to_loc(mmr.size()) else {
-            return Err(crate::mmr::Error::InvalidSize(mmr.size()).into());
+        let Ok(mmr_ops) = Location::try_from(Position::from(mmr.size())) else {
+            return Err(crate::mmr::Error::InvalidSize(mmr.size()).into()); // TODO what error should we return?
         };
+        let mmr_ops = mmr_ops.as_u64();
 
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();

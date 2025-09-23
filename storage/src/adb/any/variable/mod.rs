@@ -14,7 +14,7 @@ use crate::{
     mmr::{
         iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
-        Proof, StandardHasher as Standard,
+        Location, Position, Proof, StandardHasher as Standard,
     },
     store::operation::Variable as Operation,
     translator::Translator,
@@ -345,7 +345,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         // Confirm post-conditions hold.
-        assert_eq!(self.log_size, leaf_pos_to_loc(self.mmr.size()).unwrap());
+        assert_eq!(
+            self.log_size,
+            Location::try_from(Position::from(self.mmr.size()))
+                .unwrap()
+                .as_u64()
+        );
         assert_eq!(self.log_size, self.locations.size().await?);
 
         debug!(log_size = self.log_size, "build_snapshot_from_log complete");

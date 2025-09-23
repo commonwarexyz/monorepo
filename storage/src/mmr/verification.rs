@@ -11,7 +11,7 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Position, Proof};
+use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Location, Position, Proof};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::ops::Range;
 use futures::future::try_join_all;
@@ -40,8 +40,12 @@ impl<D: Digest> ProofStore<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let digests =
-            proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
+        let digests = proof.verify_range_inclusion_and_extract_digests(
+            hasher,
+            elements,
+            Location::from(start_loc),
+            root,
+        )?;
 
         Ok(ProofStore::new_from_digests(proof.size, digests))
     }
@@ -49,10 +53,13 @@ impl<D: Digest> ProofStore<D> {
     /// Create a new [ProofStore] from the result of calling
     /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
-    pub fn new_from_digests(size: u64, digests: Vec<(u64, D)>) -> Self {
+    pub fn new_from_digests(size: u64, digests: Vec<(Position, D)>) -> Self {
         Self {
             size,
-            digests: digests.into_iter().collect(),
+            digests: digests
+                .into_iter()
+                .map(|(pos, digest)| (pos.as_u64(), digest))
+                .collect(),
         }
     }
 
@@ -101,15 +108,13 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 
     // Fetch the digest of each.
     let mut digests: Vec<D> = Vec::new();
-    let node_futures = positions
-        .iter()
-        .map(|pos| mmr.get_node(Position::from(*pos)));
+    let node_futures = positions.iter().map(|&pos| mmr.get_node(pos));
     let hash_results = try_join_all(node_futures).await?;
 
     for (i, hash_result) in hash_results.into_iter().enumerate() {
         match hash_result {
             Some(hash) => digests.push(hash),
-            None => return Err(Error::ElementPruned(positions[i])),
+            None => return Err(Error::ElementPruned(positions[i].as_u64())),
         };
     }
 
@@ -140,7 +145,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     let node_futures: Vec<_> = node_positions
         .iter()
         .map(|&pos| async move {
-            mmr.get_node(Position::from(pos))
+            mmr.get_node(pos)
                 .await
                 .map(|digest| (pos, digest))
         })
@@ -152,7 +157,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     for (pos, digest) in results {
         match digest {
             Some(digest) => digests.push(digest),
-            None => return Err(Error::ElementPruned(pos)),
+            None => return Err(Error::ElementPruned(pos.as_u64())),
         }
     }
 

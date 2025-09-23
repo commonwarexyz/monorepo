@@ -74,7 +74,7 @@ pub struct Hasher<'a, H: CHasher> {
     height: u32,
 
     /// Maps a leaf's position to the digest of the node on which the leaf is grafted.
-    grafted_digests: HashMap<u64, H::Digest>,
+    grafted_digests: HashMap<Position, H::Digest>,
 }
 
 impl<'a, H: CHasher> Hasher<'a, H> {
@@ -105,8 +105,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     ) -> Result<(), Error> {
         let mut futures = Vec::with_capacity(leaves.len());
         for leaf_loc in leaves {
-            let dest_pos = self
-                .destination_pos(leaf_loc_to_pos(Location::new(*leaf_loc)));
+            let dest_pos = self.destination_pos(leaf_loc_to_pos(Location::new(*leaf_loc)));
             let future = mmr.get_node(dest_pos);
             futures.push(future);
         }
@@ -124,8 +123,8 @@ impl<'a, H: CHasher> Hasher<'a, H> {
 
     /// Compute the position of the leaf in the base tree onto which we should graft the leaf at
     /// position `pos` in the source tree.
-    fn destination_pos(&self, pos: u64) -> u64 {
-        destination_pos(pos, self.height)
+    fn destination_pos(&self, pos: Position) -> Position {
+        Position::new(destination_pos(pos.as_u64(), self.height))
     }
 }
 
@@ -134,7 +133,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
 pub struct HasherFork<'a, H: CHasher> {
     hasher: StandardHasher<H>,
     height: u32,
-    grafted_digests: &'a HashMap<u64, H::Digest>,
+    grafted_digests: &'a HashMap<Position, H::Digest>,
 }
 
 /// Compute the position of the node in the base tree onto which we should graft the node at
@@ -214,10 +213,9 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
     ///
     /// Panics if the grafted_digest was not previously loaded for the leaf.
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
-        let pos_u64 = pos.as_u64();
-        let grafted_digest = self.grafted_digests.get(&pos_u64);
+        let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
-            panic!("missing grafted digest for leaf_pos {pos_u64}");
+            panic!("missing grafted digest for leaf_pos {pos}");
         };
 
         // We do not include position in the digest material here since the position information is
@@ -243,7 +241,7 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
         right_digest: &H::Digest,
     ) -> H::Digest {
         self.hasher.node_digest(
-            Position::new(self.destination_pos(pos.as_u64())),
+            Position::new(destination_pos(pos.as_u64(), self.height)),
             left_digest,
             right_digest,
         )
@@ -254,7 +252,7 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher.root(self.destination_pos(size), peak_digests)
+        self.hasher.root(destination_pos(size, self.height), peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -268,10 +266,9 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
 
 impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
-        let pos_u64 = pos.as_u64();
-        let grafted_digest = self.grafted_digests.get(&pos_u64);
+        let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
-            panic!("missing grafted digest for leaf_pos {pos_u64}");
+            panic!("missing grafted digest for leaf_pos {pos}");
         };
 
         // We do not include position in the digest material here since the position information is
@@ -296,11 +293,8 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
-        self.hasher.node_digest(
-            Position::new(destination_pos(pos.as_u64(), self.height)),
-            left_digest,
-            right_digest,
-        )
+        self.hasher
+            .node_digest(self.destination_pos(pos), left_digest, right_digest)
     }
 
     fn root<'a>(
@@ -472,18 +466,18 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
         self.base_mmr.size()
     }
 
-    async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
+    async fn get_node(&self, pos: Position) -> Result<Option<H::Digest>, Error> {
         let height = pos_to_height(pos);
         if height < self.height {
             return self.base_mmr.get_node(pos).await;
         }
 
-        let source_pos = source_pos(pos, self.height);
+        let source_pos = source_pos(pos.as_u64(), self.height);
         let Some(source_pos) = source_pos else {
             return Ok(None);
         };
 
-        self.peak_tree.get_node(source_pos).await
+        self.peak_tree.get_node(Position::new(source_pos)).await
     }
 }
 
