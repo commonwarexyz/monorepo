@@ -5,6 +5,7 @@ use rand_chacha::ChaCha8Rng;
 
 mod no_coding;
 mod reed_solomon;
+mod zoda;
 
 pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
@@ -105,4 +106,4 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
     }
 }
 
-criterion_main!(reed_solomon::benches, no_coding::benches);
+criterion_main!(reed_solomon::benches, no_coding::benches, zoda::benches);
