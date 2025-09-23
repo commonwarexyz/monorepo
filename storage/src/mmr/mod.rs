@@ -68,8 +68,10 @@
 //! ```
 
 pub mod hasher;
+pub mod location;
 pub mod iterator;
 pub mod mem;
+pub mod position;
 pub mod proof;
 pub mod stability;
 
@@ -84,6 +86,8 @@ cfg_if::cfg_if! {
 }
 
 pub use hasher::Standard as StandardHasher;
+pub use location::Location;
+pub use position::Position;
 pub use proof::Proof;
 use thiserror::Error;
 
