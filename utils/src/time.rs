@@ -250,6 +250,32 @@ mod tests {
     }
 
     #[test]
+    fn test_from_nanos_u128() {
+        // Support simple cases
+        assert_eq!(Duration::from_nanos_u128(0), Duration::new(0, 0));
+        assert_eq!(
+            Duration::from_nanos_u128(NANOS_PER_SEC - 1),
+            Duration::new(0, (NANOS_PER_SEC - 1) as u32)
+        );
+        assert_eq!(
+            Duration::from_nanos_u128(NANOS_PER_SEC + 1),
+            Duration::new(1, 1)
+        );
+
+        // Support larger values than `Duration::from_nanos`
+        let std = Duration::from_nanos(u64::MAX);
+        let beyond_std = Duration::from_nanos_u128(u64::MAX as u128 + 1);
+        assert!(beyond_std > std);
+
+        // Test very large values
+        let max_span = (u64::MAX as u128) * NANOS_PER_SEC + (NANOS_PER_SEC - 1);
+        assert_eq!(
+            Duration::from_nanos_u128(max_span),
+            Duration::new(u64::MAX, (NANOS_PER_SEC - 1) as u32)
+        );
+    }
+
+    #[test]
     fn test_add_jittered() {
         let mut rng = rand::thread_rng();
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
