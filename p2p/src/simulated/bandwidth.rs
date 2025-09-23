@@ -52,13 +52,13 @@ enum ResourceKey<P> {
 }
 
 /// Tracks the constraints participating in a flow and whether it is still constrained.
-struct FlowState {
+struct State {
     resources: Vec<usize>,
     limited: bool,
     active: bool,
 }
 
-impl FlowState {
+impl State {
     fn new() -> Self {
         Self {
             resources: Vec::new(),
@@ -73,7 +73,7 @@ struct Planner<'a, P> {
     flows: &'a [Flow<P>],
     resources: Vec<Resource>,
     indices: BTreeMap<ResourceKey<P>, usize>,
-    flow_states: Vec<FlowState>,
+    flow_states: Vec<State>,
     rates: Vec<Option<Ratio>>,
     active_flows: usize,
     current_fill: Ratio,
@@ -105,7 +105,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         I: FnMut(&P) -> Option<u128>,
     {
         for (idx, flow) in self.flows.iter().enumerate() {
-            let mut state = FlowState::new();
+            let mut state = State::new();
 
             // Register the flow with its egress resource if the sender is bandwidth-limited.
             if let Some(resource_idx) = self.ensure_resource(
@@ -147,7 +147,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     /// Link a flow to a resource, marking it as constrained.
-    fn attach(&mut self, resource_idx: usize, flow_idx: usize, state: &mut FlowState) {
+    fn attach(&mut self, resource_idx: usize, flow_idx: usize, state: &mut State) {
         let resource = &mut self.resources[resource_idx];
         resource.members.push(flow_idx);
         resource.active_users += 1;
