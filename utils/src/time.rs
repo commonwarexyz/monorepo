@@ -6,6 +6,12 @@ use std::time::{Duration, SystemTime};
 /// Number of nanoseconds in a second.
 pub const NANOS_PER_SEC: u128 = 1_000_000_000;
 
+// Maximum nanoseconds that map to the largest `Duration` representable by `Duration::new`.
+pub const MAX_DURATION_NANOS: u128 = ((u64::MAX as u128) * NANOS_PER_SEC) + (NANOS_PER_SEC - 1);
+
+// Maximum `Duration` representable by `Duration::new`.
+pub const MAX_DURATION: Duration = Duration::new(u64::MAX, (NANOS_PER_SEC - 1) as u32);
+
 cfg_if::cfg_if! {
     if #[cfg(windows)] {
         /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
@@ -35,7 +41,8 @@ cfg_if::cfg_if! {
 
 /// Extension trait providing additional functionality for [`Duration`].
 pub trait DurationExt {
-    /// Creates a duration from nanoseconds represented as a `u128`.
+    /// Creates a duration from nanoseconds represented as a `u128`. Clamps anything beyond the
+    /// representable range.
     fn from_nanos_u128(ns: u128) -> Duration;
 
     /// Parse a duration string with time unit suffixes.
@@ -92,6 +99,12 @@ pub trait DurationExt {
 
 impl DurationExt for Duration {
     fn from_nanos_u128(ns: u128) -> Duration {
+        // Clamp anything beyond the representable range
+        if ns > MAX_DURATION_NANOS {
+            return MAX_DURATION;
+        }
+
+        // Convert to `Duration`
         let secs = (ns / NANOS_PER_SEC) as u64;
         let nanos = (ns % NANOS_PER_SEC) as u32;
         Duration::new(secs, nanos)
@@ -268,11 +281,14 @@ mod tests {
         assert!(beyond_std > std);
 
         // Test very large values
-        let max_span = (u64::MAX as u128) * NANOS_PER_SEC + (NANOS_PER_SEC - 1);
+        assert_eq!(Duration::from_nanos_u128(MAX_DURATION_NANOS), MAX_DURATION);
+
+        // Clamp anything beyond the representable range
         assert_eq!(
-            Duration::from_nanos_u128(max_span),
-            Duration::new(u64::MAX, (NANOS_PER_SEC - 1) as u32)
+            Duration::from_nanos_u128(MAX_DURATION_NANOS + 1),
+            MAX_DURATION
         );
+        assert_eq!(Duration::from_nanos_u128(u128::MAX), MAX_DURATION);
     }
 
     #[test]
