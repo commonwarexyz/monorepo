@@ -181,7 +181,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     fn freeze(&mut self, res_idx: usize) {
         let members = self.resources[res_idx].members.clone();
         for flow_idx in members {
-            self.deactivate(flow_idx);
+            self.finalize(flow_idx);
         }
     }
 
@@ -190,7 +190,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     /// The flow's share at the moment of freezing becomes its permanent rate; afterwards we
     /// subtract it from every referenced resource so the next progressive-filling iteration only
     /// considers the remaining active flows.
-    fn deactivate(&mut self, flow_idx: usize) {
+    fn finalize(&mut self, flow_idx: usize) {
         let state = &mut self.states[flow_idx];
         if !state.active {
             return;
