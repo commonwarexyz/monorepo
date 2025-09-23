@@ -29,15 +29,17 @@ pub enum Rate {
 /// Shared capacity constraint (either egress or ingress) tracked by the planner.
 #[derive(Debug)]
 struct Resource {
-    capacity: Ratio,
+    remaining: Ratio,
     members: Vec<usize>,
+    active_users: usize,
 }
 
 impl Resource {
     fn new(limit: u128) -> Self {
         Self {
-            capacity: Ratio::from_int(limit),
+            remaining: Ratio::from_int(limit),
             members: Vec::new(),
+            active_users: 0,
         }
     }
 }
@@ -49,21 +51,226 @@ enum ResourceKey<P> {
     Ingress(P),
 }
 
-/// Ensures an entry exists for the given resource, returning its index if limited.
-fn insert<P: Clone + Ord>(
-    key: ResourceKey<P>,
-    limit: Option<u128>,
-    indices: &mut BTreeMap<ResourceKey<P>, usize>,
-    resources: &mut Vec<Resource>,
-) -> Option<usize> {
-    if let Some(index) = indices.get(&key) {
-        return Some(*index);
+struct FlowState {
+    resources: Vec<usize>,
+    limited: bool,
+    active: bool,
+}
+
+impl FlowState {
+    fn new() -> Self {
+        Self {
+            resources: Vec::new(),
+            limited: false,
+            active: false,
+        }
+    }
+}
+
+struct BandwidthPlanner<'a, P> {
+    flows: &'a [Flow<P>],
+    resources: Vec<Resource>,
+    indices: BTreeMap<ResourceKey<P>, usize>,
+    flow_states: Vec<FlowState>,
+    rates: Vec<Option<Ratio>>,
+    active_flows: usize,
+    current_fill: Ratio,
+}
+
+impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
+    fn new(flows: &'a [Flow<P>]) -> Self {
+        Self {
+            flows,
+            resources: Vec::new(),
+            indices: BTreeMap::new(),
+            flow_states: Vec::with_capacity(flows.len()),
+            rates: vec![None; flows.len()],
+            active_flows: 0,
+            current_fill: Ratio::zero(),
+        }
     }
 
-    let idx = resources.len();
-    resources.push(Resource::new(limit?));
-    indices.insert(key, idx);
-    Some(idx)
+    fn ensure_resource(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
+        if let Some(index) = self.indices.get(&key) {
+            return Some(*index);
+        }
+        let limit = limit?;
+        let idx = self.resources.len();
+        self.resources.push(Resource::new(limit));
+        self.indices.insert(key, idx);
+        Some(idx)
+    }
+
+    fn register_flows<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
+    where
+        E: FnMut(&P) -> Option<u128>,
+        I: FnMut(&P) -> Option<u128>,
+    {
+        for (idx, flow) in self.flows.iter().enumerate() {
+            let mut state = FlowState::new();
+
+            if let Some(resource_idx) = self.ensure_resource(
+                ResourceKey::Egress(flow.origin.clone()),
+                egress_limit(&flow.origin),
+            ) {
+                self.attach(resource_idx, idx, &mut state);
+            }
+
+            if flow.requires_ingress {
+                if let Some(resource_idx) = self.ensure_resource(
+                    ResourceKey::Ingress(flow.recipient.clone()),
+                    ingress_limit(&flow.recipient),
+                ) {
+                    self.attach(resource_idx, idx, &mut state);
+                }
+            }
+
+            if state.limited {
+                state.active = true;
+                self.active_flows += 1;
+            }
+
+            self.flow_states.push(state);
+        }
+    }
+
+    fn attach(&mut self, resource_idx: usize, flow_idx: usize, state: &mut FlowState) {
+        let resource = &mut self.resources[resource_idx];
+        resource.members.push(flow_idx);
+        resource.active_users += 1;
+        state.resources.push(resource_idx);
+        state.limited = true;
+    }
+
+    fn solve(&mut self) {
+        if self.active_flows == 0 {
+            return;
+        }
+
+        let mut limiting = Vec::new();
+        while self.active_flows > 0 {
+            limiting.clear();
+            let mut min_delta: Option<Ratio> = None;
+
+            for (res_idx, resource) in self.resources.iter().enumerate() {
+                if resource.active_users == 0 {
+                    continue;
+                }
+
+                if resource.remaining.is_zero() {
+                    limiting.clear();
+                    limiting.push(res_idx);
+                    min_delta = Some(Ratio::zero());
+                    break;
+                }
+
+                let share = resource.remaining.div_int(resource.active_users as u128);
+                match &min_delta {
+                    None => {
+                        min_delta = Some(share);
+                        limiting.clear();
+                        limiting.push(res_idx);
+                    }
+                    Some(current) => match share.cmp(current) {
+                        Ordering::Less => {
+                            min_delta = Some(share);
+                            limiting.clear();
+                            limiting.push(res_idx);
+                        }
+                        Ordering::Equal => limiting.push(res_idx),
+                        Ordering::Greater => {}
+                    },
+                }
+            }
+
+            let delta = match min_delta {
+                Some(delta) => delta,
+                None => {
+                    debug_assert_eq!(self.active_flows, 0, "active flows without constraints");
+                    break;
+                }
+            };
+
+            if delta.is_zero() {
+                for &res_idx in &limiting {
+                    self.freeze_resource(res_idx);
+                }
+                continue;
+            }
+
+            self.current_fill.add_assign(&delta);
+
+            let mut saturated = Vec::new();
+            for (res_idx, resource) in self.resources.iter_mut().enumerate() {
+                if resource.active_users == 0 {
+                    continue;
+                }
+                let usage = delta.mul_int(resource.active_users as u128);
+                if usage.is_zero() {
+                    continue;
+                }
+                resource.remaining.sub_assign(&usage);
+                if resource.remaining.is_zero() {
+                    saturated.push(res_idx);
+                }
+            }
+
+            saturated.extend(limiting.iter().copied());
+            if saturated.is_empty() {
+                continue;
+            }
+            saturated.sort_unstable();
+            saturated.dedup();
+            for res_idx in saturated {
+                self.freeze_resource(res_idx);
+            }
+        }
+    }
+
+    fn freeze_resource(&mut self, res_idx: usize) {
+        let members = self.resources[res_idx].members.clone();
+        for flow_idx in members {
+            self.deactivate_flow(flow_idx);
+        }
+    }
+
+    fn deactivate_flow(&mut self, flow_idx: usize) {
+        let state = &mut self.flow_states[flow_idx];
+        if !state.active {
+            return;
+        }
+
+        self.rates[flow_idx] = Some(self.current_fill.clone());
+        state.active = false;
+        self.active_flows -= 1;
+
+        for &res_idx in &state.resources {
+            let resource = &mut self.resources[res_idx];
+            if resource.active_users > 0 {
+                resource.active_users -= 1;
+            }
+        }
+    }
+
+    fn into_rates(mut self) -> BTreeMap<u64, Rate> {
+        debug_assert_eq!(self.active_flows, 0, "planner left flows active");
+
+        for (idx, state) in self.flow_states.iter().enumerate() {
+            if state.limited && self.rates[idx].is_none() {
+                self.rates[idx] = Some(self.current_fill.clone());
+            }
+        }
+
+        let mut result = BTreeMap::new();
+        for (idx, flow) in self.flows.iter().enumerate() {
+            let rate = match &self.rates[idx] {
+                Some(ratio) => Rate::Finite(ratio.clone()),
+                None => Rate::Unlimited,
+            };
+            result.insert(flow.id, rate);
+        }
+        result
+    }
 }
 
 /// Computes a fair allocation for the provided `flows`, returning per-flow rates.
@@ -84,214 +291,14 @@ where
     I: FnMut(&P) -> Option<u128>,
 {
     // If there are no flows, there is nothing to allocate.
-    let mut result = BTreeMap::new();
     if flows.is_empty() {
-        return result;
+        return BTreeMap::new();
     }
 
-    // Register all flows with the resources they touch.
-    let mut indices: BTreeMap<ResourceKey<P>, usize> = BTreeMap::new();
-    let mut resources: Vec<Resource> = Vec::new();
-    let mut rates: Vec<Option<Ratio>> = vec![None; flows.len()];
-    let mut active_indices: Vec<usize> = Vec::new();
-    for (idx, flow) in flows.iter().enumerate() {
-        // Always insert the egress resource.
-        let mut limited = false;
-        if let Some(resource_idx) = insert(
-            ResourceKey::Egress(flow.origin.clone()),
-            egress_limit(&flow.origin),
-            &mut indices,
-            &mut resources,
-        ) {
-            resources[resource_idx].members.push(idx);
-            limited = true;
-        }
-
-        // If the flow requires ingress, insert the ingress resource (may be a no-op
-        // if the message will be dropped).
-        if flow.requires_ingress {
-            if let Some(resource_idx) = insert(
-                ResourceKey::Ingress(flow.recipient.clone()),
-                ingress_limit(&flow.recipient),
-                &mut indices,
-                &mut resources,
-            ) {
-                resources[resource_idx].members.push(idx);
-                limited = true;
-            }
-        }
-
-        // If the flow is limited by a resource, set its rate to zero (we'll increase it later).
-        if limited {
-            rates[idx] = Some(Ratio::zero());
-            active_indices.push(idx);
-        }
-    }
-
-    // Compute the rates for the constrained flows.
-    compute_rates(&active_indices, &resources, &mut rates);
-
-    // Convert the rates to the result format.
-    for (idx, flow) in flows.iter().enumerate() {
-        let rate = match &rates[idx] {
-            None => Rate::Unlimited,
-            Some(ratio) => Rate::Finite(ratio.clone()),
-        };
-        result.insert(flow.id, rate);
-    }
-
-    result
-}
-
-/// Distribute capacity among constrained flows.
-///
-/// `active` indexes flows that are limited by some resource. Each iteration identifies the
-/// tightest remaining resource, increases rates for all unfrozen flows by the same delta,
-/// and freezes any flow that now sits on a saturated resource. When no constrained flows
-/// remain, `rates` captures the final allocation (with `None` meaning unlimited).
-fn compute_rates(active: &[usize], resources: &[Resource], rates: &mut [Option<Ratio>]) {
-    // If there are no active flows, there is nothing to allocate.
-    if active.is_empty() {
-        return;
-    }
-
-    // Track how much capacity each resource still has to hand out.
-    let mut remaining: Vec<Ratio> = resources.iter().map(|res| res.capacity.clone()).collect();
-
-    // `unfrozen[idx] == true` means the flow is still participating in progressive filling.
-    let mut unfrozen = vec![false; rates.len()];
-    for &idx in active {
-        unfrozen[idx] = true;
-    }
-
-    // Continue allocating until every flow is either unlimited or fully constrained.
-    let mut active_left = active.len();
-    while active_left > 0 {
-        // Find the resource with the smallest remaining capacity.
-        let mut limiting = Vec::new();
-        let mut min_delta: Option<Ratio> = None;
-        for (res_idx, resource) in resources.iter().enumerate() {
-            // Count how many still-active flows are drawing from this resource.
-            let users: u128 = resource
-                .members
-                .iter()
-                .filter(|&&flow_idx| unfrozen[flow_idx])
-                .count() as u128;
-            if users == 0 {
-                continue;
-            }
-
-            // If the resource is exhausted, freeze all flows depending on it.
-            if remaining[res_idx].is_zero() {
-                limiting.clear();
-                limiting.push(res_idx);
-                min_delta = Some(Ratio::zero());
-                break;
-            }
-
-            // Potential additional rate every user could receive before hitting this limit.
-            let delta = remaining[res_idx].div_int(users);
-            match &min_delta {
-                None => {
-                    min_delta = Some(delta);
-                    limiting.clear();
-                    limiting.push(res_idx);
-                }
-                Some(current) => match delta.cmp(current) {
-                    Ordering::Less => {
-                        min_delta = Some(delta);
-                        limiting.clear();
-                        limiting.push(res_idx);
-                    }
-                    Ordering::Equal => limiting.push(res_idx),
-                    Ordering::Greater => {}
-                },
-            }
-        }
-
-        // If there is no resource with a remaining capacity, freeze all flows.
-        if min_delta.is_none() {
-            for &idx in active {
-                if unfrozen[idx] {
-                    rates[idx] = None;
-                }
-            }
-            break;
-        }
-
-        // Freeze flows depending on the resource with the smallest remaining capacity (if exhausted).
-        let delta = min_delta.unwrap();
-        if delta.is_zero() {
-            let mut newly_frozen = Vec::new();
-            for &res_idx in &limiting {
-                for &flow_idx in &resources[res_idx].members {
-                    if unfrozen[flow_idx] {
-                        newly_frozen.push(flow_idx);
-                    }
-                }
-                remaining[res_idx] = Ratio::zero();
-            }
-            for idx in newly_frozen {
-                if rates[idx].is_none() {
-                    rates[idx] = Some(Ratio::zero());
-                }
-                if unfrozen[idx] {
-                    unfrozen[idx] = false;
-                    active_left -= 1;
-                }
-            }
-            continue;
-        }
-
-        // If the resource has a remaining capacity, distribute it evenly among the unfrozen flows.
-        for &idx in active {
-            if !unfrozen[idx] {
-                continue;
-            }
-            match &mut rates[idx] {
-                Some(rate) => rate.add_assign(&delta),
-                None => {
-                    let mut rate = Ratio::zero();
-                    rate.add_assign(&delta);
-                    rates[idx] = Some(rate);
-                }
-            }
-        }
-
-        // Charge each resource for the extra `delta` assigned to its active members. When a
-        // resource is fully consumed, we freeze all flows that depend on it so future rounds
-        // no longer consider them when distributing remaining capacity. Freezing is safe even if
-        // only one resource is depleted: that constraint alone prevents the flow from ever
-        // increasing its rate beyond the current allocation.
-        let mut newly_frozen = Vec::new();
-        for (res_idx, resource) in resources.iter().enumerate() {
-            let users: u128 = resource
-                .members
-                .iter()
-                .filter(|&&flow_idx| unfrozen[flow_idx])
-                .count() as u128;
-            if users == 0 {
-                continue;
-            }
-            let usage = delta.mul_int(users);
-            remaining[res_idx].sub_assign(&usage);
-            if remaining[res_idx].is_zero() {
-                for &flow_idx in &resource.members {
-                    if unfrozen[flow_idx] {
-                        newly_frozen.push(flow_idx);
-                    }
-                }
-            }
-        }
-
-        // Remove newly frozen flows from the active set so subsequent iterations ignore them.
-        for idx in newly_frozen {
-            if unfrozen[idx] {
-                unfrozen[idx] = false;
-                active_left -= 1;
-            }
-        }
-    }
+    let mut planner = BandwidthPlanner::new(flows);
+    planner.register_flows(&mut egress_limit, &mut ingress_limit);
+    planner.solve();
+    planner.into_rates()
 }
 
 /// Calculate the time it will take to deplete a given amount of capacity at some [Rate].
