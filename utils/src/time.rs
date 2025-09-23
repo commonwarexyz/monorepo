@@ -424,7 +424,7 @@ mod tests {
 
         const MAX_SECS: u64 = 253_402_300_799;
         const MAX_SECS_PLUS_ONE: u64 = MAX_SECS + 1;
-        const CANDIDATE_NANOS: [u32; 7] = [
+        const CANDIDATE_NANOS: [u32; 10] = [
             0,
             900_000_000,
             999_999_700,
