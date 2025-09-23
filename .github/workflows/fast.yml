@@ -206,7 +206,7 @@ jobs:
           - name: utils-windows-time
             os: windows-latest
             command: |
-              cargo test -p commonware-utils time::tests::print_windows_duration_boundary -- --nocapture
+              cargo test -p commonware-utils -- --nocapture
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

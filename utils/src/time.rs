@@ -272,15 +272,22 @@ mod tests {
     }
 
     #[test]
-    fn check_duration_cap() {
+    fn check_duration_limit() {
         // Check happy path
-        let epoch = UNIX_EPOCH;
-        epoch
+        UNIX_EPOCH
             .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
             .expect("unable to add max duration");
 
         // Check unhappy path
-        let result = epoch.checked_add(MAX_DURATION_SINCE_UNIX_EPOCH + Duration::from_nanos(1));
+        let result =
+            UNIX_EPOCH.checked_add(MAX_DURATION_SINCE_UNIX_EPOCH + Duration::from_nanos(1));
+        assert!(result.is_none(), "able to exceed max duration");
+
+        // Check other unhappy path
+        let result = UNIX_EPOCH
+            .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
+            .unwrap()
+            .checked_add(Duration::from_nanos(1));
         assert!(result.is_none(), "able to exceed max duration");
     }
 
