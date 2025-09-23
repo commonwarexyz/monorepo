@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_utils::{parse_duration, SystemTimeExt};
+use commonware_utils::{DurationExt, SystemTimeExt};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 use std::time::{Duration, SystemTime};
@@ -34,7 +34,7 @@ fn fuzz(input: FuzzInput) {
 
     match input.operation {
         Operation::ParseDuration { input } => {
-            let _ = parse_duration(&input);
+            let _ = Duration::parse(&input);
         }
 
         Operation::SystemTimeEpoch {

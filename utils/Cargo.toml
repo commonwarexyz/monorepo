@@ -13,9 +13,10 @@ documentation = "https://docs.rs/commonware-utils"
 [dependencies]
 commonware-codec = { workspace = true, default-features = false }
 bytes = { workspace = true }
-futures = { workspace = true, optional = true  }
+futures = { workspace = true, optional = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
+cfg-if = { workspace = true }
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]

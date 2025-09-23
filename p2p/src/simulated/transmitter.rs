@@ -2,7 +2,7 @@ use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::Ratio;
+use commonware_utils::{Ratio, SystemTimeExt};
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
     time::{Duration, SystemTime},
@@ -424,8 +424,16 @@ impl<P: PublicKey + Ord + Clone> State<P> {
 
         for (flow_id, rate) in allocations {
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
+                // Preserve any fractional progress (`carry`) accrued at the previous rate so
+                // low-throughput flows keep making forward progress across ticks. If the planner
+                // assigns the exact same finite rate we can keep the remainder; otherwise the
+                // old fraction is expressed in a different rate and must be discarded (we already
+                // accounted for all bytes transferable at the old rate earlier in this rebalance,
+                // and any leftover fraction would be wrong once the rate changes).
+                if meta.rate != rate {
+                    meta.carry = 0;
+                }
                 meta.rate = rate.clone();
-                meta.carry = 0;
                 meta.last_update = now;
 
                 if matches!(meta.rate, Rate::Unlimited) {
@@ -449,13 +457,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
         completed.dedup();
 
         // Record the next time at which a bandwidth event should fire.
-        self.next_bandwidth_event = earliest.and_then(|duration| {
-            if duration.is_zero() {
-                Some(now)
-            } else {
-                now.checked_add(duration)
-            }
-        });
+        self.next_bandwidth_event = earliest.map(|duration| now.saturating_add(duration));
 
         self.finish(completed, now)
     }
@@ -778,6 +780,34 @@ mod tests {
         assert_eq!(completions.len(), 1);
         assert!(!completions[0].deliver);
         assert!(completions[0].arrival_complete_at.is_none());
+    }
+
+    #[test]
+    fn rebalance_schedules_event_for_huge_transfers() {
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin = key(20);
+        let recipient = key(21);
+
+        // Configure bandwidth constraints so the flow is limited by both peers.
+        assert!(state.tune(now, &origin, Some(1), None).is_empty());
+        assert!(state.tune(now, &recipient, None, Some(1)).is_empty());
+
+        // Enqueue a small message to create the flow entry.
+        let completions = state.enqueue(
+            now,
+            origin.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from_static(b"x"),
+            Duration::ZERO,
+            true,
+        );
+        assert!(completions.is_empty());
+
+        // Rebalance to schedule the bandwidth event
+        let _ = state.rebalance(now);
+        assert!(state.next().is_some(), "bandwidth event must be scheduled");
     }
 
     #[test]
@@ -1306,6 +1336,69 @@ mod tests {
         expected.sort();
         assert_eq!(recipients, expected);
 
+        assert!(state.next().is_none());
+    }
+
+    #[test]
+    fn carry_accumulates_across_rebalances() {
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin_small = key(60);
+        let origin_large = key(61);
+        let recipient = key(62);
+
+        assert!(state
+            .tune(now, &origin_small, Some(30_000), None)
+            .is_empty());
+        assert!(state
+            .tune(now, &origin_large, Some(30_000), None)
+            .is_empty());
+        assert!(state.tune(now, &recipient, None, Some(30_000)).is_empty());
+
+        let completions = state.enqueue(
+            now,
+            origin_small.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from_static(&[0xAA]),
+            Duration::ZERO,
+            true,
+        );
+        assert!(completions.is_empty());
+
+        let completions = state.enqueue(
+            now,
+            origin_large.clone(),
+            recipient.clone(),
+            CHANNEL,
+            Bytes::from(vec![0xBB; 10_000]),
+            Duration::ZERO,
+            true,
+        );
+        assert!(completions.is_empty());
+
+        let mut delivered = Vec::new();
+        let mut last_deadline = now;
+        while delivered.len() < 2 {
+            let deadline = state
+                .next()
+                .expect("pending transmissions should advertise a deadline");
+            assert!(deadline >= last_deadline);
+            last_deadline = deadline;
+
+            for completion in state.process(deadline) {
+                assert!(completion.deliver);
+                delivered.push(completion.message.len());
+            }
+        }
+
+        assert_eq!(
+            delivered.len(),
+            2,
+            "flows failed to complete under repeated rebalances"
+        );
+        delivered.sort();
+        assert_eq!(delivered, vec![1, 10_000]);
         assert!(state.next().is_none());
     }
 }

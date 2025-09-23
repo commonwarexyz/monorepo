@@ -7,11 +7,8 @@
 //! whenever the active set changes (for example when a message finishes or a new message
 //! arrives).
 
-use commonware_utils::Ratio;
+use commonware_utils::{time::NANOS_PER_SEC, DurationExt, Ratio};
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
-
-/// Number of nanoseconds in a second.
-pub const NS_PER_SEC: u128 = 1_000_000_000;
 
 /// Minimal description of a simulated transmission path.
 #[derive(Clone, Debug)]
@@ -309,9 +306,11 @@ pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
                     None
                 }
             } else {
-                let numerator = bytes.saturating_mul(ratio.den).saturating_mul(NS_PER_SEC);
+                let numerator = bytes
+                    .saturating_mul(ratio.den)
+                    .saturating_mul(NANOS_PER_SEC);
                 let ns = div_ceil(numerator, ratio.num);
-                Some(duration_from_ns(ns))
+                Some(Duration::from_nanos_u128(ns))
             }
         }
     }
@@ -340,7 +339,7 @@ pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u12
                 return 0;
             }
 
-            let denom = ratio.den.saturating_mul(NS_PER_SEC);
+            let denom = ratio.den.saturating_mul(NANOS_PER_SEC);
             if denom == 0 {
                 *carry = 0;
                 return remaining;
@@ -365,20 +364,6 @@ fn div_ceil(num: u128, denom: u128) -> u128 {
     } else {
         div.saturating_add(1)
     }
-}
-
-/// Convert a number of nanoseconds to a duration, handling overflows.
-fn duration_from_ns(ns: u128) -> Duration {
-    if ns == 0 {
-        return Duration::ZERO;
-    }
-    let max_ns = u128::from(u64::MAX) * NS_PER_SEC;
-    if ns >= max_ns {
-        return Duration::from_secs(u64::MAX);
-    }
-    let secs = (ns / NS_PER_SEC) as u64;
-    let nanos = (ns % NS_PER_SEC) as u32;
-    Duration::new(secs, nanos)
 }
 
 #[cfg(test)]

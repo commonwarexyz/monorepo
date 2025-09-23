@@ -25,9 +25,9 @@ pub use bitvec::{BitIterator, BitVec};
 #[cfg(feature = "std")]
 pub mod channels;
 #[cfg(feature = "std")]
-mod time;
+pub mod time;
 #[cfg(feature = "std")]
-pub use time::{parse_duration, SystemTimeExt};
+pub use time::{DurationExt, SystemTimeExt};
 #[cfg(feature = "std")]
 mod priority_set;
 #[cfg(feature = "std")]
