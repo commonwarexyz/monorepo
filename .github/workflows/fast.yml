@@ -195,25 +195,3 @@ jobs:
       run: |
         cd storage
         MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --lib index::
-
-  Diagnostics:
-    name: "Diagnostics (${{ matrix.name }})"
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      matrix:
-        include:
-          - name: utils-windows-time
-            os: windows-latest
-            command: |
-              cargo test -p commonware-utils -- --nocapture
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Run setup
-        uses: ./.github/actions/setup
-      - name: Run targeted diagnostics
-        shell: bash
-        run: |
-          set -euo pipefail
-          ${{ matrix.command }}
