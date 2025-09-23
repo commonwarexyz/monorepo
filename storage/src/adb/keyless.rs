@@ -593,7 +593,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
         self.historical_proof(self.size, start_loc, max_ops).await
@@ -604,20 +604,17 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub async fn historical_proof(
         &self,
         op_count: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
-        let end_loc = std::cmp::min(op_count, start_loc + max_ops.get());
+        let end_loc = std::cmp::min(op_count, start_loc.as_u64() + max_ops.get());
         let mmr_size = Position::from(Location::new(op_count));
         let proof = self
             .mmr
-            .historical_range_proof(
-                mmr_size.into(),
-                Location::new(start_loc)..Location::new(end_loc),
-            )
+            .historical_range_proof(mmr_size.into(), start_loc..Location::new(end_loc))
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
-        for loc in start_loc..end_loc {
+        let mut ops = Vec::with_capacity((end_loc - start_loc.as_u64()) as usize);
+        for loc in start_loc.as_u64()..end_loc {
             let offset = self.locations.read(loc).await?;
             let section = loc / self.log_items_per_section;
             let value = self.log.get(section, offset).await?;
@@ -1175,7 +1172,7 @@ mod test {
             ];
 
             for (start_loc, max_ops) in test_cases {
-                let (proof, ops) = db.proof(start_loc, NZU64!(max_ops)).await.unwrap();
+                let (proof, ops) = db.proof(Location::new(start_loc), NZU64!(max_ops)).await.unwrap();
 
                 // Verify the proof
                 assert!(
@@ -1309,7 +1306,7 @@ mod test {
                     continue;
                 }
 
-                let (proof, ops) = db.proof(start_loc.as_u64(), NZU64!(max_ops)).await.unwrap();
+                let (proof, ops) = db.proof(start_loc, NZU64!(max_ops)).await.unwrap();
 
                 // Verify the proof still works
                 assert!(
@@ -1335,7 +1332,7 @@ mod test {
             assert!(new_oldest <= AGGRESSIVE_PRUNE);
 
             // Can still generate proofs for the remaining data
-            let (proof, ops) = db.proof(new_oldest.as_u64(), NZU64!(20)).await.unwrap();
+            let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
             assert!(
                 verify_proof(&mut hasher, &proof, new_oldest.as_u64(), &ops, &root),
                 "Proof should still verify after aggressive pruning"
@@ -1349,7 +1346,7 @@ mod test {
 
             // Should still be able to prove the remaining operations
             if final_oldest.as_u64() < db.op_count() {
-                let (final_proof, final_ops) = db.proof(final_oldest.as_u64(), NZU64!(10)).await.unwrap();
+                let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
                 assert!(
                     verify_proof(&mut hasher, &final_proof, final_oldest.as_u64(), &final_ops, &root),
                     "Should be able to prove remaining operations after extensive pruning"

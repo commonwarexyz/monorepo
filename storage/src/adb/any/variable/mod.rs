@@ -588,7 +588,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_loc, max_ops)
@@ -606,21 +606,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn historical_proof(
         &self,
         op_count: u64,
-        start_loc: u64, // TODO make Location
+        start_loc: Location,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         assert!(op_count <= self.op_count());
-        assert!(start_loc < op_count);
+        assert!(start_loc.as_u64() < op_count);
 
-        let end_loc = std::cmp::min(op_count, start_loc + max_ops);
+        let end_loc = std::cmp::min(op_count, start_loc.as_u64() + max_ops);
         let mmr_size = Position::from(Location::from(op_count)).as_u64();
 
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, Location::new(start_loc)..Location::new(end_loc))
+            .historical_range_proof(mmr_size, start_loc..Location::new(end_loc))
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
-        for loc in start_loc..end_loc {
+        let mut ops = Vec::with_capacity((end_loc - start_loc.as_u64()) as usize);
+        for loc in start_loc.as_u64()..end_loc {
             let section = loc / self.log_items_per_section;
             let offset = self.locations.read(loc).await?;
             let op = self.log.get(section, offset).await?;
@@ -1160,7 +1160,7 @@ pub(super) mod test {
             assert!(start_loc < db.inactivity_floor_loc);
 
             for i in start_loc..end_loc {
-                let (proof, log) = db.proof(i, max_ops).await.unwrap();
+                let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
                 assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
             }
 

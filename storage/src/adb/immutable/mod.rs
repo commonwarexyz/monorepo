@@ -580,7 +580,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
-        start_index: u64,
+        start_index: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_index, max_ops)
@@ -592,28 +592,25 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn historical_proof(
         &self,
         op_count: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
         assert!(op_count <= self.op_count());
-        assert!(start_loc < op_count);
+        assert!(start_loc.as_u64() < op_count);
 
-        if start_loc < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(start_loc));
+        if start_loc.as_u64() < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(start_loc.as_u64()));
         }
 
-        let end_loc = std::cmp::min(op_count, start_loc + max_ops.get());
+        let end_loc = std::cmp::min(op_count, start_loc.as_u64() + max_ops.get());
         let mmr_size = Position::from(Location::new(op_count));
 
         let proof = self
             .mmr
-            .historical_range_proof(
-                mmr_size.into(),
-                Location::new(start_loc)..Location::new(end_loc),
-            )
+            .historical_range_proof(mmr_size.into(), start_loc..Location::new(end_loc))
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
-        for loc in start_loc..end_loc {
+        let mut ops = Vec::with_capacity((end_loc - start_loc.as_u64()) as usize);
+        for loc in start_loc.as_u64()..end_loc {
             let section = loc / self.log_items_per_section;
             let offset = self.locations.read(loc).await?;
             let op = self.log.get(section, offset).await?;
@@ -957,7 +954,7 @@ pub(super) mod test {
             // end.
             let max_ops = NZU64!(5);
             for i in 0..db.op_count() {
-                let (proof, log) = db.proof(i, max_ops).await.unwrap();
+                let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
                 assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
             }
 
@@ -1172,7 +1169,9 @@ pub(super) mod test {
 
             // Confirm behavior of trying to create a proof of pruned items is as expected.
             let pruned_pos = ELEMENTS / 2;
-            let proof_result = db.proof(pruned_pos, NZU64!(pruned_pos + 100)).await;
+            let proof_result = db
+                .proof(Location::new(pruned_pos), NZU64!(pruned_pos + 100))
+                .await;
             assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
 
             db.destroy().await.unwrap();

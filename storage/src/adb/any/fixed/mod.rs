@@ -510,7 +510,7 @@ impl<
     /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_loc, max_ops)
@@ -522,18 +522,18 @@ impl<
     pub async fn historical_proof(
         &self,
         op_count: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
+        let end_loc = std::cmp::min(op_count, start_loc.as_u64().saturating_add(max_ops.get()));
 
         let mmr_size = Position::from(Location::from(op_count)).as_u64();
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, Location::new(start_loc)..Location::new(end_loc))
+            .historical_range_proof(mmr_size, start_loc..Location::new(end_loc))
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
-        let futures = (start_loc..end_loc)
+        let mut ops = Vec::with_capacity((end_loc - start_loc.as_u64()) as usize);
+        let futures = (start_loc.as_u64()..end_loc)
             .map(|i| self.log.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -1083,7 +1083,7 @@ pub(super) mod test {
             assert!(start_loc < db.inactivity_floor_loc);
 
             for i in start_loc..end_loc {
-                let (proof, log) = db.proof(i, max_ops).await.unwrap();
+                let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
                 assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
             }
 
@@ -1433,10 +1433,10 @@ pub(super) mod test {
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, 5, max_ops)
+                .historical_proof(original_op_count, Location::new(5), max_ops)
                 .await
                 .unwrap();
-            let (regular_proof, regular_ops) = db.proof(5, max_ops).await.unwrap();
+            let (regular_proof, regular_ops) = db.proof(Location::new(5), max_ops).await.unwrap();
 
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -1457,7 +1457,7 @@ pub(super) mod test {
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, 5, NZU64!(10))
+                .historical_proof(original_op_count, Location::new(5), NZU64!(10))
                 .await
                 .unwrap();
             assert_eq!(
@@ -1492,7 +1492,7 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
 
             // Test singleton database
-            let (single_proof, single_ops) = db.historical_proof(1, 0, NZU64!(1)).await.unwrap();
+            let (single_proof, single_ops) = db.historical_proof(1, Location::new(0), NZU64!(1)).await.unwrap();
             assert_eq!(single_proof.size, Position::from(Location::new(1)).as_u64());
             assert_eq!(single_ops.len(), 1);
 
@@ -1513,12 +1513,12 @@ pub(super) mod test {
 
             // Test requesting more operations than available in historical position
             let (_limited_proof, limited_ops) =
-                db.historical_proof(10, 5, NZU64!(20)).await.unwrap();
+                db.historical_proof(10, Location::new(5), NZU64!(20)).await.unwrap();
             assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
             assert_eq!(limited_ops, ops[5..10]);
 
             // Test proof at minimum historical position
-            let (min_proof, min_ops) = db.historical_proof(3, 0, NZU64!(3)).await.unwrap();
+            let (min_proof, min_ops) = db.historical_proof(3, Location::new(0), NZU64!(3)).await.unwrap();
             assert_eq!(min_proof.size, Position::from(Location::new(3)).as_u64());
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
@@ -1544,7 +1544,7 @@ pub(super) mod test {
             let max_ops = NZU64!(10);
             for end_loc in 31..50 {
                 let (historical_proof, historical_ops) = db
-                    .historical_proof(end_loc, start_loc, max_ops)
+                    .historical_proof(end_loc, Location::new(start_loc), max_ops)
                     .await
                     .unwrap();
 
@@ -1559,7 +1559,7 @@ pub(super) mod test {
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
                 ref_db.sync().await.unwrap();
 
-                let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
+                let (ref_proof, ref_ops) = ref_db.proof(Location::new(start_loc), max_ops).await.unwrap();
                 assert_eq!(ref_proof.size, historical_proof.size);
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
@@ -1592,7 +1592,7 @@ pub(super) mod test {
             apply_ops(&mut db, ops).await;
             db.commit().await.unwrap();
 
-            let (proof, ops) = db.historical_proof(5, 1, NZU64!(10)).await.unwrap();
+            let (proof, ops) = db.historical_proof(5, Location::new(1), NZU64!(10)).await.unwrap();
             assert_eq!(proof.size, Position::from(Location::new(5)).as_u64());
             assert_eq!(ops.len(), 4);
 

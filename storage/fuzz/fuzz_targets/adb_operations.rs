@@ -8,7 +8,7 @@ use commonware_storage::{
         any::fixed::{Any, Config},
         verify_proof,
     },
-    mmr::StandardHasher as Standard,
+    mmr::{Location, StandardHasher as Standard},
     translator::EightCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -134,7 +134,7 @@ fn fuzz(data: FuzzInput) {
                         let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 
                         let (proof, log) = adb
-                            .proof(adjusted_start, NZU64!(adjusted_max_ops))
+                            .proof(Location::new(adjusted_start), NZU64!(adjusted_max_ops))
                             .await
                             .expect("proof should not fail");
 

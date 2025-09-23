@@ -405,7 +405,7 @@ impl<
     pub async fn range_proof(
         &self,
         hasher: &mut H,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>, Vec<[u8; N]>), Error> {
         assert!(
@@ -416,8 +416,8 @@ impl<
         // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
         let leaves = mmr.leaves();
-        assert!(start_loc < leaves, "start_loc is invalid");
-        let max_loc = start_loc + max_ops.get();
+        assert!(start_loc.as_u64() < leaves, "start_loc is invalid");
+        let max_loc = start_loc.as_u64() + max_ops.get();
         let end_loc = core::cmp::min(max_loc, leaves);
 
         // Generate the proof from the grafted MMR.
@@ -425,13 +425,13 @@ impl<
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
         let mut proof = verification::range_proof(
             &grafted_mmr,
-            Location::new(start_loc)..Location::new(end_loc),
+            start_loc..Location::new(end_loc),
         )
         .await?;
 
         // Collect the operations necessary to verify the proof.
-        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
-        let futures = (start_loc..end_loc)
+        let mut ops = Vec::with_capacity((end_loc - start_loc.as_u64()) as usize);
+        let futures = (start_loc.as_u64()..end_loc)
             .map(|i| self.any.log.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -441,7 +441,7 @@ impl<
 
         // Gather the chunks necessary to verify the proof.
         let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let start = start_loc / chunk_bits; // chunk that contains the very first bit.
+        let start = start_loc.as_u64() / chunk_bits; // chunk that contains the very first bit.
         let end = (end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
@@ -997,7 +997,7 @@ pub mod test {
 
             for i in start_loc.as_u64()..end_loc.as_u64() {
                 let (proof, ops, chunks) = db
-                    .range_proof(hasher.inner(), i, NZU64!(max_ops))
+                    .range_proof(hasher.inner(), Location::new(i), NZU64!(max_ops))
                     .await
                     .unwrap();
                 assert!(
