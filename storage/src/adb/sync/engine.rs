@@ -204,7 +204,7 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let target_size = self.target.upper_bound_ops + 1;
+        let target_size = self.target.upper_bound_ops;
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
@@ -369,8 +369,8 @@ where
     pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await?;
 
-        // Calculate the target journal size (upper bound is inclusive)
-        let target_journal_size = self.target.upper_bound_ops + 1;
+        // Calculate the target journal size.
+        let target_journal_size = self.target.upper_bound_ops;
 
         // Check if we've completed sync
         if journal_size >= target_journal_size {
