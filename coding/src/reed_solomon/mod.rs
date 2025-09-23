@@ -434,7 +434,6 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     type Error = Error;
 
     fn encode(
-        _rng: impl rand_core::CryptoRngCore,
         config: &Config,
         mut data: impl Buf,
     ) -> Result<(Self::Commitment, Vec<(Self::Shard, Self::Proof)>), Self::Error> {

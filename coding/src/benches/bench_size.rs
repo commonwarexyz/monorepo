@@ -22,7 +22,7 @@ fn benchmark_size<S: Scheme>(name: &str) {
                 data
             };
 
-            let (commitment, shard_proofs) = S::encode(&mut rng, &config, data.as_slice()).unwrap();
+            let (commitment, shard_proofs) = S::encode(&config, data.as_slice()).unwrap();
             let (shard, proof) = shard_proofs.first().unwrap();
             let reshard = S::check(&commitment, proof, shard).unwrap();
 

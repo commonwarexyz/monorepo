@@ -12,7 +12,6 @@
 
 use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
-use rand_core::CryptoRngCore;
 
 mod reed_solomon;
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
@@ -58,8 +57,6 @@ impl Read for Config {
 ///
 /// # Example
 /// ```
-/// # use rand_chacha::ChaCha8Rng;
-/// # use rand::SeedableRng as _;
 /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
 /// use commonware_cryptography::Sha256;
 ///
@@ -69,7 +66,7 @@ impl Read for Config {
 /// let data = b"Hello!";
 /// // Turn the data into shards, and a commitment to those shards.
 /// let (commitment, shards) =
-///      RS::encode(&mut ChaCha8Rng::seed_from_u64(1), &config, data.as_slice()).unwrap();
+///      RS::encode(&config, data.as_slice()).unwrap();
 ///
 /// // Each shard can be checked, and turn into a ReShard to be shared with others.
 /// let (shards, reshards): (Vec<_>, Vec<_>) = shards
@@ -108,7 +105,6 @@ pub trait Scheme {
     /// should equal `config.minimum_shards + config.extra_shards`.
     #[allow(clippy::type_complexity)]
     fn encode(
-        rng: impl CryptoRngCore,
         config: &Config,
         data: impl Buf,
     ) -> Result<(Self::Commitment, Vec<(Self::Shard, Self::Proof)>), Self::Error>;
@@ -153,8 +149,6 @@ mod test {
     use super::*;
     use crate::reed_solomon::ReedSolomon;
     use commonware_cryptography::Sha256;
-    use rand::SeedableRng as _;
-    use rand_chacha::ChaCha8Rng;
 
     fn test_basic<S: Scheme>() {
         let data = b"Hello, Reed-Solomon!";
@@ -164,8 +158,7 @@ mod test {
         };
 
         // Encode the data
-        let (commitment, shards) =
-            S::encode(&mut ChaCha8Rng::seed_from_u64(1), &config, data.as_slice()).unwrap();
+        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
         let (shards, reshards): (Vec<_>, Vec<_>) = shards
             .into_iter()
@@ -194,8 +187,7 @@ mod test {
         };
 
         // Encode the data
-        let (commitment, shards) =
-            S::encode(&mut ChaCha8Rng::seed_from_u64(1), &config, data.as_slice()).unwrap();
+        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
         let (shards, reshards): (Vec<_>, Vec<_>) = shards
             .into_iter()
@@ -218,8 +210,7 @@ mod test {
         };
 
         // Encode the data
-        let (commitment, shards) =
-            S::encode(&mut ChaCha8Rng::seed_from_u64(1), &config, data.as_slice()).unwrap();
+        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
         let (shards, reshards): (Vec<_>, Vec<_>) = shards
             .into_iter()
@@ -242,8 +233,7 @@ mod test {
         };
 
         // Encode the data
-        let (commitment, shards) =
-            S::encode(&mut ChaCha8Rng::seed_from_u64(1), &config, data.as_slice()).unwrap();
+        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
         let (shards, reshards): (Vec<_>, Vec<_>) = shards
             .into_iter()
@@ -272,8 +262,7 @@ mod test {
         };
 
         // Encode the data
-        let (commitment, shards) =
-            S::encode(&mut ChaCha8Rng::seed_from_u64(1), &config, data.as_slice()).unwrap();
+        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
         let (shards, reshards): (Vec<_>, Vec<_>) = shards
             .into_iter()
@@ -302,8 +291,7 @@ mod test {
         };
 
         // Encode the data
-        let (commitment, shards) =
-            S::encode(&mut ChaCha8Rng::seed_from_u64(1), &config, data.as_slice()).unwrap();
+        let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
 
         let (shards, reshards): (Vec<_>, Vec<_>) = shards
             .into_iter()

@@ -1,6 +1,5 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::{Config, Scheme};
-use rand_chacha::{rand_core::SeedableRng as _, ChaCha8Rng};
 
 #[derive(Debug)]
 pub struct FuzzInput {
@@ -63,8 +62,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
         minimum_shards: min,
         extra_shards: recovery,
     };
-    let (commitment, mut shards) =
-        S::encode(ChaCha8Rng::seed_from_u64(0), &config, data.as_slice()).unwrap();
+    let (commitment, mut shards) = S::encode(&config, data.as_slice()).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
     // Each participant checks their shard
     let mut reshards = shards

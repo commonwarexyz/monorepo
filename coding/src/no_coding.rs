@@ -30,7 +30,6 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     type Error = NoCodingError;
 
     fn encode(
-        _rng: impl rand_core::CryptoRngCore,
         config: &crate::Config,
         mut data: impl bytes::Buf,
     ) -> Result<(Self::Commitment, Vec<(Self::Shard, Self::Proof)>), Self::Error> {
