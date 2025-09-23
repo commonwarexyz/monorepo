@@ -2,11 +2,11 @@
 
 /// Prepare metrics for a spawned task.
 ///
-/// Returns a `(Label, HandleMetrics)` pair for tracking spawned tasks.
+/// Returns a `(Label, MetricHandle)` pair for tracking spawned tasks.
 ///
 /// The `Label` identifies the task in the metrics registry and the
-/// [`HandleMetrics`] immediately increments the `tasks_running` gauge for that
-/// label. Call [`HandleMetrics::finish`] once the task completes to decrement
+/// [`MetricHandle`] immediately increments the `tasks_running` gauge for that
+/// label. Call [`MetricHandle::finish`] once the task completes to decrement
 /// the gauge.
 #[macro_export]
 macro_rules! spawn_metrics {
@@ -36,7 +36,7 @@ macro_rules! spawn_metrics {
         let label = $label;
         let metrics = $ctx.metrics();
         metrics.tasks_spawned.get_or_create(&label).inc();
-        let metrics = $crate::utils::HandleMetrics::new(
+        let metrics = $crate::utils::MetricHandle::new(
             metrics.tasks_running.get_or_create(&label).clone(),
         );
         (label, metrics)

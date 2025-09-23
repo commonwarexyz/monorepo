@@ -21,7 +21,7 @@ where
 {
     abort_handle: Option<AbortHandle>,
     receiver: oneshot::Receiver<Result<T, Error>>,
-    metrics: HandleMetrics,
+    metric: MetricHandle,
 }
 
 impl<T> Handle<T>
@@ -30,7 +30,7 @@ where
 {
     pub(crate) fn init_future<F>(
         f: F,
-        metrics: HandleMetrics,
+        metric: MetricHandle,
         catch_panic: bool,
         children: Arc<Mutex<Vec<Aborter>>>,
     ) -> (impl Future<Output = ()>, Self)
@@ -63,7 +63,7 @@ where
 
         // Make the future abortable
         let abortable = {
-            let metrics = metrics.clone();
+            let metric = metric.clone();
             Abortable::new(wrapped, abort_registration).map(move |_| {
                 // Abort all children
                 for aborter in children.lock().unwrap().drain(..) {
@@ -71,7 +71,7 @@ where
                 }
 
                 // Mark the task as finished
-                metrics.finish();
+                metric.finish();
             })
         };
 
@@ -80,14 +80,14 @@ where
             Self {
                 abort_handle: Some(abort_handle),
                 receiver,
-                metrics,
+                metric,
             },
         )
     }
 
     pub(crate) fn init_blocking<F>(
         f: F,
-        metrics: HandleMetrics,
+        metric: MetricHandle,
         catch_panic: bool,
     ) -> (impl FnOnce(), Self)
     where
@@ -98,7 +98,7 @@ where
 
         // Wrap the closure with panic handling
         let f = {
-            let metrics = metrics.clone();
+            let metric = metric.clone();
             move || {
                 // Run blocking task
                 let result = catch_unwind(AssertUnwindSafe(f));
@@ -118,7 +118,7 @@ where
                 let _ = sender.send(result);
 
                 // Mark the task as finished
-                metrics.finish();
+                metric.finish();
             }
         };
 
@@ -128,7 +128,7 @@ where
             Self {
                 abort_handle: None,
                 receiver,
-                metrics,
+                metric,
             },
         )
     }
@@ -142,15 +142,15 @@ where
         abort_handle.abort();
 
         // We might never poll the future again after aborting it, so run the
-        // metrics cleanup right away
-        self.metrics.finish();
+        // metric cleanup right away
+        self.metric.finish();
     }
 
     /// Returns a helper that aborts the task and updates metrics consistently.
     pub(crate) fn aborter(&self) -> Option<Aborter> {
         self.abort_handle
             .clone()
-            .map(|inner| Aborter::new(inner, self.metrics.clone()))
+            .map(|inner| Aborter::new(inner, self.metric.clone()))
     }
 }
 
@@ -167,15 +167,15 @@ where
     }
 }
 
-/// Tracks the metrics state associated with a spawned task handle.
+/// Tracks the metric state associated with a spawned task handle.
 #[derive(Clone)]
-pub(crate) struct HandleMetrics {
+pub(crate) struct MetricHandle {
     gauge: Gauge,
     finished: Arc<Once>,
 }
 
-impl HandleMetrics {
-    /// Increments the supplied gauge and returns a guard responsible for
+impl MetricHandle {
+    /// Increments the supplied gauge and returns a handle responsible for
     /// eventually decrementing it.
     pub(crate) fn new(gauge: Gauge) -> Self {
         gauge.inc();
@@ -198,25 +198,25 @@ impl HandleMetrics {
     }
 }
 
-/// Couples an [`AbortHandle`] with its metrics guard so aborted tasks clean up gauges.
+/// Couples an [`AbortHandle`] with its metric handle so aborted tasks clean up gauges.
 pub(crate) struct Aborter {
     inner: AbortHandle,
-    metrics: HandleMetrics,
+    metric: MetricHandle,
 }
 
 impl Aborter {
-    /// Creates a new guard for the provided abort handle and metrics tracker.
-    pub(crate) fn new(inner: AbortHandle, metrics: HandleMetrics) -> Self {
-        Self { inner, metrics }
+    /// Creates a new [`Aborter`] for the provided abort handle and metric handle.
+    pub(crate) fn new(inner: AbortHandle, metric: MetricHandle) -> Self {
+        Self { inner, metric }
     }
 
-    /// Aborts the task and records completion in the metrics gauge.
+    /// Aborts the task and records completion in the metric gauge.
     pub(crate) fn abort(self) {
         self.inner.abort();
 
         // We might never poll the future again after aborting it, so run the
-        // metrics cleanup right away
-        self.metrics.finish();
+        // metric cleanup right away
+        self.metric.finish();
     }
 }
 
