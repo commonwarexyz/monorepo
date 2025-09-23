@@ -32,13 +32,15 @@ use crate::{
         metered::Storage as MeteredStorage,
     },
     telemetry::metrics::task::Label,
-    utils::signal::{Signal, Stopper},
+    utils::{
+        signal::{Signal, Stopper},
+        Aborter,
+    },
     Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
-    future::AbortHandle,
     task::{waker, ArcWake},
     Future,
 };
@@ -680,7 +682,7 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    children: Arc<Mutex<Vec<AbortHandle>>>,
+    children: Arc<Mutex<Vec<Aborter>>>,
 }
 
 impl Context {
@@ -819,7 +821,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, gauge) = spawn_metrics!(self, future);
+        let (label, metrics) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor();
@@ -829,7 +831,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, gauge, false, children);
+        let (f, handle) = Handle::init_future(future, metrics, false, children);
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -846,7 +848,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, gauge) = spawn_metrics!(self, future);
+        let (label, metrics) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor();
@@ -854,7 +856,7 @@ impl crate::Spawner for Context {
         move |f: F| {
             // Give spawned task its own empty children list
             let (f, handle) =
-                Handle::init_future(f, gauge, false, Arc::new(Mutex::new(Vec::new())));
+                Handle::init_future(f, metrics, false, Arc::new(Mutex::new(Vec::new())));
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -875,8 +877,8 @@ impl crate::Spawner for Context {
         let child_handle = self.spawn(f);
 
         // Register this child with the parent
-        if let Some(abort_handle) = child_handle.abort_handle() {
-            parent_children.lock().unwrap().push(abort_handle);
+        if let Some(aborter) = child_handle.aborter() {
+            parent_children.lock().unwrap().push(aborter);
         }
 
         child_handle
@@ -891,11 +893,11 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
+        let (label, metrics) = spawn_metrics!(self, blocking, dedicated);
 
         // Initialize the blocking task
         let executor = self.executor();
-        let (f, handle) = Handle::init_blocking(|| f(self), gauge, false);
+        let (f, handle) = Handle::init_blocking(|| f(self), metrics, false);
 
         // Spawn the task
         let f = async move { f() };
@@ -913,12 +915,12 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
+        let (label, metrics) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor();
         move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, gauge, false);
+            let (f, handle) = Handle::init_blocking(f, metrics, false);
 
             // Spawn the task
             let f = async move { f() };
