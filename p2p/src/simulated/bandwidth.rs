@@ -324,6 +324,36 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         }
         result
     }
+
+    #[cfg(test)]
+    fn resource_count(&self) -> usize {
+        self.resources.len()
+    }
+
+    #[cfg(test)]
+    fn resource_members(&self, idx: usize) -> &[usize] {
+        &self.resources[idx].members
+    }
+
+    #[cfg(test)]
+    fn resource_active(&self, idx: usize) -> usize {
+        self.resources[idx].active
+    }
+
+    #[cfg(test)]
+    fn states(&self) -> &[State] {
+        &self.states
+    }
+
+    #[cfg(test)]
+    fn active_flows(&self) -> usize {
+        self.active
+    }
+
+    #[cfg(test)]
+    fn rates_slice(&self) -> &[Option<Ratio>] {
+        &self.rates
+    }
 }
 
 /// Computes a fair allocation for the provided `flows`, returning per-flow rates.
@@ -681,5 +711,84 @@ mod tests {
         let rate_bc = rate_of(&allocations, 2);
         assert_eq!(rate_bc.num, 49_000);
         assert_eq!(rate_bc.den, 1);
+    }
+
+    #[test]
+    fn planner_skips_unlimited_resources() {
+        let flows = vec![Flow {
+            id: 99,
+            origin: 1u8,
+            recipient: 2u8,
+            delivered: true,
+        }];
+
+        let mut egress = unlimited();
+        let mut ingress = unlimited();
+        let planner = Planner::new(&flows, &mut egress, &mut ingress);
+
+        assert_eq!(planner.resource_count(), 0);
+        assert!(planner.states().iter().all(|state| !state.limited));
+        assert_eq!(planner.active_flows(), 0);
+    }
+
+    #[test]
+    fn planner_tracks_shared_resource_membership() {
+        let flows = vec![
+            Flow {
+                id: 1,
+                origin: 1u8,
+                recipient: 10u8,
+                delivered: true,
+            },
+            Flow {
+                id: 2,
+                origin: 1u8,
+                recipient: 11u8,
+                delivered: true,
+            },
+        ];
+
+        let mut egress = constant(1_000);
+        let mut ingress = unlimited();
+        let planner = Planner::new(&flows, &mut egress, &mut ingress);
+
+        assert_eq!(planner.resource_count(), 1);
+        assert_eq!(planner.resource_members(0), &[0, 1]);
+        assert_eq!(planner.resource_active(0), 2);
+        assert!(planner.states().iter().all(|state| state.active));
+    }
+
+    #[test]
+    fn planner_freeze_clears_active_counts() {
+        let flows = vec![
+            Flow {
+                id: 1,
+                origin: 1u8,
+                recipient: 2u8,
+                delivered: true,
+            },
+            Flow {
+                id: 2,
+                origin: 1u8,
+                recipient: 3u8,
+                delivered: true,
+            },
+        ];
+
+        let mut egress = constant(1_000);
+        let mut ingress = unlimited();
+        let mut planner = Planner::new(&flows, &mut egress, &mut ingress);
+        assert_eq!(planner.active_flows(), 2);
+
+        // Freezing the shared egress resource should freeze both flows and zero the counters.
+        planner.freeze(0);
+
+        assert_eq!(planner.resource_active(0), 0);
+        assert_eq!(planner.active_flows(), 0);
+        assert!(planner
+            .rates_slice()
+            .iter()
+            .filter_map(|opt| opt.as_ref())
+            .all(|ratio| ratio.is_zero()));
     }
 }
