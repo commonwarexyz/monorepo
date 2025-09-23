@@ -1,11 +1,10 @@
 //! Max-min fair bandwidth planner.
 //!
-//! The planner performs progressive filling over a set of active flows to
-//! compute per-flow transmission rates that respect both sender egress limits
-//! and receiver ingress limits (to provide max-min fairness). The caller is responsible
-//! for advancing flow progress according to the returned rates and invoking the planner
-//! whenever the active set changes (for example when a message finishes or a new message
-//! arrives).
+//! The planner progressively fills a set of active flows to compute per-flow
+//! transmission rates that respect both sender egress limits and receiver ingress limits
+//! (to provide max-min fairness). The caller is responsible for advancing flow progress
+//! according to the returned rates and invoking the planner whenever the active set
+//! changes (for example when a message finishes or a new message arrives).
 
 use commonware_utils::{time::NANOS_PER_SEC, DurationExt, Ratio};
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
