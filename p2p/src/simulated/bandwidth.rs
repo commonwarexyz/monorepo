@@ -69,7 +69,7 @@ impl FlowState {
 }
 
 /// Planner once all flows have been registered.
-struct RegisteredPlanner<'a, P> {
+struct Planner<'a, P> {
     flows: &'a [Flow<P>],
     resources: Vec<Resource>,
     indices: BTreeMap<ResourceKey<P>, usize>,
@@ -79,15 +79,7 @@ struct RegisteredPlanner<'a, P> {
     current_fill: Ratio,
 }
 
-/// Planner after progressive filling finished.
-struct SolvedPlanner<'a, P> {
-    flows: &'a [Flow<P>],
-    flow_states: Vec<FlowState>,
-    rates: Vec<Option<Ratio>>,
-    current_fill: Ratio,
-}
-
-impl<'a, P: Clone + Ord> RegisteredPlanner<'a, P> {
+impl<'a, P: Clone + Ord> Planner<'a, P> {
     /// Build and register resources for all flows up front.
     fn new<E, I>(flows: &'a [Flow<P>], egress_limit: &mut E, ingress_limit: &mut I) -> Self
     where
@@ -105,24 +97,6 @@ impl<'a, P: Clone + Ord> RegisteredPlanner<'a, P> {
         };
         planner.register_flows(egress_limit, ingress_limit);
         planner
-    }
-
-    /// Perform progressive filling until every constrained flow is frozen.
-    fn solve(mut self) -> SolvedPlanner<'a, P> {
-        self.progressive_fill();
-        let RegisteredPlanner {
-            flows,
-            flow_states,
-            rates,
-            current_fill,
-            ..
-        } = self;
-        SolvedPlanner {
-            flows,
-            flow_states,
-            rates,
-            current_fill,
-        }
     }
 
     fn register_flows<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
@@ -182,7 +156,7 @@ impl<'a, P: Clone + Ord> RegisteredPlanner<'a, P> {
     }
 
     /// Run the progressive filling algorithm until every constrained flow is frozen.
-    fn progressive_fill(&mut self) {
+    fn fill(&mut self) {
         if self.active_flows == 0 {
             return;
         }
@@ -304,18 +278,10 @@ impl<'a, P: Clone + Ord> RegisteredPlanner<'a, P> {
             }
         }
     }
-}
 
-impl<'a, P: Clone + Ord> SolvedPlanner<'a, P> {
-    /// Convert the computed ratios back into the public map keyed by flow id.
-    fn into_rates(mut self) -> BTreeMap<u64, Rate> {
-        for idx in 0..self.flow_states.len() {
-            let state = &self.flow_states[idx];
-            if state.limited && self.rates[idx].is_none() {
-                // Defensive path: if a constrained flow never froze, give it whatever fill remains.
-                self.rates[idx] = Some(self.current_fill.clone());
-            }
-        }
+    /// Perform progressive filling until every constrained flow is frozen.
+    fn solve(mut self) -> BTreeMap<u64, Rate> {
+        self.fill();
 
         let mut result = BTreeMap::new();
         for (idx, flow) in self.flows.iter().enumerate() {
@@ -351,8 +317,9 @@ where
         return BTreeMap::new();
     }
 
-    let planner = RegisteredPlanner::new(flows, &mut egress_limit, &mut ingress_limit).solve();
-    planner.into_rates()
+    // Register the flows and solve.
+    let planner = Planner::new(flows, &mut egress_limit, &mut ingress_limit);
+    planner.solve()
 }
 
 /// Calculate the time it will take to deplete a given amount of capacity at some [Rate].
