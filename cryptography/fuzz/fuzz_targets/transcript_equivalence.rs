@@ -24,6 +24,22 @@ struct CommitOperation {
     split_indices: Vec<usize>,
 }
 
+/// Represents a fork operation with a label
+#[derive(Debug, Clone)]
+struct ForkOperation {
+    label: &'static [u8],
+}
+
+/// Represents a summarize operation (extract summary)
+#[derive(Debug, Clone)]
+struct SummarizeAndResumeOperation {}
+
+impl SummarizeAndResumeOperation {
+    fn is_equivalent(&self, _other: &SummarizeAndResumeOperation) -> bool {
+        true
+    }
+}
+
 fn split_indices(u: &mut Unstructured<'_>, data_len: usize) -> arbitrary::Result<Vec<usize>> {
     // Valid split positions are between bytes: [1, data_len-1]
     if data_len < 2 {
@@ -101,16 +117,44 @@ impl CommitOperation {
     }
 }
 
+const FORK_LABELS: &[&'static [u8]] = &[b"fork1", b"fork2", b"test", b"branch", b"split", b""];
+
+impl<'a> Arbitrary<'a> for ForkOperation {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let label_idx = u.int_in_range(0..=FORK_LABELS.len() - 1)?;
+        Ok(ForkOperation {
+            label: FORK_LABELS[label_idx],
+        })
+    }
+}
+
+impl ForkOperation {
+    fn is_equivalent(&self, other: &ForkOperation) -> bool {
+        self.label == other.label
+    }
+}
+
 #[derive(Debug, Clone)]
 enum FuzzedOperation {
     /// Commit with potential splits via append
     Commit(CommitOperation),
+    /// Fork the transcript with a label
+    Fork(ForkOperation),
+    /// Extract a summary from the transcript and resume from it
+    SummarizeAndResume(SummarizeAndResumeOperation),
 }
 
 impl<'a> Arbitrary<'a> for FuzzedOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        // For now we only use Commit operations
-        Ok(FuzzedOperation::Commit(CommitOperation::arbitrary(u)?))
+        let choice = u.int_in_range(0..=2)?;
+        match choice {
+            0 => Ok(FuzzedOperation::Commit(CommitOperation::arbitrary(u)?)),
+            1 => Ok(FuzzedOperation::Fork(ForkOperation::arbitrary(u)?)),
+            2 => Ok(FuzzedOperation::SummarizeAndResume(
+                SummarizeAndResumeOperation {},
+            )),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -119,6 +163,11 @@ impl FuzzedOperation {
     fn is_equivalent(&self, other: &FuzzedOperation) -> bool {
         match (self, other) {
             (FuzzedOperation::Commit(a), FuzzedOperation::Commit(b)) => a.is_equivalent(b),
+            (FuzzedOperation::Fork(a), FuzzedOperation::Fork(b)) => a.is_equivalent(b),
+            (FuzzedOperation::SummarizeAndResume(a), FuzzedOperation::SummarizeAndResume(b)) => {
+                a.is_equivalent(b)
+            }
+            _ => false, // Different operation types are never equivalent
         }
     }
 }
@@ -127,6 +176,16 @@ impl FuzzedOperation {
 struct TranscriptSequence {
     namespace: Vec<u8>,
     operations: Vec<FuzzedOperation>,
+}
+
+/// Execution context for a transcript sequence that tracks forked transcripts and summaries
+struct ExecutionContext {
+    /// The main transcript
+    transcript: Transcript,
+    /// Forked transcripts created during execution
+    forked_transcripts: Vec<Transcript>,
+    /// Summaries extracted during execution
+    summaries: Vec<Summary>,
 }
 
 impl<'a> Arbitrary<'a> for TranscriptSequence {
@@ -149,6 +208,36 @@ impl<'a> Arbitrary<'a> for TranscriptSequence {
             namespace,
             operations,
         })
+    }
+}
+
+impl ExecutionContext {
+    fn new(namespace: &[u8]) -> Self {
+        Self {
+            transcript: Transcript::new(namespace),
+            forked_transcripts: Vec::new(),
+            summaries: Vec::new(),
+        }
+    }
+
+    fn apply_operation(&mut self, op: &FuzzedOperation) {
+        match op {
+            FuzzedOperation::Commit(commit_op) => {
+                commit_op.apply(&mut self.transcript);
+            }
+            FuzzedOperation::Fork(fork_op) => {
+                let forked = self.transcript.fork(fork_op.label);
+                self.forked_transcripts.push(forked);
+            }
+            FuzzedOperation::SummarizeAndResume(_) => {
+                let summary = self.transcript.summarize();
+                self.transcript = Transcript::resume(summary.clone());
+            }
+        }
+    }
+
+    fn final_summary(&self) -> Summary {
+        self.transcript.summarize()
     }
 }
 
@@ -175,17 +264,14 @@ impl TranscriptSequence {
             !self.operations.is_empty(),
             "Empty sequences cannot be executed"
         );
-        let mut transcript = Transcript::new(&self.namespace);
+
+        let mut context = ExecutionContext::new(&self.namespace);
 
         for op in &self.operations {
-            match op {
-                FuzzedOperation::Commit(op) => {
-                    op.apply(&mut transcript);
-                }
-            }
+            context.apply_operation(op);
         }
 
-        transcript.summarize()
+        context.final_summary()
     }
 }
 
