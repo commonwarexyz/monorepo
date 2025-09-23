@@ -15,7 +15,7 @@ use crate::{
         bitmap::Bitmap,
         iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
-        Proof, StandardHasher as Standard,
+        Location, Position, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed as Operation,
     translator::Translator,
@@ -215,7 +215,9 @@ impl<
         }
 
         // Pop any MMR elements that are ahead of the last log commit point.
-        let mut next_mmr_leaf_loc = leaf_pos_to_loc(mmr.size()).unwrap();
+        let mut next_mmr_leaf_loc = Location::try_from(Position::from(mmr.size()))
+            .unwrap()
+            .as_u64();
         if next_mmr_leaf_loc > log_size {
             let op_count = next_mmr_leaf_loc - log_size;
             warn!(log_size, op_count, "popping uncommitted MMR operations");
@@ -655,7 +657,10 @@ impl<
         );
 
         self.mmr
-            .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(target_prune_loc))
+            .prune_to_pos(
+                &mut self.hasher,
+                Position::from(Location::from(target_prune_loc)).as_u64(),
+            )
             .await?;
 
         Ok(())

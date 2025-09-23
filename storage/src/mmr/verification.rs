@@ -11,7 +11,7 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Proof};
+use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Position, Proof};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::ops::Range;
 use futures::future::try_join_all;
@@ -68,8 +68,8 @@ impl<D: Digest> ProofStore<D> {
 }
 
 impl<D: Digest> Storage<D> for ProofStore<D> {
-    async fn get_node(&self, pos: u64) -> Result<Option<D>, Error> {
-        Ok(self.digests.get(&pos).cloned())
+    async fn get_node(&self, pos: Position) -> Result<Option<D>, Error> {
+        Ok(self.digests.get(&pos.as_u64()).cloned())
     }
 
     fn size(&self) -> u64 {
@@ -101,7 +101,9 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 
     // Fetch the digest of each.
     let mut digests: Vec<D> = Vec::new();
-    let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
+    let node_futures = positions
+        .iter()
+        .map(|pos| mmr.get_node(Position::from(*pos)));
     let hash_results = try_join_all(node_futures).await?;
 
     for (i, hash_result) in hash_results.into_iter().enumerate() {
@@ -137,7 +139,11 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions
         .iter()
-        .map(|&pos| async move { mmr.get_node(pos).await.map(|digest| (pos, digest)) })
+        .map(|&pos| async move {
+            mmr.get_node(Position::from(pos))
+                .await
+                .map(|digest| (pos, digest))
+        })
         .collect();
     let results = try_join_all(node_futures).await?;
 

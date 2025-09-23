@@ -157,9 +157,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.put(pruning_boundary_key, mmr_size.to_be_bytes().into());
 
         // Store the pinned nodes in metadata
-        let nodes_to_pin_positions = nodes_to_pin(mmr_size);
+        let nodes_to_pin_positions = nodes_to_pin(mmr_size.into());
         for (pos, digest) in nodes_to_pin_positions.zip(pinned_nodes.iter()) {
-            metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
+            metadata.put(U64::new(NODE_PREFIX, pos.into()), digest.to_vec());
         }
 
         // Sync metadata to disk
@@ -168,7 +168,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Create in-memory MMR in fully pruned state
         let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: mmr_size,
+            pruned_to_pos: mmr_size.into(),
             pinned_nodes,
             pool: config.thread_pool,
         });

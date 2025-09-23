@@ -17,7 +17,7 @@ use crate::{
         },
         hasher::Hasher,
         iterator::leaf_pos_to_loc,
-        verification, Proof, StandardHasher as Standard,
+        verification, Location, Position, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -469,7 +469,7 @@ impl<
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        let op_count = leaf_pos_to_loc(proof.size);
+        let op_count = Location::from(Position::from(proof.size)).as_u64(); // TODO fix
         let Some(op_count) = op_count else {
             debug!("verification failed, invalid proof size");
             return false;

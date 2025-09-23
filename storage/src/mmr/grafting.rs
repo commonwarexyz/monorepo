@@ -62,7 +62,7 @@ use crate::mmr::{
     hasher::Hasher as HasherTrait,
     iterator::{leaf_loc_to_pos, leaf_pos_to_loc, pos_to_height, PeakIterator},
     storage::Storage as StorageTrait,
-    Error, StandardHasher,
+    Error, Location, Position, StandardHasher,
 };
 use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
@@ -105,7 +105,8 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     ) -> Result<(), Error> {
         let mut futures = Vec::with_capacity(leaves.len());
         for leaf_loc in leaves {
-            let dest_pos = self.destination_pos(leaf_loc_to_pos(*leaf_loc));
+            let dest_pos = self
+                .destination_pos(leaf_loc_to_pos(Location::new(*leaf_loc)));
             let future = mmr.get_node(dest_pos);
             futures.push(future);
         }
@@ -114,7 +115,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
             let Some(digest) = digest else {
                 panic!("missing grafted digest for leaf {}", leaves[i]);
             };
-            let leaf_pos = leaf_loc_to_pos(leaves[i]);
+            let leaf_pos = leaf_loc_to_pos(Location::new(leaves[i]));
             self.grafted_digests.insert(leaf_pos, digest);
         }
 
@@ -212,10 +213,11 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
     /// # Warning
     ///
     /// Panics if the grafted_digest was not previously loaded for the leaf.
-    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
-        let grafted_digest = self.grafted_digests.get(&pos);
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
+        let pos_u64 = pos.as_u64();
+        let grafted_digest = self.grafted_digests.get(&pos_u64);
         let Some(grafted_digest) = grafted_digest else {
-            panic!("missing grafted digest for leaf_pos {pos}");
+            panic!("missing grafted digest for leaf_pos {pos_u64}");
         };
 
         // We do not include position in the digest material here since the position information is
@@ -236,12 +238,15 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
 
     fn node_digest(
         &mut self,
-        pos: u64,
+        pos: Position,
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
-        self.hasher
-            .node_digest(self.destination_pos(pos), left_digest, right_digest)
+        self.hasher.node_digest(
+            Position::new(self.destination_pos(pos.as_u64())),
+            left_digest,
+            right_digest,
+        )
     }
 
     fn root<'a>(
@@ -262,10 +267,11 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
 }
 
 impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
-    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
-        let grafted_digest = self.grafted_digests.get(&pos);
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
+        let pos_u64 = pos.as_u64();
+        let grafted_digest = self.grafted_digests.get(&pos_u64);
         let Some(grafted_digest) = grafted_digest else {
-            panic!("missing grafted digest for leaf_pos {pos}");
+            panic!("missing grafted digest for leaf_pos {pos_u64}");
         };
 
         // We do not include position in the digest material here since the position information is
@@ -286,12 +292,15 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
 
     fn node_digest(
         &mut self,
-        pos: u64,
+        pos: Position,
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
-        self.hasher
-            .node_digest(destination_pos(pos, self.height), left_digest, right_digest)
+        self.hasher.node_digest(
+            Position::new(destination_pos(pos.as_u64(), self.height)),
+            left_digest,
+            right_digest,
+        )
     }
 
     fn root<'a>(
@@ -340,7 +349,7 @@ impl<'a, H: CHasher> Verifier<'a, H> {
 }
 
 impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
-    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         self.hasher.leaf_digest(pos, element)
     }
 
@@ -355,19 +364,20 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
 
     fn node_digest(
         &mut self,
-        pos: u64,
+        pos: Position,
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
+        let pos_u64 = pos.as_u64();
         let digest = self.hasher.node_digest(pos, left_digest, right_digest);
-        if pos_to_height(pos) != self.height {
+        if pos_to_height(pos_u64) != self.height {
             // If we're not at the grafting boundary we use the digest as-is.
             return digest;
         }
 
         // This base tree node corresponds to a peak-tree leaf, so we need to perform the peak-tree
         // leaf digest computation.
-        let source_pos = source_pos(pos, self.height);
+        let source_pos = source_pos(pos_u64, self.height);
         let Some(source_pos) = source_pos else {
             // malformed proof input
             debug!(pos, "no grafting source pos");
@@ -484,7 +494,7 @@ mod tests {
         iterator::leaf_loc_to_pos,
         mem::Mmr,
         stability::{build_test_mmr, ROOTS},
-        verification, StandardHasher,
+        verification, Position, StandardHasher,
     };
     use commonware_cryptography::{Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
@@ -520,16 +530,16 @@ mod tests {
             let digest1 = test_digest::<H>(1);
             let digest2 = test_digest::<H>(2);
 
-            let out = mmr_hasher.leaf_digest(0, &digest1);
+            let out = mmr_hasher.leaf_digest(Position::new(0), &digest1);
             assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
-            let mut out2 = mmr_hasher.leaf_digest(0, &digest1);
+            let mut out2 = mmr_hasher.leaf_digest(Position::new(0), &digest1);
             assert_eq!(out, out2, "hash should be re-computed consistently");
 
-            out2 = mmr_hasher.leaf_digest(1, &digest1);
+            out2 = mmr_hasher.leaf_digest(Position::new(1), &digest1);
             assert_ne!(out, out2, "hash should change with different pos");
 
-            out2 = mmr_hasher.leaf_digest(0, &digest2);
+            out2 = mmr_hasher.leaf_digest(Position::new(0), &digest2);
             assert_ne!(out, out2, "hash should change with different input digest");
         });
     }
@@ -542,28 +552,28 @@ mod tests {
         let d2 = test_digest::<H>(2);
         let d3 = test_digest::<H>(3);
 
-        let out = mmr_hasher.node_digest(0, &d1, &d2);
+        let out = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
         assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
-        let mut out2 = mmr_hasher.node_digest(0, &d1, &d2);
+        let mut out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
         assert_eq!(out, out2, "hash should be re-computed consistently");
 
-        out2 = mmr_hasher.node_digest(1, &d1, &d2);
+        out2 = mmr_hasher.node_digest(Position::new(1), &d1, &d2);
         assert_ne!(out, out2, "hash should change with different pos");
 
-        out2 = mmr_hasher.node_digest(0, &d3, &d2);
+        out2 = mmr_hasher.node_digest(Position::new(0), &d3, &d2);
         assert_ne!(
             out, out2,
             "hash should change with different first input hash"
         );
 
-        out2 = mmr_hasher.node_digest(0, &d1, &d3);
+        out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d3);
         assert_ne!(
             out, out2,
             "hash should change with different second input hash"
         );
 
-        out2 = mmr_hasher.node_digest(0, &d2, &d1);
+        out2 = mmr_hasher.node_digest(Position::new(0), &d2, &d1);
         assert_ne!(
             out, out2,
             "hash should change when swapping order of inputs"

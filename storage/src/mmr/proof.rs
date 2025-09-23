@@ -7,7 +7,7 @@
 use crate::mmr::{
     hasher::Hasher,
     iterator::{leaf_loc_to_pos, nodes_to_pin, PathIterator, PeakIterator},
-    Error,
+    Error, Location, Position,
 };
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
@@ -232,11 +232,15 @@ impl<D: Digest> Proof<D> {
         range: std::ops::Range<u64>,
     ) -> Result<Vec<D>, Error> {
         // Get the positions of all nodes that should be pinned.
-        let start_pos = leaf_loc_to_pos(range.start);
-        let pinned_positions: Vec<u64> = nodes_to_pin(start_pos).collect();
+        let start_pos = Position::from(Location::from(range.start));
+        let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
 
         // Get all positions required for the proof.
-        let required_positions = nodes_required_for_range_proof(self.size, range);
+        let required_positions: Vec<Position> = nodes_required_for_range_proof(self.size, range)
+            .into_iter()
+            .map(|pos| Position::from(pos))
+            .collect();
+
         if required_positions.len() != self.digests.len() {
             #[cfg(feature = "std")]
             debug!(
@@ -256,7 +260,7 @@ impl<D: Digest> Proof<D> {
         }
 
         // Create a mapping from position to digest.
-        let position_to_digest: BTreeMap<u64, D> = required_positions
+        let position_to_digest: BTreeMap<Position, D> = required_positions
             .iter()
             .zip(self.digests.iter())
             .map(|(&pos, &digest)| (pos, digest))
@@ -267,8 +271,11 @@ impl<D: Digest> Proof<D> {
         for pinned_pos in pinned_positions {
             let Some(&digest) = position_to_digest.get(&pinned_pos) else {
                 #[cfg(feature = "std")]
-                debug!(pinned_pos, "Pinned node not found in proof");
-                return Err(Error::MissingDigest(pinned_pos));
+                debug!(
+                    pinned_pos = pinned_pos.as_u64(),
+                    "Pinned node not found in proof"
+                );
+                return Err(Error::MissingDigest(pinned_pos.as_u64()));
             };
             result.push(digest);
         }
@@ -527,7 +534,9 @@ where
     assert_ne!(range_info.two_h, 0);
     if range_info.two_h == 1 {
         match elements.next() {
-            Some(element) => return Ok(hasher.leaf_digest(range_info.pos, element.as_ref())),
+            Some(element) => {
+                return Ok(hasher.leaf_digest(Position::from(range_info.pos), element.as_ref()))
+            }
             None => return Err(ReconstructionError::MissingDigests),
         }
     }
@@ -595,7 +604,7 @@ where
     }
 
     Ok(hasher.node_digest(
-        range_info.pos,
+        Position::from(range_info.pos),
         &left_digest.expect("left_digest guaranteed to be Some after checks above"),
         &right_digest.expect("right_digest guaranteed to be Some after checks above"),
     ))

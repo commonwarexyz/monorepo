@@ -4,6 +4,8 @@
 
 use alloc::vec::Vec;
 
+use super::{Location, Position};
+
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
 /// in decreasing order of height.
 ///
@@ -39,15 +41,15 @@ impl PeakIterator {
     /// Return the position of the last leaf in an MMR of the given size.
     ///
     /// This is an O(log2(n)) operation.
-    pub fn last_leaf_pos(size: u64) -> u64 {
+    pub fn last_leaf_pos(size: u64) -> Position {
         if size == 0 {
-            return 0;
+            return Position::ZERO;
         }
 
         let last_peak = PeakIterator::new(size)
             .last()
             .expect("PeakIterator has at least one peak when size > 0");
-        last_peak.0 - last_peak.1 as u64
+        Position::new(last_peak.0.as_u64() - last_peak.1 as u64)
     }
 
     /// Return if an MMR of the given `size` has a valid structure.
@@ -97,13 +99,16 @@ impl PeakIterator {
 }
 
 impl Iterator for PeakIterator {
-    type Item = (u64, u32); // (peak, height)
+    type Item = (Position, u32); // (peak, height)
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.two_h > 1 {
             if self.node_pos < self.size {
                 // found a peak
-                let peak_item = (self.node_pos, self.two_h.trailing_zeros() - 1);
+                let peak_item = (
+                    Position::new(self.node_pos),
+                    self.two_h.trailing_zeros() - 1,
+                );
                 // move to the right sibling
                 self.node_pos += self.two_h - 1;
                 assert!(self.node_pos >= self.size); // sibling shouldn't be in the MMR if MMR is valid
@@ -121,7 +126,7 @@ impl Iterator for PeakIterator {
 /// with the given peaks. This set is non-empty only if there is a height-0 (leaf) peak in the MMR.
 /// The result will contain this leaf peak plus the other MMR peaks with contiguously increasing
 /// height. Nodes in the result are ordered by decreasing height.
-pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
+pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<Position> {
     let mut peaks = Vec::new();
     let mut last_height = u32::MAX;
 
@@ -145,45 +150,19 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
 /// if this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
-pub(crate) const fn leaf_pos_to_loc(leaf_pos: u64) -> Option<u64> {
-    if leaf_pos == 0 {
-        return Some(0);
-    }
-
-    let start = u64::MAX >> (leaf_pos + 1).leading_zeros();
-    let height = start.trailing_ones();
-    let mut two_h = 1 << (height - 1);
-    let mut cur_node = start - 1;
-    let mut leaf_loc_floor = 0u64;
-
-    while two_h > 1 {
-        if cur_node == leaf_pos {
-            return None;
-        }
-        let left_pos = cur_node - two_h;
-        two_h >>= 1;
-        if leaf_pos > left_pos {
-            // The leaf is in the right subtree, so we must account for the leaves in the left
-            // subtree all of which precede it.
-            leaf_loc_floor += two_h;
-            cur_node -= 1; // move to the right child
-        } else {
-            // The node is in the left subtree
-            cur_node = left_pos;
-        }
-    }
-
-    Some(leaf_loc_floor)
+pub(crate) const fn leaf_pos_to_loc(leaf_pos: Position) -> Option<Location> {
+    Location::from_position(leaf_pos)
 }
 
 /// Returns the position of the leaf with location `leaf_loc` in an MMR.
-pub(crate) const fn leaf_loc_to_pos(leaf_loc: u64) -> u64 {
-    // This will never underflow since 2*n >= count_ones(n).
-    leaf_loc.checked_mul(2).expect("leaf_loc overflow") - leaf_loc.count_ones() as u64
+pub(crate) const fn leaf_loc_to_pos(leaf_loc: Location) -> Position {
+    Position::from_location(leaf_loc)
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
-pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
+pub(crate) const fn pos_to_height(pos: Position) -> u32 {
+    let mut pos = pos.as_u64();
+
     if pos == 0 {
         return 0;
     }
@@ -227,17 +206,17 @@ impl PathIterator {
     /// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the
     /// perfect binary tree with peak `peak_pos` and having height `height`, not including the peak
     /// itself.
-    pub fn new(leaf_pos: u64, peak_pos: u64, height: u32) -> PathIterator {
+    pub fn new(leaf_pos: Position, peak_pos: Position, height: u32) -> PathIterator {
         PathIterator {
-            leaf_pos,
-            node_pos: peak_pos,
+            leaf_pos: leaf_pos.as_u64(),
+            node_pos: peak_pos.as_u64(),
             two_h: 1 << height,
         }
     }
 }
 
 impl Iterator for PathIterator {
-    type Item = (u64, u64); // (parent_pos, sibling_pos)
+    type Item = (Position, Position); // (parent_pos, sibling_pos)
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.two_h <= 1 {
@@ -249,11 +228,11 @@ impl Iterator for PathIterator {
         self.two_h >>= 1;
 
         if left_pos < self.leaf_pos {
-            let r = Some((self.node_pos, left_pos));
+            let r = Some((Position::new(self.node_pos), Position::new(left_pos)));
             self.node_pos = right_pos;
             return r;
         }
-        let r = Some((self.node_pos, right_pos));
+        let r = Some((Position::new(self.node_pos), Position::new(right_pos)));
         self.node_pos = left_pos;
         r
     }
@@ -271,8 +250,8 @@ impl Iterator for PathIterator {
 /// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
 /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
 /// whose size is less than the pruning boundary.
-pub(crate) fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
-    PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
+pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position> {
+    PeakIterator::new(PeakIterator::to_nearest_size(start_pos.as_u64())).map(|(pos, _)| pos)
 }
 
 #[cfg(test)]
