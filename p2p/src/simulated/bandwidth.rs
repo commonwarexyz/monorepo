@@ -210,10 +210,9 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             return;
         }
 
-        let mut limiting = Vec::new();
+        // Run progressive filling until every constrained flow is frozen.
         while self.active > 0 {
-            // Reset the limiting set (avoids reallocation)
-            limiting.clear();
+            let mut limiting = Vec::new();
             let mut min_delta: Option<Ratio> = None;
 
             // Step 1: among all resources still serving active flows, locate the smallest per-flow
@@ -293,7 +292,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     saturated.push(res_idx);
                 }
             }
-            saturated.extend(limiting.iter().copied());
+            saturated.extend(limiting);
             if saturated.is_empty() {
                 continue;
             }
