@@ -6,23 +6,32 @@ use std::time::{Duration, SystemTime};
 /// Number of nanoseconds in a second.
 pub const NANOS_PER_SEC: u128 = 1_000_000_000;
 
-/// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
-/// current platform.
-///
-/// Source: [`FILETIME` range](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime)
-/// uses unsigned 64-bit ticks (100ns) since 1601-01-01; converting to the Unix epoch offset of
-/// 11_644_473_600 seconds yields the remaining representable span.
-#[cfg(windows)]
-const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(910_692_730_085, 477_580_799); // TODO: comment on nuance here (floors to 700)
+cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+        /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
+        /// current platform.
+        ///
+        /// Source: [`FILETIME` range](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime)
+        /// uses unsigned 64-bit ticks (100ns) since 1601-01-01; converting to the Unix epoch offset of
+        /// 11_644_473_600 seconds yields the remaining representable span.
+        const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(910_692_730_085, 477_580_700);
 
-/// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
-/// current platform.
-///
-/// Source: `SystemTime` on Unix stores seconds in a signed 64-bit integer; see
-/// [`std::sys::pal::unix::time`](https://github.com/rust-lang/rust/blob/master/library/std/src/sys/pal/unix/time.rs),
-/// which bounds additions at `i64::MAX` seconds plus 999_999_999 nanoseconds.
-#[cfg(not(windows))]
-const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
+        /// The precision of [`SystemTime`] on Windows.
+        const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(100);
+    } else {
+        /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
+        /// current platform.
+        ///
+        /// Source: `SystemTime` on Unix stores seconds in a signed 64-bit integer; see
+        /// [`std::sys::pal::unix::time`](https://github.com/rust-lang/rust/blob/master/library/std/src/sys/pal/unix/time.rs),
+        /// which bounds additions at `i64::MAX` seconds plus 999_999_999 nanoseconds.
+        #[cfg(not(windows))]
+        const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
+
+        /// The precision of [`SystemTime`] on Unix.
+        const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(1);
+    }
+}
 
 /// Extension trait providing additional functionality for [`Duration`].
 pub trait DurationExt {
@@ -273,17 +282,6 @@ mod tests {
 
     #[test]
     fn check_duration_limit() {
-        // Check happy path
-        UNIX_EPOCH
-            .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
-            .expect("unable to add max duration");
-
-        // Check unhappy path
-        let result =
-            UNIX_EPOCH.checked_add(MAX_DURATION_SINCE_UNIX_EPOCH + Duration::from_nanos(1));
-        assert!(result.is_none(), "able to exceed max duration");
-
-        // Check other unhappy path
         let result = UNIX_EPOCH
             .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
             .unwrap()
@@ -294,7 +292,7 @@ mod tests {
     #[test]
     fn saturating_add_caps_at_max() {
         let max = SystemTime::limit();
-        assert_eq!(max.saturating_add(Duration::from_secs(1)), max);
+        assert_eq!(max.saturating_add(Duration::from_nanos(1)), max);
     }
 
     #[test]

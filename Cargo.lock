@@ -1491,6 +1491,7 @@ name = "commonware-utils"
 version = "0.0.62"
 dependencies = [
  "bytes",
+ "cfg-if",
  "commonware-codec",
  "futures",
  "getrandom 0.2.15",
