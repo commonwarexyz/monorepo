@@ -54,7 +54,7 @@ impl Resource {
 
 /// Identifier used to deduplicate resource entries across flows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum ResourceKey<P> {
+enum Endpoint<P> {
     Egress(P),
     Ingress(P),
 }
@@ -80,7 +80,7 @@ impl State {
 struct Planner<'a, P> {
     flows: &'a [Flow<P>],
     resources: Vec<Resource>,
-    indices: BTreeMap<ResourceKey<P>, usize>,
+    indices: BTreeMap<Endpoint<P>, usize>,
     flow_states: Vec<State>,
     rates: Vec<Option<Ratio>>,
     active_flows: usize,
@@ -111,7 +111,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     ///
     /// Unbounded resources return `None`, allowing callers to skip any additional bookkeeping for
     /// flows that touch them.
-    fn track(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
+    fn track(&mut self, key: Endpoint<P>, limit: Option<u128>) -> Option<usize> {
         if let Some(index) = self.indices.get(&key) {
             return Some(*index);
         }
@@ -145,7 +145,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
             // Register the flow with its egress resource if the sender is bandwidth-limited.
             if let Some(resource_idx) = self.track(
-                ResourceKey::Egress(flow.origin.clone()),
+                Endpoint::Egress(flow.origin.clone()),
                 egress_limit(&flow.origin),
             ) {
                 self.attach(resource_idx, idx, &mut state);
@@ -155,7 +155,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             if flow.delivered {
                 // Register the flow with its ingress resource if the recipient is bandwidth-limited.
                 if let Some(resource_idx) = self.track(
-                    ResourceKey::Ingress(flow.recipient.clone()),
+                    Endpoint::Ingress(flow.recipient.clone()),
                     ingress_limit(&flow.recipient),
                 ) {
                     self.attach(resource_idx, idx, &mut state);
