@@ -140,7 +140,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         E: FnMut(&P) -> Option<u128>,
         I: FnMut(&P) -> Option<u128>,
     {
-        for (idx, flow) in self.flows.iter().enumerate() {
+        for (flow_idx, flow) in self.flows.iter().enumerate() {
             let mut state = State::new();
 
             // Register the flow with its egress resource if the sender is bandwidth-limited.
@@ -148,7 +148,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 Endpoint::Egress(flow.origin.clone()),
                 egress_limit(&flow.origin),
             ) {
-                self.attach(resource_idx, idx, &mut state);
+                self.attach(resource_idx, flow_idx, &mut state);
             }
 
             // Only track ingress when the recipient actually needs to receive the bytes.
@@ -158,7 +158,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     Endpoint::Ingress(flow.recipient.clone()),
                     ingress_limit(&flow.recipient),
                 ) {
-                    self.attach(resource_idx, idx, &mut state);
+                    self.attach(resource_idx, flow_idx, &mut state);
                 }
             }
 
