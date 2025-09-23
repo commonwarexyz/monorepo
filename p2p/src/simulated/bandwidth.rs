@@ -253,8 +253,9 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 }
             }
 
-            // Step 2: advance every active flow by the identified delta, or freeze immediately if
-            // we discovered an already saturated resource.
+            // Step 2: if the limiting resources still have headroom, advance every active flow by
+            // `delta`. If `delta` is zero we already exhausted a resource, so we skip the advance
+            // and immediately freeze the affected flows instead.
             let delta = match min_delta {
                 Some(delta) => delta,
                 None => {
@@ -279,6 +280,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 if resource.active == 0 {
                     continue;
                 }
+
                 // Charge each resource for the uniform allocation it just handed out.
                 let usage = delta.mul_int(resource.active as u128);
                 if usage.is_zero() {
