@@ -76,7 +76,7 @@ impl State {
     }
 }
 
-/// Planner once all flows have been registered.
+/// Allocate bandwidth for a set of flows given some set of capacity constraints.
 struct Planner<'a, P> {
     flows: &'a [Flow<P>],
     resources: Vec<Resource>,
