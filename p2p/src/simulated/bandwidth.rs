@@ -309,7 +309,11 @@ pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
                 let numerator = bytes
                     .saturating_mul(ratio.den)
                     .saturating_mul(NANOS_PER_SEC);
-                let ns = div_ceil(numerator, ratio.num);
+                let ns = if ratio.num == 0 {
+                    u128::MAX
+                } else {
+                    numerator.div_ceil(ratio.num)
+                };
                 Some(Duration::from_nanos_saturating(ns))
             }
         }
@@ -350,19 +354,6 @@ pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u12
             *carry = total % denom;
             bytes.min(remaining)
         }
-    }
-}
-
-/// Calculate the ceiling of the division of two numbers (if the denominator is zero, return `u128::MAX`).
-fn div_ceil(num: u128, denom: u128) -> u128 {
-    if denom == 0 {
-        return u128::MAX;
-    }
-    let div = num / denom;
-    if num % denom == 0 {
-        div
-    } else {
-        div.saturating_add(1)
     }
 }
 
