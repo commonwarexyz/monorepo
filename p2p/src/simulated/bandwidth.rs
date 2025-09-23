@@ -212,6 +212,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
         let mut limiting = Vec::new();
         while self.active > 0 {
+            // Reset the limiting set (avoids reallocation)
             limiting.clear();
             let mut min_delta: Option<Ratio> = None;
 
