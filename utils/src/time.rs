@@ -417,6 +417,53 @@ mod tests {
         assert!(Duration::parse("2H").is_err());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn print_windows_duration_boundary() {
+        use std::time::UNIX_EPOCH;
+
+        const MAX_SECS: u64 = 253_402_300_799;
+        const MAX_SECS_PLUS_ONE: u64 = MAX_SECS + 1;
+        const CANDIDATE_NANOS: [u32; 7] = [
+            0,
+            900_000_000,
+            999_999_700,
+            999_999_800,
+            999_999_900,
+            999_999_901,
+            999_999_999,
+        ];
+
+        for &(secs, label) in &[
+            (MAX_SECS, "max_secs"),
+            (MAX_SECS_PLUS_ONE, "max_secs_plus_one"),
+        ] {
+            for nanos in CANDIDATE_NANOS {
+                let duration = Duration::new(secs, nanos);
+                let intervals = secs
+                    .checked_mul(10_000_000)
+                    .and_then(|base| base.checked_add((nanos / 100) as u64));
+                let add_ok = UNIX_EPOCH.checked_add(duration).is_some();
+                eprintln!(
+                    "{label}: secs={secs} nanos={nanos} intervals={:?} add_ok={add_ok}",
+                    intervals
+                );
+
+                for &(extra, tag) in &[(1, "+1ns"), (100, "+100ns")] {
+                    let bumped = duration.saturating_add(Duration::from_nanos(extra));
+                    let bumped_ok = UNIX_EPOCH.checked_add(bumped).is_some();
+                    eprintln!(
+                        "  {tag}: nanos={} intervals={:?} add_ok={bumped_ok}",
+                        bumped.subsec_nanos(),
+                        secs
+                            .checked_mul(10_000_000)
+                            .and_then(|base| base.checked_add((bumped.subsec_nanos() / 100) as u64))
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_duration_parse_large_values() {
         // Large values that don't overflow
