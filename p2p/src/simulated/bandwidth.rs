@@ -310,7 +310,7 @@ pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
                     .saturating_mul(ratio.den)
                     .saturating_mul(NANOS_PER_SEC);
                 let ns = div_ceil(numerator, ratio.num);
-                Some(Duration::from_nanos_u128(ns))
+                Some(Duration::from_nanos_saturating(ns))
             }
         }
     }

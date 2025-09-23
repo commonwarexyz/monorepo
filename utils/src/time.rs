@@ -41,9 +41,9 @@ cfg_if::cfg_if! {
 
 /// Extension trait providing additional functionality for [`Duration`].
 pub trait DurationExt {
-    /// Creates a duration from nanoseconds represented as a `u128`. Clamps anything beyond the
+    /// Creates a duration from nanoseconds represented as a `u128`. Saturates anything beyond the
     /// representable range.
-    fn from_nanos_u128(ns: u128) -> Duration;
+    fn from_nanos_saturating(ns: u128) -> Duration;
 
     /// Parse a duration string with time unit suffixes.
     ///
@@ -98,7 +98,7 @@ pub trait DurationExt {
 }
 
 impl DurationExt for Duration {
-    fn from_nanos_u128(ns: u128) -> Duration {
+    fn from_nanos_saturating(ns: u128) -> Duration {
         // Clamp anything beyond the representable range
         if ns > MAX_DURATION_NANOS {
             return MAX_DURATION;
@@ -263,32 +263,35 @@ mod tests {
     }
 
     #[test]
-    fn test_from_nanos_u128() {
+    fn test_from_nanos_saturating() {
         // Support simple cases
-        assert_eq!(Duration::from_nanos_u128(0), Duration::new(0, 0));
+        assert_eq!(Duration::from_nanos_saturating(0), Duration::new(0, 0));
         assert_eq!(
-            Duration::from_nanos_u128(NANOS_PER_SEC - 1),
+            Duration::from_nanos_saturating(NANOS_PER_SEC - 1),
             Duration::new(0, (NANOS_PER_SEC - 1) as u32)
         );
         assert_eq!(
-            Duration::from_nanos_u128(NANOS_PER_SEC + 1),
+            Duration::from_nanos_saturating(NANOS_PER_SEC + 1),
             Duration::new(1, 1)
         );
 
         // Support larger values than `Duration::from_nanos`
         let std = Duration::from_nanos(u64::MAX);
-        let beyond_std = Duration::from_nanos_u128(u64::MAX as u128 + 1);
+        let beyond_std = Duration::from_nanos_saturating(u64::MAX as u128 + 1);
         assert!(beyond_std > std);
 
         // Test very large values
-        assert_eq!(Duration::from_nanos_u128(MAX_DURATION_NANOS), MAX_DURATION);
+        assert_eq!(
+            Duration::from_nanos_saturating(MAX_DURATION_NANOS),
+            MAX_DURATION
+        );
 
         // Clamp anything beyond the representable range
         assert_eq!(
-            Duration::from_nanos_u128(MAX_DURATION_NANOS + 1),
+            Duration::from_nanos_saturating(MAX_DURATION_NANOS + 1),
             MAX_DURATION
         );
-        assert_eq!(Duration::from_nanos_u128(u128::MAX), MAX_DURATION);
+        assert_eq!(Duration::from_nanos_saturating(u128::MAX), MAX_DURATION);
     }
 
     #[test]
