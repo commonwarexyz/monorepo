@@ -51,6 +51,7 @@ enum ResourceKey<P> {
     Ingress(P),
 }
 
+/// Tracks the constraints participating in a flow and whether it is still constrained.
 struct FlowState {
     resources: Vec<usize>,
     limited: bool,
@@ -67,6 +68,7 @@ impl FlowState {
     }
 }
 
+/// Progressive filling helper that owns the resource index and flow membership state.
 struct BandwidthPlanner<'a, P> {
     flows: &'a [Flow<P>],
     resources: Vec<Resource>,
@@ -78,6 +80,7 @@ struct BandwidthPlanner<'a, P> {
 }
 
 impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
+    /// Construct a planner ready to register resources for `flows`.
     fn new(flows: &'a [Flow<P>]) -> Self {
         Self {
             flows,
@@ -90,6 +93,7 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
         }
     }
 
+    /// Ensure we have a resource entry for `key`, returning `None` for unlimited capacity.
     fn ensure_resource(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
         if let Some(index) = self.indices.get(&key) {
             return Some(*index);
@@ -101,6 +105,7 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
         Some(idx)
     }
 
+    /// Attach each flow to its egress/ingress resources.
     fn register_flows<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
     where
         E: FnMut(&P) -> Option<u128>,
@@ -109,6 +114,7 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
         for (idx, flow) in self.flows.iter().enumerate() {
             let mut state = FlowState::new();
 
+            // Register the flow with its egress resource if the sender is bandwidth-limited.
             if let Some(resource_idx) = self.ensure_resource(
                 ResourceKey::Egress(flow.origin.clone()),
                 egress_limit(&flow.origin),
@@ -116,6 +122,7 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
                 self.attach(resource_idx, idx, &mut state);
             }
 
+            // Only track ingress when the recipient actually needs to receive the bytes.
             if flow.requires_ingress {
                 if let Some(resource_idx) = self.ensure_resource(
                     ResourceKey::Ingress(flow.recipient.clone()),
@@ -126,6 +133,7 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
             }
 
             if state.limited {
+                // The flow participates in progressive filling until one of its constraints saturates.
                 state.active = true;
                 self.active_flows += 1;
             }
@@ -134,6 +142,7 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
         }
     }
 
+    /// Link a flow to a resource, marking it as constrained.
     fn attach(&mut self, resource_idx: usize, flow_idx: usize, state: &mut FlowState) {
         let resource = &mut self.resources[resource_idx];
         resource.members.push(flow_idx);
@@ -142,6 +151,7 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
         state.limited = true;
     }
 
+    /// Perform progressive filling until every constrained flow is frozen.
     fn solve(&mut self) {
         if self.active_flows == 0 {
             return;
@@ -158,6 +168,7 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
                 }
 
                 if resource.remaining.is_zero() {
+                    // This resource is already saturated; any flow touching it freezes immediately.
                     limiting.clear();
                     limiting.push(res_idx);
                     min_delta = Some(Ratio::zero());
@@ -167,12 +178,14 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
                 let share = resource.remaining.div_int(resource.active_users as u128);
                 match &min_delta {
                     None => {
+                        // First candidate: provisionally treat it as the tightest constraint.
                         min_delta = Some(share);
                         limiting.clear();
                         limiting.push(res_idx);
                     }
                     Some(current) => match share.cmp(current) {
                         Ordering::Less => {
+                            // Found a tougher constraint, so reset the limiting set.
                             min_delta = Some(share);
                             limiting.clear();
                             limiting.push(res_idx);
@@ -186,18 +199,21 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
             let delta = match min_delta {
                 Some(delta) => delta,
                 None => {
+                    // Every active flow should have been tied to at least one limited resource.
                     debug_assert_eq!(self.active_flows, 0, "active flows without constraints");
                     break;
                 }
             };
 
             if delta.is_zero() {
+                // Capacity was already consumed, so immediately freeze the affected flows.
                 for &res_idx in &limiting {
                     self.freeze_resource(res_idx);
                 }
                 continue;
             }
 
+            // Raise the shared fill level; individual rates are materialised on freeze.
             self.current_fill.add_assign(&delta);
 
             let mut saturated = Vec::new();
@@ -205,12 +221,14 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
                 if resource.active_users == 0 {
                     continue;
                 }
+                // Charge each resource for the uniform allocation it just handed out.
                 let usage = delta.mul_int(resource.active_users as u128);
                 if usage.is_zero() {
                     continue;
                 }
                 resource.remaining.sub_assign(&usage);
                 if resource.remaining.is_zero() {
+                    // Track newly saturated resources so their flows freeze this iteration.
                     saturated.push(res_idx);
                 }
             }
@@ -227,19 +245,23 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
         }
     }
 
+    /// Freeze all flows that rely on a saturated resource.
     fn freeze_resource(&mut self, res_idx: usize) {
+        // Clone before iterating: freezing updates `active_users`, which should not disturb the traversal.
         let members = self.resources[res_idx].members.clone();
         for flow_idx in members {
             self.deactivate_flow(flow_idx);
         }
     }
 
+    /// Finalize the rate for `flow_idx` and update every referenced resource.
     fn deactivate_flow(&mut self, flow_idx: usize) {
         let state = &mut self.flow_states[flow_idx];
         if !state.active {
             return;
         }
 
+        // The flow's max-min allocation equals the current fill level.
         self.rates[flow_idx] = Some(self.current_fill.clone());
         state.active = false;
         self.active_flows -= 1;
@@ -247,16 +269,19 @@ impl<'a, P: Clone + Ord> BandwidthPlanner<'a, P> {
         for &res_idx in &state.resources {
             let resource = &mut self.resources[res_idx];
             if resource.active_users > 0 {
+                // Stop counting the flow toward future shares once it is frozen.
                 resource.active_users -= 1;
             }
         }
     }
 
+    /// Convert the computed ratios back into the public map keyed by flow id.
     fn into_rates(mut self) -> BTreeMap<u64, Rate> {
         debug_assert_eq!(self.active_flows, 0, "planner left flows active");
 
         for (idx, state) in self.flow_states.iter().enumerate() {
             if state.limited && self.rates[idx].is_none() {
+                // Defensive path: if a constrained flow never froze, give it whatever fill remains.
                 self.rates[idx] = Some(self.current_fill.clone());
             }
         }
