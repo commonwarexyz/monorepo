@@ -77,12 +77,19 @@ impl State {
 
 /// Allocate bandwidth for a set of flows given some set of capacity constraints.
 struct Planner<'a, P> {
+    /// Caller-supplied flow metadata (immutable throughout the run).
     flows: &'a [Flow<P>],
+    /// All constrained resources participating in this planning step.
     resources: Vec<Resource>,
+    /// Reverse index from `(peer, direction)` to the corresponding resource slot.
     indices: BTreeMap<Constraint<P>, usize>,
+    /// Per-flow membership and bookkeeping flags used during progressive filling.
     states: Vec<State>,
+    /// Final per-flow throughput; `None` indicates an unlimited flow.
     rates: Vec<Option<Ratio>>,
+    /// Number of flows still taking part in the current filling round.
     active: usize,
+    /// Shared fill level applied to every active flow.
     fill: Ratio,
 }
 
@@ -327,18 +334,8 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     #[cfg(test)]
-    fn resource_count(&self) -> usize {
-        self.resources.len()
-    }
-
-    #[cfg(test)]
-    fn resource_members(&self, idx: usize) -> &[usize] {
-        &self.resources[idx].members
-    }
-
-    #[cfg(test)]
-    fn resource_active(&self, idx: usize) -> usize {
-        self.resources[idx].active
+    fn resources(&self) -> &[Resource] {
+        &self.resources
     }
 
     #[cfg(test)]
@@ -347,12 +344,12 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     #[cfg(test)]
-    fn active_flows(&self) -> usize {
+    fn active(&self) -> usize {
         self.active
     }
 
     #[cfg(test)]
-    fn rates_slice(&self) -> &[Option<Ratio>] {
+    fn rates(&self) -> &[Option<Ratio>] {
         &self.rates
     }
 }
@@ -727,9 +724,9 @@ mod tests {
         let mut ingress = unlimited();
         let planner = Planner::new(&flows, &mut egress, &mut ingress);
 
-        assert_eq!(planner.resource_count(), 0);
+        assert_eq!(planner.resources().len(), 0);
         assert!(planner.states().iter().all(|state| !state.limited));
-        assert_eq!(planner.active_flows(), 0);
+        assert_eq!(planner.active(), 0);
     }
 
     #[test]
@@ -753,9 +750,11 @@ mod tests {
         let mut ingress = unlimited();
         let planner = Planner::new(&flows, &mut egress, &mut ingress);
 
-        assert_eq!(planner.resource_count(), 1);
-        assert_eq!(planner.resource_members(0), &[0, 1]);
-        assert_eq!(planner.resource_active(0), 2);
+        let resources = planner.resources();
+        assert_eq!(resources.len(), 1);
+        let resource = &resources[0];
+        assert_eq!(resource.members, vec![0, 1]);
+        assert_eq!(resource.active, 2);
         assert!(planner.states().iter().all(|state| state.active));
     }
 
@@ -779,15 +778,16 @@ mod tests {
         let mut egress = constant(1_000);
         let mut ingress = unlimited();
         let mut planner = Planner::new(&flows, &mut egress, &mut ingress);
-        assert_eq!(planner.active_flows(), 2);
+        assert_eq!(planner.active(), 2);
 
         // Freezing the shared egress resource should freeze both flows and zero the counters.
         planner.freeze(0);
 
-        assert_eq!(planner.resource_active(0), 0);
-        assert_eq!(planner.active_flows(), 0);
+        let resources = planner.resources();
+        assert_eq!(resources[0].active, 0);
+        assert_eq!(planner.active(), 0);
         assert!(planner
-            .rates_slice()
+            .rates()
             .iter()
             .filter_map(|opt| opt.as_ref())
             .all(|ratio| ratio.is_zero()));
