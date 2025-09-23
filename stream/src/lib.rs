@@ -155,7 +155,7 @@ impl<S> Config<S> {
         let current_time_ms = duration_to_u64(ctx.current().epoch());
         let ok_timestamps = (current_time_ms
             .saturating_sub(duration_to_u64(self.max_handshake_age)))
-            ..(current_time_ms + duration_to_u64(self.synchrony_bound));
+            ..(current_time_ms.saturating_add(duration_to_u64(self.synchrony_bound)));
         (current_time_ms, ok_timestamps)
     }
 }
