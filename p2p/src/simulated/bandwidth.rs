@@ -240,13 +240,17 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     }
                     Some(current) => match share.cmp(current) {
                         Ordering::Less => {
-                            // Found a tougher constraint, so reset the limiting set.
+                            // Found a tougher constraint (lower headroom), so reset the limiting set.
                             min_delta = Some(share);
                             limiting.clear();
                             limiting.push(res_idx);
                         }
                         Ordering::Equal => limiting.push(res_idx),
-                        Ordering::Greater => {}
+                        Ordering::Greater => {
+                            // This resource still has extra headroom relative to the current
+                            // bottleneck, so we leave it out of the limiting set and let it
+                            // keep contributing capacity in this round.
+                        }
                     },
                 }
             }
@@ -262,8 +266,6 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     break;
                 }
             };
-
-            // Capacity was already consumed, so immediately freeze the affected flows.
             if delta.is_zero() {
                 for &res_idx in &limiting {
                     self.freeze(res_idx);
@@ -275,6 +277,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             self.fill.add_assign(&delta);
             let mut saturated = Vec::new();
             for (res_idx, resource) in self.resources.iter_mut().enumerate() {
+                // Skip resources that are not active.
                 if resource.active == 0 {
                     continue;
                 }
