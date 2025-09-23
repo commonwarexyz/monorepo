@@ -1385,7 +1385,7 @@ mod tests {
 
         let mut delivered = Vec::new();
         let mut last_deadline = now;
-        for _ in 0..50_000 {
+        while delivered.len() < 2 {
             let deadline = state
                 .next()
                 .expect("pending transmissions should advertise a deadline");
@@ -1396,10 +1396,6 @@ mod tests {
                 assert!(completion.deliver);
                 delivered.push(completion.message.len());
             }
-
-            if delivered.len() == 2 {
-                break;
-            }
         }
 
         assert_eq!(
@@ -1407,7 +1403,7 @@ mod tests {
             2,
             "flows failed to complete under repeated rebalances"
         );
-        delivered.sort_unstable();
+        delivered.sort();
         assert_eq!(delivered, vec![1, 10_000]);
         assert!(state.next().is_none());
     }
