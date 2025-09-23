@@ -21,6 +21,9 @@ pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 mod no_coding;
 pub use no_coding::{NoCoding, NoCodingError};
 
+mod zoda;
+pub use zoda::{Zoda, ZodaError};
+
 /// Configuration common to all encoding schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Config {
