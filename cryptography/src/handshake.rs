@@ -34,9 +34,9 @@
 //! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
 use crate::{
     transcript::{Summary, Transcript},
-    PublicKey, Signer, Verifier,
+    PublicKey, Signature, Signer, Verifier,
 };
-use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
 use core::ops::Range;
 use rand_core::CryptoRngCore;
 
@@ -58,19 +58,17 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 /// First handshake message sent by the dialer.
 /// Contains dialer's ephemeral key and timestamp signature.
 #[cfg_attr(test, derive(PartialEq))]
-pub struct Syn<S> {
+pub struct Syn<S: Signature> {
     time_ms: i64,
     epk: EphemeralPublicKey,
     sig: S,
 }
 
-impl<S: EncodeSize> EncodeSize for Syn<S> {
-    fn encode_size(&self) -> usize {
-        self.time_ms.encode_size() + self.epk.encode_size() + self.sig.encode_size()
-    }
+impl<S: Signature> FixedSize for Syn<S> {
+    const SIZE: usize = i64::SIZE + EphemeralPublicKey::SIZE + S::SIZE;
 }
 
-impl<S: Write> Write for Syn<S> {
+impl<S: Signature + Write> Write for Syn<S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.time_ms.write(buf);
         self.epk.write(buf);
@@ -78,7 +76,7 @@ impl<S: Write> Write for Syn<S> {
     }
 }
 
-impl<S: Read> Read for Syn<S> {
+impl<S: Signature + Read> Read for Syn<S> {
     type Cfg = S::Cfg;
 
     fn read_cfg(
@@ -96,23 +94,18 @@ impl<S: Read> Read for Syn<S> {
 /// Second handshake message sent by the listener.
 /// Contains listener's ephemeral key, signature, and confirmation tag.
 #[cfg_attr(test, derive(PartialEq))]
-pub struct SynAck<S> {
+pub struct SynAck<S: Signature> {
     time_ms: i64,
     epk: EphemeralPublicKey,
     sig: S,
     confirmation: Summary,
 }
 
-impl<S: EncodeSize> EncodeSize for SynAck<S> {
-    fn encode_size(&self) -> usize {
-        self.time_ms.encode_size()
-            + self.epk.encode_size()
-            + self.sig.encode_size()
-            + self.confirmation.encode_size()
-    }
+impl<S: Signature> FixedSize for SynAck<S> {
+    const SIZE: usize = i64::SIZE + EphemeralPublicKey::SIZE + S::SIZE + Summary::SIZE;
 }
 
-impl<S: Write> Write for SynAck<S> {
+impl<S: Signature + Write> Write for SynAck<S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.time_ms.write(buf);
         self.epk.write(buf);
@@ -121,7 +114,7 @@ impl<S: Write> Write for SynAck<S> {
     }
 }
 
-impl<S: Read> Read for SynAck<S> {
+impl<S: Signature + Read> Read for SynAck<S> {
     type Cfg = S::Cfg;
 
     fn read_cfg(
@@ -144,10 +137,8 @@ pub struct Ack {
     confirmation: Summary,
 }
 
-impl EncodeSize for Ack {
-    fn encode_size(&self) -> usize {
-        self.confirmation.encode_size()
-    }
+impl FixedSize for Ack {
+    const SIZE: usize = Summary::SIZE;
 }
 
 impl Write for Ack {

@@ -1,4 +1,4 @@
-use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use rand_core::CryptoRngCore;
 use zeroize::ZeroizeOnDrop;
 
@@ -26,11 +26,9 @@ impl Write for EphemeralPublicKey {
     }
 }
 
-impl EncodeSize for EphemeralPublicKey {
-    fn encode_size(&self) -> usize {
-        // There's not a good constant anywhere in the x25519_dalek crate for this.
-        32
-    }
+impl FixedSize for EphemeralPublicKey {
+    // There's not a good constant anywhere in the x25519_dalek crate for this.
+    const SIZE: usize = 32;
 }
 
 impl Read for EphemeralPublicKey {
