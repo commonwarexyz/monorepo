@@ -1,7 +1,6 @@
+use super::position::Position;
 use core::{convert::TryFrom, fmt};
 use thiserror::Error;
-
-use super::position::Position;
 
 /// A [Location] is an index into an MMR's _leaves_.
 /// This is in contrast to a [Position], which is an index into an MMR's _nodes_.

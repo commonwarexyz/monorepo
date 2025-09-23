@@ -2,9 +2,8 @@
 //! properties from their output. These are lower levels methods that are useful for implementing
 //! new MMR variants or extensions.
 
-use alloc::vec::Vec;
-
 use super::Position;
+use alloc::vec::Vec;
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
 /// in decreasing order of height.
@@ -244,7 +243,7 @@ pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, mem::Mmr};
+    use crate::mmr::{hasher::Standard, mem::Mmr, Location};
     use commonware_cryptography::Sha256;
 
     #[test]
@@ -261,12 +260,12 @@ mod tests {
 
         let mut last_leaf_pos = 0;
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.iter().enumerate() {
-            let leaf_loc_got = leaf_pos_to_loc(*leaf_pos).unwrap();
+            let leaf_loc_got = Location::try_from(*leaf_pos).unwrap();
             assert_eq!(leaf_loc_got, Location::new(leaf_loc_expected as u64));
             let leaf_pos_got = Position::from(leaf_loc_got);
             assert_eq!(leaf_pos_got, *leaf_pos);
             for i in last_leaf_pos + 1..leaf_pos.as_u64() {
-                assert!(leaf_pos_to_loc(Position::new(i)).is_none());
+                assert!(Location::try_from(Position::new(i)).is_err());
             }
             last_leaf_pos = leaf_pos.as_u64();
         }

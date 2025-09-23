@@ -1125,23 +1125,35 @@ mod tests {
             // to its previous state then we update the leaf to its original value.
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element);
+                mmr.update_leaf(
+                    &mut hasher,
+                    Position::from(Location::new(leaves[leaf])),
+                    &element,
+                );
                 let updated_root = mmr.root(&mut hasher);
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
                 hasher.inner().update(&leaf.to_be_bytes());
                 let element = hasher.inner().finalize();
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element);
+                mmr.update_leaf(
+                    &mut hasher,
+                    Position::from(Location::new(leaves[leaf])),
+                    &element,
+                );
                 let restored_root = mmr.root(&mut hasher);
                 assert_eq!(root, restored_root);
             }
 
             // Confirm the tree has all the hashes necessary to update any element after pruning.
-            mmr.prune_to_pos(leaves[150]);
+            mmr.prune_to_pos(Position::new(leaves[150]));
             for &leaf_pos in &leaves[150..=190] {
-                mmr.prune_to_pos(leaf_pos);
-                mmr.update_leaf(&mut hasher, leaf_pos, &element);
+                mmr.prune_to_pos(Position::new(leaf_pos));
+                mmr.update_leaf(
+                    &mut hasher,
+                    Position::from(Location::new(leaf_pos)),
+                    &element,
+                );
             }
         });
     }
@@ -1156,7 +1168,7 @@ mod tests {
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
             compute_big_mmr(&mut hasher, &mut mmr);
-            let not_a_leaf_pos = 2;
+            let not_a_leaf_pos = Position::new(2);
             mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
         });
     }
@@ -1172,7 +1184,7 @@ mod tests {
             let mut mmr = Mmr::new();
             compute_big_mmr(&mut hasher, &mut mmr);
             mmr.prune_all();
-            mmr.update_leaf(&mut hasher, 0, &element);
+            mmr.update_leaf(&mut hasher, Position::new(0), &element);
         });
     }
 
@@ -1214,7 +1226,7 @@ mod tests {
         // Change a handful of leaves using a batch update.
         let mut updates = Vec::new();
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-            updates.push((leaves[leaf], &element));
+            updates.push((Position::from(Location::new(leaves[leaf])), &element));
         }
         mmr.update_leaf_batched(hasher, &updates);
 
@@ -1230,7 +1242,7 @@ mod tests {
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
             hasher.inner().update(&leaf.to_be_bytes());
             let element = hasher.inner().finalize();
-            updates.push((leaves[leaf], element));
+            updates.push((Position::from(Location::new(leaves[leaf])), element));
         }
         mmr.update_leaf_batched(hasher, &updates);
 

@@ -827,7 +827,7 @@ pub mod test {
             let info = KeyValueProofInfo {
                 key: k,
                 value: v1,
-                loc: op.1,
+                loc: Location::new(op.1),
                 chunk: proof.3,
             };
             let root = db.root(&mut hasher).await.unwrap();
@@ -873,7 +873,7 @@ pub mod test {
             let proof_inactive_info = KeyValueProofInfo {
                 key: k,
                 value: v1,
-                loc: proof_inactive.2,
+                loc: Location::new(proof_inactive.2),
                 chunk: proof_inactive.3,
             };
             assert!(!CurrentTest::verify_key_value_proof(
@@ -888,13 +888,13 @@ pub mod test {
             // inclusion of the operation itself, and not just the chunk.
             let (_, active_loc) = db.any.get_key_loc(&info.key).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
-            assert_ne!(active_loc, info.loc);
+            assert_ne!(active_loc, info.loc.as_u64());
             assert_eq!(
                 Bitmap::<Sha256, 32>::leaf_pos(active_loc),
-                Bitmap::<Sha256, 32>::leaf_pos(info.loc)
+                Bitmap::<Sha256, 32>::leaf_pos(info.loc.as_u64())
             );
             let mut info_with_modified_loc = info.clone();
-            info_with_modified_loc.loc = active_loc;
+            info_with_modified_loc.loc = Location::new(active_loc);
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
@@ -989,7 +989,14 @@ pub mod test {
                     .await
                     .unwrap();
                 assert!(
-                    CurrentTest::verify_range_proof(&mut hasher, &proof, i, &ops, &chunks, &root),
+                    CurrentTest::verify_range_proof(
+                        &mut hasher,
+                        &proof,
+                        Location::new(i),
+                        &ops,
+                        &chunks,
+                        &root
+                    ),
                     "failed to verify range at start_loc {start_loc}",
                 );
             }
@@ -1110,7 +1117,7 @@ pub mod test {
             let mut old_info = KeyValueProofInfo {
                 key: k,
                 value: Sha256::fill(0x00),
-                loc: 0,
+                loc: Location::new(0),
                 chunk: [0; 32],
             };
             for i in 1u8..=255 {

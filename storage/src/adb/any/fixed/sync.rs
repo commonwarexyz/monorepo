@@ -1232,7 +1232,8 @@ mod tests {
                 let expected = target_db.log.read(i).await.unwrap();
                 assert_eq!(got, expected);
             }
-            for i in synced_db.mmr.oldest_retained_pos().unwrap()..synced_db.mmr.size() {
+            for i in synced_db.mmr.oldest_retained_pos().unwrap().as_u64()..synced_db.mmr.size() {
+                let i = Position::new(i);
                 let got = synced_db.mmr.get_node(i).await.unwrap();
                 let expected = target_db.mmr.get_node(i).await.unwrap();
                 assert_eq!(got, expected);
@@ -1425,7 +1426,7 @@ mod tests {
             // Get pinned nodes and target hash before moving source_db
             let pinned_nodes_pos = nodes_to_pin(Position::from(Location::new(lower_bound_ops)));
             let pinned_nodes =
-                join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos.as_u64()))).await;
+                join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
                 .iter()
                 .map(|node| node.as_ref().unwrap().unwrap())

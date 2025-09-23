@@ -1,8 +1,7 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
-use commonware_cryptography::Hasher as CHasher;
-
 use super::Position;
+use commonware_cryptography::Hasher as CHasher;
 
 /// A trait for computing the various digests of an MMR.
 pub trait Hasher<H: CHasher>: Send + Sync {
@@ -110,9 +109,9 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mmr::Position;
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
-    use crate::mmr::Position;
 
     #[test]
     fn test_leaf_digest_sha256() {

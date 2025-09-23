@@ -68,8 +68,8 @@
 //! ```
 
 pub mod hasher;
-pub mod location;
 pub mod iterator;
+pub mod location;
 pub mod mem;
 pub mod position;
 pub mod proof;

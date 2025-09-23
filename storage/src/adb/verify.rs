@@ -67,11 +67,10 @@ pub fn digests_required_for_proof<D: Digest>(
     op_count: u64,
     start_loc: u64,
     end_loc: u64,
-) -> Vec<u64> {
+) -> Vec<Position> {
     let size = Position::from(Location::new(op_count));
     proof::nodes_required_for_range_proof(size.into(), start_loc..(end_loc + 1))
         .into_iter()
-        .map(|pos| pos.into())
         .collect()
 }
 
@@ -126,7 +125,7 @@ pub fn create_proof_store_from_digests<D: Digest>(
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
 pub async fn create_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
-    locations: &[u64],
+    locations: &[Location],
 ) -> Result<Proof<D>, Error> {
     // Generate the proof
     verification::multi_proof(proof_store, locations).await
@@ -136,7 +135,7 @@ pub async fn create_multi_proof<D: Digest>(
 pub fn verify_multi_proof<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
-    operations: &[(u64, Op)],
+    operations: &[(Location, Op)],
     target_root: &D,
 ) -> bool
 where
@@ -147,7 +146,7 @@ where
     // Encode operations and convert locations to positions
     let elements = operations
         .iter()
-        .map(|(loc, op)| (op.encode(), Location::new(*loc)))
+        .map(|(loc, op)| (op.encode(), *loc))
         .collect::<Vec<_>>();
 
     // Verify the proof
@@ -291,7 +290,7 @@ mod tests {
 
             // Verify the extracted nodes match what we expect from the proof
             let start_pos = Position::from(start_loc);
-            let expected_pinned: Vec<u64> = nodes_to_pin(start_pos).collect();
+            let expected_pinned: Vec<Position> = nodes_to_pin(start_pos).collect();
             assert_eq!(nodes.len(), expected_pinned.len());
         });
     }
@@ -375,7 +374,7 @@ mod tests {
 
             // Construct proof
             let proof = create_proof(op_count, digests.clone());
-            assert_eq!(proof.size, Position::from(op_count));
+            assert_eq!(proof.size, Position::new(op_count).as_u64());
             assert_eq!(proof.digests.len(), digests.len());
 
             // Verify the constructed proof works correctly
@@ -521,15 +520,21 @@ mod tests {
                 create_proof_store(&mut hasher, &proof, 0, &operations, &root).unwrap();
 
             // Generate multi-proof for specific locations
-            let target_locations = vec![2, 5, 10, 15, 18];
+            let target_locations = vec![
+                Location::new(2),
+                Location::new(5),
+                Location::new(10),
+                Location::new(15),
+                Location::new(18),
+            ];
             let multi_proof = create_multi_proof(&proof_store, &target_locations)
                 .await
                 .unwrap();
 
             // Prepare operations for verification
-            let selected_ops: Vec<(u64, u64)> = target_locations
+            let selected_ops: Vec<(Location, u64)> = target_locations
                 .iter()
-                .map(|&loc| (loc, operations[loc as usize]))
+                .map(|&loc| (loc, operations[loc.as_u64() as usize]))
                 .collect();
 
             // Verify the multi-proof
@@ -560,13 +565,17 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Generate multi-proof directly from MMR
-            let target_locations = vec![1, 4, 7];
+            let target_locations = vec![Location::new(1), Location::new(4), Location::new(7)];
             let multi_proof = verification::multi_proof(&mmr, &target_locations)
                 .await
                 .unwrap();
 
             // Verify with correct operations
-            let selected_ops = vec![(1, operations[1]), (4, operations[4]), (7, operations[7])];
+            let selected_ops = vec![
+                (Location::new(1), operations[1]),
+                (Location::new(4), operations[4]),
+                (Location::new(7), operations[7]),
+            ];
             assert!(verify_multi_proof(
                 &mut hasher,
                 &multi_proof,
@@ -575,7 +584,11 @@ mod tests {
             ));
 
             // Verify fails with wrong operations
-            let wrong_ops = vec![(1, 99), (4, operations[4]), (7, operations[7])];
+            let wrong_ops = vec![
+                (Location::new(1), 99),
+                (Location::new(4), operations[4]),
+                (Location::new(7), operations[7]),
+            ];
             assert!(!verify_multi_proof(
                 &mut hasher,
                 &multi_proof,
@@ -584,7 +597,11 @@ mod tests {
             ));
 
             // Verify fails with wrong locations
-            let wrong_locations = vec![(0, operations[1]), (4, operations[4]), (7, operations[7])];
+            let wrong_locations = vec![
+                (Location::new(0), operations[1]),
+                (Location::new(4), operations[4]),
+                (Location::new(7), operations[7]),
+            ];
             assert!(!verify_multi_proof(
                 &mut hasher,
                 &multi_proof,
@@ -606,7 +623,7 @@ mod tests {
             let empty_proof = verification::multi_proof(&empty_mmr, &[]).await.unwrap();
             assert!(empty_proof.verify_multi_inclusion(
                 &mut hasher,
-                &[] as &[(&[u8], u64)],
+                &[] as &[(&[u8], Location)],
                 &empty_root,
             ));
 
@@ -626,7 +643,7 @@ mod tests {
             assert!(verify_multi_proof(
                 &mut hasher,
                 &empty_proof,
-                &[] as &[(u64, u64)],
+                &[] as &[(Location, u64)],
                 &empty_root,
             ));
         });
@@ -655,13 +672,15 @@ mod tests {
                 create_proof_store(&mut hasher, &proof, 0, &operations, &root).unwrap();
 
             // Generate multi-proof for single element
-            let multi_proof = create_multi_proof(&proof_store, &[1]).await.unwrap();
+            let multi_proof = create_multi_proof(&proof_store, &[Location::new(1)])
+                .await
+                .unwrap();
 
             // Verify single element
             assert!(verify_multi_proof(
                 &mut hasher,
                 &multi_proof,
-                &[(1, operations[1])],
+                &[(Location::new(1), operations[1])],
                 &root,
             ));
         });

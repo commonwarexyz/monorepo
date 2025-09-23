@@ -69,8 +69,8 @@ impl<D: Digest> ProofStore<D> {
     }
 
     /// Return a multi proof for the elements corresponding to the given locations.
-    pub async fn multi_proof(&self, positions: &[u64]) -> Result<Proof<D>, Error> {
-        multi_proof(self, positions).await
+    pub async fn multi_proof(&self, locations: &[Location]) -> Result<Proof<D>, Error> {
+        multi_proof(self, locations).await
     }
 }
 
@@ -127,7 +127,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 /// The order of positions does not affect the output (sorted internally).
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
-    locations: &[u64],
+    locations: &[Location],
 ) -> Result<Proof<D>, Error> {
     // If there are no positions, return an empty proof
     let size = mmr.size();
@@ -144,11 +144,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions
         .iter()
-        .map(|&pos| async move {
-            mmr.get_node(pos)
-                .await
-                .map(|digest| (pos, digest))
-        })
+        .map(|&pos| async move { mmr.get_node(pos).await.map(|digest| (pos, digest)) })
         .collect();
     let results = try_join_all(node_futures).await?;
 
@@ -220,7 +216,7 @@ mod tests {
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
                         &elements[sub_range_usize],
-                        sub_range.start,
+                        Location::new(sub_range.start),
                         &root
                     ));
                     subrange_start += 1;

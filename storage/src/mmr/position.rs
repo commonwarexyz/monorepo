@@ -1,6 +1,5 @@
-use core::fmt;
-
 use super::location::Location;
+use core::fmt;
 
 /// A [Position] is an index into an MMR's nodes.
 /// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
