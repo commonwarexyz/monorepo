@@ -437,15 +437,15 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.len() - 1
     }
 
-    /// The chunks (identified by their number) that have been modified or added since the last `sync`.
-    pub fn dirty_chunks(&self) -> Vec<u64> {
-        let mut chunks: Vec<u64> = self
+    /// The chunks that have been modified or added since the last `sync`.
+    pub fn dirty_chunks(&self) -> Vec<Location> {
+        let mut chunks: Vec<Location> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| (chunk_index + self.pruned_chunks) as u64)
+            .map(|&chunk_index| Location::new((chunk_index + self.pruned_chunks) as u64))
             .collect();
         for i in self.authenticated_len..self.bitmap.len() - 1 {
-            chunks.push((i + self.pruned_chunks) as u64);
+            chunks.push(Location::new((i + self.pruned_chunks) as u64));
         }
 
         chunks

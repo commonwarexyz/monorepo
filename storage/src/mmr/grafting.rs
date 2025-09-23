@@ -100,21 +100,21 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     /// Panics if any of the grafted digests are missing from the MMR.
     pub async fn load_grafted_digests(
         &mut self,
-        leaves: &[u64],
+        leaves: &[Location],
         mmr: &impl StorageTrait<H::Digest>,
     ) -> Result<(), Error> {
         let mut futures = Vec::with_capacity(leaves.len());
         for leaf_loc in leaves {
-            let dest_pos = self.destination_pos(Position::from(Location::new(*leaf_loc)));
+            let dest_pos = self.destination_pos(Position::from(*leaf_loc));
             let future = mmr.get_node(dest_pos);
             futures.push(future);
         }
         let join = try_join_all(futures).await?;
         for (i, digest) in join.into_iter().enumerate() {
             let Some(digest) = digest else {
-                panic!("missing grafted digest for leaf {}", leaves[i]);
+                panic!("missing grafted digest for leaf {}", leaves[i].as_u64());
             };
-            let leaf_pos = Position::from(Location::new(leaves[i]));
+            let leaf_pos = Position::from(leaves[i]);
             self.grafted_digests.insert(leaf_pos, digest);
         }
 
@@ -328,11 +328,11 @@ pub struct Verifier<'a, H: CHasher> {
     elements: Vec<&'a [u8]>,
 
     /// The location of the first element we are verifying
-    loc: u64,
+    loc: Location,
 }
 
 impl<'a, H: CHasher> Verifier<'a, H> {
-    pub fn new(height: u32, loc: u64, elements: Vec<&'a [u8]>) -> Self {
+    pub fn new(height: u32, loc: Location, elements: Vec<&'a [u8]>) -> Self {
         Self {
             hasher: StandardHasher::new(),
             height,
@@ -386,16 +386,16 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
             debug!(pos = source_pos, "grafting source pos is not a leaf");
             return digest;
         };
-        if index.as_u64() < self.loc {
+        if index.as_u64() < self.loc.as_u64() {
             // malformed proof input
             debug!(
                 index = index.as_u64(),
-                loc = self.loc,
+                loc = self.loc.as_u64(),
                 "grafting index is negative"
             );
             return digest;
         };
-        let index_u64 = index.as_u64() - self.loc;
+        let index_u64 = index.as_u64() - self.loc.as_u64();
         if index_u64 >= self.elements.len() as u64 {
             // malformed proof input
             debug!(
@@ -662,7 +662,7 @@ mod tests {
 
             let mut hasher: Hasher<Sha256> = Hasher::new(&mut standard, 0);
             hasher
-                .load_grafted_digests(&(0..199).collect::<Vec<_>>(), &base_mmr)
+                .load_grafted_digests(&(0..199).map(Location::new).collect::<Vec<_>>(), &base_mmr)
                 .await
                 .unwrap();
 
@@ -689,7 +689,10 @@ mod tests {
             {
                 let mut hasher: Hasher<Sha256> = Hasher::new(&mut standard, 1);
                 hasher
-                    .load_grafted_digests(&(0..199).collect::<Vec<_>>(), &base_mmr)
+                    .load_grafted_digests(
+                        &(0..199).map(Location::new).collect::<Vec<_>>(),
+                        &base_mmr,
+                    )
                     .await
                     .unwrap();
 
@@ -771,7 +774,7 @@ mod tests {
             {
                 let mut grafter = Hasher::new(&mut standard, GRAFTING_HEIGHT);
                 grafter
-                    .load_grafted_digests(&[0, 1], &base_mmr)
+                    .load_grafted_digests(&[Location::new(0), Location::new(1)], &base_mmr)
                     .await
                     .unwrap();
                 peak_tree.add(&mut grafter, &p1);
@@ -805,7 +808,8 @@ mod tests {
                     .await
                     .unwrap();
 
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&p1]);
+                    let mut verifier =
+                        Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(0), vec![&p1]);
                     assert!(proof.verify_element_inclusion(
                         &mut verifier,
                         &b1,
@@ -834,7 +838,8 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&p2]);
+                    let mut verifier =
+                        Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(1), vec![&p2]);
                     assert!(proof.verify_element_inclusion(
                         &mut verifier,
                         &b3,
@@ -867,7 +872,8 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&p2]);
+                    let mut verifier =
+                        Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(1), vec![&p2]);
                     assert!(proof.verify_element_inclusion(
                         &mut verifier,
                         &b4,
@@ -895,7 +901,8 @@ mod tests {
                     ));
 
                     // Proof should fail if we inject the wrong peak element into the verifier.
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&p1]);
+                    let mut verifier =
+                        Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(0), vec![&p1]);
                     assert!(!proof.verify_element_inclusion(
                         &mut verifier,
                         &b4,
@@ -904,7 +911,8 @@ mod tests {
                     ));
 
                     // Proof should fail if we give the verifier the wrong peak tree leaf number.
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&p1]);
+                    let mut verifier =
+                        Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(0), vec![&p1]);
                     assert!(!proof.verify_element_inclusion(
                         &mut verifier,
                         &b4,
@@ -921,7 +929,8 @@ mod tests {
                             .await
                             .unwrap();
                     let range = vec![&b1, &b2, &b3, &b4];
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&p1, &p2]);
+                    let mut verifier =
+                        Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(0), vec![&p1, &p2]);
                     assert!(proof.verify_range_inclusion(
                         &mut verifier,
                         &range,
@@ -930,7 +939,8 @@ mod tests {
                     ));
 
                     // Confirm same proof fails with shortened verifier range.
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&p1]);
+                    let mut verifier =
+                        Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(0), vec![&p1]);
                     assert!(!proof.verify_range_inclusion(
                         &mut verifier,
                         &range,
@@ -957,7 +967,8 @@ mod tests {
                     .await
                     .unwrap();
 
-            let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, loc, vec![&p1]);
+            let mut verifier =
+                Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(loc), vec![&p1]);
             assert!(proof.verify_element_inclusion(
                 &mut verifier,
                 &b1,
@@ -965,7 +976,7 @@ mod tests {
                 &grafted_storage_root
             ));
 
-            let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, loc, vec![]);
+            let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(loc), vec![]);
             let loc = 4;
             let proof =
                 verification::range_proof(&grafted_mmr, Location::new(loc)..Location::new(loc + 1))

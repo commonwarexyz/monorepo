@@ -174,9 +174,8 @@ impl<
 
             // Load the digests of the grafting destination nodes from `mmr` into the grafting
             // hasher so the new leaf digests can be computed during sync.
-            grafter
-                .load_grafted_digests(&status.dirty_chunks(), &mmr)
-                .await?;
+            let dirty_chunks = status.dirty_chunks();
+            grafter.load_grafted_digests(&dirty_chunks, &mmr).await?;
             status.sync(&mut grafter).await?;
         }
 
@@ -185,9 +184,8 @@ impl<
         Any::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, Some(&mut status))
             .await
             .unwrap();
-        grafter
-            .load_grafted_digests(&status.dirty_chunks(), &mmr)
-            .await?;
+        let dirty_chunks = status.dirty_chunks();
+        grafter.load_grafted_digests(&dirty_chunks, &mmr).await?;
         status.sync(&mut grafter).await?;
 
         let any = Any {
@@ -327,8 +325,9 @@ impl<
         self.commit_ops().await?; // (1)
 
         let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
+        let dirty_chunks = self.status.dirty_chunks();
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
+            .load_grafted_digests(&dirty_chunks, &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
 
@@ -490,8 +489,11 @@ impl<
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let start_chunk_loc = start_loc.as_u64() / Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let mut verifier =
-            GraftingVerifier::<H>::new(Self::grafting_height(), start_chunk_loc, chunk_vec);
+        let mut verifier = GraftingVerifier::<H>::new(
+            Self::grafting_height(),
+            Location::new(start_chunk_loc),
+            chunk_vec,
+        );
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
             return proof.verify_range_inclusion(&mut verifier, &elements, start_loc, root);
@@ -595,8 +597,11 @@ impl<
         }
 
         let num = info.loc.as_u64() / Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let mut verifier =
-            GraftingVerifier::<H>::new(Self::grafting_height(), num, vec![&info.chunk]);
+        let mut verifier = GraftingVerifier::<H>::new(
+            Self::grafting_height(),
+            Location::new(num),
+            vec![&info.chunk],
+        );
         let element = Fixed::Update(info.key.clone(), info.value.clone()).encode();
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
@@ -704,8 +709,9 @@ impl<
         self.commit_ops().await?; // (1)
 
         let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
+        let dirty_chunks = self.status.dirty_chunks();
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
+            .load_grafted_digests(&dirty_chunks, &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
