@@ -114,7 +114,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     for (i, hash_result) in hash_results.into_iter().enumerate() {
         match hash_result {
             Some(hash) => digests.push(hash),
-            None => return Err(Error::ElementPruned(positions[i].as_u64())),
+            None => return Err(Error::ElementPruned(positions[i])),
         };
     }
 
@@ -153,7 +153,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     for (pos, digest) in results {
         match digest {
             Some(digest) => digests.push(digest),
-            None => return Err(Error::ElementPruned(pos.as_u64())),
+            None => return Err(Error::ElementPruned(pos)),
         }
     }
 

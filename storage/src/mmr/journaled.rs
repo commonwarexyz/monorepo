@@ -464,7 +464,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                     err = %digest.expect_err("digest is Err in else branch"),
                     "could not convert node from metadata bytes to digest"
                 );
-                return Err(Error::MissingNode(pos));
+                return Err(Error::MissingNode(Position::new(pos)));
             };
             return Ok(digest);
         }
@@ -476,7 +476,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             Ok(node) => Ok(node),
             Err(JError::ItemPruned(_)) => {
                 error!(pos, "node is missing from metadata and journal");
-                Err(Error::MissingNode(pos))
+                Err(Error::MissingNode(Position::new(pos)))
             }
             Err(e) => Err(Error::JournalError(e)),
         }
@@ -535,7 +535,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             }
             new_size -= 1;
             if new_size < self.pruned_to_pos.as_u64() {
-                return Err(Error::ElementPruned(new_size));
+                return Err(Error::ElementPruned(Position::new(new_size)));
             }
             if PeakIterator::check_validity(new_size) {
                 leaves_to_pop -= 1;
@@ -645,7 +645,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// Panics if there are unprocessed updates.
     pub async fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
-        self.range_proof(loc..Location::new(loc.as_u64() + 1)).await
+        self.range_proof(loc..loc.saturating_add(1)).await
     }
 
     /// Return an inclusion proof for the elements within the specified location range, or

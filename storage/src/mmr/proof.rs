@@ -273,7 +273,7 @@ impl<D: Digest> Proof<D> {
                     pinned_pos = pinned_pos.as_u64(),
                     "Pinned node not found in proof"
                 );
-                return Err(Error::MissingDigest(pinned_pos.as_u64()));
+                return Err(Error::MissingDigest(pinned_pos));
             };
             result.push(digest);
         }

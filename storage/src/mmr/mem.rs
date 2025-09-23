@@ -315,7 +315,7 @@ impl<H: CHasher> Mmr<H> {
         let mut new_size = self.size() - 1;
         loop {
             if Position::new(new_size) < self.pruned_to_pos {
-                return Err(ElementPruned(new_size));
+                return Err(ElementPruned(Position::new(new_size)));
             }
             if PeakIterator::check_validity(new_size) {
                 break;
@@ -628,7 +628,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
-        self.range_proof(loc..Location::new(loc.as_u64() + 1))
+        self.range_proof(loc..loc.saturating_add(1))
     }
 
     /// Return an inclusion proof for all elements within the provided `range` of locations. Returns
@@ -647,7 +647,7 @@ impl<H: CHasher> Mmr<H> {
             proof::nodes_required_for_range_proof(size, range.start.as_u64()..range.end.as_u64());
         let digests = positions
             .into_iter()
-            .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos.as_u64())))
+            .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Proof { size, digests })

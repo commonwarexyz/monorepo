@@ -104,15 +104,15 @@ pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("missing node: {0}")]
-    MissingNode(u64),
+    MissingNode(Position),
     #[error("invalid proof")]
     InvalidProof,
     #[error("root mismatch")]
     RootMismatch,
     #[error("element pruned: {0}")]
-    ElementPruned(u64),
+    ElementPruned(Position),
     #[error("missing digest: {0}")]
-    MissingDigest(u64),
+    MissingDigest(Position),
     #[error("invalid proof length")]
     InvalidProofLength,
     #[error("invalid size: {0}")]

@@ -161,7 +161,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                     pos = pos.as_u64(),
                     "missing pinned node"
                 );
-                return Err(MissingNode(pos.as_u64()));
+                return Err(MissingNode(pos));
             };
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
@@ -170,7 +170,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                     pos = pos.as_u64(),
                     "could not convert node bytes to digest"
                 );
-                return Err(MissingNode(pos.as_u64()));
+                return Err(MissingNode(pos));
             };
             pinned_nodes.push(digest);
         }
