@@ -432,11 +432,16 @@ mod tests {
             999_999_900,
             999_999_901,
             999_999_999,
+            955_161_599,
+            955_161_500,
+            477_580_700,
         ];
 
         for &(secs, label) in &[
             (MAX_SECS, "max_secs"),
             (MAX_SECS_PLUS_ONE, "max_secs_plus_one"),
+            (1_833_029_933_770, "old_max_secs"),
+            (910_692_730_085, "old_old_max_secs"),
         ] {
             for nanos in CANDIDATE_NANOS {
                 let duration = Duration::new(secs, nanos);
