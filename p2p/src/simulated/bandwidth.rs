@@ -306,6 +306,10 @@ pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
                     None
                 }
             } else {
+                // `ratio` encodes throughput as `num/den` bytes per second. We convert the
+                // requested `bytes` into the equivalent duration in nanoseconds by computing
+                // `bytes * den / num` seconds and scaling by `NANOS_PER_SEC`, rounding up so the
+                // caller receives the minimum time that guarantees the requested bytes were sent.
                 let numerator = bytes
                     .saturating_mul(ratio.den)
                     .saturating_mul(NANOS_PER_SEC);
