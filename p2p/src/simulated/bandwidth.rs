@@ -95,11 +95,11 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             active_flows: 0,
             current_fill: Ratio::zero(),
         };
-        planner.register_flows(egress_limit, ingress_limit);
+        planner.register(egress_limit, ingress_limit);
         planner
     }
 
-    fn register_flows<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
+    fn register<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
     where
         E: FnMut(&P) -> Option<u128>,
         I: FnMut(&P) -> Option<u128>,
@@ -108,7 +108,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             let mut state = State::new();
 
             // Register the flow with its egress resource if the sender is bandwidth-limited.
-            if let Some(resource_idx) = self.ensure_resource(
+            if let Some(resource_idx) = self.spawn(
                 ResourceKey::Egress(flow.origin.clone()),
                 egress_limit(&flow.origin),
             ) {
@@ -117,7 +117,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
             // Only track ingress when the recipient actually needs to receive the bytes.
             if flow.requires_ingress {
-                if let Some(resource_idx) = self.ensure_resource(
+                if let Some(resource_idx) = self.spawn(
                     ResourceKey::Ingress(flow.recipient.clone()),
                     ingress_limit(&flow.recipient),
                 ) {
@@ -135,7 +135,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         }
     }
 
-    fn ensure_resource(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
+    fn spawn(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
         if let Some(index) = self.indices.get(&key) {
             return Some(*index);
         }
@@ -144,6 +144,36 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         self.resources.push(Resource::new(limit));
         self.indices.insert(key, idx);
         Some(idx)
+    }
+
+    /// Freeze all flows that rely on a saturated resource.
+    fn freeze(&mut self, res_idx: usize) {
+        // Clone before iterating: freezing updates `active_users`, which should not disturb the traversal.
+        let members = self.resources[res_idx].members.clone();
+        for flow_idx in members {
+            self.deactivate(flow_idx);
+        }
+    }
+
+    /// Finalize the rate for `flow_idx` and update every referenced resource.
+    fn deactivate(&mut self, flow_idx: usize) {
+        let state = &mut self.flow_states[flow_idx];
+        if !state.active {
+            return;
+        }
+
+        // The flow's max-min allocation equals the current fill level.
+        self.rates[flow_idx] = Some(self.current_fill.clone());
+        state.active = false;
+        self.active_flows -= 1;
+
+        for &res_idx in &state.resources {
+            let resource = &mut self.resources[res_idx];
+            if resource.active_users > 0 {
+                // Stop counting the flow toward future shares once it is frozen.
+                resource.active_users -= 1;
+            }
+        }
     }
 
     /// Link a flow to a resource, marking it as constrained.
@@ -212,7 +242,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             if delta.is_zero() {
                 // Capacity was already consumed, so immediately freeze the affected flows.
                 for &res_idx in &limiting {
-                    self.freeze_resource(res_idx);
+                    self.freeze(res_idx);
                 }
                 continue;
             }
@@ -244,37 +274,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             saturated.sort_unstable();
             saturated.dedup();
             for res_idx in saturated {
-                self.freeze_resource(res_idx);
-            }
-        }
-    }
-
-    /// Freeze all flows that rely on a saturated resource.
-    fn freeze_resource(&mut self, res_idx: usize) {
-        // Clone before iterating: freezing updates `active_users`, which should not disturb the traversal.
-        let members = self.resources[res_idx].members.clone();
-        for flow_idx in members {
-            self.deactivate_flow(flow_idx);
-        }
-    }
-
-    /// Finalize the rate for `flow_idx` and update every referenced resource.
-    fn deactivate_flow(&mut self, flow_idx: usize) {
-        let state = &mut self.flow_states[flow_idx];
-        if !state.active {
-            return;
-        }
-
-        // The flow's max-min allocation equals the current fill level.
-        self.rates[flow_idx] = Some(self.current_fill.clone());
-        state.active = false;
-        self.active_flows -= 1;
-
-        for &res_idx in &state.resources {
-            let resource = &mut self.resources[res_idx];
-            if resource.active_users > 0 {
-                // Stop counting the flow toward future shares once it is frozen.
-                resource.active_users -= 1;
+                self.freeze(res_idx);
             }
         }
     }
@@ -323,7 +323,7 @@ where
 }
 
 /// Calculate the time it will take to deplete a given amount of capacity at some [Rate].
-pub fn time_to_deplete(rate: &Rate, bytes: u128) -> Option<Duration> {
+pub fn lifetime(rate: &Rate, bytes: u128) -> Option<Duration> {
     match rate {
         Rate::Unlimited => Some(Duration::ZERO),
         Rate::Finite(ratio) => {
@@ -479,7 +479,7 @@ mod tests {
     fn completion_time_calculation() {
         let ratio = Ratio::from_int(500);
         let rate = Rate::Finite(ratio);
-        let time = time_to_deplete(&rate, 1_000).expect("finite time");
+        let time = lifetime(&rate, 1_000).expect("finite time");
         assert_eq!(time.as_secs(), 2);
     }
 

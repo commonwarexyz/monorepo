@@ -444,7 +444,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                     continue;
                 }
 
-                if let Some(duration) = bandwidth::time_to_deplete(&meta.rate, meta.remaining) {
+                if let Some(duration) = bandwidth::lifetime(&meta.rate, meta.remaining) {
                     earliest = match earliest {
                         None => Some(duration),
                         Some(current) => Some(current.min(duration)),
