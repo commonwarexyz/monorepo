@@ -53,7 +53,7 @@
 //!   and passive).
 //! - **Padding**: Messages are encrypted as-is, allowing an attacker to perform traffic analysis.
 //! - **Future Secrecy**: If a peer's static private key is compromised, future sessions will be exposed.
-//! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).use core::ops::Range;
+//! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
