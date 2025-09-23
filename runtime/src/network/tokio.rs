@@ -63,7 +63,7 @@ impl crate::Listener for Listener {
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         // Accept a new TCP stream
-        let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
+        let (stream, addr) = self.listener.accept().await.map_err(|_| Error::NetClosed)?;
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {

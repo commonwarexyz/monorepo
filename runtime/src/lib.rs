@@ -58,12 +58,21 @@ const METRICS_PREFIX: &str = "runtime";
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("exited")]
-    Exited,
-    #[error("closed")]
-    Closed,
+    // Generic errors
+    #[error("signal closed")]
+    SignalClosed,
     #[error("timeout")]
     Timeout,
+
+    // Task errors
+    #[error("exited")]
+    Exited,
+    #[error("aborted")]
+    Aborted,
+
+    // Network errors
+    #[error("closed")]
+    NetClosed,
     #[error("bind failed")]
     BindFailed,
     #[error("connection failed")]
@@ -76,6 +85,8 @@ pub enum Error {
     SendFailed,
     #[error("recv failed")]
     RecvFailed,
+
+    // Storage errors
     #[error("partition creation failed: {0}")]
     PartitionCreationFailed(String),
     #[error("partition missing: {0}")]
@@ -536,7 +547,7 @@ mod tests {
                 }
             });
             handle.abort();
-            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(matches!(handle.await, Err(Error::Aborted)));
         });
     }
 

@@ -5,7 +5,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
+use commonware_runtime::{Clock, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
 use governor::{
     clock::ReasonablyRealtime,
@@ -115,19 +115,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         supervisor.spawn(stream, reservation).await;
     }
 
+    /// Run the actor.
     #[allow(clippy::type_complexity)]
-    pub fn start(
-        self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
-    ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(tracker, supervisor))
-    }
-
-    #[allow(clippy::type_complexity)]
-    async fn run(
+    pub async fn run(
         self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,

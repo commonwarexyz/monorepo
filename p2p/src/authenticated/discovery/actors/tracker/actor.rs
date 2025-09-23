@@ -8,7 +8,7 @@ use crate::authenticated::{
     ip, Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
@@ -148,12 +148,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         Ok(())
     }
 
-    /// Start the actor and run it in the background.
-    pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
-    }
-
-    async fn run(mut self) {
+    /// Run the actor.
+    pub async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Register { index, peers } => {

@@ -537,7 +537,7 @@ impl crate::Spawner for Context {
         };
         select! {
             result = stop_resolved => {
-                result.map_err(|_| Error::Closed)?;
+                result.map_err(|_| Error::SignalClosed)?;
                 Ok(())
             },
             _ = timeout_future => {

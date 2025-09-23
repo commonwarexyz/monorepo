@@ -57,7 +57,7 @@ impl SinkTrait for Sink {
 
             // If the receiver is dead, we cannot send any more messages.
             if !channel.stream_alive {
-                return Err(Error::Closed);
+                return Err(Error::NetClosed);
             }
 
             // Add the data to the buffer.
@@ -117,7 +117,7 @@ impl StreamTrait for Stream {
             // At this point, there is not enough data in the buffer.
             // If the stream is dead, we cannot receive any more messages.
             if !channel.sink_alive {
-                return Err(Error::Closed);
+                return Err(Error::NetClosed);
             }
 
             // Otherwise, populate the waiter.
@@ -129,7 +129,7 @@ impl StreamTrait for Stream {
 
         // Wait for the waiter to be resolved.
         // If the oneshot sender was dropped, it means the sink is closed.
-        let data = os_recv.await.map_err(|_| Error::Closed)?;
+        let data = os_recv.await.map_err(|_| Error::NetClosed)?;
         assert_eq!(data.len(), buf.len());
         buf.put_slice(&data);
         Ok(buf)
@@ -207,7 +207,7 @@ mod tests {
             futures::join!(
                 async {
                     let result = stream.recv(vec![0; 5]).await;
-                    assert!(matches!(result, Err(Error::Closed)));
+                    assert!(matches!(result, Err(Error::NetClosed)));
                 },
                 async {
                     // Wait for the stream to start waiting
@@ -226,7 +226,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let result = stream.recv(vec![0; 5]).await;
-            assert!(matches!(result, Err(Error::Closed)));
+            assert!(matches!(result, Err(Error::NetClosed)));
         });
     }
 
@@ -250,11 +250,11 @@ mod tests {
 
             // Drop the stream by aborting the handle
             handle.abort();
-            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(matches!(handle.await, Err(Error::NetClosed)));
 
             // Try to send a message. The stream is dropped, so this should fail.
             let result = sink.send(b"hello world".to_vec()).await;
-            assert!(matches!(result, Err(Error::Closed)));
+            assert!(matches!(result, Err(Error::NetClosed)));
         });
     }
 
@@ -266,7 +266,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let result = sink.send(b"hello world".to_vec()).await;
-            assert!(matches!(result, Err(Error::Closed)));
+            assert!(matches!(result, Err(Error::NetClosed)));
         });
     }
 

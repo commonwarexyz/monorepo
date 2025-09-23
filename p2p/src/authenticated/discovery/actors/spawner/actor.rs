@@ -10,7 +10,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -91,15 +91,7 @@ impl<
         )
     }
 
-    pub fn start(
-        mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
-        router: Mailbox<router::Message<C>>,
-    ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(tracker, router))
-    }
-
-    async fn run(
+    pub async fn run(
         mut self,
         tracker: Mailbox<tracker::Message<E, C>>,
         router: Mailbox<router::Message<C>>,

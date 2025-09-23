@@ -1,5 +1,6 @@
 //! Mechanisms for coordinating actions across many tasks.
 
+use crate::Error;
 use futures::{channel::oneshot, future::Shared, FutureExt};
 use std::{
     future::Future,
@@ -90,11 +91,13 @@ pub enum Signal {
 }
 
 impl Future for Signal {
-    type Output = Result<i32, oneshot::Canceled>;
+    type Output = Result<i32, Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut *self {
-            Signal::Open(live) => Pin::new(&mut live.inner).poll(cx),
+            Signal::Open(live) => Pin::new(&mut live.inner)
+                .poll(cx)
+                .map_err(|_| Error::SignalClosed),
             Signal::Closed(value) => Poll::Ready(Ok(*value)),
         }
     }

@@ -163,7 +163,7 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.receiver)
             .poll(cx)
-            .map(|result| result.unwrap_or_else(|_| Err(Error::Closed)))
+            .map(|result| result.unwrap_or_else(|_| Err(Error::Aborted)))
     }
 }
 

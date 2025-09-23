@@ -12,7 +12,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Handle, Metrics, Network, SinkOf, Spawner, StreamOf};
+use commonware_runtime::{Clock, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
@@ -126,20 +126,9 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
         });
     }
 
-    /// Start the dialer actor.
+    /// Run the actor.
     #[allow(clippy::type_complexity)]
-    pub fn start(
-        self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
-    ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(tracker, supervisor))
-    }
-
-    #[allow(clippy::type_complexity)]
-    async fn run(
+    pub async fn run(
         mut self,
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
