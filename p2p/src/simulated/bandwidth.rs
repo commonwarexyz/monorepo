@@ -81,10 +81,10 @@ struct Planner<'a, P> {
     flows: &'a [Flow<P>],
     resources: Vec<Resource>,
     indices: BTreeMap<Endpoint<P>, usize>,
-    flow_states: Vec<State>,
+    states: Vec<State>,
     rates: Vec<Option<Ratio>>,
-    active_flows: usize,
-    current_fill: Ratio,
+    active: usize,
+    fill: Ratio,
 }
 
 impl<'a, P: Clone + Ord> Planner<'a, P> {
@@ -98,10 +98,10 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             flows,
             resources: Vec::new(),
             indices: BTreeMap::new(),
-            flow_states: Vec::with_capacity(flows.len()),
+            states: Vec::with_capacity(flows.len()),
             rates: vec![None; flows.len()],
-            active_flows: 0,
-            current_fill: Ratio::zero(),
+            active: 0,
+            fill: Ratio::zero(),
         };
         planner.register(egress_limit, ingress_limit);
         planner
@@ -165,9 +165,9 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             // The flow participates in progressive filling until one of its constraints saturates.
             if state.limited {
                 state.active = true;
-                self.active_flows += 1;
+                self.active += 1;
             }
-            self.flow_states.push(state);
+            self.states.push(state);
         }
     }
 
@@ -185,15 +185,15 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     /// subtract it from every referenced resource so the next progressive-filling iteration only
     /// considers the remaining active flows.
     fn deactivate(&mut self, flow_idx: usize) {
-        let state = &mut self.flow_states[flow_idx];
+        let state = &mut self.states[flow_idx];
         if !state.active {
             return;
         }
 
         // The flow's max-min allocation equals the current fill level.
-        self.rates[flow_idx] = Some(self.current_fill.clone());
+        self.rates[flow_idx] = Some(self.fill.clone());
         state.active = false;
-        self.active_flows -= 1;
+        self.active -= 1;
 
         for &res_idx in &state.resources {
             let resource = &mut self.resources[res_idx];
@@ -206,12 +206,12 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
     /// Run the progressive filling algorithm until every constrained flow is frozen.
     fn fill(&mut self) {
-        if self.active_flows == 0 {
+        if self.active == 0 {
             return;
         }
 
         let mut limiting = Vec::new();
-        while self.active_flows > 0 {
+        while self.active > 0 {
             limiting.clear();
             let mut min_delta: Option<Ratio> = None;
 
@@ -258,7 +258,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 Some(delta) => delta,
                 None => {
                     // Every active flow should have been tied to at least one limited resource.
-                    assert_eq!(self.active_flows, 0, "active flows without constraints");
+                    assert_eq!(self.active, 0, "active flows without constraints");
                     break;
                 }
             };
@@ -272,7 +272,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             }
 
             // Raise the shared fill level; individual rates are materialized on freeze.
-            self.current_fill.add_assign(&delta);
+            self.fill.add_assign(&delta);
             let mut saturated = Vec::new();
             for (res_idx, resource) in self.resources.iter_mut().enumerate() {
                 if resource.active == 0 {
