@@ -416,15 +416,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Panics
     ///
     /// Panics if `loc` is beyond the last commit point.
-    pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
-        assert!(loc <= self.last_commit.unwrap_or(0));
+    pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
+        assert!(loc.as_u64() <= self.last_commit.unwrap_or(0));
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
         // actual pruning boundary. This procedure ensures all log operations always have
         // corresponding MMR & location entries, even in the event of failures, with no need for
         // special recovery.
-        let section = loc / self.log_items_per_section;
+        let section = loc.as_u64() / self.log_items_per_section;
         self.log.prune(section).await?;
         self.oldest_retained_loc = section * self.log_items_per_section;
 
@@ -447,7 +447,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             if loc < self.oldest_retained_loc {
                 continue;
             }
-            if let Some(v) = self.get_from_loc(key, loc).await? {
+            if let Some(v) = self.get_from_loc(key, Location::new(loc)).await? {
                 return Ok(Some(v));
             }
         }
@@ -457,14 +457,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
     /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
-    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
-        assert!(loc < self.op_count());
-        if loc < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(loc));
+    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
+        assert!(loc.as_u64() < self.op_count());
+        if loc.as_u64() < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc.as_u64()));
         }
 
-        let offset = self.locations.read(loc).await?;
-        let section = loc / self.log_items_per_section;
+        let offset = self.locations.read(loc.as_u64()).await?;
+        let section = loc.as_u64() / self.log_items_per_section;
         let op = self.log.get(section, offset).await?;
 
         Ok(op.into_value())
@@ -473,14 +473,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
-    pub async fn get_from_loc(&self, key: &K, loc: u64) -> Result<Option<V>, Error> {
-        if loc < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(loc));
+    pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
+        if loc.as_u64() < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc.as_u64()));
         }
 
-        match self.locations.read(loc).await {
+        match self.locations.read(loc.as_u64()).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc, offset).await;
+                return self.get_from_offset(key, loc.as_u64(), offset).await;
             }
             Err(e) => Err(Error::Journal(e)),
         }
@@ -1116,7 +1116,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Prune the db to the first half of the operations.
-            db.prune(ELEMENTS / 2).await.unwrap();
+            db.prune(Location::new(ELEMENTS / 2)).await.unwrap();
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // items_per_section is 5, so half should be exactly at a blob boundary, in which case
@@ -1143,9 +1143,8 @@ pub(super) mod test {
             assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
             // Prune to a non-blob boundary.
-            db.prune(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1))
-                .await
-                .unwrap();
+            let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
+            db.prune(loc).await.unwrap();
             // Actual boundary should be a multiple of 5.
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(

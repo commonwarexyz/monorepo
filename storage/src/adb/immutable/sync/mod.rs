@@ -188,7 +188,7 @@ mod tests {
                 Engine, Journal, Target,
             },
         },
-        mmr::StandardHasher as Standard,
+        mmr::{Location, StandardHasher as Standard},
         store::operation::Variable,
         translator::TwoCap,
     };
@@ -828,7 +828,7 @@ mod tests {
             apply_ops(&mut target_db, target_ops).await;
             target_db.commit(None).await.unwrap();
 
-            target_db.prune(10).await.unwrap();
+            target_db.prune(Location::new(10)).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -963,7 +963,7 @@ mod tests {
             apply_ops(&mut target_db, more_ops.clone()).await;
             target_db.commit(None).await.unwrap();
 
-            target_db.prune(10).await.unwrap();
+            target_db.prune(Location::new(10)).await.unwrap();
             target_db.commit(None).await.unwrap();
 
             // Capture final target state
