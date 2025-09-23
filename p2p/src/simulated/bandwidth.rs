@@ -107,51 +107,11 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         planner
     }
 
-    /// Register each flow with the constrained resources it depends on.
-    ///
-    /// Unlimited resources are ignored so we never carry them into the progressive-filling loop,
-    /// keeping the active set as small (and cheap) as possible.
-    fn register<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
-    where
-        E: FnMut(&P) -> Option<u128>,
-        I: FnMut(&P) -> Option<u128>,
-    {
-        for (idx, flow) in self.flows.iter().enumerate() {
-            let mut state = State::new();
-
-            // Register the flow with its egress resource if the sender is bandwidth-limited.
-            if let Some(resource_idx) = self.spawn(
-                ResourceKey::Egress(flow.origin.clone()),
-                egress_limit(&flow.origin),
-            ) {
-                self.attach(resource_idx, idx, &mut state);
-            }
-
-            // Only track ingress when the recipient actually needs to receive the bytes.
-            if flow.delivered {
-                if let Some(resource_idx) = self.spawn(
-                    ResourceKey::Ingress(flow.recipient.clone()),
-                    ingress_limit(&flow.recipient),
-                ) {
-                    self.attach(resource_idx, idx, &mut state);
-                }
-            }
-
-            if state.limited {
-                // The flow participates in progressive filling until one of its constraints saturates.
-                state.active = true;
-                self.active_flows += 1;
-            }
-
-            self.flow_states.push(state);
-        }
-    }
-
     /// Ensure a resource entry exists, returning its index if the resource is rate-limited.
     ///
     /// Unbounded resources return `None`, allowing callers to skip any additional bookkeeping for
     /// flows that touch them.
-    fn spawn(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
+    fn track(&mut self, key: ResourceKey<P>, limit: Option<u128>) -> Option<usize> {
         if let Some(index) = self.indices.get(&key) {
             return Some(*index);
         }
@@ -162,12 +122,57 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         Some(idx)
     }
 
+    /// Link a flow to a resource, marking it as constrained.
+    fn attach(&mut self, resource_idx: usize, flow_idx: usize, state: &mut State) {
+        let resource = &mut self.resources[resource_idx];
+        resource.members.push(flow_idx);
+        resource.active += 1;
+
+        // We have to update both the resource and flow views so freezing can walk in either
+        // direction without extra lookups.
+        state.resources.push(resource_idx);
+        state.limited = true;
+    }
+
+    /// Register each flow with the constrained resources it depends on. Resources without limits are ignored.
+    fn register<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
+    where
+        E: FnMut(&P) -> Option<u128>,
+        I: FnMut(&P) -> Option<u128>,
+    {
+        for (idx, flow) in self.flows.iter().enumerate() {
+            let mut state = State::new();
+
+            // Register the flow with its egress resource if the sender is bandwidth-limited.
+            if let Some(resource_idx) = self.track(
+                ResourceKey::Egress(flow.origin.clone()),
+                egress_limit(&flow.origin),
+            ) {
+                self.attach(resource_idx, idx, &mut state);
+            }
+
+            // Only track ingress when the recipient actually needs to receive the bytes.
+            if flow.delivered {
+                // Register the flow with its ingress resource if the recipient is bandwidth-limited.
+                if let Some(resource_idx) = self.track(
+                    ResourceKey::Ingress(flow.recipient.clone()),
+                    ingress_limit(&flow.recipient),
+                ) {
+                    self.attach(resource_idx, idx, &mut state);
+                }
+            }
+
+            // The flow participates in progressive filling until one of its constraints saturates.
+            if state.limited {
+                state.active = true;
+                self.active_flows += 1;
+            }
+            self.flow_states.push(state);
+        }
+    }
+
     /// Freeze all flows that rely on a saturated resource.
-    ///
-    /// We clone the membership list because freezing mutates `resource.active`; iterating over the
-    /// original vector while modifying it would corrupt the traversal.
     fn freeze(&mut self, res_idx: usize) {
-        // Clone before iterating: freezing updates `active_users`, which should not disturb the traversal.
         let members = self.resources[res_idx].members.clone();
         for flow_idx in members {
             self.deactivate(flow_idx);
@@ -197,18 +202,6 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 resource.active -= 1;
             }
         }
-    }
-
-    /// Link a flow to a resource, marking it as constrained.
-    ///
-    /// We have to update both the resource and flow views so freezing can walk in either
-    /// direction without extra lookups.
-    fn attach(&mut self, resource_idx: usize, flow_idx: usize, state: &mut State) {
-        let resource = &mut self.resources[resource_idx];
-        resource.members.push(flow_idx);
-        resource.active += 1;
-        state.resources.push(resource_idx);
-        state.limited = true;
     }
 
     /// Run the progressive filling algorithm until every constrained flow is frozen.
