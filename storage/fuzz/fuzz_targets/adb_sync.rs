@@ -140,7 +140,7 @@ fn fuzz(input: FuzzInput) {
                     let mut hasher = Standard::<Sha256>::new();
                     let target = sync::Target {
                         root: src.root(&mut hasher),
-                        lower_bound_ops: src.inactivity_floor_loc(),
+                        lower_bound_ops: src.inactivity_floor_loc().as_u64(),
                         upper_bound_ops: src.op_count() - 1,
                     };
 

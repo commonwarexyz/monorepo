@@ -213,7 +213,7 @@ impl<
 
     /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
     pub fn inactivity_floor_loc(&self) -> Location {
-        Location::new(self.any.inactivity_floor_loc())
+        self.any.inactivity_floor_loc()
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -225,7 +225,7 @@ impl<
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        self.any.get_loc(loc.as_u64()).await
+        self.any.get_loc(loc).await
     }
 
     /// Get the level of the base MMR into which we are grafting.
@@ -353,7 +353,7 @@ impl<
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        self.any.prune(target_prune_loc.as_u64()).await
+        self.any.prune(target_prune_loc).await
     }
 
     /// Return the root of the db.
@@ -550,10 +550,8 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof =
-            verification::range_proof(&grafted_mmr, Location::new(loc)..Location::new(loc + 1))
-                .await?;
-        let chunk = *self.status.get_chunk(loc);
+        let mut proof = verification::range_proof(&grafted_mmr, loc..loc.saturating_add(1)).await?;
+        let chunk = *self.status.get_chunk(loc.as_u64());
 
         let last_chunk = self.status.last_chunk();
         if last_chunk.1 != 0 {
@@ -566,7 +564,7 @@ impl<
             KeyValueProofInfo {
                 key,
                 value,
-                loc: Location::from(loc),
+                loc,
                 chunk,
             },
         ))
@@ -835,13 +833,13 @@ pub mod test {
 
             let op = db.any.get_key_loc(&k).await.unwrap().unwrap();
             let proof = db
-                .operation_inclusion_proof(hasher.inner(), op.1)
+                .operation_inclusion_proof(hasher.inner(), op.1.as_u64())
                 .await
                 .unwrap();
             let info = KeyValueProofInfo {
                 key: k,
                 value: v1,
-                loc: Location::new(op.1),
+                loc: op.1,
                 chunk: proof.3,
             };
             let root = db.root(&mut hasher).await.unwrap();
@@ -879,7 +877,7 @@ pub mod test {
 
             // Create a proof of the now-inactive operation.
             let proof_inactive = db
-                .operation_inclusion_proof(hasher.inner(), op.1)
+                .operation_inclusion_proof(hasher.inner(), op.1.as_u64())
                 .await
                 .unwrap();
             // This proof should not verify, but only because verification will see that the
@@ -902,13 +900,13 @@ pub mod test {
             // inclusion of the operation itself, and not just the chunk.
             let (_, active_loc) = db.any.get_key_loc(&info.key).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
-            assert_ne!(active_loc, info.loc.as_u64());
+            assert_ne!(active_loc, info.loc);
             assert_eq!(
-                Bitmap::<Sha256, 32>::leaf_pos(active_loc),
+                Bitmap::<Sha256, 32>::leaf_pos(active_loc.as_u64()),
                 Bitmap::<Sha256, 32>::leaf_pos(info.loc.as_u64())
             );
             let mut info_with_modified_loc = info.clone();
-            info_with_modified_loc.loc = Location::new(active_loc);
+            info_with_modified_loc.loc = active_loc;
             assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
@@ -994,10 +992,10 @@ pub mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.op_count();
+            let end_loc = Location::new(db.op_count());
             let start_loc = db.any.inactivity_floor_loc();
 
-            for i in start_loc..end_loc {
+            for i in start_loc.as_u64()..end_loc.as_u64() {
                 let (proof, ops, chunks) = db
                     .range_proof(hasher.inner(), i, NZU64!(max_ops))
                     .await
@@ -1222,9 +1220,7 @@ pub mod test {
                 .await
                 .unwrap();
             db.commit().await.unwrap();
-            db.prune(Location::new(db.any.inactivity_floor_loc()))
-                .await
-                .unwrap();
+            db.prune(db.any.inactivity_floor_loc()).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
             db.close().await.unwrap();
@@ -1283,7 +1279,7 @@ pub mod test {
                     db_no_pruning.commit().await.unwrap();
                     db_pruning.commit().await.unwrap();
                     db_pruning
-                        .prune(Location::new(db_no_pruning.any.inactivity_floor_loc()))
+                        .prune(db_no_pruning.any.inactivity_floor_loc())
                         .await
                         .unwrap();
                 }

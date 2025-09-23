@@ -368,22 +368,22 @@ impl<
     /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
-    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
-        assert!(loc < self.op_count());
-        if loc < self.inactivity_floor_loc {
-            return Err(Error::OperationPruned(loc));
+    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
+        assert!(loc.as_u64() < self.op_count());
+        if loc.as_u64() < self.inactivity_floor_loc {
+            return Err(Error::OperationPruned(loc.as_u64()));
         }
 
-        Ok(self.log.read(loc).await?.into_value())
+        Ok(self.log.read(loc.as_u64()).await?.into_value())
     }
 
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
-    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
+    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
         for &loc in self.snapshot.get(key) {
             let (k, v) = Self::get_update_op(&self.log, loc).await?;
             if k == *key {
-                return Ok(Some((v, loc)));
+                return Ok(Some((v, Location::new(loc))));
             }
         }
 
@@ -400,8 +400,8 @@ impl<
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
-    pub fn inactivity_floor_loc(&self) -> u64 {
-        self.inactivity_floor_loc
+    pub fn inactivity_floor_loc(&self) -> Location {
+        Location::new(self.inactivity_floor_loc)
     }
 
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
@@ -641,8 +641,8 @@ impl<
     /// # Panic
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
-        assert!(target_prune_loc <= self.inactivity_floor_loc);
+    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+        assert!(target_prune_loc.as_u64() <= self.inactivity_floor_loc);
         if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.
             return Ok(());
@@ -653,20 +653,18 @@ impl<
         // the operations between the MMR tip and the log pruning boundary.
         self.mmr.sync(&mut self.hasher).await?;
 
-        if !self.log.prune(target_prune_loc).await? {
+        if !self.log.prune(target_prune_loc.as_u64()).await? {
             return Ok(());
         }
 
         debug!(
             log_size = self.op_count(),
-            target_prune_loc, "pruned inactive ops"
+            target_prune_loc = target_prune_loc.as_u64(),
+            "pruned inactive ops"
         );
 
         self.mmr
-            .prune_to_pos(
-                &mut self.hasher,
-                Position::from(Location::from(target_prune_loc)).as_u64(),
-            )
+            .prune_to_pos(&mut self.hasher, Position::from(target_prune_loc).as_u64())
             .await?;
 
         Ok(())

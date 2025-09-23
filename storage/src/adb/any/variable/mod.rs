@@ -278,9 +278,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             Operation::Update(key, _) => {
                                 let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
-                                    uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
+                                    uncommitted_ops
+                                        .insert(key, (Some(old_loc), Some(Location::new(loc))));
                                 } else {
-                                    uncommitted_ops.insert(key, (None, Some(loc)));
+                                    uncommitted_ops.insert(key, (None, Some(Location::new(loc))));
                                 }
                             }
                             Operation::CommitFloor(_, loc) => {
@@ -293,15 +294,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                             Self::update_loc(
                                                 &mut self.snapshot,
                                                 key,
-                                                *old_loc,
-                                                *new_loc,
+                                                old_loc.as_u64(),
+                                                new_loc.as_u64(),
                                             );
                                         } else {
-                                            Self::delete_loc(&mut self.snapshot, key, *old_loc);
+                                            Self::delete_loc(
+                                                &mut self.snapshot,
+                                                key,
+                                                old_loc.as_u64(),
+                                            );
                                         }
                                     } else {
                                         assert!(new_loc.is_some());
-                                        self.snapshot.insert(key, new_loc.unwrap());
+                                        self.snapshot.insert(key, new_loc.unwrap().as_u64());
                                     }
                                 }
                                 uncommitted_ops.clear();
@@ -361,7 +366,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
-            if let Some(v) = self.get_from_loc(key, loc).await? {
+            if let Some(v) = self.get_from_loc(key, Location::new(loc)).await? {
                 return Ok(Some(v));
             }
         }
@@ -375,14 +380,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Panics
     ///
     /// Panics if `loc` is greater than or equal to the number of operations in the log.
-    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
-        assert!(loc < self.op_count());
-        if loc < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(loc));
+    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
+        assert!(loc.as_u64() < self.op_count());
+        if loc.as_u64() < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc.as_u64()));
         }
 
-        let offset = self.locations.read(loc).await?;
-        let section = loc / self.log_items_per_section;
+        let offset = self.locations.read(loc.as_u64()).await?;
+        let section = loc.as_u64() / self.log_items_per_section;
         let op = self.log.get(section, offset).await?;
 
         Ok(op.into_value())
@@ -390,11 +395,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Returns the location of the operation that set the key's current value, or None if the key
     /// isn't currently assigned any value.
-    pub async fn get_key_loc(&self, key: &K) -> Result<Option<u64>, Error> {
+    pub async fn get_key_loc(&self, key: &K) -> Result<Option<Location>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
-            if self.get_from_loc(key, loc).await?.is_some() {
-                return Ok(Some(loc));
+            if self.get_from_loc(key, Location::new(loc)).await?.is_some() {
+                return Ok(Some(Location::new(loc)));
             }
         }
 
@@ -436,12 +441,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Panics
     ///
     /// Panics if `loc` is greater than or equal to the number of operations in the log.
-    pub async fn get_from_loc(&self, key: &K, loc: u64) -> Result<Option<V>, Error> {
-        assert!(loc < self.op_count());
+    pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
+        assert!(loc.as_u64() < self.op_count());
 
-        match self.locations.read(loc).await {
+        match self.locations.read(loc.as_u64()).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc, offset).await;
+                return self.get_from_offset(key, loc.as_u64(), offset).await;
             }
             Err(e) => Err(Error::Journal(e)),
         }
@@ -485,18 +490,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<u64> {
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
         if self.log_size == 0 {
             None
         } else {
-            Some(self.oldest_retained_loc)
+            Some(Location::new(self.oldest_retained_loc))
         }
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
-    pub fn inactivity_floor_loc(&self) -> u64 {
-        self.inactivity_floor_loc
+    pub fn inactivity_floor_loc(&self) -> Location {
+        Location::new(self.inactivity_floor_loc)
     }
 
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
@@ -504,7 +509,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
         if let Some(old_loc) = self.get_key_loc(&key).await? {
-            Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
+            Self::update_loc(&mut self.snapshot, &key, old_loc.as_u64(), new_loc);
         } else {
             self.snapshot.insert(&key, new_loc);
         };
@@ -523,7 +528,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Ok(());
         };
 
-        Self::delete_loc(&mut self.snapshot, &key, old_loc);
+        Self::delete_loc(&mut self.snapshot, &key, old_loc.as_u64());
         self.apply_op(Operation::Delete(key)).await?;
 
         Ok(())
@@ -750,9 +755,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Panics
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
-        assert!(target_prune_loc <= self.inactivity_floor_loc);
-        if target_prune_loc <= self.oldest_retained_loc {
+    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
+        assert!(target_prune_loc.as_u64() <= self.inactivity_floor_loc);
+        if target_prune_loc.as_u64() <= self.oldest_retained_loc {
             return Ok(());
         }
 
@@ -771,7 +776,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // actual pruning boundary. This procedure ensures all log operations always have
         // corresponding MMR & location entries, even in the event of failures, with no need for
         // special recovery.
-        let section_with_target = target_prune_loc / self.log_items_per_section;
+        let section_with_target = target_prune_loc.as_u64() / self.log_items_per_section;
         if !self.log.prune(section_with_target).await? {
             return Ok(());
         }
@@ -1099,7 +1104,7 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), 1477);
             assert_eq!(db.inactivity_floor_loc, 0);
-            assert_eq!(db.oldest_retained_loc().unwrap(), 0); // no pruning yet
+            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new(0)); // no pruning yet
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit will raise the activity floor.
@@ -1108,7 +1113,7 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, 1478);
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
+            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new(1477));
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1324,7 +1329,7 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, 1480);
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
+            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new(1477));
             assert_eq!(db.snapshot.items(), 857);
             db.close().await.unwrap();
 
@@ -1339,7 +1344,7 @@ pub(super) mod test {
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
-            assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
+            assert_eq!(db.oldest_retained_loc().unwrap(), Location::new(1477));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();

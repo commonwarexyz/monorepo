@@ -358,7 +358,7 @@ mod tests {
             apply_ops(&mut target_db, target_db_ops.clone()).await;
             target_db.commit().await.unwrap();
             target_db
-                .prune(target_db.inactivity_floor_loc)
+                .prune(Location::new(target_db.inactivity_floor_loc))
                 .await
                 .unwrap();
             let target_op_count = target_db.op_count();
@@ -720,10 +720,13 @@ mod tests {
             sync_db.commit().await.unwrap();
 
             target_db
-                .prune(target_db.inactivity_floor_loc)
+                .prune(Location::new(target_db.inactivity_floor_loc))
                 .await
                 .unwrap();
-            sync_db.prune(sync_db.inactivity_floor_loc).await.unwrap();
+            sync_db
+                .prune(Location::new(sync_db.inactivity_floor_loc))
+                .await
+                .unwrap();
 
             // Close sync_db
             sync_db.close().await.unwrap();
@@ -1416,7 +1419,7 @@ mod tests {
             apply_ops(&mut source_db, ops.clone()).await;
             source_db.commit().await.unwrap();
             source_db
-                .prune(source_db.inactivity_floor_loc)
+                .prune(Location::new(source_db.inactivity_floor_loc))
                 .await
                 .unwrap();
 
@@ -1617,12 +1620,15 @@ mod tests {
             apply_ops(&mut target_db, original_ops.clone()).await;
             target_db.commit().await.unwrap();
             target_db
-                .prune(target_db.inactivity_floor_loc)
+                .prune(Location::new(target_db.inactivity_floor_loc))
                 .await
                 .unwrap();
             apply_ops(&mut sync_db, original_ops.clone()).await;
             sync_db.commit().await.unwrap();
-            sync_db.prune(sync_db.inactivity_floor_loc).await.unwrap();
+            sync_db
+                .prune(Location::new(sync_db.inactivity_floor_loc))
+                .await
+                .unwrap();
             let sync_db_original_size = sync_db.op_count();
 
             // Get pinned nodes before closing the database

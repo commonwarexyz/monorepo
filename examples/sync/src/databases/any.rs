@@ -100,7 +100,7 @@ where
     }
 
     fn lower_bound_ops(&self) -> u64 {
-        self.inactivity_floor_loc()
+        self.inactivity_floor_loc().as_u64()
     }
 
     fn historical_proof(
