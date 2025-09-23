@@ -2,10 +2,7 @@ use crate::{
     adb::{self, any},
     index::Index,
     journal::fixed,
-    mmr::{
-        iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
-        Location, Position, StandardHasher,
-    },
+    mmr::{Location, Position, StandardHasher},
     store::operation::Fixed,
     translator::Translator,
 };
@@ -1423,9 +1420,9 @@ mod tests {
             let upper_bound_ops = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes_pos = nodes_to_pin(leaf_loc_to_pos(lower_bound_ops));
+            let pinned_nodes_pos = nodes_to_pin(Position::from((Location::new(lower_bound_ops))));
             let pinned_nodes =
-                join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
+                join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos.as_u64()))).await;
             let pinned_nodes = pinned_nodes
                 .iter()
                 .map(|node| node.as_ref().unwrap().unwrap())
@@ -1545,7 +1542,7 @@ mod tests {
                 }
                 log.sync().await.unwrap();
 
-                let pinned_nodes = nodes_to_pin(leaf_loc_to_pos(lower_bound))
+                let pinned_nodes = nodes_to_pin(Position::from(Location::new(lower_bound)))
                     .map(|pos| source_db.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
                 let pinned_nodes = pinned_nodes
@@ -1568,7 +1565,7 @@ mod tests {
                 // Verify database state
                 let expected_op_count = upper_bound + 1;
                 assert_eq!(db.log.size().await.unwrap(), expected_op_count);
-                assert_eq!(db.mmr.size(), leaf_loc_to_pos(expected_op_count));
+                assert_eq!(db.mmr.size(), Position::from(Location::new(expected_op_count)).as_u64());
                 assert_eq!(db.op_count(), expected_op_count);
                 assert_eq!(db.inactivity_floor_loc, lower_bound);
 
@@ -1626,7 +1623,7 @@ mod tests {
 
             // Get pinned nodes before closing the database
             let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
-            let pinned_nodes = nodes_to_pin(leaf_loc_to_pos(sync_db_original_size))
+            let pinned_nodes = nodes_to_pin(Position::from(Location::new(sync_db_original_size)))
                 .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect::<Vec<_>>();
 
@@ -1721,7 +1718,7 @@ mod tests {
             let target_db_mmr_size = db.mmr.size();
 
             let pinned_nodes = join_all(
-                nodes_to_pin(leaf_loc_to_pos(db.inactivity_floor_loc))
+                nodes_to_pin(Position::from(db.inactivity_floor_loc))
                     .map(|pos| db.mmr.get_node(pos)),
             )
             .await;

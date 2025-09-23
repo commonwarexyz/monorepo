@@ -5,7 +5,7 @@ use crate::mmr::{
     iterator::{leaf_pos_to_loc, nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
     proof, Error,
     Error::*,
-    Location, Position, Proof,
+    Position, Proof,
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -802,7 +802,7 @@ mod tests {
             assert_eq!(mmr.leaves(), 0);
             assert_eq!(mmr.last_leaf_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
-            assert_eq!(mmr.get_node(0), None);
+            assert_eq!(mmr.get_node(Position::new(0)), None);
             assert!(matches!(mmr.pop(), Err(Empty)));
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
@@ -823,27 +823,33 @@ mod tests {
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
-            let mut leaves: Vec<u64> = Vec::new();
+            let mut leaves: Vec<Position> = Vec::new();
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..11 {
                 leaves.push(mmr.add(&mut hasher, &element));
-                let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
+                let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
                 assert!(peaks.len() <= mmr.size() as usize);
                 let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
                 assert!(nodes_needing_parents.len() <= peaks.len());
             }
-            assert_eq!(mmr.oldest_retained_pos().unwrap(), 0);
+            assert_eq!(mmr.oldest_retained_pos().unwrap(), Position::new(0));
             assert_eq!(mmr.size(), 19, "mmr not of expected size");
             assert_eq!(
                 leaves,
-                vec![0, 1, 3, 4, 7, 8, 10, 11, 15, 16, 18],
+                vec![0, 1, 3, 4, 7, 8, 10, 11, 15, 16, 18]
+                    .into_iter()
+                    .map(Position::new)
+                    .collect::<Vec<_>>(),
                 "mmr leaf positions not as expected"
             );
-            let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
+            let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
             assert_eq!(
                 peaks,
-                vec![(14, 3), (17, 1), (18, 0)],
+                vec![(14, 3), (17, 1), (18, 0)]
+                    .into_iter()
+                    .map(|(pos, height)| (Position::new(pos), height))
+                    .collect::<Vec<_>>(),
                 "mmr peaks not as expected"
             );
 
@@ -852,7 +858,7 @@ mod tests {
             let peaks_needing_parents = nodes_needing_parents(mmr.peak_iterator());
             assert_eq!(
                 peaks_needing_parents,
-                vec![17, 18],
+                vec![17, 18].into_iter().map(Position::new).collect::<Vec<_>>(),
                 "mmr nodes needing parents not as expected"
             );
 
@@ -863,27 +869,27 @@ mod tests {
             }
 
             // verify height=1 node digests
-            let digest2 = hasher.node_digest(2, &mmr.nodes[0], &mmr.nodes[1]);
+            let digest2 = hasher.node_digest(Position::new(2), &mmr.nodes[0], &mmr.nodes[1]);
             assert_eq!(mmr.nodes[2], digest2);
-            let digest5 = hasher.node_digest(5, &mmr.nodes[3], &mmr.nodes[4]);
+            let digest5 = hasher.node_digest(Position::new(5), &mmr.nodes[3], &mmr.nodes[4]);
             assert_eq!(mmr.nodes[5], digest5);
-            let digest9 = hasher.node_digest(9, &mmr.nodes[7], &mmr.nodes[8]);
+            let digest9 = hasher.node_digest(Position::new(9), &mmr.nodes[7], &mmr.nodes[8]);
             assert_eq!(mmr.nodes[9], digest9);
-            let digest12 = hasher.node_digest(12, &mmr.nodes[10], &mmr.nodes[11]);
+            let digest12 = hasher.node_digest(Position::new(12), &mmr.nodes[10], &mmr.nodes[11]);
             assert_eq!(mmr.nodes[12], digest12);
-            let digest17 = hasher.node_digest(17, &mmr.nodes[15], &mmr.nodes[16]);
+            let digest17 = hasher.node_digest(Position::new(17), &mmr.nodes[15], &mmr.nodes[16]);
             assert_eq!(mmr.nodes[17], digest17);
 
             // verify height=2 node digests
-            let digest6 = hasher.node_digest(6, &mmr.nodes[2], &mmr.nodes[5]);
+            let digest6 = hasher.node_digest(Position::new(6), &mmr.nodes[2], &mmr.nodes[5]);
             assert_eq!(mmr.nodes[6], digest6);
-            let digest13 = hasher.node_digest(13, &mmr.nodes[9], &mmr.nodes[12]);
+            let digest13 = hasher.node_digest(Position::new(13), &mmr.nodes[9], &mmr.nodes[12]);
             assert_eq!(mmr.nodes[13], digest13);
-            let digest17 = hasher.node_digest(17, &mmr.nodes[15], &mmr.nodes[16]);
+            let digest17 = hasher.node_digest(Position::new(17), &mmr.nodes[15], &mmr.nodes[16]);
             assert_eq!(mmr.nodes[17], digest17);
 
             // verify topmost digest
-            let digest14 = hasher.node_digest(14, &mmr.nodes[6], &mmr.nodes[13]);
+            let digest14 = hasher.node_digest(Position::new(14), &mmr.nodes[6], &mmr.nodes[13]);
             assert_eq!(mmr.nodes[14], digest14);
 
             // verify root

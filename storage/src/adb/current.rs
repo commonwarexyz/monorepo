@@ -16,7 +16,6 @@ use crate::{
             Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
         },
         hasher::Hasher,
-        iterator::leaf_pos_to_loc,
         verification, Location, Position, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,

@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::{mem::Mmr, StandardHasher as Standard};
+use commonware_storage::mmr::{mem::Mmr, Location, Position, StandardHasher as Standard};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -27,10 +27,10 @@ struct FuzzInput {
 
 // Simple reference that tracks basic MMR state
 struct ReferenceMmr {
-    leaf_positions: Vec<u64>,
+    leaf_positions: Vec<Position>,
     leaf_data: Vec<Vec<u8>>,
     total_nodes_added: u64,
-    pruned_to_pos: u64,
+    pruned_to_pos: Position,
 }
 
 impl ReferenceMmr {
@@ -39,11 +39,11 @@ impl ReferenceMmr {
             leaf_positions: Vec::new(),
             leaf_data: Vec::new(),
             total_nodes_added: 0,
-            pruned_to_pos: 0,
+            pruned_to_pos: Position::new(0),
         }
     }
 
-    fn add(&mut self, leaf_pos: u64, data: Vec<u8>) {
+    fn add(&mut self, leaf_pos: Position, data: Vec<u8>) {
         self.leaf_positions.push(leaf_pos);
         self.leaf_data.push(data);
         // Track nodes added (leaf + any parent nodes)
@@ -79,7 +79,7 @@ impl ReferenceMmr {
         }
     }
 
-    fn last_leaf_pos(&self) -> Option<u64> {
+    fn last_leaf_pos(&self) -> Option<Position> {
         self.leaf_positions.last().copied()
     }
 
@@ -92,20 +92,20 @@ impl ReferenceMmr {
     }
 
     fn prune_all(&mut self) {
-        self.pruned_to_pos = self.total_nodes_added;
+        self.pruned_to_pos = Position::new(self.total_nodes_added);
     }
 
-    fn prune_to_pos(&mut self, pos: u64) {
-        if pos <= self.total_nodes_added {
+    fn prune_to_pos(&mut self, pos: Position) {
+        if pos.as_u64() <= self.total_nodes_added {
             self.pruned_to_pos = pos;
         }
     }
 
-    fn get_pruned_to_pos(&self) -> u64 {
+    fn get_pruned_to_pos(&self) -> Position {
         self.pruned_to_pos
     }
 
-    fn is_leaf_pruned(&self, leaf_pos: u64) -> bool {
+    fn is_leaf_pruned(&self, leaf_pos: Position) -> bool {
         leaf_pos < self.pruned_to_pos
     }
 
@@ -145,7 +145,7 @@ fn fuzz(input: FuzzInput) {
                 MmrOperation::Add { data } => {
                     // Skip adding if we're fully pruned (pruned_to_pos == size)
                     // because the MMR needs access to previous nodes to compute parent hashes
-                    if mmr.pruned_to_pos() == mmr.size() && mmr.size() > 0 {
+                    if mmr.pruned_to_pos().as_u64() == mmr.size() && mmr.size() > 0 {
                         continue;
                     }
 
@@ -241,7 +241,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::GetNode { pos } => {
                     if mmr.size() > 0 {
-                        let safe_pos = *pos % mmr.size();
+                        let safe_pos = Position::new(*pos % mmr.size());
                         let node = mmr.get_node(safe_pos);
 
                         // Check if the node is pruned
@@ -251,8 +251,8 @@ fn fuzz(input: FuzzInput) {
                         } else {
                             // Node is not pruned, so it should exist
                             if node.is_none() {
-                                panic!("Could not get non-pruned node at position {safe_pos} (size: {}, pruned_to: {})",
-                                    mmr.size(), mmr.pruned_to_pos());
+                                panic!("Could not get non-pruned node at position {} (size: {}, pruned_to: {})",
+                                    safe_pos.as_u64(), mmr.size(), mmr.pruned_to_pos().as_u64());
                             }
                         }
                     }
@@ -297,13 +297,13 @@ fn fuzz(input: FuzzInput) {
                         // Check if the element is pruned
                         let is_pruned = reference.is_leaf_pruned(pos);
 
-                        match mmr.proof(pos) {
+                        match mmr.proof(pos.as_u64()) {
                             Ok(proof) => {
                                 // If we got a proof for a pruned element, it might be pinned
                                 // Verify the proof with the actual data we stored
                                 let root = mmr.root(&mut hasher);
                                 let leaf_data = &reference.leaf_data[idx];
-                                let is_valid = proof.verify_element_inclusion(&mut hasher, leaf_data, pos, &root);
+                                let is_valid = proof.verify_element_inclusion(&mut hasher, leaf_data, Location::try_from(pos).unwrap(), &root);
                                 assert!(
                                     is_valid,
                                     "Operation {op_idx}: Proof verification failed for leaf at pos {pos}",
@@ -325,7 +325,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::PruneAll => {
                     // Skip prune_all if we're already fully pruned to avoid issues with subsequent adds
-                    if mmr.pruned_to_pos() == mmr.size() {
+                    if mmr.pruned_to_pos().as_u64() == mmr.size() {
                         continue;
                     }
 
@@ -357,7 +357,7 @@ fn fuzz(input: FuzzInput) {
                 MmrOperation::PruneToPos { pos_idx } => {
                     if mmr.size() > 0 {
                         // Only prune to positions within the current size (0 to size inclusive)
-                        let pos = (*pos_idx as u64) % (mmr.size() + 1);
+                        let pos = Position::new((*pos_idx as u64) % (mmr.size() + 1));
 
                         // Skip if trying to prune to a position before or equal to what's already pruned
                         if pos <= mmr.pruned_to_pos() {
@@ -365,7 +365,7 @@ fn fuzz(input: FuzzInput) {
                         }
 
                         // Skip if trying to prune beyond the current size
-                        if pos > mmr.size() {
+                        if pos.as_u64() > mmr.size() {
                             continue;
                         }
 
@@ -408,9 +408,9 @@ fn fuzz(input: FuzzInput) {
                 // Last leaf position should be valid
                 if let Some(last_pos) = mmr.last_leaf_pos() {
                     assert!(
-                        last_pos < mmr.size(),
-                        "Operation {op_idx}: Last leaf position {last_pos} >= size {}",
-                        mmr.size()
+                        last_pos.as_u64() < mmr.size(),
+                        "Operation {op_idx}: Last leaf position {} >= size {}",
+                        last_pos.as_u64(), mmr.size()
                     );
                 }
             } else {

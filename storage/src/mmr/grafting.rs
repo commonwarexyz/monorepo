@@ -294,8 +294,11 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
-        self.hasher
-            .node_digest(Position::new(destination_pos(pos.as_u64(), self.height)), left_digest, right_digest)
+        self.hasher.node_digest(
+            Position::new(destination_pos(pos.as_u64(), self.height)),
+            left_digest,
+            right_digest,
+        )
     }
 
     fn root<'a>(
@@ -379,14 +382,18 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
             return digest;
         };
         let index = leaf_pos_to_loc(Position::new(source_pos));
-        let Some(mut index) = index else {
+        let Some(index) = index else {
             // malformed proof input
             debug!(pos = source_pos, "grafting source pos is not a leaf");
             return digest;
         };
         if index.as_u64() < self.loc {
             // malformed proof input
-            debug!(index = index.as_u64(), loc = self.loc, "grafting index is negative");
+            debug!(
+                index = index.as_u64(),
+                loc = self.loc,
+                "grafting index is negative"
+            );
             return digest;
         };
         let index_u64 = index.as_u64() - self.loc;

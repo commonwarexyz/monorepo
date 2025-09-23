@@ -275,13 +275,13 @@ mod tests {
         let mut last_leaf_pos = 0;
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.iter().enumerate() {
             let leaf_loc_got = leaf_pos_to_loc(*leaf_pos).unwrap();
-            assert_eq!(leaf_loc_got, leaf_loc_expected as u64);
+            assert_eq!(leaf_loc_got, Location::new(leaf_loc_expected as u64));
             let leaf_pos_got = leaf_loc_to_pos(leaf_loc_got);
             assert_eq!(leaf_pos_got, *leaf_pos);
-            for i in last_leaf_pos + 1..*leaf_pos {
-                assert!(leaf_pos_to_loc(i).is_none());
+            for i in last_leaf_pos + 1..leaf_pos.as_u64() {
+                assert!(leaf_pos_to_loc(Position::new(i)).is_none());
             }
-            last_leaf_pos = *leaf_pos;
+            last_leaf_pos = leaf_pos.as_u64();
         }
     }
 }

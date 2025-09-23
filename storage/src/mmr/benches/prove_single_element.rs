@@ -1,5 +1,5 @@
 use commonware_cryptography::{sha256, Digest as _, Sha256};
-use commonware_storage::mmr::{mem::Mmr, StandardHasher};
+use commonware_storage::mmr::{mem::Mmr, Location, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -47,7 +47,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                                 assert!(proof.verify_element_inclusion(
                                     &mut hasher,
                                     &element,
-                                    loc as u64,
+                                    Location::from(loc),
                                     &root,
                                 ));
                             }

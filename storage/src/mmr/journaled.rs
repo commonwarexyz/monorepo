@@ -752,7 +752,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let mut written_count = 0usize;
         self.mem_mmr.sync(hasher);
         for i in self.journal_size..self.size() {
-            let node = *self.mem_mmr.get_node_unchecked(i);
+            let node = *self.mem_mmr.get_node_unchecked(Position::new(i));
             self.journal.append(node).await?;
             written_count += 1;
             if written_count >= write_limit {

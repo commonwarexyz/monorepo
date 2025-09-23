@@ -1,5 +1,5 @@
 use commonware_cryptography::{sha256, Digest as _, Sha256};
-use commonware_storage::mmr::{mem::Mmr, StandardHasher};
+use commonware_storage::mmr::{mem::Mmr, Location, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -63,7 +63,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                                     assert!(proof.verify_range_inclusion(
                                         &mut hasher,
                                         &elements[range.start as usize..range.end as usize],
-                                        range.start,
+                                        Location::from(range.start),
                                         &root,
                                     ));
                                 }

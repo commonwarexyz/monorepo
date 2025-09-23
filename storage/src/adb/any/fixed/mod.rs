@@ -13,7 +13,6 @@ use crate::{
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
-        iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
@@ -730,7 +729,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::verify_proof,
-        mmr::{mem::Mmr as MemMmr, StandardHasher as Standard},
+        mmr::{iterator::leaf_loc_to_pos, mem::Mmr as MemMmr, StandardHasher as Standard},
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
@@ -1078,7 +1077,7 @@ pub(super) mod test {
             let max_ops = NZU64!(4);
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
-            let start_loc = leaf_pos_to_loc(start_pos).unwrap();
+            let start_loc = Location::try_from(start_pos).unwrap().as_u64();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(100).await.unwrap();
             db.sync().await.unwrap();
@@ -1463,7 +1462,10 @@ pub(super) mod test {
                 .historical_proof(original_op_count, 5, NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(historical_proof.size, leaf_loc_to_pos(original_op_count));
+            assert_eq!(
+                historical_proof.size,
+                Position::from(Location::from(original_op_count)).as_u64()
+            );
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -1493,7 +1495,10 @@ pub(super) mod test {
 
             // Test singleton database
             let (single_proof, single_ops) = db.historical_proof(1, 0, NZU64!(1)).await.unwrap();
-            assert_eq!(single_proof.size, leaf_loc_to_pos(1));
+            assert_eq!(
+                single_proof.size,
+                leaf_loc_to_pos(Location::new(1)).as_u64()
+            );
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
@@ -1519,7 +1524,7 @@ pub(super) mod test {
 
             // Test proof at minimum historical position
             let (min_proof, min_ops) = db.historical_proof(3, 0, NZU64!(3)).await.unwrap();
-            assert_eq!(min_proof.size, leaf_loc_to_pos(3));
+            assert_eq!(min_proof.size, leaf_loc_to_pos(Location::new(3)).as_u64());
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
@@ -1548,7 +1553,10 @@ pub(super) mod test {
                     .await
                     .unwrap();
 
-                assert_eq!(historical_proof.size, leaf_loc_to_pos(end_loc));
+                assert_eq!(
+                    historical_proof.size,
+                    leaf_loc_to_pos(Location::new(end_loc)).as_u64()
+                );
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
@@ -1590,7 +1598,7 @@ pub(super) mod test {
             db.commit().await.unwrap();
 
             let (proof, ops) = db.historical_proof(5, 1, NZU64!(10)).await.unwrap();
-            assert_eq!(proof.size, leaf_loc_to_pos(5));
+            assert_eq!(proof.size, leaf_loc_to_pos(Location::new(5)).as_u64());
             assert_eq!(ops.len(), 4);
 
             let mut hasher = Standard::<Sha256>::new();

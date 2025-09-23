@@ -16,7 +16,9 @@ use crate::{
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{
-        iterator::leaf_loc_to_pos, journaled::{Config as MmrConfig, Mmr}, Location, Position, Proof, StandardHasher as Standard
+        iterator::leaf_loc_to_pos,
+        journaled::{Config as MmrConfig, Mmr},
+        Location, Position, Proof, StandardHasher as Standard,
     },
     store::operation::Keyless as Operation,
 };

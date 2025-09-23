@@ -12,7 +12,6 @@ use crate::{
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{
-        iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
@@ -1148,7 +1147,7 @@ pub(super) mod test {
             let max_ops = 4;
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
-            let start_loc = leaf_pos_to_loc(start_pos).unwrap();
+            let start_loc = Location::try_from(start_pos).unwrap().as_u64();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(None, 100).await.unwrap();
             db.sync().await.unwrap();
@@ -1315,7 +1314,12 @@ pub(super) mod test {
 
             let root = db.root(&mut hasher);
             assert_eq!(db.op_count(), 2787);
-            assert_eq!(leaf_pos_to_loc(db.mmr.size()), Some(2787));
+            assert_eq!(
+                Location::try_from(Position::new(db.mmr.size()))
+                    .ok()
+                    .map(|l| l.as_u64()),
+                Some(2787)
+            );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
@@ -1327,7 +1331,12 @@ pub(super) mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2787);
-            assert_eq!(leaf_pos_to_loc(db.mmr.size()), Some(2787));
+            assert_eq!(
+                Location::try_from(Position::new(db.mmr.size()))
+                    .ok()
+                    .map(|l| l.as_u64()),
+                Some(2787)
+            );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
             assert_eq!(db.oldest_retained_loc().unwrap(), 1477);

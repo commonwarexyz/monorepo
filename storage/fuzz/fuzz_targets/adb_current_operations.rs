@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::current::{Config, Current},
-    mmr::{hasher::Hasher as MmrHasher, StandardHasher as Standard},
+    mmr::{hasher::Hasher as MmrHasher, Location, StandardHasher as Standard},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -165,7 +165,7 @@ fn fuzz(data: FuzzInput) {
                                 Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
                                     &mut hasher,
                                     &proof,
-                                    adjusted_start,
+                                    Location::from(adjusted_start),
                                     &ops,
                                     &chunks,
                                     &current_root
