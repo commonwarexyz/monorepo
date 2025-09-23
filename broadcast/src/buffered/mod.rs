@@ -38,7 +38,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        Committable, Digestible, PrivateKeyExt as _, Signer as _,
+        Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
@@ -600,6 +600,55 @@ mod tests {
             let got = mb2.get(Some(sender1.clone()), m3.commitment(), None).await;
             assert_eq!(got, vec![m3.clone()]);
         });
+    }
+
+    #[test_traced]
+    fn test_get_all_for_commitment_deterministic_order() {
+        let run = |seed: u64| {
+            let config = deterministic::Config::new()
+                .with_seed(seed)
+                .with_timeout(Some(Duration::from_secs(5)));
+            let runner = deterministic::Runner::new(config);
+            runner.start(|context| async move {
+                let (peers, mut registrations, _oracle) =
+                    initialize_simulation(context.clone(), 1, 1.0).await;
+                let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
+
+                let sender1 = peers[0].clone();
+                let mut mb1 = mailboxes.get(&sender1).unwrap().clone();
+
+                // Two messages share commitment but have distinct digests.
+                let m1 = TestMessage::new(b"id", b"content-1");
+                let m2 = TestMessage::new(b"id", b"content-2");
+                let m3 = TestMessage::new(b"id", b"content-3");
+                mb1.broadcast(Recipients::All, m1.clone())
+                    .await
+                    .await
+                    .unwrap();
+                mb1.broadcast(Recipients::All, m2.clone())
+                    .await
+                    .await
+                    .unwrap();
+                mb1.broadcast(Recipients::All, m3.clone())
+                    .await
+                    .await
+                    .unwrap();
+
+                let mut hasher = Sha256::default();
+                let values = mb1.get(None, m1.commitment(), None).await;
+                for value in values {
+                    hasher.update(&value.content);
+                }
+                hasher.finalize()
+            })
+        };
+
+        for seed in 0..10 {
+            let h1 = run(seed);
+            let h2 = run(seed);
+
+            assert_eq!(h1, h2, "Messages returned in different order for {seed}");
+        }
     }
 
     #[test_traced]
