@@ -428,6 +428,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 
     type Shard = Chunk<H>;
     type ReShard = Chunk<H>;
+    type CheckedShard = Chunk<H>;
 
     type Proof = ();
 
@@ -446,7 +447,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         Ok((commitment, chunks.into_iter().map(|s| (s, ())).collect()))
     }
 
-    fn check(
+    fn reshard(
         commitment: &Self::Commitment,
         _proof: &Self::Proof,
         shard: &Self::Shard,
@@ -458,11 +459,21 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         }
     }
 
+    fn check(
+        commitment: &Self::Commitment,
+        reshard: Self::ReShard,
+    ) -> Result<Self::CheckedShard, Self::Error> {
+        if !reshard.verify(reshard.index, commitment) {
+            return Err(Error::InvalidProof);
+        }
+        Ok(reshard)
+    }
+
     fn decode(
         config: &Config,
         commitment: &Self::Commitment,
         my_shard: Self::Shard,
-        shards: &[Self::ReShard],
+        shards: &[Self::CheckedShard],
     ) -> Result<Vec<u8>, Self::Error> {
         decode(
             config.minimum_shards + config.extra_shards,

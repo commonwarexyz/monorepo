@@ -60,17 +60,20 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
 
                             shards.shuffle(&mut rng);
                             let my_shard_and_proof = shards.pop().unwrap();
-                            let reshards = shards
+                            let checked_shard = shards
                                 .iter()
                                 .take(min)
-                                .map(|(shard, proof)| S::check(&commitment, proof, shard).unwrap())
+                                .map(|(shard, proof)| {
+                                    let reshard = S::reshard(&commitment, proof, shard).unwrap();
+                                    S::check(&commitment, reshard).unwrap()
+                                })
                                 .collect::<Vec<_>>();
 
-                            (commitment, my_shard_and_proof, reshards)
+                            (commitment, my_shard_and_proof, checked_shard)
                         },
                         // We include the cost of checking your shard as part of decoding
                         |(commitment, (my_shard, my_proof), reshards)| {
-                            S::check(&commitment, &my_proof, &my_shard).unwrap();
+                            S::reshard(&commitment, &my_proof, &my_shard).unwrap();
                             S::decode(&config, &commitment, my_shard, &reshards).unwrap();
                         },
                         BatchSize::SmallInput,
