@@ -821,7 +821,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, metrics) = spawn_metrics!(self, future);
+        let (label, metric) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor();
@@ -831,7 +831,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metrics, false, children);
+        let (f, handle) = Handle::init_future(future, metric, false, children);
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -848,7 +848,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, metrics) = spawn_metrics!(self, future);
+        let (label, metric) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor();
@@ -856,7 +856,7 @@ impl crate::Spawner for Context {
         move |f: F| {
             // Give spawned task its own empty children list
             let (f, handle) =
-                Handle::init_future(f, metrics, false, Arc::new(Mutex::new(Vec::new())));
+                Handle::init_future(f, metric, false, Arc::new(Mutex::new(Vec::new())));
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -893,11 +893,11 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, metrics) = spawn_metrics!(self, blocking, dedicated);
+        let (label, metric) = spawn_metrics!(self, blocking, dedicated);
 
         // Initialize the blocking task
         let executor = self.executor();
-        let (f, handle) = Handle::init_blocking(|| f(self), metrics, false);
+        let (f, handle) = Handle::init_blocking(|| f(self), metric, false);
 
         // Spawn the task
         let f = async move { f() };
@@ -915,12 +915,12 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, metrics) = spawn_metrics!(self, blocking, dedicated);
+        let (label, metric) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor();
         move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metrics, false);
+            let (f, handle) = Handle::init_blocking(f, metric, false);
 
             // Spawn the task
             let f = async move { f() };

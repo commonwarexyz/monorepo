@@ -36,9 +36,9 @@ macro_rules! spawn_metrics {
         let label = $label;
         let metrics = $ctx.metrics();
         metrics.tasks_spawned.get_or_create(&label).inc();
-        let metrics = $crate::utils::MetricHandle::new(
+        let metric = $crate::utils::MetricHandle::new(
             metrics.tasks_running.get_or_create(&label).clone(),
         );
-        (label, metrics)
+        (label, metric)
     }};
 }
