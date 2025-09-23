@@ -223,8 +223,8 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     continue;
                 }
 
+                // This resource is already saturated; any flow touching it freezes immediately.
                 if resource.remaining.is_zero() {
-                    // This resource is already saturated; any flow touching it freezes immediately.
                     limiting.clear();
                     limiting.push(res_idx);
                     min_delta = Some(Ratio::zero());
@@ -258,22 +258,21 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 Some(delta) => delta,
                 None => {
                     // Every active flow should have been tied to at least one limited resource.
-                    debug_assert_eq!(self.active_flows, 0, "active flows without constraints");
+                    assert_eq!(self.active_flows, 0, "active flows without constraints");
                     break;
                 }
             };
 
+            // Capacity was already consumed, so immediately freeze the affected flows.
             if delta.is_zero() {
-                // Capacity was already consumed, so immediately freeze the affected flows.
                 for &res_idx in &limiting {
                     self.freeze(res_idx);
                 }
                 continue;
             }
 
-            // Raise the shared fill level; individual rates are materialised on freeze.
+            // Raise the shared fill level; individual rates are materialized on freeze.
             self.current_fill.add_assign(&delta);
-
             let mut saturated = Vec::new();
             for (res_idx, resource) in self.resources.iter_mut().enumerate() {
                 if resource.active == 0 {
@@ -284,20 +283,21 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 if usage.is_zero() {
                     continue;
                 }
+
+                // Track newly saturated resources so their flows freeze this iteration.
                 resource.remaining.sub_assign(&usage);
                 if resource.remaining.is_zero() {
-                    // Track newly saturated resources so their flows freeze this iteration.
                     saturated.push(res_idx);
                 }
             }
-
             saturated.extend(limiting.iter().copied());
             if saturated.is_empty() {
                 continue;
             }
+
             // Step 3: freeze every flow touching the resources that just saturated so they are not
             // considered in the next iteration.
-            saturated.sort_unstable();
+            saturated.sort();
             saturated.dedup();
             for res_idx in saturated {
                 self.freeze(res_idx);
@@ -307,8 +307,10 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
     /// Consume the planner, finalising the rate for every flow and returning the result map.
     fn solve(mut self) -> BTreeMap<u64, Rate> {
+        // Run the progressive filling algorithm until every constrained flow is frozen.
         self.fill();
 
+        // Finalize the rates for every flow.
         let mut result = BTreeMap::new();
         for (idx, flow) in self.flows.iter().enumerate() {
             let rate = match &self.rates[idx] {
