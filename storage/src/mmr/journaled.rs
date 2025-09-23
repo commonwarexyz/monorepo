@@ -13,11 +13,11 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
         hasher::Hasher,
-        iterator::{nodes_to_pin, PeakIterator},
+        iterator::{leaf_pos_to_loc, nodes_to_pin, PeakIterator},
         mem::{Config as MemConfig, Mmr as MemMmr},
         storage::Storage,
-        verification, Error,
-        Error::*,
+        verification,
+        Error::{self, *},
         Proof,
     },
 };
@@ -337,6 +337,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         context: E,
         cfg: SyncConfig<H::Digest>,
     ) -> Result<Self, crate::adb::Error> {
+        println!("SIZEEEE: {} {}", cfg.lower_bound_pos, cfg.upper_bound_pos);
         let journal = init_journal(
             context.with_label("mmr_journal"),
             JConfig {
