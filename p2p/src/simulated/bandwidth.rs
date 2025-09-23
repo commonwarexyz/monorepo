@@ -110,7 +110,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     ///
     /// Unbounded resources return `None`, allowing callers to skip any additional bookkeeping for
     /// flows that touch them.
-    fn track(&mut self, constraint: Constraint<P>, limit: Option<u128>) -> Option<usize> {
+    fn constrain(&mut self, constraint: Constraint<P>, limit: Option<u128>) -> Option<usize> {
         if let Some(index) = self.indices.get(&constraint) {
             return Some(*index);
         }
@@ -143,7 +143,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             let mut state = State::new();
 
             // Register the flow with its egress resource if the sender is bandwidth-limited.
-            if let Some(resource_idx) = self.track(
+            if let Some(resource_idx) = self.constrain(
                 Constraint::Egress(flow.origin.clone()),
                 egress_limit(&flow.origin),
             ) {
@@ -153,7 +153,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             // Only track ingress when the recipient actually needs to receive the bytes.
             if flow.delivered {
                 // Register the flow with its ingress resource if the recipient is bandwidth-limited.
-                if let Some(resource_idx) = self.track(
+                if let Some(resource_idx) = self.constrain(
                     Constraint::Ingress(flow.recipient.clone()),
                     ingress_limit(&flow.recipient),
                 ) {
