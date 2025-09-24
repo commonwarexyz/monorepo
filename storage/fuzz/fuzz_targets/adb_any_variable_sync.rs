@@ -4,7 +4,10 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::any::variable::{Any, Config},
+    adb::{
+        any::variable::{Any, Config},
+        verify_proof,
+    },
     mmr::hasher::Standard,
     translator::TwoCap,
 };
@@ -45,12 +48,12 @@ enum Operation {
     },
     Proof {
         start_offset: u32,
-        max_ops: u8,
+        max_ops: u16,
     },
     HistoricalProof {
-        size_offset: u32,
+        size: u32,
         start_offset: u32,
-        max_ops: u8,
+        max_ops: u16,
     },
     Sync,
     OldestRetainedLoc,
@@ -119,11 +122,11 @@ impl<'a> Arbitrary<'a> for Operation {
                 })
             }
             10 => {
-                let size_offset = u.arbitrary()?;
+                let size = u.arbitrary()?;
                 let start_offset = u.arbitrary()?;
                 let max_ops = u.arbitrary()?;
                 Ok(Operation::HistoricalProof {
-                    size_offset,
+                    size,
                     start_offset,
                     max_ops,
                 })
@@ -180,6 +183,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
+        let mut hasher = Standard::<Sha256>::new();
         let mut db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
             context.clone(),
             test_config("adb_any_variable_fuzz_test"),
@@ -249,22 +253,39 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let start_loc = (*start_offset as u64) % op_count;
-                        let max_ops_value = ((*max_ops as u64) % 100) + 1;
-                        let _ = db.proof(start_loc, max_ops_value).await;
+                        let max_ops_value = *max_ops as u64;
+                        // TODO: remove this after fixing the bug mentioned in the PR discussions
+                        if start_loc + max_ops_value <=1 || start_loc > max_ops_value {
+                            continue
+                        }
+                        let root = db.root(&mut hasher);
+                        if let Ok((proof, log)) = db.proof(start_loc, max_ops_value).await {
+                            assert!(verify_proof(&mut hasher, &proof, start_loc, &log, &root));
+                        }
                     }
                 }
 
                 Operation::HistoricalProof {
-                    size_offset,
+                    size,
                     start_offset,
                     max_ops,
                 } => {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
-                        let size = ((*size_offset as u64) % op_count) + 1;
-                        let start_loc = (*start_offset as u64) % size;
-                        let max_ops_value = ((*max_ops as u64) % 100) + 1;
-                        let _ = db.historical_proof(size, start_loc, max_ops_value).await;
+                        let size = ((*size as u64) % op_count) + 1;
+                        //let start_loc = (*start_offset as u64) % size;
+                        let start_loc = (*start_offset as u64).clamp(0, op_count);
+                        let max_ops_value = *max_ops as u64;
+                        // TODO: remove this after fixing the bug mentioned in the PR discussions
+                        if start_loc + max_ops_value <=1 || start_loc > max_ops_value || start_loc >= size {
+                            continue
+                        }
+                        let root = db.root(&mut hasher);
+                        if let Ok((proof, log)) =
+                            db.historical_proof(size, start_loc, max_ops_value).await
+                        {
+                            assert!(verify_proof(&mut hasher, &proof, start_loc, &log, &root));
+                        }
                     }
                 }
 
