@@ -185,7 +185,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use futures::{channel::mpsc, future::join_all, SinkExt, StreamExt};
+    use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -1003,18 +1003,13 @@ mod tests {
 
             // Send message to all peers concurrently
             // and wait for all sends to be acknowledged
-            join_all(peers.iter().skip(1).map(|peer| {
-                let mut sender = senders[0].clone();
-                let recipient = peer.clone();
-                let msg = Bytes::from(vec![0u8; MESSAGE_SIZE]);
-                context.clone().spawn(|_| async move {
-                    sender
-                        .send(Recipients::One(recipient), msg, true)
-                        .await
-                        .unwrap()
-                })
-            }))
-            .await;
+            let msg = Bytes::from(vec![0u8; MESSAGE_SIZE]);
+            for peer in peers.iter().skip(1) {
+                senders[0]
+                    .send(Recipients::One(peer.clone()), msg.clone(), true)
+                    .await
+                    .unwrap();
+            }
 
             // Verify all messages are received
             for receiver in receivers.iter_mut().skip(1) {
@@ -1042,18 +1037,13 @@ mod tests {
 
             // Each peer sends a message to the main peer concurrently and we wait for all
             // sends to be acknowledged
-            join_all(senders.iter().skip(1).map(|sender| {
-                let mut sender = sender.clone();
-                let recipient = peers[0].clone();
-                let msg = Bytes::from(vec![0; MESSAGE_SIZE]);
-                context.clone().spawn(|_| async move {
-                    sender
-                        .send(Recipients::One(recipient), msg, true)
-                        .await
-                        .unwrap()
-                })
-            }))
-            .await;
+            let msg = Bytes::from(vec![0; MESSAGE_SIZE]);
+            for mut sender in senders.into_iter().skip(1) {
+                sender
+                    .send(Recipients::One(peers[0].clone()), msg.clone(), true)
+                    .await
+                    .unwrap();
+            }
 
             // Collect all messages at the main peer
             let mut received_from = HashSet::new();
