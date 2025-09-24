@@ -104,7 +104,7 @@ p256 = { version = "0.13.2", default-features = false }
 test-case = "3.3.1"
 chacha20poly1305 = "0.10.1"
 num-bigint = "0.4.6"
-num-rational = { version = "0.4.2", features = ["bigint"] }
+num-rational = { version = "0.4.2", features = ["num-bigint"] }
 num-traits = "0.2.19"
 num-integer = "0.1.46"
 

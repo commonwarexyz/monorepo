@@ -10,7 +10,7 @@ use commonware_utils::{time::NANOS_PER_SEC, DurationExt};
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_rational::BigRational;
-use num_traits::{One, ToPrimitive, Zero};
+use num_traits::{ToPrimitive, Zero};
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 /// Minimal description of a simulated transmission path.
