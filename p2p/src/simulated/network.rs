@@ -282,33 +282,36 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Process completions from the transmitter.
     fn process_completions(&mut self, completions: Vec<Completion<P>>) {
         for completion in completions {
-            if completion.deliver {
-                let key = (completion.origin.clone(), completion.recipient.clone());
-                let Some(arrival_complete_at) = completion.arrival_complete_at else {
-                    continue;
-                };
-                match self.links.get_mut(&key) {
-                    Some(link) => {
-                        if let Err(err) =
-                            link.send(completion.channel, completion.message, arrival_complete_at)
-                        {
-                            error!(?err, "failed to send");
-                        }
-                    }
-                    None => {
-                        trace!(
-                            origin = ?completion.origin,
-                            recipient = ?completion.recipient,
-                            "missing link for completion",
-                        );
-                    }
-                }
-            } else {
+            // If there is no message to deliver, then skip
+            if !completion.deliver {
                 trace!(
                     origin = ?completion.origin,
                     recipient = ?completion.recipient,
                     "message dropped before delivery",
                 );
+            }
+
+            // Send message to link
+            let key = (completion.origin.clone(), completion.recipient.clone());
+            let Some(arrival_complete_at) = completion.arrival_complete_at else {
+                continue;
+            };
+            match self.links.get_mut(&key) {
+                Some(link) => {
+                    if let Err(err) =
+                        link.send(completion.channel, completion.message, arrival_complete_at)
+                    {
+                        error!(?err, "failed to send");
+                    }
+                }
+                None => {
+                    // This can happen if the link is removed before the message is delivered
+                    trace!(
+                        origin = ?completion.origin,
+                        recipient = ?completion.recipient,
+                        "missing link for completion",
+                    );
+                }
             }
         }
     }
