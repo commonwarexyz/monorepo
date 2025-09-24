@@ -7,9 +7,107 @@ use commonware_cryptography::{
 };
 use commonware_storage::bmt::{self, Builder};
 use rand::seq::SliceRandom;
+use rand_core::CryptoRngCore;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
+
+fn gf16_mul(a: u16, b: u16) -> u16 {
+    #[inline(always)]
+    fn mul_u(a: u16, mut b: u16) -> (u16, u16) {
+        let mut a = u32::from(a);
+        let mut u = 0u32;
+        while b > 0 {
+            u ^= a & (0u32.wrapping_sub(u32::from(b & 1)));
+            b >>= 1;
+            a <<= 1;
+        }
+        (u as u16, (u >> 16) as u16)
+    }
+    let (mut out, mut hi) = mul_u(a, b);
+    while hi > 0 {
+        // 0x2D is the irreducible polynomial used in the RS Simd crate.
+        let (l, h) = mul_u(hi, 0x2D);
+        out ^= l;
+        hi = h
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct Gf16x8 {
+    data: [u8; 16],
+}
+
+impl Gf16x8 {
+    fn zero() -> Self {
+        Self { data: [0u8; 16] }
+    }
+
+    fn add(&mut self, other: &Self) {
+        for i in 0..16 {
+            self.data[i] ^= other.data[i];
+        }
+    }
+
+    fn scale(&self, s: u16) -> Self {
+        let mut data = [0u8; 16];
+        for i in 0..8 {
+            let a = u16::from(self.data[2 * i]) | (u16::from(self.data[2 * i + 1]) << 8);
+            data[2 * i..2 * (i + 1)].copy_from_slice(&gf16_mul(a, s).to_le_bytes());
+        }
+        Self { data }
+    }
+
+    fn rand(mut rng: impl CryptoRngCore) -> Self {
+        let mut data = [0u8; 16];
+        rng.fill_bytes(&mut data);
+        Self { data }
+    }
+}
+
+impl AsRef<[u8]> for Gf16x8 {
+    fn as_ref(&self) -> &[u8] {
+        self.data.as_slice()
+    }
+}
+
+fn row_checksum(coeffs: &[Gf16x8], row: &[u8]) -> Gf16x8 {
+    assert_eq!(2 * coeffs.len(), row.len());
+    let mut out = Gf16x8::zero();
+    let row_els = row
+        .chunks_exact(2)
+        .map(|x| u16::from(x[0]) | (u16::from(x[1]) << 8));
+    for (coeff, row_el) in coeffs.iter().zip(row_els) {
+        out.add(&coeff.scale(row_el));
+    }
+    out
+}
+
+fn encode_checks(topology: &Topology, mut checks: Vec<Vec<Gf16x8>>) -> Vec<Vec<Gf16x8>> {
+    assert_eq!(checks.len(), topology.check_columns);
+    let chunk_size = 16 * topology.check_columns;
+    let mut chunk = vec![0u8; chunk_size];
+    let mut encoder =
+        ReedSolomonEncoder::new(topology.min_rows(), topology.extra_rows(), chunk_size)
+            .expect("TODO");
+    for i in 0..topology.min_rows() {
+        for (j, check) in checks.iter().enumerate() {
+            chunk[16 * j..16 * (j + 1)].copy_from_slice(check[i].as_ref());
+        }
+        encoder.add_original_shard(&chunk).expect("TODO");
+    }
+    let res = encoder.encode().expect("TODO");
+    for recovery in res.recovery_iter() {
+        for (i, bytes) in recovery.chunks_exact(16).enumerate() {
+            let el = Gf16x8 {
+                data: bytes.try_into().expect("TODO"),
+            };
+            checks[i].push(el);
+        }
+    }
+    checks
+}
 
 const NAMESPACE: &[u8] = b"commonware-zoda";
 
@@ -117,6 +215,7 @@ pub struct Shard<H: Hasher> {
     rows: Vec<Row<H>>,
     data_bytes: u64,
     root: H::Digest,
+    checks: Arc<Vec<Vec<Gf16x8>>>,
 }
 
 impl<H: Hasher> EncodeSize for Shard<H> {
@@ -185,6 +284,8 @@ pub struct CheckingData<H: Hasher> {
     root: H::Digest,
     topology: Topology,
     shuffled_indices: Vec<u16>,
+    encoded_checks: Vec<Vec<Gf16x8>>,
+    check_coefficients: Vec<Vec<Gf16x8>>,
 }
 
 impl<H: Hasher> CheckingData<H> {
@@ -193,6 +294,7 @@ impl<H: Hasher> CheckingData<H> {
         commitment: &Summary,
         root: H::Digest,
         data_bytes: u64,
+        checks: Vec<Vec<Gf16x8>>,
     ) -> Result<Self, ZodaError> {
         let topology = Topology::reckon(config, data_bytes as usize);
         let expected_commitment = Transcript::new(NAMESPACE)
@@ -204,10 +306,24 @@ impl<H: Hasher> CheckingData<H> {
         }
         let transcript = Transcript::resume(expected_commitment);
         let shuffled_indices = shuffle_indices(&transcript, topology.total_rows() as u16);
+
+        let mut check_rng = transcript.noise(b"check_rng");
+        let check_coefficients = (0..topology.check_columns)
+            .map(|_| {
+                (0..topology.chunk_size() / 2)
+                    .map(|_| Gf16x8::rand(&mut check_rng))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let encoded_checks = encode_checks(&topology, checks);
+
         Ok(Self {
             root,
             topology,
             shuffled_indices,
+            check_coefficients,
+            encoded_checks,
         })
     }
 
@@ -234,6 +350,13 @@ impl<H: Hasher> CheckingData<H> {
                     &self.root,
                 )
                 .map_err(|_| ZodaError::Something)?;
+            for (j, coeffs) in self.check_coefficients.iter().enumerate() {
+                let expected = self.encoded_checks[j][position as usize];
+                let actual = row_checksum(coeffs, &row.data);
+                if actual != expected {
+                    return Err(ZodaError::Something);
+                }
+            }
         }
 
         Ok(CheckedShard {
@@ -305,6 +428,23 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let transcript = Transcript::resume(commitment);
 
         let shuffled_indices = shuffle_indices(&transcript, topology.total_rows() as u16);
+
+        let mut check_rng = transcript.noise(b"check_rng");
+        let checks = (0..topology.check_columns)
+            .map(|_| {
+                let width = topology.chunk_size() / 2;
+                let coefficients = (0..width)
+                    .map(|_| Gf16x8::rand(&mut check_rng))
+                    .collect::<Vec<_>>();
+                row_data
+                    .iter()
+                    .take(topology.min_rows())
+                    .map(|row| row_checksum(&coefficients, &row))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let checks = Arc::new(checks);
+
         let shards: Vec<Self::Shard> = (0..config.minimum_shards + config.extra_shards)
             .map(|index| {
                 let rows = (0..topology.row_samples)
@@ -321,6 +461,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
                     rows,
                     data_bytes: topology.data_bytes as u64,
                     root,
+                    checks: checks.clone(),
                 }
             })
             .collect();
@@ -334,7 +475,13 @@ impl<H: Hasher> Scheme for Zoda<H> {
         index: u16,
         shard: Self::Shard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
-        let checking_data = CheckingData::reckon(config, commitment, shard.root, shard.data_bytes)?;
+        let checking_data = CheckingData::reckon(
+            config,
+            commitment,
+            shard.root,
+            shard.data_bytes,
+            Arc::unwrap_or_clone(shard.checks),
+        )?;
         let reshard = ReShard {
             rows: Arc::new(shard.rows),
         };
@@ -353,7 +500,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     }
 
     fn decode(
-        config: &Config,
+        _config: &Config,
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
