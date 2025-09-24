@@ -98,13 +98,13 @@ pub trait Scheme {
     /// A commitment attesting to the shards of data.
     type Commitment: Digest;
     /// A shard of data, to be received by a participant.
-    type Shard: Codec;
+    type Shard: Codec + Send + Sync + 'static;
     /// A shard shared with other participants, to aid them in reconstruction.
     ///
     /// In most cases, this will be the same as `Shard`, but some schemes might
     /// have extra information in `Shard` that may not be necessary to reconstruct
     /// the data.
-    type ReShard: Codec;
+    type ReShard: Codec + Send + Sync + 'static;
     /// Data which can assist in checking shards.
     type CheckingData;
     /// A shard that has been checked for inclusion in the commitment.
