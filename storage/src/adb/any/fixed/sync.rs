@@ -1062,7 +1062,7 @@ mod tests {
             // Capture target state
             let mut hasher = test_hasher();
             let lower_bound = target_db.inactivity_floor_loc;
-            let upper_bound = target_db.op_count() - 1;
+            let upper_bound = Location::new(target_db.op_count() - 1);
             let root = target_db.root(&mut hasher);
 
             // Create client with target that will complete immediately
@@ -1074,8 +1074,8 @@ mod tests {
                 fetch_batch_size: NZU64!(20),
                 target: Target {
                     root,
-                    lower_bound: lower_bound,
-                    upper_bound: Location::new(upper_bound),
+                    lower_bound,
+                    upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1092,15 +1092,15 @@ mod tests {
                 .send(Target {
                     // Dummy target update
                     root: sha256::Digest::from([2u8; 32]),
-                    lower_bound: Location::new(lower_bound.as_u64() + 1),
-                    upper_bound: Location::new(upper_bound + 1),
+                    lower_bound: lower_bound.saturating_add(1),
+                    upper_bound: upper_bound.saturating_add(1),
                 })
                 .await;
 
             // Verify the synced database has the expected state
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), root);
-            assert_eq!(synced_db.op_count(), upper_bound + 1);
+            assert_eq!(synced_db.op_count(), upper_bound.saturating_add(1).as_u64());
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
 
             synced_db.destroy().await.unwrap();
@@ -1273,7 +1273,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: target_root,
-                    lower_bound: lower_bound,
+                    lower_bound,
                     upper_bound: Location::new(upper_bound),
                 },
                 context,

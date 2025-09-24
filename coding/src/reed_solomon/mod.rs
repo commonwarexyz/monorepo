@@ -106,7 +106,7 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     let mut shard_len = prefixed_len.div_ceil(k);
 
     // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
-    if shard_len % 2 != 0 {
+    if !shard_len.is_multiple_of(2) {
         shard_len += 1;
     }
 

@@ -1,5 +1,7 @@
-use crate::adb::sync::{self, error::EngineError};
-use crate::mmr::Location;
+use crate::{
+    adb::sync::{self, error::EngineError},
+    mmr::Location,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
