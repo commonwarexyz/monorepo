@@ -49,9 +49,7 @@ pub fn find_next(
     let mut outstanding_reqs_iter = outstanding_requests
         .iter()
         .map(|&start_loc| {
-            let end_loc = start_loc
-                + fetch_batch_size.get()
-                - 1;
+            let end_loc = start_loc + fetch_batch_size.get() - 1;
             (start_loc, end_loc)
         })
         .peekable();

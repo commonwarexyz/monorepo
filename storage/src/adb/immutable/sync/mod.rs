@@ -1013,10 +1013,7 @@ mod tests {
             // Verify the synced database has the expected state
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), final_root);
-            assert_eq!(
-                synced_db.op_count(),
-                (final_upper_bound + 1).as_u64()
-            );
+            assert_eq!(synced_db.op_count(), (final_upper_bound + 1).as_u64());
             assert_eq!(synced_db.oldest_retained_loc, final_lower_bound);
 
             synced_db.destroy().await.unwrap();

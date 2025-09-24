@@ -1028,7 +1028,7 @@ mod tests {
                 .send(Target {
                     root: initial_root,
                     lower_bound: initial_upper_bound, // Greater than upper bound
-                    upper_bound: initial_lower_bound,                // Less than lower bound
+                    upper_bound: initial_lower_bound, // Less than lower bound
                 })
                 .await
                 .unwrap();

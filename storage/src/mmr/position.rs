@@ -163,6 +163,19 @@ mod tests {
         assert!(pos.checked_sub(11).is_none());
     }
 
+    #[test]
+    fn test_saturating_add() {
+        let pos = Position::new(10);
+        assert_eq!(pos.saturating_add(5).as_u64(), 15);
+        assert_eq!(Position::new(u64::MAX).saturating_add(1).as_u64(), u64::MAX);
+    }
+
+    #[test]
+    fn test_saturating_sub() {
+        let pos = Position::new(10);
+        assert_eq!(pos.saturating_sub(5).as_u64(), 5);
+        assert_eq!(Position::new(0).saturating_sub(1).as_u64(), 0);
+    }
 
     #[test]
     fn test_display() {

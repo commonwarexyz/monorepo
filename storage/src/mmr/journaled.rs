@@ -975,10 +975,7 @@ mod tests {
             assert!(matches!(mmr.pop(1).await, Err(Error::ElementPruned(_))));
 
             // Make sure pruning to an older location is a no-op.
-            assert!(mmr
-                .prune_to_pos(&mut hasher, leaf_pos - 1)
-                .await
-                .is_ok());
+            assert!(mmr.prune_to_pos(&mut hasher, leaf_pos - 1).await.is_ok());
             assert_eq!(mmr.pruned_to_pos(), leaf_pos);
 
             mmr.destroy().await.unwrap();
