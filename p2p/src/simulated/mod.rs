@@ -133,6 +133,7 @@
 //! ```
 
 mod bandwidth;
+pub mod helpers;
 mod ingress;
 mod metrics;
 mod network;
