@@ -233,8 +233,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     break;
                 }
 
-                let share = resource.remaining.clone()
-                    / BigRational::from_u64(resource.active as u64);
+                let share = resource.remaining.clone() / BigRational::from_usize(resource.active);
                 match &min_delta {
                     None => {
                         // First candidate: provisionally treat it as the tightest constraint.
@@ -287,8 +286,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 }
 
                 // Charge each resource for the uniform allocation it just handed out.
-                let usage =
-                    delta.clone() * BigRational::from_u64(resource.active as u64);
+                let usage = delta.clone() * BigRational::from_usize(resource.active);
                 if usage.is_zero() {
                     continue;
                 }
@@ -477,10 +475,6 @@ mod tests {
         move |_| None
     }
 
-    fn int(value: u64) -> BigRational {
-        BigRational::from_u64(value)
-    }
-
     fn frac(num: u64, den: u64) -> BigRational {
         BigRational::new(BigInt::from(num), BigInt::from(den))
     }
@@ -551,19 +545,19 @@ mod tests {
     fn transfer_accumulates_carry() {
         let ratio = frac(1, 2); // 0.5 bytes per second
         let rate = Rate::Finite(ratio);
-        let initial = int(10);
+        let initial = BigRational::from_u128(10);
 
         let after_short = transfer(&rate, Duration::from_millis(500), initial);
         assert_eq!(after_short, frac(39, 4));
 
         let after_long = transfer(&rate, Duration::from_millis(1500), after_short);
-        assert_eq!(after_long, int(9));
+        assert_eq!(after_long, BigRational::from_u128(9));
     }
 
     #[test]
     fn finish_duration_accounts_for_fractional_progress() {
         let rate = Rate::Finite(frac(1, 2));
-        let initial = int(1);
+        let initial = BigRational::from_u128(1);
         let partial = transfer(&rate, Duration::from_millis(500), initial.clone());
         assert_eq!(partial, frac(3, 4));
 
@@ -577,9 +571,9 @@ mod tests {
 
     #[test]
     fn bandwidth_duration() {
-        let ratio = int(500);
+        let ratio = BigRational::from_u128(500);
         let rate = Rate::Finite(ratio);
-        let time = duration(&rate, &int(1_000)).expect("finite time");
+        let time = duration(&rate, &BigRational::from_u128(1_000)).expect("finite time");
         assert_eq!(time.as_secs(), 2);
     }
 
