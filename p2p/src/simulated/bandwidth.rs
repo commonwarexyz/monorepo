@@ -232,7 +232,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     break;
                 }
 
-                let share = resource.remaining.clone() / BigRational::from_usize(resource.active);
+                let share = &resource.remaining / BigRational::from_usize(resource.active);
                 match &min_delta {
                     None => {
                         // First candidate: provisionally treat it as the tightest constraint.
@@ -276,7 +276,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             }
 
             // Raise the shared fill level; individual rates are materialized on freeze.
-            self.fill += delta.clone();
+            self.fill += &delta;
             let mut saturated = Vec::new();
             for (res_idx, resource) in self.resources.iter_mut().enumerate() {
                 // Skip resources that are not active.
@@ -285,7 +285,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 }
 
                 // Charge each resource for the uniform allocation it just handed out.
-                let usage = delta.clone() * BigRational::from_usize(resource.active);
+                let usage = &delta * BigRational::from_usize(resource.active);
                 if usage.is_zero() {
                     continue;
                 }
@@ -392,7 +392,7 @@ pub fn duration(rate: &Rate, remaining: &BigRational) -> Option<Duration> {
                 return None;
             }
 
-            let seconds = remaining.clone() / ratio.clone();
+            let seconds = remaining / ratio;
             if seconds.is_zero() {
                 return Some(Duration::ZERO);
             }
@@ -430,7 +430,7 @@ pub fn transfer(rate: &Rate, elapsed: Duration, mut remaining: BigRational) -> B
                 return remaining;
             }
 
-            let usage = ratio.clone() * elapsed_ratio;
+            let usage = ratio * &elapsed_ratio;
             if usage >= remaining {
                 return BigRational::zero();
             }
