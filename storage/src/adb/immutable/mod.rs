@@ -436,10 +436,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             .prune(self.oldest_retained_loc.as_u64())
             .await?;
         self.mmr
-            .prune_to_pos(
-                &mut self.hasher,
-                Position::from(self.oldest_retained_loc).as_u64(),
-            )
+            .prune_to_pos(&mut self.hasher, Position::from(self.oldest_retained_loc))
             .await?;
         Ok(())
     }

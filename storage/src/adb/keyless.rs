@@ -451,10 +451,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // Prune locations and the MMR to the corresponding positions.
         try_join!(
             self.mmr
-                .prune_to_pos(
-                    &mut self.hasher,
-                    Position::from(Location::from(prune_loc)).as_u64()
-                )
+                .prune_to_pos(&mut self.hasher, Position::from(Location::from(prune_loc)))
                 .map_err(Error::Mmr),
             self.locations.prune(prune_loc).map_err(Error::Journal),
         )?;
@@ -1032,9 +1029,7 @@ mod test {
             // Simulate a failure during pruning and ensure we recover.
             let db = open_db(context.clone()).await;
             let last_commit_loc = db.last_commit_loc().unwrap();
-            db.simulate_prune_failure(last_commit_loc)
-                .await
-                .unwrap();
+            db.simulate_prune_failure(last_commit_loc).await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(&mut hasher), root);

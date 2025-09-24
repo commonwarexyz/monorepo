@@ -32,7 +32,7 @@ impl<D: Digest> ProofStore<D> {
         hasher: &mut H,
         proof: &Proof<D>,
         elements: &[E],
-        start_loc: u64,
+        start_loc: Location,
         root: &D,
     ) -> Result<Self, Error>
     where
@@ -40,12 +40,8 @@ impl<D: Digest> ProofStore<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let digests = proof.verify_range_inclusion_and_extract_digests(
-            hasher,
-            elements,
-            Location::from(start_loc),
-            root,
-        )?;
+        let digests =
+            proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
 
         Ok(ProofStore::new_from_digests(proof.size, digests))
     }
@@ -90,7 +86,7 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    historical_range_proof(mmr, mmr.size(), range.start.as_u64()..range.end.as_u64()).await
+    historical_range_proof(mmr, mmr.size(), range.start..range.end).await
 }
 
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
@@ -98,7 +94,7 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     size: u64,
-    range: Range<u64>,
+    range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
     // Get the positions of all nodes needed to generate the proof.
     let positions = proof::nodes_required_for_range_proof(size, range);
@@ -198,7 +194,7 @@ mod tests {
                     &mut hasher,
                     &range_proof,
                     &elements[range_usize],
-                    range.start,
+                    Location::new(range.start),
                     &root,
                 )
                 .unwrap();

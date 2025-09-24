@@ -168,8 +168,7 @@ impl<D: Digest> Proof<D> {
         let mut node_positions = BTreeSet::new();
         let mut nodes_required = BTreeMap::new();
         for (_, loc) in elements {
-            let loc_u64 = loc.as_u64();
-            let required = nodes_required_for_range_proof(self.size, loc_u64..(loc_u64 + 1));
+            let required = nodes_required_for_range_proof(self.size, *loc..loc.saturating_add(1));
             for req_pos in &required {
                 node_positions.insert(*req_pos);
             }
@@ -232,10 +231,10 @@ impl<D: Digest> Proof<D> {
     /// returned by `nodes_to_pin` (decreasing height order)
     pub(crate) fn extract_pinned_nodes(
         &self,
-        range: std::ops::Range<u64>,
+        range: std::ops::Range<Location>,
     ) -> Result<Vec<D>, Error> {
         // Get the positions of all nodes that should be pinned.
-        let start_pos = Position::from(Location::from(range.start));
+        let start_pos = Position::from(range.start);
         let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
 
         // Get all positions required for the proof.
@@ -425,14 +424,14 @@ impl<D: Digest> Proof<D> {
 /// # Panics
 ///
 /// Panics if the range is invalid for an MMR of the provided `size`.
-pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<u64>) -> Vec<Position> {
+pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<Location>) -> Vec<Position> {
     let mut positions = Vec::new();
     if range.is_empty() {
         return positions;
     }
 
-    let start_element_pos = Position::from(Location::new(range.start));
-    let end_element_pos = Position::from(Location::new(range.end - 1));
+    let start_element_pos = Position::from(range.start);
+    let end_element_pos = Position::from(range.end.saturating_sub(1));
     assert!(end_element_pos.as_u64() < size, "range is out of bounds");
 
     // Find the mountains that contain no elements from the range. The peaks of these mountains
@@ -521,7 +520,9 @@ pub(crate) fn nodes_required_for_multi_proof(
     locations
         .iter()
         .map(|loc| loc.as_u64())
-        .flat_map(|loc| nodes_required_for_range_proof(size, loc..(loc + 1)))
+        .flat_map(|loc| {
+            nodes_required_for_range_proof(size, Location::new(loc)..Location::new(loc + 1))
+        })
         .collect()
 }
 
@@ -1116,9 +1117,8 @@ mod tests {
 
                 for end_loc in test_end_locs {
                     // Generate proof for the range
-                    let range = leaf..end_loc;
-                    let proof_result =
-                        mmr.range_proof(Location::new(range.start)..Location::new(range.end));
+                    let range = Location::new(leaf)..Location::new(end_loc);
+                    let proof_result = mmr.range_proof(range.clone());
                     let proof = proof_result.unwrap();
 
                     // Extract pinned nodes

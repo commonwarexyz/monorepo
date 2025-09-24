@@ -643,8 +643,7 @@ impl<H: CHasher> Mmr<H> {
             "dirty nodes must be processed before computing proofs"
         );
         let size = self.size();
-        let positions =
-            proof::nodes_required_for_range_proof(size, range.start.as_u64()..range.end.as_u64());
+        let positions = proof::nodes_required_for_range_proof(size, range);
         let digests = positions
             .into_iter()
             .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))

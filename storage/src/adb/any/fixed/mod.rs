@@ -673,7 +673,7 @@ impl<
         );
 
         self.mmr
-            .prune_to_pos(&mut self.hasher, Position::from(target_prune_loc).as_u64())
+            .prune_to_pos(&mut self.hasher, Position::from(target_prune_loc))
             .await?;
 
         Ok(())

@@ -28,8 +28,8 @@ pub fn extract_pinned_nodes<D: Digest>(
     start_loc: Location,
     operations_len: u64,
 ) -> Result<Vec<D>, Error> {
-    let end_loc = start_loc.as_u64() + operations_len;
-    proof.extract_pinned_nodes(start_loc.as_u64()..end_loc)
+    let end_loc = start_loc.saturating_add(operations_len);
+    proof.extract_pinned_nodes(start_loc..end_loc)
 }
 
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their positions)
@@ -64,7 +64,7 @@ pub fn digests_required_for_proof<D: Digest>(
     end_loc: Location,
 ) -> Vec<Position> {
     let size = Position::from(Location::new(op_count));
-    proof::nodes_required_for_range_proof(size.into(), start_loc.as_u64()..(end_loc.as_u64() + 1))
+    proof::nodes_required_for_range_proof(size.into(), start_loc..(end_loc.saturating_add(1)))
         .into_iter()
         .collect()
 }
@@ -93,14 +93,11 @@ where
     H: Hasher<Digest = D>,
     D: Digest,
 {
-    // Convert operation location to MMR position
-    let start_pos = Position::from(start_loc);
-
     // Encode operations for verification
     let elements: Vec<Vec<u8>> = operations.iter().map(|op| op.encode().to_vec()).collect();
 
     // Create ProofStore by verifying the proof and extracting all digests
-    ProofStore::new(hasher, proof, &elements, start_pos.into(), root)
+    ProofStore::new(hasher, proof, &elements, start_loc, root)
 }
 
 /// Create a [ProofStore] from a list of digests (output by [verify_proof_and_extract_digests]).
