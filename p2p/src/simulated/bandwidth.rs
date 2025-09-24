@@ -395,6 +395,9 @@ pub fn duration(rate: &Rate, remaining: &BigRational) -> Option<Duration> {
             if seconds.is_zero() {
                 return Some(Duration::ZERO);
             }
+
+            // Find the minimum number of nanoseconds that will complete the transfer (rounding up to cover
+            // fractional progress).
             let nanos = seconds * BigRational::from_u128(NANOS_PER_SEC);
             let ns = nanos.ceil_to_u128()?;
             Some(Duration::from_nanos_saturating(ns))
