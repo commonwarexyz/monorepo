@@ -209,11 +209,6 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
     /// Run the progressive filling algorithm until every constrained flow is frozen.
     fn fill(&mut self) {
-        if self.active == 0 {
-            return;
-        }
-
-        // Run progressive filling until every constrained flow is frozen.
         while self.active > 0 {
             let mut limiting = Vec::new();
             let mut min_delta: Option<Ratio> = None;
