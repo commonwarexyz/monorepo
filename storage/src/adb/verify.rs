@@ -72,8 +72,8 @@ pub fn digests_required_for_proof<D: Digest>(
 /// Create a [Proof] from a op_count and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
-pub fn create_proof<D: Digest>(op_count: u64, digests: Vec<D>) -> Proof<D> {
-    let size = Position::from(Location::new(op_count));
+pub fn create_proof<D: Digest>(op_count: Location, digests: Vec<D>) -> Proof<D> {
+    let size = Position::from(op_count);
     Proof::<D> {
         size: size.into(),
         digests,
@@ -354,15 +354,12 @@ mod tests {
 
             // The size here is the number of leaves added (15 in this case)
             let op_count = 15;
-            let start_loc = 3u64;
-            let end_loc = 7u64;
+            let start_loc = Location::new(3u64);
+            let end_loc = Location::new(7u64);
 
             // Get required digests
-            let required_positions = digests_required_for_proof::<Digest>(
-                op_count,
-                Location::new(start_loc),
-                Location::new(end_loc),
-            );
+            let required_positions =
+                digests_required_for_proof::<Digest>(op_count, start_loc, end_loc);
 
             // Fetch the actual digests
             let mut digests = Vec::new();
@@ -373,16 +370,15 @@ mod tests {
             }
 
             // Construct proof
-            let proof = create_proof(op_count, digests.clone());
+            let proof = create_proof(Location::new(op_count), digests.clone());
             assert_eq!(proof.size, Position::from(Location::new(op_count)).as_u64());
             assert_eq!(proof.digests.len(), digests.len());
 
-            // Verify the constructed proof works correctly
             assert!(verify_proof(
                 &mut hasher,
                 &proof,
-                Location::new(start_loc),
-                &operations[start_loc as usize..=end_loc as usize],
+                start_loc,
+                &operations[start_loc.as_u64() as usize..=end_loc.as_u64() as usize],
                 &root,
             ));
         });

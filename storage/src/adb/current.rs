@@ -665,17 +665,15 @@ impl<
     async fn operation_inclusion_proof(
         &self,
         hasher: &mut H,
-        loc: u64,
+        loc: Location,
     ) -> Result<(Proof<H::Digest>, Fixed<K, V>, u64, [u8; N]), Error> {
-        let op = self.any.log.read(loc).await?;
+        let op = self.any.log.read(loc.as_u64()).await?;
 
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof =
-            verification::range_proof(&grafted_mmr, Location::new(loc)..Location::new(loc + 1))
-                .await?;
-        let chunk = *self.status.get_chunk(loc);
+        let mut proof = verification::range_proof(&grafted_mmr, loc..loc.saturating_add(1)).await?;
+        let chunk = *self.status.get_chunk(loc.as_u64());
 
         let last_chunk = self.status.last_chunk();
         if last_chunk.1 != 0 {
@@ -683,7 +681,7 @@ impl<
             proof.digests.push(hasher.finalize());
         }
 
-        Ok((proof, op, loc, chunk))
+        Ok((proof, op, loc.as_u64(), chunk))
     }
 
     #[cfg(test)]
@@ -835,7 +833,7 @@ pub mod test {
 
             let op = db.any.get_key_loc(&k).await.unwrap().unwrap();
             let proof = db
-                .operation_inclusion_proof(hasher.inner(), op.1.as_u64())
+                .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
                 .unwrap();
             let info = KeyValueProofInfo {
@@ -879,7 +877,7 @@ pub mod test {
 
             // Create a proof of the now-inactive operation.
             let proof_inactive = db
-                .operation_inclusion_proof(hasher.inner(), op.1.as_u64())
+                .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
                 .unwrap();
             // This proof should not verify, but only because verification will see that the

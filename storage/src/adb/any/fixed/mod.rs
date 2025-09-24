@@ -333,7 +333,7 @@ impl<
 
         // Iterate over conflicts in the snapshot.
         while let Some(&loc) = cursor.next() {
-            let (k, _) = Self::get_update_op(log, loc).await?;
+            let (k, _) = Self::get_update_op(log, Location::new(loc)).await?;
             if k == *key {
                 // Found the key in the snapshot.
                 assert!(new_loc > loc);
@@ -355,9 +355,15 @@ impl<
     /// Panics if the location does not reference an update operation. This should never happen
     /// unless the snapshot is buggy, or this method is being used to look up an operation
     /// independent of the snapshot contents.
-    async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
-        let Operation::Update(k, v) = log.read(loc).await? else {
-            panic!("location does not reference update operation. loc={loc}");
+    async fn get_update_op(
+        log: &Journal<E, Operation<K, V>>,
+        loc: Location,
+    ) -> Result<(K, V), Error> {
+        let Operation::Update(k, v) = log.read(loc.as_u64()).await? else {
+            panic!(
+                "location does not reference update operation. loc={}",
+                loc.as_u64()
+            );
         };
 
         Ok((k, v))
@@ -384,7 +390,7 @@ impl<
     /// value.
     pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
         for &loc in self.snapshot.get(key) {
-            let (k, v) = Self::get_update_op(&self.log, loc).await?;
+            let (k, v) = Self::get_update_op(&self.log, Location::new(loc)).await?;
             if k == *key {
                 return Ok(Some((v, Location::new(loc))));
             }
@@ -459,7 +465,7 @@ impl<
         };
         // Iterate over all conflicting keys in the snapshot.
         while let Some(&loc) = cursor.next() {
-            let (k, _) = Self::get_update_op(log, loc).await?;
+            let (k, _) = Self::get_update_op(log, Location::new(loc)).await?;
             if k == *key {
                 // The key is in the snapshot, so delete it.
                 //

@@ -673,14 +673,14 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     #[cfg(test)]
     /// Simulate pruning failure by consuming the db and abandoning pruning operation mid-flight.
-    pub(super) async fn simulate_prune_failure(mut self, loc: u64) -> Result<(), Error> {
-        assert!(loc <= self.last_commit_loc.unwrap_or(Location::new(0)).as_u64());
+    pub(super) async fn simulate_prune_failure(mut self, loc: Location) -> Result<(), Error> {
+        assert!(loc.as_u64() <= self.last_commit_loc.unwrap_or(Location::new(0)).as_u64());
         // Perform the same steps as pruning except "crash" right after the log is pruned.
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.locations.sync().map_err(Error::Journal),
         )?;
-        let section = loc / self.log_items_per_section;
+        let section = loc.as_u64() / self.log_items_per_section;
         assert!(
             self.log.prune(section).await?,
             "nothing was pruned, so could not simulate failure"
@@ -1032,7 +1032,7 @@ mod test {
             // Simulate a failure during pruning and ensure we recover.
             let db = open_db(context.clone()).await;
             let last_commit_loc = db.last_commit_loc().unwrap();
-            db.simulate_prune_failure(last_commit_loc.as_u64())
+            db.simulate_prune_failure(last_commit_loc)
                 .await
                 .unwrap();
             let db = open_db(context.clone()).await;
