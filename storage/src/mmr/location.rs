@@ -1,5 +1,9 @@
 use super::position::Position;
-use core::{convert::TryFrom, fmt};
+use core::{
+    convert::TryFrom,
+    fmt,
+    ops::{Add, Sub},
+};
 use thiserror::Error;
 
 /// A [Location] is an index into an MMR's _leaves_.
@@ -68,6 +72,42 @@ impl From<Location> for u64 {
     #[inline]
     fn from(loc: Location) -> Self {
         loc.as_u64()
+    }
+}
+
+impl Add for Location {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl Add<u64> for Location {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: u64) -> Self::Output {
+        Self(self.0 + rhs)
+    }
+}
+
+impl Sub for Location {
+    type Output = Self;
+
+    #[inline]
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self(self.0 - rhs.0)
+    }
+}
+
+impl Sub<u64> for Location {
+    type Output = Self;
+
+    #[inline]
+    fn sub(self, rhs: u64) -> Self::Output {
+        Self(self.0 - rhs)
     }
 }
 
@@ -218,5 +258,19 @@ mod tests {
     fn test_display() {
         let location = Location::new(42);
         assert_eq!(location.to_string(), "Location(42)");
+    }
+
+    #[test]
+    fn test_add() {
+        let loc1 = Location::new(10);
+        let loc2 = Location::new(5);
+        assert_eq!((loc1 + loc2).as_u64(), 15);
+    }
+
+    #[test]
+    fn test_sub() {
+        let loc1 = Location::new(10);
+        let loc2 = Location::new(3);
+        assert_eq!((loc1 - loc2).as_u64(), 7);
     }
 }

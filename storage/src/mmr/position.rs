@@ -1,5 +1,8 @@
 use super::location::Location;
-use core::fmt;
+use core::{
+    fmt,
+    ops::{Add, Sub},
+};
 
 /// A [Position] is an index into an MMR's nodes.
 /// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
@@ -79,6 +82,42 @@ impl From<Location> for Position {
     }
 }
 
+impl Add for Position {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl Add<u64> for Position {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: u64) -> Self::Output {
+        Self(self.0 + rhs)
+    }
+}
+
+impl Sub for Position {
+    type Output = Self;
+
+    #[inline]
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self(self.0 - rhs.0)
+    }
+}
+
+impl Sub<u64> for Position {
+    type Output = Self;
+
+    #[inline]
+    fn sub(self, rhs: u64) -> Self::Output {
+        Self(self.0 - rhs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
@@ -142,5 +181,19 @@ mod tests {
     fn test_display() {
         let position = Position::new(42);
         assert_eq!(position.to_string(), "Position(42)");
+    }
+
+    #[test]
+    fn test_add() {
+        let pos1 = Position::new(10);
+        let pos2 = Position::new(5);
+        assert_eq!((pos1 + pos2).as_u64(), 15);
+    }
+
+    #[test]
+    fn test_sub() {
+        let pos1 = Position::new(10);
+        let pos2 = Position::new(3);
+        assert_eq!((pos1 - pos2).as_u64(), 7);
     }
 }
