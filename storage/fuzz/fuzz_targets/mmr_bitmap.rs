@@ -26,7 +26,7 @@ enum BitmapOperation {
     DirtyChunks,
     GetNode { position: u64 },
     Size,
-    Proof { element_pos: u64 },
+    Proof { bit_offset: u64 },
     RestorePruned,
     WritePruned,
 }
@@ -184,10 +184,22 @@ fn fuzz(input: FuzzInput) {
                     let _ = bitmap.size();
                 }
 
-                BitmapOperation::Proof { element_pos } => {
+                BitmapOperation::Proof { bit_offset } => {
                     if bit_count > pruned_bits && !bitmap.is_dirty() {
-                        let safe_pos = (element_pos % (bit_count - pruned_bits)) + pruned_bits;
-                        let _ = bitmap.proof(&mut hasher, safe_pos).await;
+                        let bit_offset = (bit_offset % (bit_count - pruned_bits)) + pruned_bits;
+                        if let Ok((proof, chunk)) = bitmap.proof(&mut hasher, bit_offset).await {
+                            let root = bitmap.root(&mut hasher).await.unwrap();
+                            assert!(
+                                Bitmap::<_, CHUNK_SIZE>::verify_bit_inclusion(
+                                    &mut hasher,
+                                    &proof,
+                                    &chunk,
+                                    bit_offset,
+                                    &root
+                                ),
+                                "failed to prove bit {bit_offset}",
+                            );
+                        }
                     }
                 }
 

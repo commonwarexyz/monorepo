@@ -177,11 +177,26 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::Proof { element_pos } => {
-                    if element_pos >= mmr.size() {
+                    if positions.is_empty() {
                         continue;
                     }
                     mmr.process_updates(&mut hasher);
-                    let _ = mmr.proof(element_pos).await;
+                    let idx = (element_pos as usize) % positions.len();
+                    let test_element_pos = positions[idx];
+                    
+                    if test_element_pos >= mmr.size() || test_element_pos < mmr.pruned_to_pos() {
+                        continue;
+                    }
+                    
+                    if let Ok(proof) = mmr.proof(test_element_pos).await {
+                        let root = mmr.root(&mut hasher);
+                        assert!(proof.verify_element_inclusion(
+                            &mut hasher,
+                            &elements[idx],
+                            test_element_pos,
+                            &root,
+                        ));
+                    }
                 }
 
                 MmrJournaledOperation::RangeProof { start_pos, end_pos } => {
@@ -190,7 +205,15 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     mmr.process_updates(&mut hasher);
-                    let _ = mmr.range_proof(start_pos, end_pos).await;
+                    if let Ok(proof) = mmr.range_proof(start_pos, end_pos).await {
+                        let original_size = mmr.size();
+                        let historical_proof = mmr
+                            .historical_range_proof(original_size, start_pos, end_pos)
+                            .await
+                            .unwrap();
+                        assert_eq!(proof.size, historical_proof.size);
+                        assert_eq!(proof.digests, historical_proof.digests);
+                    }
                 }
 
                 MmrJournaledOperation::HistoricalRangeProof {
