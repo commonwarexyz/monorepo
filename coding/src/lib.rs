@@ -83,8 +83,8 @@ impl Read for Config {
 /// // We can use this checking_data to check the other shards.
 /// let mut checked_shards = Vec::new();
 /// checked_shards.push(checked_shard);
-/// for reshard in reshards.into_iter().skip(1) {
-///   checked_shards.push(RS::check(&config, &commitment, &checking_data, reshard).unwrap())
+/// for (i, reshard) in reshards.into_iter().enumerate().skip(1) {
+///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
 /// }
 ///
 /// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2]).unwrap();
@@ -145,6 +145,7 @@ pub trait Scheme {
         config: &Config,
         commitment: &Self::Commitment,
         checking_data: &Self::CheckingData,
+        index: u16,
         reshard: Self::ReShard,
     ) -> Result<Self::CheckedShard, Self::Error>;
 
