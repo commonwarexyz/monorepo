@@ -183,7 +183,7 @@ fn fuzz(input: FuzzInput) {
 
                     let leaves_before = mmr.leaves();
                     mmr.process_updates(&mut hasher);
-                    if let Ok(..) = mmr.pop(count as usize).await {
+                    if mmr.pop(count as usize).await.is_ok() {
                         let leaves_after = mmr.leaves();
                         let actually_popped = leaves_before - leaves_after;
 
@@ -275,7 +275,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrJournaledOperation::PruneAll => {
                     mmr.process_updates(&mut hasher);
-                    let _ = mmr.prune_all(&mut hasher).await.unwrap();
+                    mmr.prune_all(&mut hasher).await.unwrap();
                     assert_eq!(mmr.oldest_retained_pos(), None);
 
                     // Return, otherwise we will need to process leaves and update them in `positions`
