@@ -178,34 +178,31 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     /// Finalize all flows that rely on a saturated resource.
-    fn finalize_all(&mut self, res_idx: usize) {
+    fn finalize(&mut self, res_idx: usize) {
         let members = self.resources[res_idx].members.clone();
         for flow_idx in members {
-            self.finalize(flow_idx);
-        }
-    }
+            // Finalize the rate for `flow_idx` and update every referenced resource.
+            //
+            // The flow's share at the moment of freezing becomes its permanent rate; afterwards we
+            // subtract it from every referenced resource so the next progressive-filling iteration only
+            // considers the remaining active flows.
+            let state = &mut self.states[flow_idx];
+            if !state.active {
+                continue;
+            }
 
-    /// Finalize the rate for `flow_idx` and update every referenced resource.
-    ///
-    /// The flow's share at the moment of freezing becomes its permanent rate; afterwards we
-    /// subtract it from every referenced resource so the next progressive-filling iteration only
-    /// considers the remaining active flows.
-    fn finalize(&mut self, flow_idx: usize) {
-        let state = &mut self.states[flow_idx];
-        if !state.active {
-            return;
-        }
+            // The flow's max-min allocation equals the current fill level.
+            self.rates[flow_idx] = Some(self.fill.clone());
+            state.active = false;
+            self.active -= 1;
 
-        // The flow's max-min allocation equals the current fill level.
-        self.rates[flow_idx] = Some(self.fill.clone());
-        state.active = false;
-        self.active -= 1;
-
-        for &res_idx in &state.resources {
-            let resource = &mut self.resources[res_idx];
-            if resource.active > 0 {
-                // Stop counting the flow toward future shares once it is frozen.
-                resource.active -= 1;
+            // Subtract the flow's share from other referenced resources
+            for &other_res_idx in &state.resources {
+                let resource = &mut self.resources[other_res_idx];
+                if resource.active > 0 {
+                    // Stop counting the flow toward future shares once it is frozen.
+                    resource.active -= 1;
+                }
             }
         }
     }
@@ -275,7 +272,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             };
             if delta.is_zero() {
                 for &res_idx in &limiting {
-                    self.finalize_all(res_idx);
+                    self.finalize(res_idx);
                 }
                 continue;
             }
@@ -306,17 +303,17 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 continue;
             }
 
-            // Step 3: freeze every flow touching the resources that just saturated so they are not
+            // Step 3: finalize every flow touching the resources that just saturated so they are not
             // considered in the next iteration.
             saturated.sort();
             saturated.dedup();
             for res_idx in saturated {
-                self.finalize_all(res_idx);
+                self.finalize(res_idx);
             }
         }
     }
 
-    /// Consume the planner, finalising the rate for every flow and returning the result map.
+    /// Consume the planner, finalizing the rate for every flow and returning the result map.
     fn solve(mut self) -> BTreeMap<u64, Rate> {
         // Run the progressive filling algorithm until every constrained flow is frozen.
         self.fill();
@@ -358,7 +355,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 ///
 /// Each sender/receiver cap is modeled as a shared resource. Every flow registers
 /// with the resources it touches, after which we perform progressive filling: raise
-/// the rate of all unfrozen flows uniformly until a resource is depleted, freeze flows
+/// the rate of all unfrozen flows uniformly until a resource is depleted, finalize flows
 /// using that resource, and repeat. This yields a deterministic, starvation-free assignment
 /// that honors both ingress and egress limits.
 pub fn allocate<P, E, I>(
@@ -759,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_freeze_clears_active_counts() {
+    fn planner_finalize_clears_active_counts() {
         let flows = vec![
             Flow {
                 id: 1,
@@ -781,7 +778,7 @@ mod tests {
         assert_eq!(planner.active(), 2);
 
         // Finalizing the shared egress resource should finalize both flows and zero the counters.
-        planner.finalize_all(0);
+        planner.finalize(0);
 
         let resources = planner.resources();
         assert_eq!(resources[0].active, 0);
