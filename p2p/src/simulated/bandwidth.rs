@@ -8,9 +8,8 @@
 
 use commonware_utils::{time::NANOS_PER_SEC, BigRationalExt, DurationExt};
 use num_bigint::BigInt;
-use num_integer::Integer;
 use num_rational::BigRational;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::Zero;
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 /// Minimal description of a simulated transmission path.
@@ -398,7 +397,7 @@ pub fn duration(rate: &Rate, remaining: &BigRational) -> Option<Duration> {
                 return Some(Duration::ZERO);
             }
             let nanos = seconds * BigRational::from_u128(NANOS_PER_SEC);
-            let ns = ceil_to_u128(&nanos)?;
+            let ns = nanos.ceil_to_u128()?;
             Some(Duration::from_nanos_saturating(ns))
         }
     }
@@ -440,24 +439,6 @@ pub fn transfer(rate: &Rate, elapsed: Duration, mut remaining: BigRational) -> B
             remaining
         }
     }
-}
-
-fn ceil_to_u128(value: &BigRational) -> Option<u128> {
-    if value < &BigRational::zero() {
-        return Some(0);
-    }
-
-    let num = value.numer();
-    let den = value.denom();
-    if den.is_zero() {
-        return None;
-    }
-    let (quot, rem) = num.div_rem(den);
-    let mut result = quot.to_u128().unwrap_or(u128::MAX);
-    if !rem.is_zero() {
-        result = result.saturating_add(1);
-    }
-    Some(result)
 }
 
 #[cfg(test)]

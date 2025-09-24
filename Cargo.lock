@@ -1500,7 +1500,9 @@ dependencies = [
  "futures",
  "getrandom 0.2.15",
  "num-bigint",
+ "num-integer",
  "num-rational",
+ "num-traits",
  "rand 0.8.5",
  "thiserror 2.0.12",
 ]
