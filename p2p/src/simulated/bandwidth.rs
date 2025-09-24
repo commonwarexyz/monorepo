@@ -383,21 +383,15 @@ where
 pub fn duration(rate: &Rate, remaining: &BigRational) -> Option<Duration> {
     match rate {
         Rate::Unlimited => Some(Duration::ZERO),
-        Rate::Finite(ratio) => {
-            if remaining.is_zero() {
-                return Some(Duration::ZERO);
-            }
-            if ratio.is_zero() {
+        Rate::Finite(rate) => {
+            // If the rate is zero, the transfer will never complete.
+            if rate.is_zero() {
                 return None;
-            }
-
-            let seconds = remaining / ratio;
-            if seconds.is_zero() {
-                return Some(Duration::ZERO);
             }
 
             // Find the minimum number of nanoseconds that will complete the transfer (rounding up to cover
             // fractional progress).
+            let seconds = remaining / rate;
             let nanos = seconds * BigRational::from_u128(NANOS_PER_SEC);
             let ns = nanos.ceil_to_u128()?;
             Some(Duration::from_nanos_saturating(ns))
@@ -426,12 +420,8 @@ pub fn transfer(rate: &Rate, elapsed: Duration, mut remaining: BigRational) -> B
                 return remaining;
             }
 
-            let elapsed_ratio = BigRational::from_frac_u128(delta_ns, NANOS_PER_SEC);
-            if elapsed_ratio.is_zero() {
-                return remaining;
-            }
-
-            let usage = ratio * &elapsed_ratio;
+            let elapsed = BigRational::from_frac_u128(delta_ns, NANOS_PER_SEC);
+            let usage = ratio * &elapsed;
             if usage >= remaining {
                 return BigRational::zero();
             }
