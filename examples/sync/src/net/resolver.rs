@@ -89,7 +89,7 @@ where
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
             request_id,
             size,
-            start_loc: start_loc.as_u64(),
+            start_loc,
             max_ops,
         });
         let (tx, rx) = oneshot::channel();

@@ -192,7 +192,7 @@ where
 
     // Check if we have enough operations
     let db_size = database.op_count();
-    if request.start_loc >= db_size {
+    if request.start_loc.as_u64() >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc >= database size ({}) >= ({})",
             request.start_loc, db_size
@@ -200,7 +200,7 @@ where
     }
 
     // Calculate how many operations to return
-    let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
+    let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc.as_u64());
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
     let max_ops =
         NonZeroU64::new(max_ops).expect("max_ops cannot be zero since start_loc < db_size");
@@ -208,14 +208,14 @@ where
     debug!(
         request_id = request.request_id,
         max_ops,
-        start_loc = request.start_loc,
+        start_loc = request.start_loc.as_u64(),
         db_size,
         "operations request"
     );
 
     // Get the historical proof and operations
     let result = database
-        .historical_proof(request.size, Location::new(request.start_loc), max_ops)
+        .historical_proof(request.size, request.start_loc, max_ops)
         .await;
 
     drop(database);
