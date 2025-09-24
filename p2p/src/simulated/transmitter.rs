@@ -408,7 +408,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                 id: flow_id,
                 origin: meta.origin.clone(),
                 recipient: meta.recipient.clone(),
-                requires_ingress: meta.sequence.is_some(),
+                delivered: meta.sequence.is_some(),
             });
         }
 
@@ -444,7 +444,7 @@ impl<P: PublicKey + Ord + Clone> State<P> {
                     continue;
                 }
 
-                if let Some(duration) = bandwidth::time_to_deplete(&meta.rate, meta.remaining) {
+                if let Some(duration) = bandwidth::duration(&meta.rate, meta.remaining) {
                     earliest = match earliest {
                         None => Some(duration),
                         Some(current) => Some(current.min(duration)),
