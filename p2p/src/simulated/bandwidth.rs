@@ -7,7 +7,6 @@
 //! changes (for example when a message finishes or a new message arrives).
 
 use commonware_utils::{time::NANOS_PER_SEC, BigRationalExt, DurationExt};
-use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::Zero;
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
@@ -424,8 +423,7 @@ pub fn transfer(rate: &Rate, elapsed: Duration, mut remaining: BigRational) -> B
                 return remaining;
             }
 
-            let elapsed_ratio =
-                BigRational::new(BigInt::from(delta_ns), BigInt::from(NANOS_PER_SEC));
+            let elapsed_ratio = BigRational::from_frac_u128(delta_ns, NANOS_PER_SEC);
             if elapsed_ratio.is_zero() {
                 return remaining;
             }
@@ -444,7 +442,6 @@ pub fn transfer(rate: &Rate, elapsed: Duration, mut remaining: BigRational) -> B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use num_bigint::BigInt;
     use num_rational::BigRational;
     use std::collections::BTreeMap;
 
@@ -456,12 +453,8 @@ mod tests {
         move |_| None
     }
 
-    fn frac(num: u64, den: u64) -> BigRational {
-        BigRational::new(BigInt::from(num), BigInt::from(den))
-    }
-
     fn assert_rational_eq(r: &BigRational, num: u64, den: u64) {
-        assert_eq!(r, &frac(num, den));
+        assert_eq!(r, &BigRational::from_frac_u64(num, den));
     }
 
     #[test]
@@ -524,12 +517,12 @@ mod tests {
 
     #[test]
     fn transfer_accumulates_carry() {
-        let ratio = frac(1, 2); // 0.5 bytes per second
+        let ratio = BigRational::from_frac_u64(1, 2); // 0.5 bytes per second
         let rate = Rate::Finite(ratio);
         let initial = BigRational::from_u128(10);
 
         let after_short = transfer(&rate, Duration::from_millis(500), initial);
-        assert_eq!(after_short, frac(39, 4));
+        assert_eq!(after_short, BigRational::from_frac_u64(39, 4));
 
         let after_long = transfer(&rate, Duration::from_millis(1500), after_short);
         assert_eq!(after_long, BigRational::from_u128(9));
@@ -537,10 +530,10 @@ mod tests {
 
     #[test]
     fn finish_duration_accounts_for_fractional_progress() {
-        let rate = Rate::Finite(frac(1, 2));
+        let rate = Rate::Finite(BigRational::from_frac_u64(1, 2));
         let initial = BigRational::from_u128(1);
         let partial = transfer(&rate, Duration::from_millis(500), initial.clone());
-        assert_eq!(partial, frac(3, 4));
+        assert_eq!(partial, BigRational::from_frac_u64(3, 4));
 
         let duration_full = duration(&rate, &initial).expect("finite duration");
         assert_eq!(duration_full, Duration::from_secs(2));
