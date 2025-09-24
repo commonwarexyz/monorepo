@@ -18,7 +18,7 @@ cfg_if::cfg_if! {
 
         /// The precision of [`SystemTime`] on Windows.
         pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(100);
-    } else {
+    } else { // We default to Unix-like behavior on all other platforms
         /// Maximum duration that can be safely added to [`SystemTime::UNIX_EPOCH`] without overflow on the
         /// current platform.
         ///
