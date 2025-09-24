@@ -177,8 +177,8 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         }
     }
 
-    /// Finalize all flows that rely on a saturated resource.
-    fn finalize(&mut self, res_idx: usize) {
+    /// Freeze all flows that rely on a saturated resource.
+    fn freeze(&mut self, res_idx: usize) {
         let members = self.resources[res_idx].members.clone();
         for flow_idx in members {
             // Finalize the rate for `flow_idx` and update every referenced resource.
@@ -226,7 +226,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     continue;
                 }
 
-                // This resource is already saturated; any flow touching it should finalize immediately.
+                // This resource is already saturated; any flow touching it should freeze immediately.
                 if resource.remaining.is_zero() {
                     limiting.clear();
                     limiting.push(res_idx);
@@ -261,7 +261,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
             // Step 2: if the limiting resources still have headroom, advance every active flow by
             // `delta`. If `delta` is zero we already exhausted a resource, so we skip the advance
-            // and immediately finalize the affected flows instead.
+            // and immediately freeze the affected flows instead.
             let delta = match min_delta {
                 Some(delta) => delta,
                 None => {
@@ -272,12 +272,12 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             };
             if delta.is_zero() {
                 for &res_idx in &limiting {
-                    self.finalize(res_idx);
+                    self.freeze(res_idx);
                 }
                 continue;
             }
 
-            // Raise the shared fill level; individual rates are materialized on finalize.
+            // Raise the shared fill level; individual rates are materialized on freeze.
             self.fill.add_assign(&delta);
             let mut saturated = Vec::new();
             for (res_idx, resource) in self.resources.iter_mut().enumerate() {
@@ -292,7 +292,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                     continue;
                 }
 
-                // Track newly saturated resources so their flows finalize this iteration.
+                // Track newly saturated resources so their flows freeze this iteration.
                 resource.remaining.sub_assign(&usage);
                 if resource.remaining.is_zero() {
                     saturated.push(res_idx);
@@ -303,12 +303,12 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 continue;
             }
 
-            // Step 3: finalize every flow touching the resources that just saturated so they are not
+            // Step 3: freeze every flow touching the resources that just saturated so they are not
             // considered in the next iteration.
             saturated.sort();
             saturated.dedup();
             for res_idx in saturated {
-                self.finalize(res_idx);
+                self.freeze(res_idx);
             }
         }
     }
@@ -355,7 +355,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 ///
 /// Each sender/receiver cap is modeled as a shared resource. Every flow registers
 /// with the resources it touches, after which we perform progressive filling: raise
-/// the rate of all unfrozen flows uniformly until a resource is depleted, finalize flows
+/// the rate of all unfrozen flows uniformly until a resource is depleted, freeze flows
 /// using that resource, and repeat. This yields a deterministic, starvation-free assignment
 /// that honors both ingress and egress limits.
 pub fn allocate<P, E, I>(
@@ -756,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_finalize_clears_active_counts() {
+    fn planner_freeze_clears_active_counts() {
         let flows = vec![
             Flow {
                 id: 1,
@@ -777,8 +777,8 @@ mod tests {
         let mut planner = Planner::new(&flows, &mut egress, &mut ingress);
         assert_eq!(planner.active(), 2);
 
-        // Finalizing the shared egress resource should finalize both flows and zero the counters.
-        planner.finalize(0);
+        // Freezing the shared egress resource should freeze both flows and zero the counters.
+        planner.freeze(0);
 
         let resources = planner.resources();
         assert_eq!(resources[0].active, 0);
