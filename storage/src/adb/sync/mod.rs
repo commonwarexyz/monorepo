@@ -28,8 +28,8 @@ mod requests;
 pub async fn sync<DB, R>(config: Config<DB, R>) -> Result<DB, Error<R::Error, DB::Digest>>
 where
     DB: Database,
-    DB::Op: Encode,
-    R: resolver::Resolver<Op = DB::Op, Digest = DB::Digest>,
+    DB::Data: Encode,
+    R: resolver::Resolver<Data = DB::Data, Proof = DB::Proof, Digest = DB::Digest>,
 {
     Engine::new(config).await?.sync().await
 }
