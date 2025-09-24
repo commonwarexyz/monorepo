@@ -255,8 +255,8 @@ fn fuzz(input: FuzzInput) {
                         let start_loc = (*start_offset as u64) % op_count;
                         let max_ops_value = *max_ops as u64;
                         // TODO: remove this after fixing the bug mentioned in the PR discussions
-                        if start_loc + max_ops_value <=1 || start_loc > max_ops_value {
-                            continue
+                        if start_loc + max_ops_value <= 1 || start_loc > max_ops_value {
+                            continue;
                         }
                         let root = db.root(&mut hasher);
                         if let Ok((proof, log)) = db.proof(start_loc, max_ops_value).await {
@@ -277,8 +277,8 @@ fn fuzz(input: FuzzInput) {
                         let start_loc = (*start_offset as u64) % size;
                         let max_ops_value = *max_ops as u64;
                         // TODO: remove this after fixing the bug mentioned in the PR discussions
-                        if start_loc + max_ops_value <=1 || start_loc > max_ops_value {
-                            continue
+                        if start_loc + max_ops_value <= 1 || start_loc > max_ops_value {
+                            continue;
                         }
                         // Only verify when size == op_count because we can only get the current root
                         // For historical sizes, we need to compute historical root that
