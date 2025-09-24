@@ -91,7 +91,7 @@ pub trait DurationExt {
     ///
     /// // Overflow protection
     /// let max_hours = u64::MAX / 3600;
-    /// assert!(Duration::parse(&format!("{}h", max_hours)).is_ok());     // At limit
+    /// assert!(Duration::parse(&format!("{}h", max_hours)).is_ok());      // At limit
     /// assert!(Duration::parse(&format!("{}h", max_hours + 1)).is_err()); // Overflow
     /// ```
     fn parse(s: &str) -> Result<Duration, String>;
