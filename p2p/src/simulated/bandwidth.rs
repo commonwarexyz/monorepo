@@ -22,6 +22,41 @@ pub struct Flow<P> {
     pub delivered: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Remaining {
+    bytes: u128,
+    carry: u128,
+}
+
+impl Remaining {
+    pub fn new(bytes: u128) -> Self {
+        Self { bytes, carry: 0 }
+    }
+
+    pub fn zero() -> Self {
+        Self { bytes: 0, carry: 0 }
+    }
+
+    pub fn bytes(&self) -> u128 {
+        self.bytes
+    }
+
+    pub fn carry(&self) -> u128 {
+        self.carry
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes == 0
+    }
+
+    pub fn without_carry(self) -> Self {
+        Self {
+            bytes: self.bytes,
+            carry: 0,
+        }
+    }
+}
+
 /// Resulting per-flow throughput expressed as bytes/second.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Rate {
@@ -407,41 +442,43 @@ pub fn duration(rate: &Rate, bytes: u128) -> Option<Duration> {
     }
 }
 
-/// Calculate the number of bytes that can be transferred in a given duration at some [Rate],
-/// accounting for any fractional bytes-per-nanosecond that would otherwise be rounded away.
+/// Calculate the remaining work after transferring data for `elapsed` at the provided [Rate].
 ///
-/// The caller supplies `carry` to preserve sub-byte precision across repeated invocations (useful
-/// when advancing simulation time in small quanta) and can inspect the return value to learn how
-/// much progress a flow made before an interruption.
-pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u128) -> u128 {
-    if remaining == 0 {
-        return 0;
+/// `Remaining` tracks both the whole bytes still outstanding and any fractional progress (recorded
+/// as a carry of nanoseconds-to-byte work). Feed the returned state back into subsequent calls to
+/// preserve sub-byte accuracy across discrete scheduling ticks and compute bytes sent by comparing
+/// the previous and returned states.
+pub fn transfer(rate: &Rate, elapsed: Duration, remaining: Remaining) -> Remaining {
+    if remaining.is_empty() {
+        return remaining;
     }
 
     match rate {
-        Rate::Unlimited => {
-            *carry = 0;
-            remaining
-        }
+        Rate::Unlimited => Remaining::zero(),
         Rate::Finite(ratio) => {
             if ratio.is_zero() {
-                return 0;
+                return remaining;
             }
+
             let delta_ns = elapsed.as_nanos();
             if delta_ns == 0 {
-                return 0;
+                return remaining;
             }
 
             let denom = ratio.den.saturating_mul(NANOS_PER_SEC);
             if denom == 0 {
-                *carry = 0;
-                return remaining;
+                return Remaining::zero();
             }
+
             let numerator = ratio.num.saturating_mul(delta_ns);
-            let total = numerator.saturating_add(*carry);
-            let bytes = total / denom;
-            *carry = total % denom;
-            bytes.min(remaining)
+            let total = numerator.saturating_add(remaining.carry);
+            let bytes = (total / denom).min(remaining.bytes);
+            let carry = total % denom;
+
+            Remaining {
+                bytes: remaining.bytes.saturating_sub(bytes),
+                carry,
+            }
         }
     }
 }
@@ -522,14 +559,16 @@ mod tests {
     #[test]
     fn transfer_accumulates_carry() {
         let ratio = Ratio { num: 1, den: 2 }; // 0.5 bytes per second
-        let mut carry = 0;
         let rate = Rate::Finite(ratio);
-        let first = transfer(&rate, Duration::from_millis(500), &mut carry, 10);
-        assert_eq!(first, 0); // 0.25 bytes rounded down
-        assert_ne!(carry, 0);
-        let second = transfer(&rate, Duration::from_millis(1500), &mut carry, 10);
-        // 0.75 + previous 0.25 == 1 byte
-        assert_eq!(first + second, 1);
+        let initial = Remaining::new(10);
+
+        let after_short = transfer(&rate, Duration::from_millis(500), initial);
+        assert_eq!(after_short.bytes(), 10); // 0.25 bytes rounded down
+        assert_ne!(after_short.carry(), 0);
+
+        let after_long = transfer(&rate, Duration::from_millis(1500), after_short);
+        assert_eq!(after_long.bytes(), 9);
+        assert_eq!(after_long.carry(), 0); // 0.75 + previous 0.25 == 1 byte
     }
 
     #[test]
