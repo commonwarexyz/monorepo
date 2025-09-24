@@ -165,10 +165,10 @@ impl<
 
         // Ensure consistency between the bitmap and the db.
         let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
-        if status.bit_count() < inactivity_floor_loc {
+        if status.bit_count() < inactivity_floor_loc.as_u64() {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
-            while status.bit_count() < inactivity_floor_loc {
+            while status.bit_count() < inactivity_floor_loc.as_u64() {
                 status.append(false);
             }
 
@@ -292,23 +292,27 @@ impl<
     /// since it applies at least one operation.
     async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
-            if self.any.inactivity_floor_loc == self.op_count() {
+            if self.any.inactivity_floor_loc.as_u64() == self.op_count() {
                 break;
             }
-            let op = self.any.log.read(self.any.inactivity_floor_loc).await?;
+            let op = self
+                .any
+                .log
+                .read(self.any.inactivity_floor_loc.as_u64())
+                .await?;
             let old_loc = self
                 .any
-                .move_op_if_active(op, Location::new(self.any.inactivity_floor_loc))
+                .move_op_if_active(op, self.any.inactivity_floor_loc)
                 .await?;
             if let Some(old_loc) = old_loc {
                 self.status.set_bit(old_loc.as_u64(), false);
                 self.status.append(true);
             }
-            self.any.inactivity_floor_loc += 1;
+            self.any.inactivity_floor_loc = self.any.inactivity_floor_loc.saturating_add(1);
         }
 
         self.any
-            .apply_op(Fixed::CommitFloor(self.any.inactivity_floor_loc))
+            .apply_op(Fixed::CommitFloor(self.any.inactivity_floor_loc.as_u64()))
             .await?;
         self.status.append(false);
 
@@ -331,7 +335,8 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
 
-        self.status.prune_to_bit(self.any.inactivity_floor_loc);
+        self.status
+            .prune_to_bit(self.any.inactivity_floor_loc.as_u64());
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -710,7 +715,7 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
-        self.status.prune_to_bit(target_prune_loc);
+        self.status.prune_to_bit(target_prune_loc.as_u64());
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -1174,9 +1179,7 @@ pub mod test {
             let committed_root = db.root(&mut hasher).await.unwrap();
             let committed_op_count = db.op_count();
             let committed_inactivity_floor = db.any.inactivity_floor_loc;
-            db.prune(Location::new(committed_inactivity_floor))
-                .await
-                .unwrap();
+            db.prune(committed_inactivity_floor).await.unwrap();
 
             // Perform more random operations without committing any of them.
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)

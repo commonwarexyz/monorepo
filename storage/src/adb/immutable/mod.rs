@@ -101,7 +101,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     locations: fixed::Journal<E, u32>,
 
     /// The location of the oldest retained operation, or 0 if no operations have been added.
-    oldest_retained_loc: u64,
+    oldest_retained_loc: Location,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -284,7 +284,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         log: &mut variable::Journal<E, Variable<K, V>>,
         locations: &mut fixed::Journal<E, u32>,
         snapshot: &mut Index<T, u64>,
-    ) -> Result<(u64, u64), Error> {
+    ) -> Result<(u64, Location), Error> {
         // Align the mmr with the location map.
         let mut mmr_leaves = super::align_mmr_and_locations(mmr, locations).await?;
 
@@ -393,7 +393,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         );
         assert_eq!(log_size, locations.size().await?);
 
-        Ok((log_size, oldest_retained_loc.unwrap_or(0)))
+        let oldest_retained_loc = oldest_retained_loc
+            .map(Location::new)
+            .unwrap_or(Location::new(0));
+        Ok((log_size, oldest_retained_loc))
     }
 
     /// Returns the section of the log where we are currently writing new items.
@@ -406,7 +409,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         if self.log_size == 0 {
             None
         } else {
-            Some(Location::new(self.oldest_retained_loc))
+            Some(self.oldest_retained_loc)
         }
     }
 
@@ -426,14 +429,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // special recovery.
         let section = loc.as_u64() / self.log_items_per_section;
         self.log.prune(section).await?;
-        self.oldest_retained_loc = section * self.log_items_per_section;
+        self.oldest_retained_loc = Location::new(section * self.log_items_per_section);
 
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
-        self.locations.prune(self.oldest_retained_loc).await?;
+        self.locations
+            .prune(self.oldest_retained_loc.as_u64())
+            .await?;
         self.mmr
             .prune_to_pos(
                 &mut self.hasher,
-                Position::from(Location::new(self.oldest_retained_loc)).as_u64(),
+                Position::from(self.oldest_retained_loc).as_u64(),
             )
             .await?;
         Ok(())
@@ -444,7 +449,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
-            if loc < self.oldest_retained_loc {
+            if loc < self.oldest_retained_loc.as_u64() {
                 continue;
             }
             if let Some(v) = self.get_from_loc(key, Location::new(loc)).await? {
@@ -459,7 +464,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         assert!(loc.as_u64() < self.op_count());
-        if loc.as_u64() < self.oldest_retained_loc {
+        if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }
 
@@ -474,7 +479,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        if loc.as_u64() < self.oldest_retained_loc {
+        if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }
 
@@ -495,7 +500,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         loc: Location,
         offset: u32,
     ) -> Result<Option<V>, Error> {
-        if loc.as_u64() < self.oldest_retained_loc {
+        if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }
 
@@ -528,8 +533,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// during this call.
     pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
         let loc = self.log_size;
+        let oldest_retained_loc = self.oldest_retained_loc.as_u64();
         self.snapshot
-            .insert_and_prune(&key, loc, |v| *v < self.oldest_retained_loc);
+            .insert_and_prune(&key, loc, |v| *v < oldest_retained_loc);
 
         let op = Variable::Set(key, value);
         self.apply_op(op).await
@@ -606,7 +612,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         assert!(op_count <= self.op_count());
         assert!(start_loc.as_u64() < op_count);
 
-        if start_loc.as_u64() < self.oldest_retained_loc {
+        if start_loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(start_loc));
         }
 
