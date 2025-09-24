@@ -214,7 +214,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     let now = self.context.current();
                     let completions =
                         self.transmitter
-                            .tune(now, &public_key, egress_cap, ingress_cap);
+                            .limit(now, &public_key, egress_cap, ingress_cap);
                     self.process_completions(completions);
 
                     // Alert application of update

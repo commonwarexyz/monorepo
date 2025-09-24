@@ -138,7 +138,7 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Records the latest bandwidth limits for `peer`.
-    pub fn tune(
+    pub fn limit(
         &mut self,
         now: SystemTime,
         peer: &P,
@@ -781,8 +781,8 @@ mod tests {
         let recipient = key(21);
 
         // Configure bandwidth constraints so the flow is limited by both peers.
-        assert!(state.tune(now, &origin, Some(1), None).is_empty());
-        assert!(state.tune(now, &recipient, None, Some(1)).is_empty());
+        assert!(state.limit(now, &origin, Some(1), None).is_empty());
+        assert!(state.limit(now, &recipient, None, Some(1)).is_empty());
 
         // Enqueue a small message to create the flow entry.
         let completions = state.enqueue(
@@ -809,7 +809,7 @@ mod tests {
         let recipient = key(11);
         let make_bytes = |value: u8| Bytes::from(vec![value; 1_000]);
 
-        let completions = state.tune(now, &origin, Some(1_000), None);
+        let completions = state.limit(now, &origin, Some(1_000), None);
         assert!(completions.is_empty());
 
         let completions = state.enqueue(
@@ -872,7 +872,7 @@ mod tests {
         let origin = key(21);
         let recipient = key(22);
 
-        let completions = state.tune(start, &origin, Some(500_000), None); // 500 KB/s
+        let completions = state.limit(start, &origin, Some(500_000), None); // 500 KB/s
         assert!(completions.is_empty());
 
         let msg_a = Bytes::from(vec![0xAA; 1_000_000]);
@@ -950,7 +950,7 @@ mod tests {
         let origin = key(42);
         let recipient = key(43);
 
-        let completions = state.tune(start, &origin, Some(1_000), None);
+        let completions = state.limit(start, &origin, Some(1_000), None);
         assert!(completions.is_empty());
 
         state.enqueue(
@@ -991,7 +991,7 @@ mod tests {
         let origin = key(44);
         let recipient = key(45);
 
-        let completions = state.tune(start, &origin, Some(1_000), None);
+        let completions = state.limit(start, &origin, Some(1_000), None);
         assert!(completions.is_empty());
 
         state.enqueue(
@@ -1061,7 +1061,7 @@ mod tests {
         let recipient = key(41);
 
         // Restrict egress so flows take measurable time to complete.
-        let completions = state.tune(start, &origin, Some(1_000_000), None); // 1 MB/s
+        let completions = state.limit(start, &origin, Some(1_000_000), None); // 1 MB/s
         assert!(completions.is_empty());
 
         let msg_a = Bytes::from(vec![0xAA; 3_000_000]);
@@ -1234,7 +1234,7 @@ mod tests {
         let origin = key(50);
         let recipient = key(51);
 
-        let completions = state.tune(now, &origin, Some(1_000), None); // 1 KB/s egress
+        let completions = state.limit(now, &origin, Some(1_000), None); // 1 KB/s egress
         assert!(completions.is_empty());
 
         let msg = Bytes::from(vec![0xDD; 1_000]);
@@ -1254,7 +1254,7 @@ mod tests {
             .expect("completion scheduled under limited bandwidth");
         assert_eq!(finish, now + Duration::from_secs(1));
 
-        let completions = state.tune(now, &origin, None, None); // unlimited egress
+        let completions = state.limit(now, &origin, None, None); // unlimited egress
         assert_eq!(completions.len(), 1);
         let completion = &completions[0];
         assert_eq!(completion.message.len(), msg.len());
@@ -1271,7 +1271,7 @@ mod tests {
         let recipient_b = key(31);
         let recipient_c = key(32);
 
-        let completions = state.tune(now, &origin, Some(1_000), None);
+        let completions = state.limit(now, &origin, Some(1_000), None);
         assert!(completions.is_empty());
 
         let msg_b = Bytes::from(vec![0xBB; 1_000]);
@@ -1330,12 +1330,12 @@ mod tests {
         let recipient = key(62);
 
         assert!(state
-            .tune(now, &origin_small, Some(30_000), None)
+            .limit(now, &origin_small, Some(30_000), None)
             .is_empty());
         assert!(state
-            .tune(now, &origin_large, Some(30_000), None)
+            .limit(now, &origin_large, Some(30_000), None)
             .is_empty());
-        assert!(state.tune(now, &recipient, None, Some(30_000)).is_empty());
+        assert!(state.limit(now, &recipient, None, Some(30_000)).is_empty());
 
         let completions = state.enqueue(
             now,
