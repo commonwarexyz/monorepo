@@ -35,8 +35,8 @@ pub type Region = String;
 #[derive(Debug, Clone)]
 pub struct RegionConfig {
     pub count: usize,
-    pub egress_bps: Option<usize>,
-    pub ingress_bps: Option<usize>,
+    pub egress_cap: Option<usize>,
+    pub ingress_cap: Option<usize>,
 }
 
 pub type Distribution = BTreeMap<Region, RegionConfig>;

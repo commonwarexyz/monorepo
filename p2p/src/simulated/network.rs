@@ -205,28 +205,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
             ingress::Message::SetBandwidth {
                 public_key,
-                egress_bps,
-                ingress_bps,
+                egress_cap,
+                ingress_cap,
                 result,
             } => match self.peers.contains_key(&public_key) {
                 true => {
-                    // Parse bandwidth limits
-                    assert!(egress_bps > 0, "egress bandwidth must be greater than 0");
-                    assert!(ingress_bps > 0, "ingress bandwidth must be greater than 0");
-                    let egress = if egress_bps == usize::MAX {
-                        None
-                    } else {
-                        Some(egress_bps)
-                    };
-                    let ingress = if ingress_bps == usize::MAX {
-                        None
-                    } else {
-                        Some(ingress_bps)
-                    };
-
                     // Update bandwidth limits
                     let now = self.context.current();
-                    let completions = self.transmitter.tune(now, &public_key, egress, ingress);
+                    let completions =
+                        self.transmitter
+                            .tune(now, &public_key, egress_cap, ingress_cap);
                     self.process_completions(completions);
 
                     // Alert application of update
@@ -883,11 +871,11 @@ mod tests {
             let (_sender2, mut receiver) = oracle.register(recipient_pk.clone(), 0).await.unwrap();
 
             oracle
-                .set_bandwidth(sender_pk.clone(), 5_000, usize::MAX)
+                .set_bandwidth(sender_pk.clone(), Some(5_000), None)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(recipient_pk.clone(), usize::MAX, 5_000)
+                .set_bandwidth(recipient_pk.clone(), None, Some(5_000))
                 .await
                 .unwrap();
 
@@ -947,15 +935,15 @@ mod tests {
             let (_sender3, mut recv_b) = oracle.register(recipient_b.clone(), 0).await.unwrap();
 
             oracle
-                .set_bandwidth(sender_pk.clone(), 1_000, usize::MAX)
+                .set_bandwidth(sender_pk.clone(), Some(1_000), None)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(recipient_a.clone(), usize::MAX, 1_000)
+                .set_bandwidth(recipient_a.clone(), None, Some(1_000))
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(recipient_b.clone(), usize::MAX, 1_000)
+                .set_bandwidth(recipient_b.clone(), None, Some(1_000))
                 .await
                 .unwrap();
 

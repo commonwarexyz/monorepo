@@ -790,11 +790,11 @@ mod tests {
 
         // Set bandwidth limits
         oracle
-            .set_bandwidth(pk1.clone(), sender_bps.unwrap_or(usize::MAX), usize::MAX)
+            .set_bandwidth(pk1.clone(), sender_bps, None)
             .await
             .unwrap();
         oracle
-            .set_bandwidth(pk2.clone(), usize::MAX, receiver_bps.unwrap_or(usize::MAX))
+            .set_bandwidth(pk2.clone(), None, receiver_bps)
             .await
             .unwrap();
 
@@ -964,7 +964,7 @@ mod tests {
             // Set bandwidth limits for all peers
             for pk in &peers {
                 oracle
-                    .set_bandwidth(pk.clone(), EFFECTIVE_BPS, EFFECTIVE_BPS)
+                    .set_bandwidth(pk.clone(), Some(EFFECTIVE_BPS), Some(EFFECTIVE_BPS))
                     .await
                     .unwrap();
             }
@@ -1157,11 +1157,11 @@ mod tests {
 
             const BPS: usize = 1_000;
             oracle
-                .set_bandwidth(pk1.clone(), BPS, usize::MAX)
+                .set_bandwidth(pk1.clone(), Some(BPS), None)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(pk2.clone(), usize::MAX, BPS)
+                .set_bandwidth(pk2.clone(), None, Some(BPS))
                 .await
                 .unwrap();
 
@@ -1267,7 +1267,7 @@ mod tests {
 
                 // Each sender has 10KB/s egress
                 oracle
-                    .set_bandwidth(sender.clone(), 10_000, usize::MAX)
+                    .set_bandwidth(sender.clone(), Some(10_000), None)
                     .await
                     .unwrap();
             }
@@ -1277,7 +1277,7 @@ mod tests {
 
             // Receiver has 100KB/s ingress
             oracle
-                .set_bandwidth(receiver.clone(), usize::MAX, 100_000)
+                .set_bandwidth(receiver.clone(), None, Some(100_000))
                 .await
                 .unwrap();
 
@@ -1345,7 +1345,7 @@ mod tests {
 
             // Sender has 100KB/s egress
             oracle
-                .set_bandwidth(sender.clone(), 100_000, usize::MAX)
+                .set_bandwidth(sender.clone(), Some(100_000), None)
                 .await
                 .unwrap();
 
@@ -1360,7 +1360,7 @@ mod tests {
 
                 // Each receiver has 10KB/s ingress
                 oracle
-                    .set_bandwidth(receiver.clone(), usize::MAX, 10_000)
+                    .set_bandwidth(receiver.clone(), None, Some(10_000))
                     .await
                     .unwrap();
 
@@ -1434,7 +1434,7 @@ mod tests {
 
                 // Each sender has 1KB/s egress (slow)
                 oracle
-                    .set_bandwidth(sender.clone(), 1_000, usize::MAX)
+                    .set_bandwidth(sender.clone(), Some(1_000), None)
                     .await
                     .unwrap();
             }
@@ -1445,7 +1445,7 @@ mod tests {
 
             // Receiver has 10KB/s ingress (can handle all 10 senders at full speed)
             oracle
-                .set_bandwidth(receiver.clone(), usize::MAX, 10_000)
+                .set_bandwidth(receiver.clone(), None, Some(10_000))
                 .await
                 .unwrap();
 
@@ -1524,7 +1524,7 @@ mod tests {
 
                 // Each sender has 30KB/s egress
                 oracle
-                    .set_bandwidth(sender.clone(), 30_000, usize::MAX)
+                    .set_bandwidth(sender.clone(), Some(30_000), None)
                     .await
                     .unwrap();
             }
@@ -1533,7 +1533,7 @@ mod tests {
             let receiver = ed25519::PrivateKey::from_seed(100).public_key();
             let (_, mut receiver_rx) = oracle.register(receiver.clone(), 0).await.unwrap();
             oracle
-                .set_bandwidth(receiver.clone(), usize::MAX, 30_000)
+                .set_bandwidth(receiver.clone(), None, Some(30_000))
                 .await
                 .unwrap();
 
@@ -1664,7 +1664,7 @@ mod tests {
 
                 // Each sender has unlimited egress
                 oracle
-                    .set_bandwidth(sender.clone(), usize::MAX, usize::MAX)
+                    .set_bandwidth(sender.clone(), None, None)
                     .await
                     .unwrap();
             }
@@ -1673,7 +1673,7 @@ mod tests {
             let receiver = ed25519::PrivateKey::from_seed(100).public_key();
             let (_, mut receiver_rx) = oracle.register(receiver.clone(), 0).await.unwrap();
             oracle
-                .set_bandwidth(receiver.clone(), usize::MAX, 30_000)
+                .set_bandwidth(receiver.clone(), None, Some(30_000))
                 .await
                 .unwrap();
 
@@ -1757,11 +1757,11 @@ mod tests {
 
             // Set bandwidth: 1000 B/s (1 byte per millisecond)
             oracle
-                .set_bandwidth(sender.clone(), 1000, usize::MAX)
+                .set_bandwidth(sender.clone(), Some(1000), None)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(receiver.clone(), usize::MAX, 1000)
+                .set_bandwidth(receiver.clone(), None, Some(1000))
                 .await
                 .unwrap();
 
@@ -1866,11 +1866,11 @@ mod tests {
 
             // Initial bandwidth: 10 KB/s
             oracle
-                .set_bandwidth(pk_sender.clone(), 10_000, usize::MAX)
+                .set_bandwidth(pk_sender.clone(), Some(10_000), None)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(pk_receiver.clone(), usize::MAX, 10_000)
+                .set_bandwidth(pk_receiver.clone(), None, Some(10_000))
                 .await
                 .unwrap();
 
@@ -1894,7 +1894,7 @@ mod tests {
 
             // Change bandwidth to 2 KB/s
             oracle
-                .set_bandwidth(pk_sender.clone(), 2_000, usize::MAX)
+                .set_bandwidth(pk_sender.clone(), Some(2_000), None)
                 .await
                 .unwrap();
 
@@ -1919,7 +1919,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ingress bandwidth must be greater than 0")]
     fn test_zero_sender_ingress_bandwidth() {
         // This test verifies that when sender bandwidth is 0, the send returns empty list
         let executor = deterministic::Runner::default();
@@ -1954,14 +1953,13 @@ mod tests {
 
             // Set sender bandwidth to 0
             oracle
-                .set_bandwidth(pk_sender.clone(), usize::MAX, 0)
+                .set_bandwidth(pk_sender.clone(), None, Some(0))
                 .await
                 .unwrap();
         });
     }
 
     #[test]
-    #[should_panic(expected = "egress bandwidth must be greater than 0")]
     fn test_zero_sender_egress_bandwidth() {
         // This test verifies that when sender bandwidth is 0, the send returns empty list
         let executor = deterministic::Runner::default();
@@ -1996,7 +1994,7 @@ mod tests {
 
             // Set sender bandwidth to 0
             oracle
-                .set_bandwidth(pk_sender.clone(), 0, usize::MAX)
+                .set_bandwidth(pk_sender.clone(), None, Some(0))
                 .await
                 .unwrap();
         });
