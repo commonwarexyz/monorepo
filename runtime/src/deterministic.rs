@@ -678,7 +678,6 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// runtime.
 pub struct Context {
     name: String,
-    spawned: bool,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -721,7 +720,6 @@ impl Context {
         (
             Self {
                 name: String::new(),
-                spawned: false,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -771,7 +769,6 @@ impl Context {
         (
             Self {
                 name: String::new(),
-                spawned: false,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -801,7 +798,6 @@ impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
-            spawned: false,
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -817,9 +813,6 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
         let (label, metric) = spawn_metrics!(self, future);
 
@@ -836,32 +829,6 @@ impl crate::Spawner for Context {
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
         handle
-    }
-
-    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (label, metric) = spawn_metrics!(self, future);
-
-        // Set up the task
-        let executor = self.executor();
-
-        move |f: F| {
-            // Give spawned task its own empty children list
-            let (f, handle) =
-                Handle::init_future(f, metric, false, Arc::new(Mutex::new(Vec::new())));
-
-            // Spawn the task
-            Tasks::register_work(&executor.tasks, label, Box::pin(f));
-            handle
-        }
     }
 
     fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
@@ -889,9 +856,6 @@ impl crate::Spawner for Context {
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
         let (label, metric) = spawn_metrics!(self, blocking, dedicated);
 
@@ -903,30 +867,6 @@ impl crate::Spawner for Context {
         let f = async move { f() };
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
         handle
-    }
-
-    fn spawn_blocking_ref<F, T>(&mut self, dedicated: bool) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (label, metric) = spawn_metrics!(self, blocking, dedicated);
-
-        // Set up the task
-        let executor = self.executor();
-        move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metric, false);
-
-            // Spawn the task
-            let f = async move { f() };
-            Tasks::register_work(&executor.tasks, label, Box::pin(f));
-            handle
-        }
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
@@ -979,7 +919,6 @@ impl crate::Metrics for Context {
         );
         Self {
             name,
-            spawned: false,
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),

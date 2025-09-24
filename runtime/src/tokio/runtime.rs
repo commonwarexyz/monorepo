@@ -334,7 +334,6 @@ impl crate::Runner for Runner {
         let context = Context {
             storage,
             name: label.name(),
-            spawned: false,
             executor: executor.clone(),
             network,
             children: Arc::new(Mutex::new(Vec::new())),
@@ -367,7 +366,6 @@ cfg_if::cfg_if! {
 /// runtime.
 pub struct Context {
     name: String,
-    spawned: bool,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -385,7 +383,6 @@ impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
-            spawned: false,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -401,9 +398,6 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
         let (_, metric) = spawn_metrics!(self, future);
 
@@ -421,36 +415,6 @@ impl crate::Spawner for Context {
         // Spawn the task
         executor.runtime.spawn(f);
         handle
-    }
-
-    fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (_, metric) = spawn_metrics!(self, future);
-
-        // Set up the task
-        let executor = self.executor.clone();
-
-        move |f: F| {
-            let (f, handle) = Handle::init_future(
-                f,
-                metric,
-                executor.cfg.catch_panics,
-                // Give spawned task its own empty children list
-                Arc::new(Mutex::new(Vec::new())),
-            );
-
-            // Spawn the task
-            executor.runtime.spawn(f);
-            handle
-        }
     }
 
     fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
@@ -478,9 +442,6 @@ impl crate::Spawner for Context {
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
         // Get metrics
         let (_, metric) = spawn_metrics!(self, blocking, dedicated);
 
@@ -495,33 +456,6 @@ impl crate::Spawner for Context {
             executor.runtime.spawn_blocking(f);
         }
         handle
-    }
-
-    fn spawn_blocking_ref<F, T>(&mut self, dedicated: bool) -> impl FnOnce(F) -> Handle<T> + 'static
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (_, metric) = spawn_metrics!(self, blocking, dedicated);
-
-        // Set up the task
-        let executor = self.executor.clone();
-        move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metric, executor.cfg.catch_panics);
-
-            // Spawn the blocking task
-            if dedicated {
-                std::thread::spawn(f);
-            } else {
-                executor.runtime.spawn_blocking(f);
-            }
-            handle
-        }
     }
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
@@ -567,7 +501,6 @@ impl crate::Metrics for Context {
         );
         Self {
             name,
-            spawned: false,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
