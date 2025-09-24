@@ -1,5 +1,7 @@
 //! Gap detection algorithm for sync operations.
 
+use crate::mmr::Location;
+use core::num::NonZeroU64;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Find the next gap in operations that needs to be fetched.
@@ -23,23 +25,23 @@ use std::collections::{BTreeMap, BTreeSet};
 /// - All start locations in `outstanding_requests` are in [lower_bound, upper_bound]
 /// - All operation counts in `fetched_operations` are > 0
 pub fn find_next(
-    lower_bound: u64,
-    upper_bound: u64,
-    fetched_operations: &BTreeMap<u64, u64>, // start_loc -> operation_count
-    outstanding_requests: &BTreeSet<u64>,
-    fetch_batch_size: u64,
-) -> Option<(u64, u64)> {
+    lower_bound: Location,
+    upper_bound: Location,
+    fetched_operations: &BTreeMap<Location, u64>, // start_loc -> operation_count
+    outstanding_requests: &BTreeSet<Location>,
+    fetch_batch_size: NonZeroU64,
+) -> Option<(Location, Location)> {
     if lower_bound > upper_bound {
         return None;
     }
 
-    let mut current_covered_end: Option<u64> = None; // Nothing covered yet
+    let mut current_covered_end: Option<Location> = None; // Nothing covered yet
 
     // Create iterators for both data structures (already sorted)
     let mut fetched_ops_iter = fetched_operations
         .iter()
         .map(|(&start_loc, &operation_count)| {
-            let end_loc = start_loc + operation_count - 1;
+            let end_loc = start_loc.saturating_add(operation_count).saturating_sub(1);
             (start_loc, end_loc)
         })
         .peekable();
@@ -47,7 +49,9 @@ pub fn find_next(
     let mut outstanding_reqs_iter = outstanding_requests
         .iter()
         .map(|&start_loc| {
-            let end_loc = start_loc + fetch_batch_size - 1;
+            let end_loc = start_loc
+                .saturating_add(fetch_batch_size.get())
+                .saturating_sub(1);
             (start_loc, end_loc)
         })
         .peekable();
@@ -74,15 +78,15 @@ pub fn find_next(
                 // This is the first range.
                 if lower_bound < range_start {
                     // There's a gap between the lower bound and the start of the first range.
-                    let gap_end = range_start - 1;
+                    let gap_end = range_start.saturating_sub(1);
                     return Some((lower_bound, gap_end));
                 }
             }
             Some(covered_end) => {
                 // Check if there's a gap between current coverage and this range
-                if covered_end + 1 < range_start {
-                    let gap_start = covered_end + 1;
-                    let gap_end = range_start - 1;
+                if covered_end.saturating_add(1) < range_start {
+                    let gap_start = covered_end.saturating_add(1);
+                    let gap_end = range_start.saturating_sub(1);
                     return Some((gap_start, gap_end));
                 }
             }
@@ -109,7 +113,7 @@ pub fn find_next(
         Some(covered_end) => {
             // Check if there's a gap after the last covered location
             if covered_end < upper_bound {
-                let gap_start = covered_end + 1;
+                let gap_start = covered_end.saturating_add(1);
                 Some((gap_start, upper_bound))
             } else {
                 None
@@ -279,15 +283,28 @@ mod tests {
         expected: Some((0, 0)),
     }; "mixed_coverage_interleaved_ranges")]
     fn test_find_next(test_case: FindNextTestCase) {
-        let fetched_ops: BTreeMap<u64, u64> = test_case.fetched_ops.into_iter().collect();
-        let outstanding_requests: BTreeSet<u64> = test_case.requested_ops.into_iter().collect();
+        let fetched_ops: BTreeMap<Location, u64> = test_case
+            .fetched_ops
+            .into_iter()
+            .map(|(k, v)| (Location::new(k), v))
+            .collect();
+        let outstanding_requests: BTreeSet<Location> = test_case
+            .requested_ops
+            .into_iter()
+            .map(Location::new)
+            .collect();
         let result = find_next(
-            test_case.lower_bound,
-            test_case.upper_bound,
+            Location::new(test_case.lower_bound),
+            Location::new(test_case.upper_bound),
             &fetched_ops,
             &outstanding_requests,
-            test_case.fetch_batch_size,
+            NonZeroU64::new(test_case.fetch_batch_size).unwrap(),
         );
-        assert_eq!(result, test_case.expected);
+        assert_eq!(
+            result,
+            test_case
+                .expected
+                .map(|(start, end)| (Location::new(start), Location::new(end)))
+        );
     }
 }

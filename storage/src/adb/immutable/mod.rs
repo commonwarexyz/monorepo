@@ -114,7 +114,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     hasher: Standard<H>,
 
     /// The location of the last commit operation, or None if no commit has been made.
-    last_commit: Option<u64>,
+    last_commit: Option<Location>,
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
@@ -177,7 +177,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let last_commit = log_size.checked_sub(1);
+        let last_commit = log_size.checked_sub(1).map(Location::new);
 
         Ok(Immutable {
             mmr,
@@ -247,7 +247,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let last_commit = log_size.checked_sub(1);
+        let last_commit = log_size.checked_sub(1).map(Location::new);
 
         let mut db = Immutable {
             mmr,
@@ -420,7 +420,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Panics if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc.as_u64() <= self.last_commit.unwrap_or(0));
+        assert!(loc.as_u64() <= self.last_commit.unwrap_or(Location::new(0)).as_u64());
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
@@ -640,7 +640,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        self.last_commit = Some(self.log_size);
+        self.last_commit = Some(Location::new(self.log_size));
         let op = Variable::<K, V>::Commit(metadata);
         let encoded_op = op.encode();
         let section = self.current_section();
@@ -677,13 +677,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
-        let section = last_commit / self.log_items_per_section;
-        let offset = self.locations.read(last_commit).await?;
+        let section = last_commit.as_u64() / self.log_items_per_section;
+        let offset = self.locations.read(last_commit.as_u64()).await?;
         let Variable::Commit(metadata) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some((Location::new(last_commit), metadata)))
+        Ok(Some((last_commit, metadata)))
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of

@@ -47,7 +47,7 @@ enum Event<Op, D: Digest, E> {
 #[derive(Debug)]
 pub(super) struct IndexedFetchResult<Op, D: Digest, E> {
     /// The location of the first operation in the batch
-    pub start_loc: u64,
+    pub start_loc: Location,
     /// The result of the fetch operation
     pub result: Result<FetchResult<Op, D>, E>,
 }
@@ -111,7 +111,7 @@ where
     outstanding_requests: Requests<DB::Op, DB::Digest, R::Error>,
 
     /// Operations that have been fetched but not yet applied to the log
-    fetched_operations: BTreeMap<u64, Vec<DB::Op>>,
+    fetched_operations: BTreeMap<Location, Vec<DB::Op>>,
 
     /// Pinned MMR nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
@@ -209,13 +209,13 @@ where
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
         if self.pinned_nodes.is_none() {
-            let start_loc = self.target.lower_bound.as_u64();
+            let start_loc = self.target.lower_bound;
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
-                start_loc,
+                start_loc.as_u64(),
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc, NZU64!(1))
+                        .get_operations(target_size, start_loc.as_u64(), NZU64!(1))
                         .await;
                     IndexedFetchResult { start_loc, result }
                 }),
@@ -231,34 +231,43 @@ where
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
-            let operation_counts: BTreeMap<u64, u64> = self
+            let _operation_counts: BTreeMap<u64, u64> = self
                 .fetched_operations
                 .iter()
-                .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
+                .map(|(&start_loc, operations)| (start_loc.as_u64(), operations.len() as u64))
                 .collect();
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next(
-                log_size,
-                self.target.upper_bound.as_u64(),
-                &operation_counts,
-                self.outstanding_requests.locations(),
-                self.fetch_batch_size.get(),
+                Location::new(log_size),
+                self.target.upper_bound,
+                &self
+                    .fetched_operations
+                    .iter()
+                    .map(|(&k, v)| (k, v.len() as u64))
+                    .collect(),
+                &self
+                    .outstanding_requests
+                    .locations()
+                    .iter()
+                    .map(|&loc| Location::new(loc))
+                    .collect(),
+                self.fetch_batch_size,
             ) else {
                 break; // No more gaps to fill
             };
 
             // Calculate batch size for this gap
-            let gap_size = NZU64!(end_loc - start_loc + 1);
+            let gap_size = NZU64!(end_loc.as_u64() - start_loc.as_u64() + 1);
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
-                start_loc,
+                start_loc.as_u64(),
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc, batch_size)
+                        .get_operations(target_size, start_loc.as_u64(), batch_size)
                         .await;
                     IndexedFetchResult { start_loc, result }
                 }),
@@ -300,7 +309,7 @@ where
     }
 
     /// Store a batch of fetched operations
-    pub fn store_operations(&mut self, start_loc: u64, operations: Vec<DB::Op>) {
+    pub fn store_operations(&mut self, start_loc: Location, operations: Vec<DB::Op>) {
         self.fetched_operations.insert(start_loc, operations);
     }
 
@@ -315,7 +324,7 @@ where
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
         self.fetched_operations.retain(|&start_loc, operations| {
-            let end_loc = start_loc + operations.len() as u64 - 1;
+            let end_loc = start_loc.as_u64() + operations.len() as u64 - 1;
             end_loc >= next_loc
         });
 
@@ -326,8 +335,8 @@ where
                 self.fetched_operations
                     .iter()
                     .find_map(|(range_start, range_ops)| {
-                        let range_end = range_start + range_ops.len() as u64 - 1;
-                        if *range_start <= next_loc && next_loc <= range_end {
+                        let range_end = range_start.as_u64() + range_ops.len() as u64 - 1;
+                        if range_start.as_u64() <= next_loc && next_loc <= range_end {
                             Some(*range_start)
                         } else {
                             None
@@ -342,7 +351,7 @@ where
             // Remove the batch of operations that contains the next operation to apply.
             let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
             // Skip operations that are before the next location.
-            let skip_count = (next_loc - range_start_loc) as usize;
+            let skip_count = (next_loc - range_start_loc.as_u64()) as usize;
             let operations_count = operations.len() - skip_count;
             let remaining_operations = operations.into_iter().skip(skip_count);
             next_loc += operations_count as u64;
@@ -397,7 +406,8 @@ where
         fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
     ) -> Result<(), Error<DB, R>> {
         // Mark request as complete
-        self.outstanding_requests.remove(fetch_result.start_loc);
+        self.outstanding_requests
+            .remove(fetch_result.start_loc.as_u64());
 
         let start_loc = fetch_result.start_loc;
         let FetchResult {
@@ -419,7 +429,7 @@ where
         let proof_valid = adb::verify_proof(
             &mut self.hasher,
             &proof,
-            Location::new(start_loc),
+            start_loc,
             &operations,
             &self.target.root,
         );
@@ -429,12 +439,10 @@ where
 
         if proof_valid {
             // Extract pinned nodes if we don't have them and this is the first batch
-            if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound.as_u64() {
-                if let Ok(nodes) = crate::adb::extract_pinned_nodes(
-                    &proof,
-                    Location::new(start_loc),
-                    operations_len,
-                ) {
+            if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound {
+                if let Ok(nodes) =
+                    crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
+                {
                     self.pinned_nodes = Some(nodes);
                 }
             }
@@ -549,7 +557,7 @@ mod tests {
         // Test adding requests
         let fut = Box::pin(async {
             IndexedFetchResult {
-                start_loc: 0,
+                start_loc: Location::new(0),
                 result: Ok(FetchResult {
                     proof: Proof {
                         size: 0,

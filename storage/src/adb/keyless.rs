@@ -109,7 +109,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
     hasher: Standard<H>,
 
     /// The location of the last commit, if any.
-    last_commit_loc: Option<u64>,
+    last_commit_loc: Option<Location>,
 }
 
 impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
@@ -378,7 +378,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations,
             log_items_per_section,
             hasher,
-            last_commit_loc: size.checked_sub(1),
+            last_commit_loc: size.checked_sub(1).map(Location::new),
         })
     }
 
@@ -401,7 +401,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Returns the location of the last commit, if any.
     pub fn last_commit_loc(&self) -> Option<Location> {
-        self.last_commit_loc.map(Location::new)
+        self.last_commit_loc
     }
 
     /// Returns the section of the operations log where we are currently writing new operations.
@@ -427,7 +427,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     ///
     /// Panics if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc.as_u64() <= self.last_commit_loc.unwrap_or(0));
+        assert!(loc.as_u64() <= self.last_commit_loc.unwrap_or(Location::new(0)).as_u64());
 
         // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
         // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
@@ -505,7 +505,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<u64, Error> {
         let loc = self.size;
         let section = self.current_section();
-        self.last_commit_loc = Some(loc);
+        self.last_commit_loc = Some(Location::new(loc));
 
         let operation = Operation::Commit(metadata);
         let encoded_operation = operation.encode();
@@ -562,14 +562,14 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let Some(loc) = self.last_commit_loc else {
             return Ok(None);
         };
-        let offset = self.locations.read(loc).await?;
-        let section = loc / self.log_items_per_section;
+        let offset = self.locations.read(loc.as_u64()).await?;
+        let section = loc.as_u64() / self.log_items_per_section;
         let op = self.log.get(section, offset).await?;
         let Operation::Commit(metadata) = op else {
             return Ok(None);
         };
 
-        Ok(Some((Location::new(loc), metadata)))
+        Ok(Some((loc, metadata)))
     }
 
     /// Return the root of the db.
@@ -674,7 +674,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     #[cfg(test)]
     /// Simulate pruning failure by consuming the db and abandoning pruning operation mid-flight.
     pub(super) async fn simulate_prune_failure(mut self, loc: u64) -> Result<(), Error> {
-        assert!(loc <= self.last_commit_loc.unwrap_or(0));
+        assert!(loc <= self.last_commit_loc.unwrap_or(Location::new(0)).as_u64());
         // Perform the same steps as pruning except "crash" right after the log is pruned.
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
