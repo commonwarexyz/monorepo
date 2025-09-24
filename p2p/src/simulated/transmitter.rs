@@ -434,11 +434,10 @@ impl<P: PublicKey> State<P> {
                 if let Some(duration) = bandwidth::duration(&meta.rate, &meta.remaining) {
                     // Ensure the scheduled event advances by at least the platform precision so
                     // `SystemTime` actually moves forward on coarse clocks (e.g. Windows).
-                    let duration = if duration > Duration::ZERO && duration < SYSTEM_TIME_PRECISION
-                    {
+                    let duration = if duration.is_zero() {
                         SYSTEM_TIME_PRECISION
                     } else {
-                        duration
+                        duration.max(SYSTEM_TIME_PRECISION)
                     };
                     earliest = match earliest {
                         None => Some(duration),
