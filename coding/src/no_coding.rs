@@ -60,6 +60,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         _config: &Config,
         _commitment: &Self::Commitment,
         _checking_data: &Self::CheckingData,
+        _index: u16,
         _reshard: Self::ReShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
         Ok(())

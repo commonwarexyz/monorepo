@@ -77,8 +77,16 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                 S::reshard(&config, &commitment, my_shard).unwrap();
                             let checked_shards = reshards
                                 .into_iter()
-                                .map(|reshard| {
-                                    S::check(&config, &commitment, &checking_data, reshard).unwrap()
+                                .enumerate()
+                                .map(|(i, reshard)| {
+                                    S::check(
+                                        &config,
+                                        &commitment,
+                                        &checking_data,
+                                        i as u16,
+                                        reshard,
+                                    )
+                                    .unwrap()
                                 })
                                 .collect::<Vec<_>>();
                             S::decode(&config, &commitment, checking_data, &checked_shards)

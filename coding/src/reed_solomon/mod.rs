@@ -24,6 +24,8 @@ pub enum Error {
     InvalidDataLength(usize),
     #[error("invalid index: {0}")]
     InvalidIndex(u16),
+    #[error("wrong index: {0}")]
+    WrongIndex(u16),
 }
 
 /// A piece of data from a Reed-Solomon encoded object.
@@ -461,8 +463,12 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         _config: &Config,
         commitment: &Self::Commitment,
         _checking_data: &Self::CheckingData,
+        index: u16,
         reshard: Self::ReShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
+        if reshard.index != index {
+            return Err(Error::WrongIndex(reshard.index));
+        }
         if !reshard.verify(reshard.index, commitment) {
             return Err(Error::InvalidProof);
         }
