@@ -1,4 +1,4 @@
-use super::bandwidth::{self, Flow, Rate, Remaining};
+use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -83,7 +83,7 @@ struct Status<P: PublicKey> {
     channel: Channel,
     message: Bytes,
     sequence: Option<u128>, // delivered if some
-    remaining: Remaining,
+    remaining: Ratio,
     rate: Rate,
     last_update: SystemTime,
 }
@@ -374,17 +374,18 @@ impl<P: PublicKey> State<P> {
 
         for (&flow_id, meta) in self.all_flows.iter_mut() {
             // First, account for bytes already in flight since the previous tick.
-            if !meta.remaining.is_empty() {
+            if !meta.remaining.is_zero() {
                 let elapsed = now
                     .duration_since(meta.last_update)
                     .unwrap_or(Duration::ZERO);
                 if !elapsed.is_zero() {
-                    meta.remaining = bandwidth::transfer(&meta.rate, elapsed, meta.remaining);
+                    meta.remaining =
+                        bandwidth::transfer(&meta.rate, elapsed, meta.remaining.clone());
                 }
             }
 
             meta.last_update = now;
-            if meta.remaining.is_empty() {
+            if meta.remaining.is_zero() {
                 completed.push(flow_id);
             }
         }
@@ -394,7 +395,7 @@ impl<P: PublicKey> State<P> {
 
         let mut active: Vec<Flow<P>> = Vec::new();
         for (&flow_id, meta) in self.all_flows.iter() {
-            if meta.remaining.is_empty() {
+            if meta.remaining.is_zero() {
                 continue;
             }
             active.push(Flow {
@@ -417,27 +418,18 @@ impl<P: PublicKey> State<P> {
 
         for (flow_id, rate) in allocations {
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
-                // Preserve fractional progress stored in `Remaining` so low-throughput flows keep
-                // advancing across ticks. If the planner assigns the exact same finite rate we can
-                // keep the remainder; otherwise the old fraction is expressed in a different rate
-                // and must be discarded (we already accounted for all bytes transferable at the
-                // old rate earlier in this rebalance, and any leftover fraction would be wrong
-                // once the rate changes).
-                if meta.rate != rate {
-                    meta.remaining = meta.remaining.clear_fraction();
-                }
                 meta.rate = rate.clone();
                 meta.last_update = now;
 
                 if matches!(meta.rate, Rate::Unlimited) {
-                    if !meta.remaining.is_empty() {
-                        meta.remaining = Remaining::zero();
+                    if !meta.remaining.is_zero() {
+                        meta.remaining = Ratio::zero();
                         completed.push(flow_id);
                     }
                     continue;
                 }
 
-                if let Some(duration) = bandwidth::finish_duration(&meta.rate, meta.remaining) {
+                if let Some(duration) = bandwidth::duration(&meta.rate, &meta.remaining) {
                     earliest = match earliest {
                         None => Some(duration),
                         Some(current) => Some(current.min(duration)),
@@ -671,7 +663,7 @@ impl<P: PublicKey> State<P> {
         } = entry;
 
         let deliver = should_deliver && origin != recipient;
-        let remaining = Remaining::new(message.len() as u128);
+        let remaining = Ratio::from_int(message.len() as u128);
         let sequence = if deliver {
             Some(self.increment(&origin, &recipient))
         } else {

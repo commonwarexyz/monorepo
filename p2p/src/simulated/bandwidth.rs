@@ -22,51 +22,6 @@ pub struct Flow<P> {
     pub delivered: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Remaining {
-    bytes: u128,
-    carry: u128,
-}
-
-impl Remaining {
-    /// Creates a new tracker with `bytes` whole bytes remaining and no fractional progress.
-    pub fn new(bytes: u128) -> Self {
-        Self { bytes, carry: 0 }
-    }
-
-    /// Returns an empty tracker (no bytes or fractional work outstanding).
-    pub fn zero() -> Self {
-        Self { bytes: 0, carry: 0 }
-    }
-
-    /// Whole bytes that still need to be transmitted.
-    pub fn bytes(&self) -> u128 {
-        self.bytes
-    }
-
-    /// Fractional progress toward the next byte, expressed in planner units.
-    pub fn carry(&self) -> u128 {
-        self.carry
-    }
-
-    /// Indicates whether all bytes have been delivered.
-    pub fn is_empty(&self) -> bool {
-        self.bytes == 0
-    }
-
-    /// Drops any fractional progress, typically when switching to a new rate scale.
-    #[must_use]
-    pub fn clear_fraction(self) -> Self {
-        if self.carry == 0 {
-            return self;
-        }
-        Self {
-            bytes: self.bytes,
-            carry: 0,
-        }
-    }
-}
-
 /// Resulting per-flow throughput expressed as bytes/second.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Rate {
@@ -422,70 +377,31 @@ where
 /// Calculate the time it will take to deplete a given amount of capacity at some [Rate].
 ///
 /// The computation rounds up so callers receive the minimum duration that guarantees at least the
-/// requested number of bytes were transmitted.
-pub fn duration(rate: &Rate, bytes: u128) -> Option<Duration> {
+/// requested amount of work was transmitted.
+pub fn duration(rate: &Rate, remaining: &Ratio) -> Option<Duration> {
     match rate {
         Rate::Unlimited => Some(Duration::ZERO),
         Rate::Finite(ratio) => {
-            if ratio.is_zero() {
-                if bytes == 0 {
-                    Some(Duration::ZERO)
-                } else {
-                    None
-                }
-            } else {
-                // `ratio` encodes throughput as `num/den` bytes per second. We convert the
-                // requested `bytes` into the equivalent duration in nanoseconds by computing
-                // `bytes * den / num` seconds and scaling by `NANOS_PER_SEC`, rounding up so the
-                // caller receives the minimum time that guarantees the requested bytes were sent.
-                let numerator = bytes
-                    .saturating_mul(ratio.den)
-                    .saturating_mul(NANOS_PER_SEC);
-                let ns = if ratio.num == 0 {
-                    u128::MAX
-                } else {
-                    numerator.div_ceil(ratio.num)
-                };
-                Some(Duration::from_nanos_saturating(ns))
-            }
-        }
-    }
-}
-
-/// Calculate the time required to complete the outstanding work tracked by [`Remaining`].
-///
-/// The computation reuses the carry embedded in `remaining`, so partially transmitted bytes shorten
-/// the returned deadline relative to a whole-byte estimate.
-pub fn finish_duration(rate: &Rate, remaining: Remaining) -> Option<Duration> {
-    match rate {
-        Rate::Unlimited => Some(Duration::ZERO),
-        Rate::Finite(ratio) => {
-            if remaining.is_empty() {
+            if remaining.is_zero() {
                 return Some(Duration::ZERO);
             }
             if ratio.is_zero() {
                 return None;
             }
 
-            let denom = ratio.den.saturating_mul(NANOS_PER_SEC);
-            if denom == 0 {
-                return Some(Duration::ZERO);
+            // `ratio` encodes throughput as `num/den` bytes per second. Converting the remaining
+            // work into seconds requires dividing by that throughput and scaling to nanoseconds.
+            // We round up so the caller receives the minimum completion time that guarantees the
+            // requested bytes were transmitted.
+            let numerator = remaining
+                .num
+                .saturating_mul(ratio.den)
+                .saturating_mul(NANOS_PER_SEC);
+            let denominator = remaining.den.saturating_mul(ratio.num);
+            if denominator == 0 {
+                return None;
             }
-
-            let required = remaining
-                .bytes
-                .saturating_mul(denom)
-                .saturating_sub(remaining.carry);
-
-            if required == 0 {
-                return Some(Duration::ZERO);
-            }
-
-            let ns = if ratio.num == 0 {
-                u128::MAX
-            } else {
-                required.div_ceil(ratio.num)
-            };
+            let ns = numerator.div_ceil(denominator);
             Some(Duration::from_nanos_saturating(ns))
         }
     }
@@ -493,19 +409,17 @@ pub fn finish_duration(rate: &Rate, remaining: Remaining) -> Option<Duration> {
 
 /// Calculate the remaining work after transferring data for `elapsed` at the provided [Rate].
 ///
-/// `Remaining` tracks both the whole bytes still outstanding and any fractional progress (recorded
-/// as a carry of nanoseconds-to-byte work). Feed the returned state back into subsequent calls to
-/// preserve sub-byte accuracy across discrete scheduling ticks and compute bytes sent by comparing
-/// the previous and returned states.
-pub fn transfer(rate: &Rate, elapsed: Duration, remaining: Remaining) -> Remaining {
-    if remaining.is_empty() {
+/// Feed the returned ratio back into subsequent calls to preserve fractional progress across
+/// discrete scheduling ticks.
+pub fn transfer(rate: &Rate, elapsed: Duration, mut remaining: Ratio) -> Ratio {
+    if remaining.is_zero() {
         return remaining;
     }
 
     match rate {
-        Rate::Unlimited => Remaining::zero(),
+        Rate::Unlimited => Ratio::zero(),
         Rate::Finite(ratio) => {
-            if ratio.is_zero() {
+            if ratio.is_zero() || elapsed.is_zero() {
                 return remaining;
             }
 
@@ -516,20 +430,16 @@ pub fn transfer(rate: &Rate, elapsed: Duration, remaining: Remaining) -> Remaini
 
             let denom = ratio.den.saturating_mul(NANOS_PER_SEC);
             if denom == 0 {
-                return Remaining::zero();
+                return Ratio::zero();
             }
 
-            let numerator = ratio.num.saturating_mul(delta_ns);
-            let total = numerator.saturating_add(remaining.carry);
-            let bytes = (total / denom).min(remaining.bytes);
-            let leftover = total % denom;
-            let remaining_bytes = remaining.bytes.saturating_sub(bytes);
-            let carry = if remaining_bytes == 0 { 0 } else { leftover };
+            let usage = Ratio {
+                num: ratio.num.saturating_mul(delta_ns),
+                den: denom,
+            };
 
-            Remaining {
-                bytes: remaining_bytes,
-                carry,
-            }
+            remaining.sub_assign(&usage);
+            remaining
         }
     }
 }
@@ -611,29 +521,26 @@ mod tests {
     fn transfer_accumulates_carry() {
         let ratio = Ratio { num: 1, den: 2 }; // 0.5 bytes per second
         let rate = Rate::Finite(ratio);
-        let initial = Remaining::new(10);
+        let initial = Ratio::from_int(10);
 
         let after_short = transfer(&rate, Duration::from_millis(500), initial);
-        assert_eq!(after_short.bytes(), 10); // 0.25 bytes rounded down
-        assert_ne!(after_short.carry(), 0);
+        assert_eq!(after_short, Ratio { num: 39, den: 4 });
 
         let after_long = transfer(&rate, Duration::from_millis(1500), after_short);
-        assert_eq!(after_long.bytes(), 9);
-        assert_eq!(after_long.carry(), 0); // 0.75 + previous 0.25 == 1 byte
+        assert_eq!(after_long, Ratio::from_int(9));
     }
 
     #[test]
     fn finish_duration_accounts_for_fractional_progress() {
         let rate = Rate::Finite(Ratio { num: 1, den: 2 });
-        let initial = Remaining::new(1);
-        let partial = transfer(&rate, Duration::from_millis(500), initial);
-        assert_eq!(partial.bytes(), 1);
-        assert!(partial.carry() > 0);
+        let initial = Ratio::from_int(1);
+        let partial = transfer(&rate, Duration::from_millis(500), initial.clone());
+        assert_eq!(partial, Ratio { num: 3, den: 4 });
 
-        let duration_full = duration(&rate, 1).expect("finite duration");
+        let duration_full = duration(&rate, &initial).expect("finite duration");
         assert_eq!(duration_full, Duration::from_secs(2));
 
-        let finish = finish_duration(&rate, partial).expect("finish duration");
+        let finish = duration(&rate, &partial).expect("finish duration");
         assert_eq!(finish, Duration::from_millis(1500));
         assert!(finish < duration_full);
     }
@@ -642,7 +549,7 @@ mod tests {
     fn bandwidth_duration() {
         let ratio = Ratio::from_int(500);
         let rate = Rate::Finite(ratio);
-        let time = duration(&rate, 1_000).expect("finite time");
+        let time = duration(&rate, &Ratio::from_int(1_000)).expect("finite time");
         assert_eq!(time.as_secs(), 2);
     }
 
