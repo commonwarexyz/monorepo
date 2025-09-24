@@ -21,7 +21,7 @@ const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: E,
+    context: Option<E>,
 
     // ---------- Configuration ----------
     /// For signing and verifying messages.
@@ -93,7 +93,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context,
+                context: Some(context),
                 crypto: cfg.crypto,
                 ip_namespace,
                 allow_private_ips: cfg.allow_private_ips,
@@ -111,7 +111,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     /// Handle an incoming list of peer information.
     ///
     /// Returns an error if the list itself or any entries can be considered malformed.
-    fn validate(&mut self, infos: &Vec<types::PeerInfo<C::PublicKey>>) -> Result<(), Error> {
+    fn validate(
+        &mut self,
+        context: &E,
+        infos: &Vec<types::PeerInfo<C::PublicKey>>,
+    ) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         if infos.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(infos.len()));
@@ -134,7 +138,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
             // If any timestamp is too far into the future, disconnect from the peer
             if Duration::from_millis(info.timestamp)
-                > self.context.current().epoch() + self.synchrony_bound
+                > context.current().epoch() + self.synchrony_bound
             {
                 return Err(Error::SynchronyBound);
             }
@@ -150,10 +154,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context))
     }
 
-    async fn run(mut self) {
+    async fn run(mut self, mut context: E) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Register { index, peers } => {
@@ -208,7 +215,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     // Truncate to a random selection of peers if we have too many infos
                     let max = self.peer_gossip_max_count;
                     if infos.len() > max {
-                        infos.partial_shuffle(&mut self.context, max);
+                        infos.partial_shuffle(&mut context, max);
                         infos.truncate(max);
                     }
 
@@ -218,7 +225,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     }
                 }
                 Message::Peers { peers, mut peer } => {
-                    if let Err(e) = self.validate(&peers) {
+                    if let Err(e) = self.validate(&context, &peers) {
                         debug!(error = ?e, "failed to handle peers");
                         peer.kill().await;
                         continue;
@@ -394,7 +401,7 @@ mod tests {
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
         let ip_namespace = union(&ip_namespace_base, super::NAMESPACE_SUFFIX_IP);
-        runner_context.spawn(|_| actor.run());
+        runner_context.spawn(|context| actor.run(context));
 
         TestHarness {
             mailbox,

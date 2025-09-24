@@ -25,7 +25,7 @@ const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
 pub struct Vrf<E: Clock + Spawner, P: PublicKey> {
-    context: E,
+    context: Option<E>,
     timeout: Duration,
     threshold: u32,
     contributors: Vec<P>,
@@ -48,7 +48,7 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
-            context,
+            context: Some(context),
             timeout,
             threshold,
             contributors,
@@ -59,6 +59,7 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
 
     async fn run_round(
         &self,
+        context: &E,
         output: &Output<MinSig>,
         round: u64,
         sender: &mut impl Sender<PublicKey = P>,
@@ -83,12 +84,12 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
             .expect("failed to send signature");
 
         // Wait for partial signatures from peers or timeout
-        let start = self.context.current();
+        let start = context.current();
         let t_signature = start + self.timeout;
         let mut received = HashSet::new();
         loop {
             select! {
-                _ = self.context.sleep_until(t_signature) => {
+                _ = context.sleep_until(t_signature) => {
                     debug!(round, "signature timeout");
                     break;
                 },
@@ -162,11 +163,15 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
         sender: impl Sender<PublicKey = P>,
         receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(sender, receiver))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context, sender, receiver))
     }
 
     async fn run(
         mut self,
+        context: E,
         mut sender: impl Sender<PublicKey = P>,
         mut receiver: impl Receiver<PublicKey = P>,
     ) {
@@ -179,7 +184,7 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
             };
 
             match self
-                .run_round(&output, round, &mut sender, &mut receiver)
+                .run_round(&context, &output, round, &mut sender, &mut receiver)
                 .await
             {
                 Some(signature) => {

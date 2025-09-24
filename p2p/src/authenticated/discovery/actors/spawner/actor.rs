@@ -24,7 +24,7 @@ pub struct Actor<
     I: Stream,
     C: PublicKey,
 > {
-    context: E,
+    context: Option<E>,
 
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
@@ -74,7 +74,7 @@ impl<
 
         (
             Self {
-                context,
+                context: Some(context),
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -96,11 +96,15 @@ impl<
         tracker: Mailbox<tracker::Message<E, C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(tracker, router))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context, tracker, router))
     }
 
     async fn run(
         mut self,
+        context: E,
         tracker: Mailbox<tracker::Message<E, C>>,
         router: Mailbox<router::Message<C>>,
     ) {
@@ -124,44 +128,42 @@ impl<
                     let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
 
                     // Spawn peer
-                    self.context
-                        .with_label("peer")
-                        .spawn(move |context| async move {
-                            // Create peer
-                            debug!(?peer, "peer started");
-                            let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
-                                context,
-                                peer::Config {
-                                    sent_messages,
-                                    received_messages,
-                                    rate_limited,
-                                    mailbox_size: self.mailbox_size,
-                                    gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
-                                    allowed_bit_vec_rate: self.allowed_bit_vec_rate,
-                                    max_peer_set_size: self.max_peer_set_size,
-                                    allowed_peers_rate: self.allowed_peers_rate,
-                                    peer_gossip_max_count: self.peer_gossip_max_count,
-                                },
-                            );
+                    context.with_label("peer").spawn(move |context| async move {
+                        // Create peer
+                        debug!(?peer, "peer started");
+                        let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                            context,
+                            peer::Config {
+                                sent_messages,
+                                received_messages,
+                                rate_limited,
+                                mailbox_size: self.mailbox_size,
+                                gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
+                                allowed_bit_vec_rate: self.allowed_bit_vec_rate,
+                                max_peer_set_size: self.max_peer_set_size,
+                                allowed_peers_rate: self.allowed_peers_rate,
+                                peer_gossip_max_count: self.peer_gossip_max_count,
+                            },
+                        );
 
-                            // Register peer with the router
-                            let channels = router.ready(peer.clone(), messenger).await;
+                        // Register peer with the router
+                        let channels = router.ready(peer.clone(), messenger).await;
 
-                            // Register peer with tracker
-                            tracker.connect(peer.clone(), is_dialer, peer_mailbox).await;
+                        // Register peer with tracker
+                        tracker.connect(peer.clone(), is_dialer, peer_mailbox).await;
 
-                            // Run peer
-                            let e = peer_actor
-                                .run(peer.clone(), connection, tracker, channels)
-                                .await;
-                            connections.dec();
+                        // Run peer
+                        let e = peer_actor
+                            .run(peer.clone(), connection, tracker, channels)
+                            .await;
+                        connections.dec();
 
-                            // Let the router know the peer has exited
-                            debug!(error = ?e, ?peer, "peer shutdown");
-                            router.release(peer).await;
-                            // Release the reservation
-                            drop(reservation);
-                        });
+                        // Let the router know the peer has exited
+                        debug!(error = ?e, ?peer, "peer shutdown");
+                        router.release(peer).await;
+                        // Release the reservation
+                        drop(reservation);
+                    });
                 }
             }
         }

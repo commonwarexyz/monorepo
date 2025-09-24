@@ -51,7 +51,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
-    context: E,
+    context: Option<E>,
 
     ////////////////////////////////////////
     // Configuration
@@ -119,7 +119,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
-            context,
+            context: Some(context),
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
@@ -140,13 +140,20 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(network))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context, network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
+    async fn run(
+        mut self,
+        context: E,
+        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+    ) {
         let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
-        let mut shutdown = self.context.stopped();
+        let mut shutdown = context.stopped();
 
         loop {
             // Cleanup waiters

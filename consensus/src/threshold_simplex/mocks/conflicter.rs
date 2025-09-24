@@ -27,7 +27,7 @@ pub struct Conflicter<
     H: Hasher,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
-    context: E,
+    context: Option<E>,
     supervisor: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
@@ -43,7 +43,7 @@ impl<
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context,
+            context: Some(context),
             supervisor: cfg.supervisor,
             namespace: cfg.namespace,
             _hasher: PhantomData,
@@ -52,10 +52,13 @@ impl<
     }
 
     pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(pending_network))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context, pending_network))
     }
 
-    async fn run(mut self, pending_network: (impl Sender, impl Receiver)) {
+    async fn run(self, mut context: E, pending_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
@@ -73,7 +76,7 @@ impl<
                     // Notarize random digest
                     let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
-                    let payload = H::Digest::random(&mut self.context);
+                    let payload = H::Digest::random(&mut context);
                     let proposal =
                         Proposal::new(notarize.proposal.round, notarize.proposal.parent, payload);
                     let n = Notarize::<V, _>::sign(&self.namespace, share, proposal);
@@ -89,7 +92,7 @@ impl<
                     // Finalize random digest
                     let view = finalize.view();
                     let share = self.supervisor.share(view).unwrap();
-                    let payload = H::Digest::random(&mut self.context);
+                    let payload = H::Digest::random(&mut context);
                     let proposal =
                         Proposal::new(finalize.proposal.round, finalize.proposal.parent, payload);
                     let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);

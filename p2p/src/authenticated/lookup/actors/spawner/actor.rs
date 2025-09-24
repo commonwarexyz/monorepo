@@ -20,7 +20,7 @@ pub struct Actor<
     St: Stream,
     C: PublicKey,
 > {
-    context: E,
+    context: Option<E>,
 
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
@@ -66,7 +66,7 @@ impl<
 
         (
             Self {
-                context,
+                context: Some(context),
                 mailbox_size: cfg.mailbox_size,
                 ping_frequency: cfg.ping_frequency,
                 allowed_ping_rate: cfg.allowed_ping_rate,
@@ -85,11 +85,15 @@ impl<
         tracker: Mailbox<tracker::Message<E, C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(tracker, router))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context, tracker, router))
     }
 
     async fn run(
         mut self,
+        context: E,
         tracker: Mailbox<tracker::Message<E, C>>,
         router: Mailbox<router::Message<C>>,
     ) {
@@ -112,39 +116,37 @@ impl<
                     let mut router = router.clone();
 
                     // Spawn peer
-                    self.context
-                        .with_label("peer")
-                        .spawn(move |context| async move {
-                            // Create peer
-                            debug!(?peer, "peer started");
-                            let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
-                                context,
-                                peer::Config {
-                                    ping_frequency: self.ping_frequency,
-                                    allowed_ping_rate: self.allowed_ping_rate,
-                                    sent_messages,
-                                    received_messages,
-                                    rate_limited,
-                                    mailbox_size: self.mailbox_size,
-                                },
-                            );
+                    context.with_label("peer").spawn(move |context| async move {
+                        // Create peer
+                        debug!(?peer, "peer started");
+                        let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                            context,
+                            peer::Config {
+                                ping_frequency: self.ping_frequency,
+                                allowed_ping_rate: self.allowed_ping_rate,
+                                sent_messages,
+                                received_messages,
+                                rate_limited,
+                                mailbox_size: self.mailbox_size,
+                            },
+                        );
 
-                            // Register peer with the router
-                            let channels = router.ready(peer.clone(), messenger).await;
+                        // Register peer with the router
+                        let channels = router.ready(peer.clone(), messenger).await;
 
-                            // Register peer with tracker
-                            tracker.connect(peer.clone(), peer_mailbox).await;
+                        // Register peer with tracker
+                        tracker.connect(peer.clone(), peer_mailbox).await;
 
-                            // Run peer
-                            let e = peer_actor.run(peer.clone(), connection, channels).await;
-                            connections.dec();
+                        // Run peer
+                        let e = peer_actor.run(peer.clone(), connection, channels).await;
+                        connections.dec();
 
-                            // Let the router know the peer has exited
-                            debug!(error = ?e, ?peer, "peer shutdown");
-                            router.release(peer).await;
-                            // Release the reservation
-                            drop(reservation)
-                        });
+                        // Let the router know the peer has exited
+                        debug!(error = ?e, ?peer, "peer shutdown");
+                        router.release(peer).await;
+                        // Release the reservation
+                        drop(reservation)
+                    });
                 }
             }
         }

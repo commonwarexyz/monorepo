@@ -32,7 +32,7 @@ where
     H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 {
     // Configuration
-    context: E,
+    context: Option<E>,
     blocker: B,
     priority_request: bool,
     request_codec: Rq::Cfg,
@@ -85,7 +85,7 @@ where
 
         (
             Self {
-                context,
+                context: Some(context),
                 blocker: cfg.blocker,
                 priority_request: cfg.priority_request,
                 request_codec: cfg.request_codec,
@@ -111,7 +111,10 @@ where
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(requests, responses))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|_| self.run(requests, responses))
     }
 
     async fn run(
