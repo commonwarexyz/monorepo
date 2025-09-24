@@ -29,6 +29,10 @@ pub mod time;
 #[cfg(feature = "std")]
 pub use time::{DurationExt, SystemTimeExt};
 #[cfg(feature = "std")]
+pub mod rational;
+#[cfg(feature = "std")]
+pub use rational::BigRationalExt;
+#[cfg(feature = "std")]
 mod priority_set;
 #[cfg(feature = "std")]
 pub use priority_set::PrioritySet;

@@ -6,7 +6,7 @@
 //! according to the returned rates and invoking the planner whenever the active set
 //! changes (for example when a message finishes or a new message arrives).
 
-use commonware_utils::{time::NANOS_PER_SEC, DurationExt};
+use commonware_utils::{time::NANOS_PER_SEC, BigRationalExt, DurationExt};
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_rational::BigRational;
@@ -48,7 +48,7 @@ struct Resource {
 impl Resource {
     fn new(limit: u128) -> Self {
         Self {
-            remaining: rational_from_u128(limit),
+            remaining: BigRational::from_u128(limit),
             members: Vec::new(),
             active: 0,
         }
@@ -234,7 +234,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 }
 
                 let share = resource.remaining.clone()
-                    / BigRational::from_integer(BigInt::from(resource.active as u64));
+                    / BigRational::from_u64(resource.active as u64);
                 match &min_delta {
                     None => {
                         // First candidate: provisionally treat it as the tightest constraint.
@@ -288,7 +288,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 
                 // Charge each resource for the uniform allocation it just handed out.
                 let usage =
-                    delta.clone() * BigRational::from_integer(BigInt::from(resource.active as u64));
+                    delta.clone() * BigRational::from_u64(resource.active as u64);
                 if usage.is_zero() {
                     continue;
                 }
@@ -399,7 +399,7 @@ pub fn duration(rate: &Rate, remaining: &BigRational) -> Option<Duration> {
             if seconds.is_zero() {
                 return Some(Duration::ZERO);
             }
-            let nanos = seconds * BigRational::from_integer(BigInt::from(NANOS_PER_SEC));
+            let nanos = seconds * BigRational::from_u128(NANOS_PER_SEC);
             let ns = ceil_to_u128(&nanos)?;
             Some(Duration::from_nanos_saturating(ns))
         }
@@ -444,10 +444,6 @@ pub fn transfer(rate: &Rate, elapsed: Duration, mut remaining: BigRational) -> B
     }
 }
 
-fn rational_from_u128(value: u128) -> BigRational {
-    BigRational::from_integer(BigInt::from(value))
-}
-
 fn ceil_to_u128(value: &BigRational) -> Option<u128> {
     if value < &BigRational::zero() {
         return Some(0);
@@ -482,7 +478,7 @@ mod tests {
     }
 
     fn int(value: u64) -> BigRational {
-        BigRational::from_integer(BigInt::from(value))
+        BigRational::from_u64(value)
     }
 
     fn frac(num: u64, den: u64) -> BigRational {

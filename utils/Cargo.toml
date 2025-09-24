@@ -17,6 +17,8 @@ futures = { workspace = true, optional = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 cfg-if = { workspace = true }
+num-bigint = { workspace = true, optional = true }
+num-rational = { workspace = true, optional = true }
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
@@ -28,7 +30,16 @@ num-bigint = { version = "0.4.6", default-features = false }
 
 [features]
 default = ["std"]
-std = ["rand/std", "rand/std_rng", "thiserror/std", "bytes/std", "commonware-codec/std", "futures"]
+std = [
+    "rand/std",
+    "rand/std_rng",
+    "thiserror/std",
+    "bytes/std",
+    "commonware-codec/std",
+    "futures",
+    "num-bigint",
+    "num-rational",
+]
 
 [lib]
 bench = false

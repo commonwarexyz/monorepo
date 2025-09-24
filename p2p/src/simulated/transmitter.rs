@@ -2,8 +2,7 @@ use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::SystemTimeExt;
-use num_bigint::BigInt;
+use commonware_utils::{BigRationalExt, SystemTimeExt};
 use num_rational::BigRational;
 use num_traits::Zero;
 use std::{
@@ -666,7 +665,7 @@ impl<P: PublicKey> State<P> {
         } = entry;
 
         let deliver = should_deliver && origin != recipient;
-        let remaining = BigRational::from_integer(BigInt::from(message.len() as u128));
+        let remaining = BigRational::from_usize(message.len());
         let sequence = if deliver {
             Some(self.increment(&origin, &recipient))
         } else {
