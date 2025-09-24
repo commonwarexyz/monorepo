@@ -50,23 +50,23 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 7 {
-            0 => {
+        match choice % 8 {
+            0 | 1 => {
                 let key = u.arbitrary()?;
                 let value = u.arbitrary()?;
                 Ok(Operation::Update { key, value })
             }
-            1 => {
+            2 => {
                 let key = u.arbitrary()?;
                 Ok(Operation::Delete { key })
             }
-            2 => Ok(Operation::Commit),
-            3 => Ok(Operation::Prune),
-            4 => {
+            3 => Ok(Operation::Commit),
+            4 => Ok(Operation::Prune),
+            5 => {
                 let fetch_batch_size = u.arbitrary()?;
                 Ok(Operation::SyncFull { fetch_batch_size })
             }
-            5 | 6 => {
+            6 => {
                 let sync_log: bool = u.arbitrary()?;
                 let sync_mmr: bool = u.arbitrary()?;
                 let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
@@ -75,6 +75,10 @@ impl<'a> Arbitrary<'a> for Operation {
                     sync_mmr,
                     write_limit,
                 })
+            }
+            7 => {
+                let key = u.arbitrary()?;
+                Ok(Operation::Delete { key })
             }
             _ => unreachable!(),
         }
