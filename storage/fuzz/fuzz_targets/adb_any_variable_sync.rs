@@ -273,18 +273,23 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let size = ((*size as u64) % op_count) + 1;
-                        //let start_loc = (*start_offset as u64) % size;
-                        let start_loc = (*start_offset as u64).clamp(0, op_count);
+                        // Ensure start_loc is less than size to satisfy the assertion in historical_proof
+                        let start_loc = (*start_offset as u64) % size;
                         let max_ops_value = *max_ops as u64;
                         // TODO: remove this after fixing the bug mentioned in the PR discussions
-                        if start_loc + max_ops_value <=1 || start_loc > max_ops_value || start_loc >= size {
+                        if start_loc + max_ops_value <=1 || start_loc > max_ops_value {
                             continue
                         }
-                        let root = db.root(&mut hasher);
-                        if let Ok((proof, log)) =
-                            db.historical_proof(size, start_loc, max_ops_value).await
-                        {
-                            assert!(verify_proof(&mut hasher, &proof, start_loc, &log, &root));
+                        // Only verify when size == op_count because we can only get the current root
+                        // For historical sizes, we need to compute historical root that
+                        // requires access to peaks at that size
+                        if size == op_count {
+                            let root = db.root(&mut hasher);
+                            if let Ok((proof, log)) =
+                                db.historical_proof(size, start_loc, max_ops_value).await
+                            {
+                                assert!(verify_proof(&mut hasher, &proof, start_loc, &log, &root));
+                            }
                         }
                     }
                 }
