@@ -32,7 +32,7 @@
 //!    finish first by computing how long it needs to transmit its remaining
 //!    bytes. Advance simulated time directly to that completion instant (advancing all other flows
 //!    by the bytes transferred over the interval).
-//! 4. **Finalize Work:** Remove the completed flow and pass the message to the receiver. Repeat from step 1
+//! 4. **Deliver Message:** Remove the completed flow and pass the message to the receiver. Repeat from step 1
 //!    until all flows are processed.
 //!
 //! _Messages between the same pair of peers remain strictly ordered. When one
