@@ -141,11 +141,11 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     peaks
 }
 
-/// Returns the number of the leaf at position `leaf_pos` in an MMR, or None if
-/// this is not a leaf.
+/// Returns the location of the leaf at position `leaf_pos` in an MMR, or None
+/// if this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
-pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
+pub(crate) const fn leaf_pos_to_loc(leaf_pos: u64) -> Option<u64> {
     if leaf_pos == 0 {
         return Some(0);
     }
@@ -154,7 +154,7 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
     let height = start.trailing_ones();
     let mut two_h = 1 << (height - 1);
     let mut cur_node = start - 1;
-    let mut leaf_num_floor = 0u64;
+    let mut leaf_loc_floor = 0u64;
 
     while two_h > 1 {
         if cur_node == leaf_pos {
@@ -165,7 +165,7 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
         if leaf_pos > left_pos {
             // The leaf is in the right subtree, so we must account for the leaves in the left
             // subtree all of which precede it.
-            leaf_num_floor += two_h;
+            leaf_loc_floor += two_h;
             cur_node -= 1; // move to the right child
         } else {
             // The node is in the left subtree
@@ -173,13 +173,13 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
         }
     }
 
-    Some(leaf_num_floor)
+    Some(leaf_loc_floor)
 }
 
-/// Returns the position of the leaf with number `leaf_num` in an MMR.
-pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
+/// Returns the position of the leaf with location `leaf_loc` in an MMR.
+pub(crate) const fn leaf_loc_to_pos(leaf_loc: u64) -> u64 {
     // This will never underflow since 2*n >= count_ones(n).
-    leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
+    leaf_loc.checked_mul(2).expect("leaf_loc overflow") - leaf_loc.count_ones() as u64
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
@@ -282,25 +282,25 @@ mod tests {
     use commonware_cryptography::Sha256;
 
     #[test]
-    fn test_leaf_num_calculation() {
+    fn test_leaf_loc_calculation() {
         // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
         // its number and back again.
         let mut mmr: Mmr<Sha256> = Mmr::new();
         let mut hasher = Standard::<Sha256>::new();
-        let mut num_to_pos = Vec::new();
+        let mut loc_to_pos = Vec::new();
         let digest = [1u8; 32];
         for _ in 0u64..1000 {
-            num_to_pos.push(mmr.add(&mut hasher, &digest));
+            loc_to_pos.push(mmr.add(&mut hasher, &digest));
         }
 
         let mut last_leaf_pos = 0;
-        for (leaf_num_expected, leaf_pos) in num_to_pos.iter().enumerate() {
-            let leaf_num_got = leaf_pos_to_num(*leaf_pos).unwrap();
-            assert_eq!(leaf_num_got, leaf_num_expected as u64);
-            let leaf_pos_got = leaf_num_to_pos(leaf_num_got);
+        for (leaf_loc_expected, leaf_pos) in loc_to_pos.iter().enumerate() {
+            let leaf_loc_got = leaf_pos_to_loc(*leaf_pos).unwrap();
+            assert_eq!(leaf_loc_got, leaf_loc_expected as u64);
+            let leaf_pos_got = leaf_loc_to_pos(leaf_loc_got);
             assert_eq!(leaf_pos_got, *leaf_pos);
             for i in last_leaf_pos + 1..*leaf_pos {
-                assert!(leaf_pos_to_num(i).is_none());
+                assert!(leaf_pos_to_loc(i).is_none());
             }
             last_leaf_pos = *leaf_pos;
         }

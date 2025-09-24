@@ -290,34 +290,34 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrOperation::GenerateProof { leaf_idx } => {
-                    if !reference.leaf_positions.is_empty() {
-                        let idx = (*leaf_idx as usize) % reference.leaf_positions.len();
-                        let pos = reference.leaf_positions[idx];
+                    if reference.leaf_positions.is_empty() {
+                        return;
+                    }
+                    let loc = (*leaf_idx as u64) % reference.leaf_positions.len() as u64;
+                    let pos = reference.leaf_positions[loc as usize];
 
-                        // Check if the element is pruned
-                        let is_pruned = reference.is_leaf_pruned(pos);
-
-                        match mmr.proof(pos) {
-                            Ok(proof) => {
-                                // If we got a proof for a pruned element, it might be pinned
-                                // Verify the proof with the actual data we stored
-                                let root = mmr.root(&mut hasher);
-                                let leaf_data = &reference.leaf_data[idx];
-                                let is_valid = proof.verify_element_inclusion(&mut hasher, leaf_data, pos, &root);
-                                assert!(
-                                    is_valid,
-                                    "Operation {op_idx}: Proof verification failed for leaf at pos {pos}",
-                                );
-                            }
-                            Err(e) => {
-                                // Expected error for pruned elements
-                                if is_pruned {
-                                    // This is expected - we can't generate proofs for pruned elements
-                                    // unless they're pinned
-                                } else {
-                                    // Unexpected error for non-pruned elements
-                                    panic!("Could not generate proof for non-pruned pos {pos}: {e:?}");
-                                }
+                    // Check if the element is pruned
+                    let is_pruned = reference.is_leaf_pruned(pos);
+                    match mmr.proof(loc) {
+                        Ok(proof) => {
+                            // If we got a proof for a pruned element, it might be pinned
+                            // Verify the proof with the actual data we stored
+                            let root = mmr.root(&mut hasher);
+                            let leaf_data = &reference.leaf_data[loc as usize];
+                            let is_valid = proof.verify_element_inclusion(&mut hasher, leaf_data, loc, &root);
+                            assert!(
+                                is_valid,
+                                "Operation {op_idx}: Proof verification failed for leaf at loc {loc}",
+                            );
+                        }
+                        Err(e) => {
+                            // Expected error for pruned elements
+                            if is_pruned {
+                                // This is expected - we can't generate proofs for pruned elements
+                                // unless they're pinned
+                            } else {
+                                // Unexpected error for non-pruned elements
+                                panic!("Could not generate proof for non-pruned pos {pos}: {e:?}");
                             }
                         }
                     }

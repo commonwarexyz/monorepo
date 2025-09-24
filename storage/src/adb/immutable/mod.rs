@@ -6,7 +6,7 @@ use crate::{
     index::Index,
     journal::{fixed, variable},
     mmr::{
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
         Proof, StandardHasher as Standard,
     },
@@ -211,8 +211,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
-                lower_bound: leaf_num_to_pos(cfg.lower_bound),
-                upper_bound: leaf_num_to_pos(cfg.upper_bound + 1) - 1,
+                lower_bound_pos: leaf_loc_to_pos(cfg.lower_bound),
+                upper_bound_pos: leaf_loc_to_pos(cfg.upper_bound + 1) - 1,
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
@@ -385,7 +385,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         // Confirm post-conditions hold.
-        assert_eq!(log_size, leaf_pos_to_num(mmr.size()).unwrap());
+        assert_eq!(log_size, leaf_pos_to_loc(mmr.size()).unwrap());
         assert_eq!(log_size, locations.size().await?);
 
         Ok((log_size, oldest_retained_loc.unwrap_or(0)))
@@ -426,7 +426,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(self.oldest_retained_loc).await?;
         self.mmr
-            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
+            .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(self.oldest_retained_loc))
             .await?;
         Ok(())
     }
@@ -579,28 +579,30 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             .await
     }
 
-    /// Analogous to proof but with respect to the state of the MMR when it had `size` elements.
+    /// Analogous to proof but with respect to the state of the database when it had `op_count`
+    /// operations.
     pub async fn historical_proof(
         &self,
-        size: u64,
+        op_count: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
+        assert!(op_count <= self.op_count());
+        assert!(start_loc < op_count);
+
         if start_loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(start_loc));
         }
 
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_loc = std::cmp::min(size - 1, start_loc + max_ops.get() - 1);
-        let end_pos = leaf_num_to_pos(end_loc);
-        let mmr_size = leaf_num_to_pos(size);
+        let end_loc = std::cmp::min(op_count, start_loc + max_ops.get());
+        let mmr_size = leaf_loc_to_pos(op_count);
 
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_pos, end_pos)
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
-        for loc in start_loc..=end_loc {
+        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
+        for loc in start_loc..end_loc {
             let section = loc / self.log_items_per_section;
             let offset = self.locations.read(loc).await?;
             let op = self.log.get(section, offset).await?;

@@ -14,7 +14,7 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
         hasher::Hasher,
-        iterator::{leaf_num_to_pos, nodes_to_pin},
+        iterator::{leaf_loc_to_pos, nodes_to_pin},
         mem::{Config, Mmr},
         storage::Storage,
         verification, Error,
@@ -151,7 +151,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         if pruned_chunks == 0 {
             return Ok(Self::new());
         }
-        let mmr_size = leaf_num_to_pos(pruned_chunks as u64);
+        let mmr_size = leaf_loc_to_pos(pruned_chunks as u64);
 
         let mut pinned_nodes = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
@@ -210,7 +210,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         metadata.put(key, self.pruned_chunks.to_be_bytes().to_vec());
 
         // Write the pinned nodes.
-        let mmr_size = leaf_num_to_pos(self.pruned_chunks as u64);
+        let mmr_size = leaf_loc_to_pos(self.pruned_chunks as u64);
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
@@ -241,18 +241,18 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     ///
     /// - Panics if there are unprocessed updates.
     pub fn prune_to_bit(&mut self, bit_offset: u64) {
-        let chunk_num = Self::chunk_num(bit_offset);
-        if chunk_num < self.pruned_chunks {
+        let chunk_loc = Self::chunk_loc(bit_offset);
+        if chunk_loc < self.pruned_chunks {
             return;
         }
         assert!(!self.is_dirty(), "cannot prune with unprocessed updates");
 
-        let chunk_index = chunk_num - self.pruned_chunks;
+        let chunk_index = chunk_loc - self.pruned_chunks;
         self.bitmap.drain(0..chunk_index);
-        self.pruned_chunks = chunk_num;
+        self.pruned_chunks = chunk_loc;
         self.authenticated_len = self.bitmap.len() - 1;
 
-        let mmr_pos = leaf_num_to_pos(chunk_num as u64);
+        let mmr_pos = leaf_loc_to_pos(chunk_loc as u64);
         self.mmr.prune_to_pos(mmr_pos);
     }
 
@@ -358,8 +358,9 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
+    #[cfg(test)]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        leaf_num_to_pos(Self::chunk_num(bit_offset) as u64)
+        leaf_loc_to_pos(Self::chunk_loc(bit_offset) as u64)
     }
 
     #[inline]
@@ -370,15 +371,15 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// Panics if the bit doesn't exist or has been pruned.
     fn chunk_index(&self, bit_offset: u64) -> usize {
         assert!(bit_offset < self.bit_count(), "out of bounds: {bit_offset}");
-        let chunk_num = Self::chunk_num(bit_offset);
-        assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
+        let chunk_loc = Self::chunk_loc(bit_offset);
+        assert!(chunk_loc >= self.pruned_chunks, "bit pruned: {bit_offset}");
 
-        chunk_num - self.pruned_chunks
+        chunk_loc - self.pruned_chunks
     }
 
     // Convert a bit offset into the number of the chunk it belongs to.
     #[inline]
-    fn chunk_num(bit_offset: u64) -> usize {
+    fn chunk_loc(bit_offset: u64) -> usize {
         (bit_offset / Self::CHUNK_SIZE_BITS) as usize
     }
 
@@ -461,7 +462,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             .dirty_chunks
             .iter()
             .map(|chunk_index| {
-                let pos = leaf_num_to_pos((*chunk_index + self.pruned_chunks) as u64);
+                let pos = leaf_loc_to_pos((*chunk_index + self.pruned_chunks) as u64);
                 (pos, &self.bitmap[*chunk_index])
             })
             .collect::<Vec<_>>();
@@ -543,10 +544,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             "cannot compute proof with unprocessed updates"
         );
 
-        let leaf_pos = Self::leaf_pos(bit_offset);
-        let chunk = self.get_chunk(bit_offset);
+        let chunk = *self.get_chunk(bit_offset);
+        let chunk_loc = Self::chunk_loc(bit_offset);
 
-        if leaf_pos == self.mmr.size() {
+        if chunk_loc as u64 == self.mmr.leaves() {
             assert!(self.next_bit > 0);
             // Proof is over a bit in the partial chunk. In this case only a single digest is
             // required in the proof: the mmr's root.
@@ -555,15 +556,16 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                     size: self.bit_count(),
                     digests: vec![self.mmr.root(hasher)],
                 },
-                *chunk,
+                chunk,
             ));
         }
 
-        let mut proof = verification::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+        let range = chunk_loc as u64..(chunk_loc + 1) as u64;
+        let mut proof = verification::range_proof(&self.mmr, range).await?;
         proof.size = self.bit_count();
         if self.next_bit == 0 {
             // Bitmap is chunk aligned.
-            return Ok((proof, *chunk));
+            return Ok((proof, chunk));
         }
 
         // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
@@ -571,7 +573,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let last_chunk_digest = hasher.digest(self.last_chunk().0);
         proof.digests.push(last_chunk_digest);
 
-        Ok((proof, *chunk))
+        Ok((proof, chunk))
     }
 
     /// Verify whether `proof` proves that the `chunk` containing the referenced bit belongs to the
@@ -588,15 +590,16 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             debug!(bit_count, bit_offset, "tried to verify non-existent bit");
             return false;
         }
-        let leaf_pos = Self::leaf_pos(bit_offset);
 
+        let leaves = Self::chunk_loc(bit_count) as u64;
         let mut mmr_proof = Proof::<H::Digest> {
-            size: leaf_num_to_pos(bit_count / Self::CHUNK_SIZE_BITS),
+            size: leaf_loc_to_pos(leaves),
             digests: proof.digests.clone(),
         };
 
+        let loc = Self::chunk_loc(bit_offset) as u64;
         if bit_count % Self::CHUNK_SIZE_BITS == 0 {
-            return mmr_proof.verify_element_inclusion(hasher, chunk, leaf_pos, root);
+            return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
         }
 
         if proof.digests.is_empty() {
@@ -605,7 +608,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
         let last_digest = mmr_proof.digests.pop().unwrap();
 
-        if mmr_proof.size == leaf_pos {
+        if leaves == loc {
             // The proof is over a bit in the partial chunk. In this case the proof's only digest
             // should be the MMR's root, otherwise it is invalid. Since we've popped off the last
             // digest already, there should be no remaining digests.
@@ -629,7 +632,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], leaf_pos) {
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");

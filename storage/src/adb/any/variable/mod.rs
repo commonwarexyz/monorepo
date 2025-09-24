@@ -12,7 +12,7 @@ use crate::{
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
         Proof, StandardHasher as Standard,
     },
@@ -345,7 +345,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         // Confirm post-conditions hold.
-        assert_eq!(self.log_size, leaf_pos_to_num(self.mmr.size()).unwrap());
+        assert_eq!(self.log_size, leaf_pos_to_loc(self.mmr.size()).unwrap());
         assert_eq!(self.log_size, self.locations.size().await?);
 
         debug!(log_size = self.log_size, "build_snapshot_from_log complete");
@@ -586,32 +586,32 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             .await
     }
 
-    /// Analogous to proof, but with respect to the state of the MMR when it had `size` elements.
+    /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
+    /// operations.
+    ///
     ///
     /// # Panics
     ///
-    /// - Panics if `start_loc` greater than or equal to `size`.
-    /// - Panics if `size` is greater than the number of operations.
+    /// - Panics if `start_loc` greater than or equal to `op_count`.
+    /// - Panics if `op_count` is greater than the number of operations.
     pub async fn historical_proof(
         &self,
-        size: u64,
+        op_count: u64,
         start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        assert!(size <= self.op_count());
-        assert!(start_loc < size);
+        assert!(op_count <= self.op_count());
+        assert!(start_loc < op_count);
 
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_index = std::cmp::min(size - 1, start_loc + max_ops - 1);
-        let end_pos = leaf_num_to_pos(end_index);
-        let mmr_size = leaf_num_to_pos(size);
+        let end_loc = std::cmp::min(op_count, start_loc + max_ops);
+        let mmr_size = leaf_loc_to_pos(op_count);
 
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_pos, end_pos)
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_index - start_loc + 1) as usize);
-        for loc in start_loc..=end_index {
+        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
+        for loc in start_loc..end_loc {
             let section = loc / self.log_items_per_section;
             let offset = self.locations.read(loc).await?;
             let op = self.log.get(section, offset).await?;
@@ -785,7 +785,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 .prune(self.oldest_retained_loc)
                 .map_err(Error::Journal),
             self.mmr
-                .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
+                .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(self.oldest_retained_loc))
                 .map_err(Error::Mmr),
         )?;
 
@@ -1140,7 +1140,7 @@ pub(super) mod test {
             let max_ops = 4;
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
-            let start_loc = leaf_pos_to_num(start_pos).unwrap();
+            let start_loc = leaf_pos_to_loc(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(None, 100).await.unwrap();
             db.sync().await.unwrap();
@@ -1307,7 +1307,7 @@ pub(super) mod test {
 
             let root = db.root(&mut hasher);
             assert_eq!(db.op_count(), 2787);
-            assert_eq!(leaf_pos_to_num(db.mmr.size()), Some(2787));
+            assert_eq!(leaf_pos_to_loc(db.mmr.size()), Some(2787));
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
@@ -1319,7 +1319,7 @@ pub(super) mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2787);
-            assert_eq!(leaf_pos_to_num(db.mmr.size()), Some(2787));
+            assert_eq!(leaf_pos_to_loc(db.mmr.size()), Some(2787));
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
             assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
