@@ -49,7 +49,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     fn get_operations<'a>(
         &'a self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
@@ -70,10 +70,10 @@ where
     async fn get_operations(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(size, Location::new(start_loc), max_ops)
+        self.historical_proof(size, start_loc, max_ops)
             .await
             .map(|(proof, operations)| FetchResult {
                 proof,
@@ -102,11 +102,11 @@ where
     async fn get_operations(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, adb::Error> {
         let db = self.read().await;
-        db.historical_proof(size, Location::new(start_loc), max_ops)
+        db.historical_proof(size, start_loc, max_ops)
             .await
             .map(|(proof, operations)| FetchResult {
                 proof,
@@ -133,10 +133,10 @@ where
     async fn get_operations(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        self.historical_proof(size, Location::new(start_loc), max_ops)
+        self.historical_proof(size, start_loc, max_ops)
             .await
             .map(|(proof, operations)| FetchResult {
                 proof,
@@ -165,11 +165,11 @@ where
     async fn get_operations(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let db = self.read().await;
-        db.historical_proof(size, Location::new(start_loc), max_ops)
+        db.historical_proof(size, start_loc, max_ops)
             .await
             .map(|(proof, operations)| FetchResult {
                 proof,
@@ -205,7 +205,7 @@ pub(crate) mod tests {
         async fn get_operations(
             &self,
             _size: u64,
-            _start_loc: u64,
+            _start_loc: Location,
             _max_ops: NonZeroU64,
         ) -> Result<FetchResult<Self::Op, Self::Digest>, adb::Error> {
             Err(adb::Error::KeyNotFound) // Arbitrary dummy error

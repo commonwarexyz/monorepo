@@ -215,7 +215,7 @@ where
                 start_loc.as_u64(),
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc.as_u64(), NZU64!(1))
+                        .get_operations(target_size, start_loc, NZU64!(1))
                         .await;
                     IndexedFetchResult { start_loc, result }
                 }),
@@ -267,7 +267,7 @@ where
                 start_loc.as_u64(),
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc.as_u64(), batch_size)
+                        .get_operations(target_size, start_loc, batch_size)
                         .await;
                     IndexedFetchResult { start_loc, result }
                 }),

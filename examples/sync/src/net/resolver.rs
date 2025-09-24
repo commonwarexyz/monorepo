@@ -3,7 +3,7 @@ use crate::net::request_id;
 use commonware_codec::{Encode, Read};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
-use commonware_storage::adb::sync;
+use commonware_storage::{adb::sync, mmr::Location};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -82,14 +82,14 @@ where
     async fn get_operations(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<sync::resolver::FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
             request_id,
             size,
-            start_loc,
+            start_loc: start_loc.as_u64(),
             max_ops,
         });
         let (tx, rx) = oneshot::channel();
