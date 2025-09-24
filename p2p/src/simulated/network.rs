@@ -294,21 +294,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             // Send message to link
             let key = (completion.origin.clone(), completion.recipient.clone());
-            match self.links.get_mut(&key) {
-                Some(link) => {
-                    if let Err(err) = link.send(completion.channel, completion.message, deliver_at)
-                    {
-                        error!(?err, "failed to send");
-                    }
-                }
-                None => {
-                    // This can happen if the link is removed before the message is delivered
-                    trace!(
-                        origin = ?completion.origin,
-                        recipient = ?completion.recipient,
-                        "missing link for completion",
-                    );
-                }
+            let Some(link) = self.links.get_mut(&key) else {
+                // This can happen if the link is removed before the message is delivered
+                trace!(
+                    origin = ?completion.origin,
+                    recipient = ?completion.recipient,
+                    "missing link for completion",
+                );
+                continue;
+            };
+            if let Err(err) = link.send(completion.channel, completion.message, deliver_at) {
+                error!(?err, "failed to send");
             }
         }
     }
