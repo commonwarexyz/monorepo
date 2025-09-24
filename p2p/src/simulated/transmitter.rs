@@ -435,7 +435,7 @@ impl<P: PublicKey> State<P> {
                     // Ensure the scheduled event advances by at least the platform precision so
                     // `SystemTime` actually moves forward on coarse clocks (e.g. Windows).
                     let duration = if duration.is_zero() {
-                        SYSTEM_TIME_PRECISION
+                        Duration::ZERO
                     } else {
                         duration.max(SYSTEM_TIME_PRECISION)
                     };
