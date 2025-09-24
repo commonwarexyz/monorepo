@@ -96,8 +96,8 @@ struct Status<P: PublicKey> {
 /// - `enqueue` is the public entry point for sending; it records the request, then immediately
 ///   calls `launch`, which may start a new flow. When a flow is created, `begin` installs it and
 ///   invokes `rebalance` so the bandwidth planner can recompute rates.
-/// - The runtime drives progression with `next`/`process`. `next` reports the earlier of the
-///   next bandwidth event or transmission-ready time. `process(now)` first `wake`s transmissions
+/// - The runtime drives progression with `next`/`advance`. `next` reports the earlier of the
+///   next bandwidth event or transmission-ready time. `advance(now)` first `wake`s transmissions
 ///   whose start time has arrived, then keeps draining events occurring at `now`. Inside this loop
 ///   `rebalance` advances active flows and calls `finish` on completions, while another `wake`
 ///   handles newly eligible queued work.
@@ -187,7 +187,7 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Advances the simulation to `now`, draining any completed transmissions.
-    pub fn process(&mut self, now: SystemTime) -> Vec<Completion<P>> {
+    pub fn advance(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         // Process all events until we arrive at now
         let mut completions = Vec::new();
         loop {
@@ -722,7 +722,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CHANNEL: Channel = 0;
 
@@ -826,7 +826,7 @@ mod tests {
         let first_finish = state.next().expect("first completion scheduled");
         assert_eq!(first_finish, now + Duration::from_secs(1));
 
-        let completions = state.process(first_finish);
+        let completions = state.advance(first_finish);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
         assert_eq!(
@@ -845,19 +845,19 @@ mod tests {
         );
         assert!(completions.is_empty());
 
-        let completions = state.process(now);
+        let completions = state.advance(now);
         assert!(completions.is_empty());
 
         let next_ready = state.next().expect("second transfer should be scheduled");
         assert_eq!(next_ready, first_finish + Duration::from_secs(1));
 
-        let completions = state.process(next_ready);
+        let completions = state.advance(next_ready);
         assert!(completions.is_empty());
 
         let second_finish = state.next().expect("second completion scheduled");
         assert_eq!(second_finish, next_ready + Duration::from_secs(1));
 
-        let completions = state.process(second_finish);
+        let completions = state.advance(second_finish);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
         assert_eq!(completion_b.deliver_at, Some(second_finish));
@@ -903,7 +903,7 @@ mod tests {
         let first_finish = state.next().expect("message A completion scheduled");
         assert_eq!(first_finish, start + Duration::from_millis(2000));
 
-        let completions = state.process(first_finish);
+        let completions = state.advance(first_finish);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
         assert_eq!(completion_a.message.len(), msg_a.len());
@@ -918,13 +918,13 @@ mod tests {
             first_finish + Duration::from_millis(500) - Duration::from_millis(100)
         );
 
-        let completions = state.process(next_ready);
+        let completions = state.advance(next_ready);
         assert!(completions.is_empty());
 
         let second_finish = state.next().expect("message B completion scheduled");
         assert_eq!(second_finish, next_ready + Duration::from_secs_f64(1.0));
 
-        let completions = state.process(second_finish);
+        let completions = state.advance(second_finish);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
         assert_eq!(completion_b.message.len(), msg_b.len());
@@ -944,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn processing_long_after_next_drains_once() {
+    fn advancing_long_after_next_drains_once() {
         let mut state = State::new();
         let start = SystemTime::UNIX_EPOCH;
         let origin = key(42);
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(first_deadline, start + Duration::from_secs(1));
 
         let late_time = first_deadline + Duration::from_secs(5);
-        let completions = state.process(late_time);
+        let completions = state.advance(late_time);
         assert_eq!(completions.len(), 1);
 
         let completion = &completions[0];
@@ -980,12 +980,12 @@ mod tests {
 
         assert!(state.next().is_none());
 
-        let more = state.process(late_time + Duration::from_secs(1));
+        let more = state.advance(late_time + Duration::from_secs(1));
         assert!(more.is_empty());
     }
 
     #[test]
-    fn processing_same_instant_is_idempotent() {
+    fn advancing_to_past_instants_is_noop() {
         let mut state = State::new();
         let start = SystemTime::UNIX_EPOCH;
         let origin = key(44);
@@ -1005,11 +1005,14 @@ mod tests {
         );
 
         let deadline = state.next().expect("completion scheduled");
-        let completions = state.process(deadline);
+        let completions = state.advance(deadline);
         assert_eq!(completions.len(), 1);
         assert!(completions[0].deliver_at.is_some());
 
-        let more = state.process(deadline);
+        let more = state.advance(deadline);
+        assert!(more.is_empty());
+
+        let more = state.advance(UNIX_EPOCH);
         assert!(more.is_empty());
     }
 
@@ -1127,7 +1130,7 @@ mod tests {
         let first_finish = state.next().expect("first completion scheduled");
         assert_eq!(first_finish, start + Duration::from_secs(3));
 
-        let completions = state.process(first_finish);
+        let completions = state.advance(first_finish);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
         assert!(completion_a.deliver_at.is_some());
@@ -1161,7 +1164,7 @@ mod tests {
         );
 
         // Advancing exactly to ready_at wakes the queue and triggers launch of the second flow.
-        let wake_outputs = state.process(start + Duration::from_secs(5));
+        let wake_outputs = state.advance(start + Duration::from_secs(5));
         assert!(wake_outputs.is_empty());
         assert!(state.active_flows.contains_key(&pair));
         {
@@ -1181,7 +1184,7 @@ mod tests {
         let second_finish = state.next().expect("second completion scheduled");
         assert_eq!(second_finish, start + Duration::from_secs(6));
 
-        let completions = state.process(second_finish);
+        let completions = state.advance(second_finish);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
         assert!(completion_b.deliver_at.is_some());
@@ -1207,7 +1210,7 @@ mod tests {
         assert_eq!(state.next().expect("third ready scheduled"), third_ready);
 
         // Advance to third ready to wake and launch it.
-        let wake_outputs = state.process(third_ready);
+        let wake_outputs = state.advance(third_ready);
         assert!(wake_outputs.is_empty());
         assert!(state.active_flows.contains_key(&pair));
         assert!(!state.queued.contains_key(&pair));
@@ -1216,7 +1219,7 @@ mod tests {
         let third_finish = state.next().expect("third completion scheduled");
         assert_eq!(third_finish, start + Duration::from_secs(13));
 
-        let completions = state.process(third_finish);
+        let completions = state.advance(third_finish);
         assert_eq!(completions.len(), 1);
         let completion_c = &completions[0];
         assert!(completion_c.deliver_at.is_some());
@@ -1302,7 +1305,7 @@ mod tests {
         let finish = state.next().expect("completion scheduled");
         assert_eq!(finish, now + Duration::from_secs(2));
 
-        let completions = state.process(finish);
+        let completions = state.advance(finish);
         assert_eq!(completions.len(), 2);
 
         let mut recipients: Vec<_> = completions
@@ -1368,7 +1371,7 @@ mod tests {
             assert!(deadline >= last_deadline);
             last_deadline = deadline;
 
-            for completion in state.process(deadline) {
+            for completion in state.advance(deadline) {
                 assert!(completion.deliver_at.is_some());
                 delivered.push(completion.message.len());
             }

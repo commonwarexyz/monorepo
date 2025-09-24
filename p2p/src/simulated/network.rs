@@ -398,7 +398,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             select! {
                 _ = tick => {
                     let now = self.context.current();
-                    let completions = self.transmitter.process(now);
+                    let completions = self.transmitter.advance(now);
                     self.process_completions(completions);
                 },
                 message = self.ingress.next() => {
