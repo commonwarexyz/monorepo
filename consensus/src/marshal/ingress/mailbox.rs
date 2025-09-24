@@ -32,6 +32,9 @@ pub(crate) enum Message<V: Variant, B: Block> {
         response: oneshot::Sender<Option<(u64, B::Commitment)>>,
     },
     /// A request to retrieve a block by its identifier.
+    ///
+    /// Requesting by height or tip will only return finalized blocks, whereas requesting by
+    /// commitment may return non-finalized or even unverified blocks.
     GetBlock {
         /// The identifier of the block to retrieve.
         identifier: Identifier<B::Commitment>,
