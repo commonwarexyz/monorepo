@@ -1,0 +1,40 @@
+[package]
+name = "commonware-broadcast-example"
+edition = "2021"
+publish = false # Changed to false, not intended for individual publishing
+version = "0.0.50"
+license = "MIT OR Apache-2.0"
+description = "Commonware broadcast example"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/broadcast"
+# documentation = "https://docs.rs/commonware-broadcast-example" # Usually for published crates
+
+# Adding an empty workspace table to explicitly mark it as standalone
+[workspace]
+
+[dependencies]
+commonware-cryptography = { version = "0.0.50", path = "../../cryptography" }
+commonware-macros = { version = "0.0.50", path = "../../macros" }
+commonware-p2p = { version = "0.0.50", path = "../../p2p" }
+commonware-runtime = { version = "0.0.50", path = "../../runtime" }
+commonware-utils = { version = "0.0.50", path = "../../utils" }
+commonware-broadcast = { version = "0.0.50", path = "../../broadcast" }
+commonware-storage = { version = "0.0.50", path = "../../storage" }
+
+bytes = "1.7.1"
+rand = "0.8.5"
+tracing = "0.1.41"
+futures = "0.3.31"
+clap = { version = "4.5.18", features = ["derive"] } # Assuming derive feature is needed for clap
+prometheus-client = "0.22.3"
+governor = "0.6.3"
+tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"] }
+chrono = "0.4.39"
+ratatui = "0.27.0"
+crossterm = "0.28.1"
+serde_json = "1.0.122"
+
+[[bin]]
+name = "commonware-broadcast-example"
+bench = false
