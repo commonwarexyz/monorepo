@@ -105,7 +105,7 @@ struct Status<P: PublicKey> {
 ///   for another outer tick. `schedule` keeps track of the earliest queued start time so `next`
 ///   always reflects both bandwidth expiries and queue readiness.
 pub struct State<P: PublicKey> {
-    bandwidth_limits: BTreeMap<P, Bandwidth>,
+    bandwidth_caps: BTreeMap<P, Bandwidth>,
     next_flow_id: u64,
     assign_sequences: BTreeMap<(P, P), u128>,
     active_flows: BTreeMap<(P, P), u64>,
@@ -122,7 +122,7 @@ impl<P: PublicKey> State<P> {
     /// Creates a new scheduler.
     pub fn new() -> Self {
         Self {
-            bandwidth_limits: BTreeMap::new(),
+            bandwidth_caps: BTreeMap::new(),
             next_flow_id: 0,
             assign_sequences: BTreeMap::new(),
             active_flows: BTreeMap::new(),
@@ -145,7 +145,7 @@ impl<P: PublicKey> State<P> {
         ingress: Option<usize>,
     ) -> Vec<Completion<P>> {
         // Update bandwidth limits
-        self.bandwidth_limits.insert(
+        self.bandwidth_caps.insert(
             peer.clone(),
             Bandwidth {
                 egress: egress.map(|bps| bps as u128),
@@ -162,15 +162,15 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Returns the egress bandwidth limit for `peer`.
-    fn egress_limit(&self, peer: &P) -> Option<u128> {
-        self.bandwidth_limits
+    fn egress_cap(&self, peer: &P) -> Option<u128> {
+        self.bandwidth_caps
             .get(peer)
             .and_then(|limits| limits.egress)
     }
 
     /// Returns the ingress bandwidth limit for `peer`.
-    fn ingress_limit(&self, peer: &P) -> Option<u128> {
-        self.bandwidth_limits
+    fn ingress_cap(&self, peer: &P) -> Option<u128> {
+        self.bandwidth_caps
             .get(peer)
             .and_then(|limits| limits.ingress)
     }
@@ -233,7 +233,7 @@ impl<P: PublicKey> State<P> {
         latency: Duration,
         should_deliver: bool,
     ) -> Vec<Completion<P>> {
-        if self.bandwidth_limits.is_empty() {
+        if self.bandwidth_caps.is_empty() {
             return self.fulfill_unconstrained(
                 now,
                 origin,
@@ -414,9 +414,9 @@ impl<P: PublicKey> State<P> {
             return self.finish(completed, now);
         }
 
-        let mut egress_limit = |pk: &P| self.egress_limit(pk);
-        let mut ingress_limit = |pk: &P| self.ingress_limit(pk);
-        let allocations = bandwidth::allocate(&active, &mut egress_limit, &mut ingress_limit);
+        let mut egress_cap = |pk: &P| self.egress_cap(pk);
+        let mut ingress_cap = |pk: &P| self.ingress_cap(pk);
+        let allocations = bandwidth::allocate(&active, &mut egress_cap, &mut ingress_cap);
         let mut earliest: Option<Duration> = None;
 
         for (flow_id, rate) in allocations {

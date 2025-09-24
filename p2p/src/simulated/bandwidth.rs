@@ -95,7 +95,7 @@ struct Planner<'a, P> {
 
 impl<'a, P: Clone + Ord> Planner<'a, P> {
     /// Build and register resources for all flows up front.
-    fn new<E, I>(flows: &'a [Flow<P>], egress_limit: &mut E, ingress_limit: &mut I) -> Self
+    fn new<E, I>(flows: &'a [Flow<P>], egress_cap: &mut E, ingress_cap: &mut I) -> Self
     where
         E: FnMut(&P) -> Option<u128>,
         I: FnMut(&P) -> Option<u128>,
@@ -109,7 +109,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             active: 0,
             fill: Ratio::zero(),
         };
-        planner.register(egress_limit, ingress_limit);
+        planner.register(egress_cap, ingress_cap);
         planner
     }
 
@@ -141,7 +141,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     /// Register each flow with the constrained resources it depends on. Resources without limits are ignored.
-    fn register<E, I>(&mut self, egress_limit: &mut E, ingress_limit: &mut I)
+    fn register<E, I>(&mut self, egress_cap: &mut E, ingress_cap: &mut I)
     where
         E: FnMut(&P) -> Option<u128>,
         I: FnMut(&P) -> Option<u128>,
@@ -152,7 +152,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             // Register the flow with its egress resource if the sender is bandwidth-limited.
             if let Some(resource_idx) = self.constrain(
                 Constraint::Egress(flow.origin.clone()),
-                egress_limit(&flow.origin),
+                egress_cap(&flow.origin),
             ) {
                 self.attach(resource_idx, flow_idx, &mut state);
             }
@@ -162,7 +162,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 // Register the flow with its ingress resource if the recipient is bandwidth-limited.
                 if let Some(resource_idx) = self.constrain(
                     Constraint::Ingress(flow.recipient.clone()),
-                    ingress_limit(&flow.recipient),
+                    ingress_cap(&flow.recipient),
                 ) {
                     self.attach(resource_idx, flow_idx, &mut state);
                 }
@@ -355,8 +355,8 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
 /// that honors both ingress and egress limits.
 pub fn allocate<P, E, I>(
     flows: &[Flow<P>],
-    mut egress_limit: E,
-    mut ingress_limit: I,
+    mut egress_cap: E,
+    mut ingress_cap: I,
 ) -> BTreeMap<u64, Rate>
 where
     P: Clone + Ord,
@@ -370,7 +370,7 @@ where
 
     // Register the flows and solve. Construction hydrates the planner with all resource
     // membership data, and `solve` consumes it to run progressive filling and return the final map.
-    let planner = Planner::new(flows, &mut egress_limit, &mut ingress_limit);
+    let planner = Planner::new(flows, &mut egress_cap, &mut ingress_cap);
     planner.solve()
 }
 
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn ingress_limit_enforced() {
+    fn ingress_cap_enforced() {
         let flows = vec![Flow {
             id: 1,
             origin: 1,
