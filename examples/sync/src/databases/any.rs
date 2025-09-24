@@ -106,10 +106,10 @@ where
     fn historical_proof(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(size, Location::new(start_loc), max_ops)
+        self.historical_proof(size, start_loc, max_ops)
     }
 
     fn name() -> &'static str {
