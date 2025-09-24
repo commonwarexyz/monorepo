@@ -461,7 +461,7 @@ fn ceil_to_u128(value: &BigRational) -> Option<u128> {
     let (quot, rem) = num.div_rem(den);
     let mut result = quot.to_u128().unwrap_or(u128::MAX);
     if !rem.is_zero() {
-        result = result.checked_add(1).unwrap_or(u128::MAX);
+        result = result.saturating_add(1);
     }
     Some(result)
 }
