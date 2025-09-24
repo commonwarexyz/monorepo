@@ -203,7 +203,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 );
                 send_result(result, Ok((sender, receiver)))
             }
-            ingress::Message::SetBandwidth {
+            ingress::Message::LimitBandwidth {
                 public_key,
                 egress_cap,
                 ingress_cap,
@@ -867,11 +867,11 @@ mod tests {
             let (_sender2, mut receiver) = oracle.register(recipient_pk.clone(), 0).await.unwrap();
 
             oracle
-                .set_bandwidth(sender_pk.clone(), Some(5_000), None)
+                .limit_bandwidth(sender_pk.clone(), Some(5_000), None)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(recipient_pk.clone(), None, Some(5_000))
+                .limit_bandwidth(recipient_pk.clone(), None, Some(5_000))
                 .await
                 .unwrap();
 
@@ -931,15 +931,15 @@ mod tests {
             let (_sender3, mut recv_b) = oracle.register(recipient_b.clone(), 0).await.unwrap();
 
             oracle
-                .set_bandwidth(sender_pk.clone(), Some(1_000), None)
+                .limit_bandwidth(sender_pk.clone(), Some(1_000), None)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(recipient_a.clone(), None, Some(1_000))
+                .limit_bandwidth(recipient_a.clone(), None, Some(1_000))
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(recipient_b.clone(), None, Some(1_000))
+                .limit_bandwidth(recipient_b.clone(), None, Some(1_000))
                 .await
                 .unwrap();
 

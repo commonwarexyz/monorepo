@@ -6,7 +6,9 @@
 //! according to the returned rates and invoking the planner whenever the active set
 //! changes (for example when a message finishes or a new message arrives).
 
-use commonware_utils::{time::NANOS_PER_SEC, DurationExt, Ratio};
+use commonware_utils::{time::NANOS_PER_SEC, BigRationalExt, DurationExt};
+use num_rational::BigRational;
+use num_traits::Zero;
 use std::{cmp::Ordering, collections::BTreeMap, time::Duration};
 
 /// Minimal description of a simulated transmission path.
@@ -26,7 +28,7 @@ pub struct Flow<P> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Rate {
     Unlimited,
-    Finite(Ratio),
+    Finite(BigRational),
 }
 
 /// Shared capacity constraint (either egress or ingress) tracked by the planner.
@@ -36,7 +38,7 @@ pub enum Rate {
 /// bandwidth in the current filling round.
 #[derive(Debug)]
 struct Resource {
-    remaining: Ratio,
+    remaining: BigRational,
     members: Vec<usize>,
     active: usize,
 }
@@ -44,7 +46,7 @@ struct Resource {
 impl Resource {
     fn new(limit: u128) -> Self {
         Self {
-            remaining: Ratio::from_int(limit),
+            remaining: BigRational::from_u128(limit),
             members: Vec::new(),
             active: 0,
         }
@@ -86,11 +88,11 @@ struct Planner<'a, P> {
     /// Per-flow membership and bookkeeping flags used during progressive filling.
     states: Vec<State>,
     /// Final per-flow throughput; `None` indicates an unlimited flow.
-    rates: Vec<Option<Ratio>>,
+    rates: Vec<Option<BigRational>>,
     /// Number of flows still taking part in the current filling round.
     active: usize,
     /// Shared fill level applied to every active flow.
-    fill: Ratio,
+    fill: BigRational,
 }
 
 impl<'a, P: Clone + Ord> Planner<'a, P> {
@@ -107,7 +109,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             states: Vec::with_capacity(flows.len()),
             rates: vec![None; flows.len()],
             active: 0,
-            fill: Ratio::zero(),
+            fill: BigRational::zero(),
         };
         planner.register(egress_cap, ingress_cap);
         planner
@@ -211,7 +213,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     fn fill(&mut self) {
         while self.active > 0 {
             let mut limiting = Vec::new();
-            let mut min_delta: Option<Ratio> = None;
+            let mut min_delta: Option<BigRational> = None;
 
             // Step 1: among all resources still serving active flows, locate the smallest per-flow
             // headroom (i.e. the next constraint that will be hit if we increase every active flow
@@ -225,11 +227,11 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 if resource.remaining.is_zero() {
                     limiting.clear();
                     limiting.push(res_idx);
-                    min_delta = Some(Ratio::zero());
+                    min_delta = Some(BigRational::zero());
                     break;
                 }
 
-                let share = resource.remaining.div_int(resource.active as u128);
+                let share = &resource.remaining / BigRational::from_usize(resource.active);
                 match &min_delta {
                     None => {
                         // First candidate: provisionally treat it as the tightest constraint.
@@ -273,7 +275,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
             }
 
             // Raise the shared fill level; individual rates are materialized on freeze.
-            self.fill.add_assign(&delta);
+            self.fill += &delta;
             let mut saturated = Vec::new();
             for (res_idx, resource) in self.resources.iter_mut().enumerate() {
                 // Skip resources that are not active.
@@ -282,13 +284,13 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
                 }
 
                 // Charge each resource for the uniform allocation it just handed out.
-                let usage = delta.mul_int(resource.active as u128);
+                let usage = &delta * BigRational::from_usize(resource.active);
                 if usage.is_zero() {
                     continue;
                 }
 
                 // Track newly saturated resources so their flows freeze this iteration.
-                resource.remaining.sub_assign(&usage);
+                resource.remaining -= usage;
                 if resource.remaining.is_zero() {
                     saturated.push(res_idx);
                 }
@@ -341,7 +343,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     #[cfg(test)]
-    fn rates(&self) -> &[Option<Ratio>] {
+    fn rates(&self) -> &[Option<BigRational>] {
         &self.rates
     }
 }
@@ -377,71 +379,55 @@ where
 /// Calculate the time it will take to deplete a given amount of capacity at some [Rate].
 ///
 /// The computation rounds up so callers receive the minimum duration that guarantees at least the
-/// requested number of bytes were transmitted.
-pub fn duration(rate: &Rate, bytes: u128) -> Option<Duration> {
+/// requested amount of work was transmitted.
+pub fn duration(rate: &Rate, remaining: &BigRational) -> Option<Duration> {
     match rate {
         Rate::Unlimited => Some(Duration::ZERO),
-        Rate::Finite(ratio) => {
-            if ratio.is_zero() {
-                if bytes == 0 {
-                    Some(Duration::ZERO)
-                } else {
-                    None
-                }
-            } else {
-                // `ratio` encodes throughput as `num/den` bytes per second. We convert the
-                // requested `bytes` into the equivalent duration in nanoseconds by computing
-                // `bytes * den / num` seconds and scaling by `NANOS_PER_SEC`, rounding up so the
-                // caller receives the minimum time that guarantees the requested bytes were sent.
-                let numerator = bytes
-                    .saturating_mul(ratio.den)
-                    .saturating_mul(NANOS_PER_SEC);
-                let ns = if ratio.num == 0 {
-                    u128::MAX
-                } else {
-                    numerator.div_ceil(ratio.num)
-                };
-                Some(Duration::from_nanos_saturating(ns))
+        Rate::Finite(rate) => {
+            // If the rate is zero, the transfer will never complete.
+            if rate.is_zero() {
+                return None;
             }
+
+            // Find the minimum number of nanoseconds that will complete the transfer (rounding up to cover
+            // fractional progress).
+            let seconds = remaining / rate;
+            let nanos = seconds * BigRational::from_u128(NANOS_PER_SEC);
+            let ns = nanos.ceil_to_u128()?;
+            Some(Duration::from_nanos_saturating(ns))
         }
     }
 }
 
-/// Calculate the number of bytes that can be transferred in a given duration at some [Rate],
-/// accounting for any fractional bytes-per-nanosecond that would otherwise be rounded away.
+/// Calculate the remaining work after transferring data for `elapsed` at the provided [Rate].
 ///
-/// The caller supplies `carry` to preserve sub-byte precision across repeated invocations (useful
-/// when advancing simulation time in small quanta) and can inspect the return value to learn how
-/// much progress a flow made before an interruption.
-pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u128) -> u128 {
-    if remaining == 0 {
-        return 0;
+/// Feed the returned ratio back into subsequent calls to preserve fractional progress across
+/// discrete scheduling ticks.
+pub fn transfer(rate: &Rate, elapsed: Duration, mut remaining: BigRational) -> BigRational {
+    if remaining.is_zero() {
+        return remaining;
     }
 
     match rate {
-        Rate::Unlimited => {
-            *carry = 0;
-            remaining
-        }
+        Rate::Unlimited => BigRational::zero(),
         Rate::Finite(ratio) => {
-            if ratio.is_zero() {
-                return 0;
-            }
-            let delta_ns = elapsed.as_nanos();
-            if delta_ns == 0 {
-                return 0;
-            }
-
-            let denom = ratio.den.saturating_mul(NANOS_PER_SEC);
-            if denom == 0 {
-                *carry = 0;
+            if ratio.is_zero() || elapsed.is_zero() {
                 return remaining;
             }
-            let numerator = ratio.num.saturating_mul(delta_ns);
-            let total = numerator.saturating_add(*carry);
-            let bytes = total / denom;
-            *carry = total % denom;
-            bytes.min(remaining)
+
+            let delta_ns = elapsed.as_nanos();
+            if delta_ns == 0 {
+                return remaining;
+            }
+
+            let elapsed = BigRational::from_frac_u128(delta_ns, NANOS_PER_SEC);
+            let usage = ratio * &elapsed;
+            if usage >= remaining {
+                return BigRational::zero();
+            }
+
+            remaining -= usage;
+            remaining
         }
     }
 }
@@ -449,6 +435,7 @@ pub fn transfer(rate: &Rate, elapsed: Duration, carry: &mut u128, remaining: u12
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_rational::BigRational;
     use std::collections::BTreeMap;
 
     fn constant(limit: u128) -> impl FnMut(&u8) -> Option<u128> {
@@ -457,6 +444,10 @@ mod tests {
 
     fn unlimited() -> impl FnMut(&u8) -> Option<u128> {
         move |_| None
+    }
+
+    fn assert_rational_eq(r: &BigRational, num: u64, den: u64) {
+        assert_eq!(r, &BigRational::from_frac_u64(num, den));
     }
 
     #[test]
@@ -483,8 +474,7 @@ mod tests {
             let Rate::Finite(ratio) = rate else {
                 panic!("expected finite rate");
             };
-            assert_eq!(ratio.num, 500);
-            assert_eq!(ratio.den, 1);
+            assert_rational_eq(ratio, 500, 1);
         }
     }
 
@@ -502,8 +492,7 @@ mod tests {
         let Rate::Finite(ratio) = rate else {
             panic!("expected finite rate");
         };
-        assert_eq!(ratio.num, 2_000);
-        assert_eq!(ratio.den, 1);
+        assert_rational_eq(ratio, 2_000, 1);
     }
 
     #[test]
@@ -521,26 +510,41 @@ mod tests {
 
     #[test]
     fn transfer_accumulates_carry() {
-        let ratio = Ratio { num: 1, den: 2 }; // 0.5 bytes per second
-        let mut carry = 0;
+        let ratio = BigRational::from_frac_u64(1, 2); // 0.5 bytes per second
         let rate = Rate::Finite(ratio);
-        let first = transfer(&rate, Duration::from_millis(500), &mut carry, 10);
-        assert_eq!(first, 0); // 0.25 bytes rounded down
-        assert_ne!(carry, 0);
-        let second = transfer(&rate, Duration::from_millis(1500), &mut carry, 10);
-        // 0.75 + previous 0.25 == 1 byte
-        assert_eq!(first + second, 1);
+        let initial = BigRational::from_u128(10);
+
+        let after_short = transfer(&rate, Duration::from_millis(500), initial);
+        assert_eq!(after_short, BigRational::from_frac_u64(39, 4));
+
+        let after_long = transfer(&rate, Duration::from_millis(1500), after_short);
+        assert_eq!(after_long, BigRational::from_u128(9));
+    }
+
+    #[test]
+    fn finish_duration_accounts_for_fractional_progress() {
+        let rate = Rate::Finite(BigRational::from_frac_u64(1, 2));
+        let initial = BigRational::from_u128(1);
+        let partial = transfer(&rate, Duration::from_millis(500), initial.clone());
+        assert_eq!(partial, BigRational::from_frac_u64(3, 4));
+
+        let duration_full = duration(&rate, &initial).expect("finite duration");
+        assert_eq!(duration_full, Duration::from_secs(2));
+
+        let finish = duration(&rate, &partial).expect("finish duration");
+        assert_eq!(finish, Duration::from_millis(1500));
+        assert!(finish < duration_full);
     }
 
     #[test]
     fn bandwidth_duration() {
-        let ratio = Ratio::from_int(500);
+        let ratio = BigRational::from_u128(500);
         let rate = Rate::Finite(ratio);
-        let time = duration(&rate, 1_000).expect("finite time");
+        let time = duration(&rate, &BigRational::from_u128(1_000)).expect("finite time");
         assert_eq!(time.as_secs(), 2);
     }
 
-    fn rate_of(map: &BTreeMap<u64, Rate>, id: u64) -> Ratio {
+    fn rate_of(map: &BTreeMap<u64, Rate>, id: u64) -> BigRational {
         match map.get(&id).expect("missing flow") {
             Rate::Finite(ratio) => ratio.clone(),
             Rate::Unlimited => panic!("unexpected unlimited rate"),
@@ -599,24 +603,19 @@ mod tests {
         );
 
         let rate_ab1 = rate_of(&allocations, 1);
-        assert_eq!(rate_ab1.num, 250_000);
-        assert_eq!(rate_ab1.den, 3);
+        assert_rational_eq(&rate_ab1, 250_000, 3);
 
         let rate_ab2 = rate_of(&allocations, 2);
-        assert_eq!(rate_ab2.num, 250_000);
-        assert_eq!(rate_ab2.den, 3);
+        assert_rational_eq(&rate_ab2, 250_000, 3);
 
         let rate_ac = rate_of(&allocations, 4);
-        assert_eq!(rate_ac.num, 500_000);
-        assert_eq!(rate_ac.den, 1);
+        assert_rational_eq(&rate_ac, 500_000, 1);
 
         let rate_bc = rate_of(&allocations, 3);
-        assert_eq!(rate_bc.num, 500_000);
-        assert_eq!(rate_bc.den, 1);
+        assert_rational_eq(&rate_bc, 500_000, 1);
 
         let rate_cb = rate_of(&allocations, 5);
-        assert_eq!(rate_cb.num, 250_000);
-        assert_eq!(rate_cb.den, 3);
+        assert_rational_eq(&rate_cb, 250_000, 3);
     }
 
     #[test]
@@ -653,12 +652,10 @@ mod tests {
         );
 
         let rate_ab = rate_of(&allocations, 1);
-        assert_eq!(rate_ab.num, 1_000);
-        assert_eq!(rate_ab.den, 1);
+        assert_rational_eq(&rate_ab, 1_000, 1);
 
         let rate_bc = rate_of(&allocations, 2);
-        assert_eq!(rate_bc.num, 500_000);
-        assert_eq!(rate_bc.den, 1);
+        assert_rational_eq(&rate_bc, 500_000, 1);
     }
 
     #[test]
@@ -695,12 +692,10 @@ mod tests {
         );
 
         let rate_ab = rate_of(&allocations, 1);
-        assert_eq!(rate_ab.num, 1_000);
-        assert_eq!(rate_ab.den, 1);
+        assert_rational_eq(&rate_ab, 1_000, 1);
 
         let rate_bc = rate_of(&allocations, 2);
-        assert_eq!(rate_bc.num, 49_000);
-        assert_eq!(rate_bc.den, 1);
+        assert_rational_eq(&rate_bc, 49_000, 1);
     }
 
     #[test]
