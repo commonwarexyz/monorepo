@@ -348,7 +348,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
             // Determine if there is a link between the origin and recipient
             let Some(link) = self.links.get_mut(&o_r) else {
-                trace!(?origin, ?recipient, reason = "no link", "dropping message",);
+                trace!(?origin, ?recipient, reason = "no link", "dropping message");
                 continue;
             };
 
