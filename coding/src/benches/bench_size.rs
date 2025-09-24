@@ -32,7 +32,13 @@ fn benchmark_size<S: Scheme>(name: &str) {
                 shard.encode_size()
             );
 
-            let (_, _, reshard) = S::reshard(&config, &commitment, shard).unwrap();
+            let (_, _, reshard) = S::reshard(
+                &config,
+                &commitment,
+                config.minimum_shards + config.extra_shards - 1,
+                shard,
+            )
+            .unwrap();
             println!(
                 "{} (reshard)/msg_len={} chunks={}: {} B",
                 name,

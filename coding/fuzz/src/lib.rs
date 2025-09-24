@@ -67,9 +67,10 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     // Each participant checks their shard
     let (mut checking_data, mut checked_shards): (Vec<_>, Vec<_>) = shards
         .into_iter()
-        .map(|shard| {
+        .enumerate()
+        .map(|(i, shard)| {
             let (checking_data, checked_shard, _) =
-                S::reshard(&config, &commitment, shard).unwrap();
+                S::reshard(&config, &commitment, i as u16, shard).unwrap();
             (checking_data, checked_shard)
         })
         .collect();

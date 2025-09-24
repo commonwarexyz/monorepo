@@ -73,8 +73,9 @@ impl Read for Config {
 /// // to check other peoples reshards.
 /// let (mut checking_data_w_shard, reshards): (Vec<_>, Vec<_>) = shards
 ///         .into_iter()
-///         .map(|shard| {
-///             let (checking_data, checked_shard, reshard) = RS::reshard(&config, &commitment, shard).unwrap();
+///         .enumerate()
+///         .map(|(i, shard)| {
+///             let (checking_data, checked_shard, reshard) = RS::reshard(&config, &commitment, i as u16, shard).unwrap();
 ///             ((checking_data, checked_shard), reshard)
 ///         })
 ///         .collect();
@@ -134,6 +135,7 @@ pub trait Scheme {
     fn reshard(
         config: &Config,
         commitment: &Self::Commitment,
+        index: u16,
         shard: Self::Shard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error>;
 
@@ -192,9 +194,10 @@ mod test {
 
         let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
-            .map(|shard| {
+            .enumerate()
+            .map(|(i, shard)| {
                 let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, shard).unwrap();
+                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
                 (checking_data, checked_shard)
             })
             .collect();
@@ -221,9 +224,10 @@ mod test {
 
         let (mut checking_data, mut checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
-            .map(|shard| {
+            .enumerate()
+            .map(|(i, shard)| {
                 let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, shard).unwrap();
+                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
                 (checking_data, checked_shard)
             })
             .collect();
@@ -255,9 +259,10 @@ mod test {
 
         let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
-            .map(|shard| {
+            .enumerate()
+            .map(|(i, shard)| {
                 let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, shard).unwrap();
+                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
                 (checking_data, checked_shard)
             })
             .collect();
@@ -284,9 +289,10 @@ mod test {
 
         let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
-            .map(|shard| {
+            .enumerate()
+            .map(|(i, shard)| {
                 let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, shard).unwrap();
+                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
                 (checking_data, checked_shard)
             })
             .collect();
@@ -313,9 +319,10 @@ mod test {
 
         let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
-            .map(|shard| {
+            .enumerate()
+            .map(|(i, shard)| {
                 let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, shard).unwrap();
+                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
                 (checking_data, checked_shard)
             })
             .collect();
@@ -342,9 +349,10 @@ mod test {
 
         let (mut checking_data, checked_shards): (Vec<_>, Vec<_>) = shards
             .into_iter()
-            .map(|shard| {
+            .enumerate()
+            .map(|(i, shard)| {
                 let (checking_data, checked_shard, _) =
-                    S::reshard(&config, &commitment, shard).unwrap();
+                    S::reshard(&config, &commitment, i as u16, shard).unwrap();
                 (checking_data, checked_shard)
             })
             .collect();

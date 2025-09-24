@@ -47,6 +47,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     fn reshard(
         _config: &Config,
         commitment: &Self::Commitment,
+        _index: u16,
         shard: Self::Shard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
         let my_commitment = H::new().update(shard.as_slice()).finalize();
