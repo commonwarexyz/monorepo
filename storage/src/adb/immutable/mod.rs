@@ -210,8 +210,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
-                lower_bound_pos: Position::from(Location::new(cfg.lower_bound)),
-                upper_bound_pos: Position::from(Location::new(cfg.upper_bound + 1))
+                lower_bound_pos: Position::from(cfg.lower_bound),
+                upper_bound_pos: Position::from(cfg.upper_bound.saturating_add(1))
                     .saturating_sub(1),
                 pinned_nodes: cfg.pinned_nodes,
             },
@@ -227,8 +227,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 write_buffer: cfg.db_config.log_write_buffer,
                 buffer_pool: cfg.db_config.buffer_pool.clone(),
             },
-            cfg.lower_bound,
-            cfg.upper_bound,
+            cfg.lower_bound.as_u64(),
+            cfg.upper_bound.as_u64(),
         )
         .await?;
 
@@ -896,12 +896,18 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 3);
 
             // Make sure we can still get metadata.
-            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(1), metadata)));
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((Location::new(1), metadata))
+            );
 
             // Commit the second key.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 4);
-            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(3), None)));
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((Location::new(3), None))
+            );
 
             // Capture state.
             let root = db.root(&mut hasher);
@@ -919,7 +925,10 @@ pub(super) mod test {
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(3), None)));
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((Location::new(3), None))
+            );
 
             // Cleanup.
             db.destroy().await.unwrap();

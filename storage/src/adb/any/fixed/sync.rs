@@ -32,8 +32,8 @@ where
     async fn create_journal(
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
     ) -> Result<Self::Journal, adb::Error> {
         let journal_config = fixed::Config {
             partition: config.log_journal_partition.clone(),
@@ -45,8 +45,8 @@ where
         init_journal(
             context.with_label("log"),
             journal_config,
-            lower_bound,
-            upper_bound,
+            lower_bound.as_u64(),
+            upper_bound.as_u64(),
         )
         .await
     }
@@ -56,8 +56,8 @@ where
         db_config: Self::Config,
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
         apply_batch_size: usize,
     ) -> Result<Self, adb::Error> {
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
@@ -71,12 +71,12 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
-                lower_bound_pos: Position::from(Location::from(lower_bound)),
+                lower_bound_pos: Position::from(lower_bound),
                 // The last node of an MMR with `upper_bound` + 1 operations is at the position
                 // right before where the next leaf goes.
                 upper_bound_pos: Position::from(
                     // TODO make this less ugly
-                    Position::from(Location::from(upper_bound + 1)).as_u64() - 1,
+                    Position::from(upper_bound.saturating_add(1)).as_u64() - 1,
                 ),
                 pinned_nodes,
             },
@@ -109,7 +109,7 @@ where
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
         any::fixed::Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
-            lower_bound,
+            lower_bound.as_u64(),
             &log,
             &mut snapshot,
             None,
@@ -119,7 +119,7 @@ where
         let mut db = any::fixed::Any {
             mmr,
             log,
-            inactivity_floor_loc: lower_bound,
+            inactivity_floor_loc: lower_bound.as_u64(),
             snapshot,
             uncommitted_ops: 0,
             hasher: StandardHasher::<H>::new(),
@@ -136,12 +136,12 @@ where
         mut journal: Self::Journal,
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
     ) -> Result<Self::Journal, adb::Error> {
         let size = journal.size().await?;
 
-        if size <= lower_bound {
+        if size <= lower_bound.as_u64() {
             // Close the existing journal before creating a new one
             journal.close().await?;
 
@@ -149,7 +149,7 @@ where
             Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Just prune to the lower bound
-            journal.prune(lower_bound).await?;
+            journal.prune(lower_bound.as_u64()).await?;
             Ok(journal)
         }
     }
@@ -1374,8 +1374,8 @@ mod tests {
                 any_db_config("sync_basic"),
                 log,
                 None,
-                0,
-                0,
+                Location::new(0),
+                Location::new(0),
                 1024,
             )
             .await
@@ -1464,8 +1464,8 @@ mod tests {
                     any_db_config("sync_basic"),
                     log,
                     Some(pinned_nodes),
-                    lower_bound_ops,
-                    upper_bound_ops,
+                    Location::new(lower_bound_ops),
+                    Location::new(upper_bound_ops),
                     1024,
                 )
                 .await
@@ -1562,8 +1562,8 @@ mod tests {
                     create_test_config(context.next_u64()),
                     log,
                     Some(pinned_nodes),
-                    lower_bound,
-                    upper_bound,
+                    Location::new(lower_bound),
+                    Location::new(upper_bound),
                     1024,
                 )
                 .await
@@ -1666,8 +1666,8 @@ mod tests {
                     sync_db_config,
                     log,
                     Some(pinned_nodes),
-                    sync_lower_bound,
-                    sync_upper_bound,
+                    Location::new(sync_lower_bound),
+                    Location::new(sync_upper_bound),
                     1024,
                 )
                 .await
@@ -1748,8 +1748,8 @@ mod tests {
                     db_config,
                     log,
                     Some(pinned_nodes),
-                    sync_lower_bound,
-                    sync_upper_bound,
+                    Location::new(sync_lower_bound),
+                    Location::new(sync_upper_bound),
                     1024,
                 )
                 .await

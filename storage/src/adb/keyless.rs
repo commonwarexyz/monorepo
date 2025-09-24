@@ -767,7 +767,10 @@ mod test {
             // Commit op should remain after reopen even without clean shutdown.
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1); // commit op should remain after re-open.
-            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(0), metadata)));
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((Location::new(0), metadata))
+            );
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.last_commit_loc(), Some(Location::new(0)));
 
@@ -795,7 +798,10 @@ mod test {
             // Make sure closing/reopening gets us back to the same state.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 3); // 2 appends, 1 commit
-            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(2), None)));
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((Location::new(2), None))
+            );
             assert_eq!(db.get(Location::new(2)).await.unwrap(), None); // the commit op
             let root = db.root(&mut hasher);
             db.close().await.unwrap();

@@ -35,8 +35,8 @@ where
     async fn create_journal(
         context: Self::Context,
         config: &Self::Config,
-        lower_bound_loc: u64,
-        upper_bound_loc: u64,
+        lower_bound_loc: Location,
+        upper_bound_loc: Location,
     ) -> Result<Self::Journal, Error> {
         // Open the journal and discard operations outside the sync range.
         let (journal, size) = init_journal(
@@ -48,8 +48,8 @@ where
                 write_buffer: config.log_write_buffer,
                 buffer_pool: config.buffer_pool.clone(),
             },
-            lower_bound_loc,
-            upper_bound_loc,
+            lower_bound_loc.as_u64(),
+            upper_bound_loc.as_u64(),
             config.log_items_per_section,
         )
         .await?;
@@ -81,8 +81,8 @@ where
         db_config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
         apply_batch_size: usize,
     ) -> Result<Self, Error> {
         let journal = journal.into_inner();
@@ -106,12 +106,12 @@ where
         journal: Self::Journal,
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
     ) -> Result<Self::Journal, Error> {
         let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
-        if size <= lower_bound {
+        if size <= lower_bound.as_u64() {
             // Close existing journal and create new one
             journal.close().await.map_err(crate::adb::Error::from)?;
             Self::create_journal(context, config, lower_bound, upper_bound).await
@@ -121,7 +121,7 @@ where
 
             // Use Variable journal's section-based pruning
             let items_per_section = config.log_items_per_section.get();
-            let lower_section = lower_bound / items_per_section;
+            let lower_section = lower_bound.as_u64() / items_per_section;
             variable_journal
                 .prune(lower_section)
                 .await
@@ -129,7 +129,7 @@ where
 
             // Get the size of the journal
             let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
-            if size > upper_bound + 1 {
+            if size > upper_bound.as_u64() + 1 {
                 return Err(crate::adb::Error::UnexpectedData(Location::new(size)));
             }
 
@@ -160,10 +160,10 @@ where
     pub log: variable::Journal<E, Variable<K, V>>,
 
     /// Sync lower boundary (inclusive) - operations below this index are pruned.
-    pub lower_bound: u64,
+    pub lower_bound: Location,
 
     /// Sync upper boundary (inclusive) - operations above this index are not synced.
-    pub upper_bound: u64,
+    pub upper_bound: Location,
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
     /// `lower_bound`, in the order specified by `Proof::nodes_to_pin`.
