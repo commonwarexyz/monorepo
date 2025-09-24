@@ -94,8 +94,8 @@
 //!     // Set bandwidth limits
 //!     // peer[0]: 10KB/s egress, unlimited ingress
 //!     // peer[1]: unlimited egress, 5KB/s ingress
-//!     oracle.set_bandwidth(peers[0].clone(), 10_000, usize::MAX).await.unwrap();
-//!     oracle.set_bandwidth(peers[1].clone(), usize::MAX, 5_000).await.unwrap();
+//!     oracle.set_bandwidth(peers[0].clone(), Some(10_000), None).await.unwrap();
+//!     oracle.set_bandwidth(peers[1].clone(), None, Some(5_000)).await.unwrap();
 //!
 //!     // Link 2 peers
 //!     oracle.add_link(
