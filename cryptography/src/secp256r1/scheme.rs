@@ -400,7 +400,7 @@ mod tests {
         let qx = commonware_utils::from_hex_formatted(&padding_odd_length_hex(qx)).unwrap();
         let qy = commonware_utils::from_hex_formatted(&padding_odd_length_hex(qy)).unwrap();
         let mut compressed = Vec::with_capacity(qx.len() + 1);
-        if qy.last().unwrap() % 2 == 0 {
+        if qy.last().unwrap().is_multiple_of(2) {
             compressed.push(0x02);
         } else {
             compressed.push(0x03);
@@ -420,7 +420,7 @@ mod tests {
     }
 
     fn padding_odd_length_hex(value: &str) -> String {
-        if value.len() % 2 != 0 {
+        if !value.len().is_multiple_of(2) {
             return format!("0{value}");
         }
         value.to_string()
