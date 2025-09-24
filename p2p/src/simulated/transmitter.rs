@@ -282,7 +282,7 @@ impl<P: PublicKey> State<P> {
             let arrival_complete_at = ready_at
                 .checked_add(latency)
                 .expect("latency overflow computing arrival completion");
-            let sequence = Some(self.tag(&origin, &recipient));
+            let sequence = Some(self.increment(&origin, &recipient));
             self.register_completion(
                 origin,
                 recipient,
@@ -677,7 +677,7 @@ impl<P: PublicKey> State<P> {
         let deliver = should_deliver && origin != recipient;
         let remaining = message.len() as u128;
         let sequence = if deliver {
-            Some(self.tag(&origin, &recipient))
+            Some(self.increment(&origin, &recipient))
         } else {
             None
         };
@@ -712,7 +712,7 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Returns the next sequence identifier used to preserve FIFO delivery per link.
-    fn tag(&mut self, origin: &P, recipient: &P) -> u128 {
+    fn increment(&mut self, origin: &P, recipient: &P) -> u128 {
         let key = (origin.clone(), recipient.clone());
         let counter = self.assign_sequences.entry(key).or_insert(0);
         let seq = *counter;
