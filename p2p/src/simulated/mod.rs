@@ -1919,8 +1919,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_sender_ingress_bandwidth() {
-        // This test verifies that when sender bandwidth is 0, the send returns empty list
+    fn test_zero_receiver_ingress_bandwidth() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
@@ -1936,14 +1935,14 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (_sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
-            let (_, _receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            let (mut sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, mut receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
             oracle
                 .add_link(
                     pk_sender.clone(),
                     pk_receiver.clone(),
                     Link {
-                        latency: Duration::from_millis(10),
+                        latency: Duration::ZERO,
                         jitter: Duration::ZERO,
                         success_rate: 1.0,
                     },
@@ -1953,15 +1952,45 @@ mod tests {
 
             // Set sender bandwidth to 0
             oracle
-                .set_bandwidth(pk_sender.clone(), None, Some(0))
+                .set_bandwidth(pk_receiver.clone(), None, Some(0))
                 .await
                 .unwrap();
+
+            // Send message to receiver
+            let msg1 = Bytes::from(vec![1u8; 20_000]); // 20 KB
+            let sent = sender_tx
+                .send(Recipients::One(pk_receiver.clone()), msg1.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0], pk_receiver);
+
+            // Message should not be received after 10 seconds
+            select! {
+                _ = receiver_rx.recv() => {
+                    panic!("unexpected message");
+                },
+                _ = context.sleep(Duration::from_secs(10)) => {},
+            }
+
+            // Unset bandwidth
+            oracle
+                .set_bandwidth(pk_receiver.clone(), None, None)
+                .await
+                .unwrap();
+
+            // Message should be immediately received
+            select! {
+                _ = receiver_rx.recv() => {},
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("timeout");
+                },
+            }
         });
     }
 
     #[test]
     fn test_zero_sender_egress_bandwidth() {
-        // This test verifies that when sender bandwidth is 0, the send returns empty list
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
@@ -1977,14 +2006,14 @@ mod tests {
             let pk_receiver = PrivateKey::from_seed(2).public_key();
 
             // Register peers and establish link
-            let (_sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
-            let (_, _receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
+            let (mut sender_tx, _) = oracle.register(pk_sender.clone(), 0).await.unwrap();
+            let (_, mut receiver_rx) = oracle.register(pk_receiver.clone(), 0).await.unwrap();
             oracle
                 .add_link(
                     pk_sender.clone(),
                     pk_receiver.clone(),
                     Link {
-                        latency: Duration::from_millis(10),
+                        latency: Duration::ZERO,
                         jitter: Duration::ZERO,
                         success_rate: 1.0,
                     },
@@ -1994,9 +2023,40 @@ mod tests {
 
             // Set sender bandwidth to 0
             oracle
-                .set_bandwidth(pk_sender.clone(), None, Some(0))
+                .set_bandwidth(pk_sender.clone(), Some(0), None)
                 .await
                 .unwrap();
+
+            // Send message to receiver
+            let msg1 = Bytes::from(vec![1u8; 20_000]); // 20 KB
+            let sent = sender_tx
+                .send(Recipients::One(pk_receiver.clone()), msg1.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0], pk_receiver);
+
+            // Message should not be received after 10 seconds
+            select! {
+                _ = receiver_rx.recv() => {
+                    panic!("unexpected message");
+                },
+                _ = context.sleep(Duration::from_secs(10)) => {},
+            }
+
+            // Unset bandwidth
+            oracle
+                .set_bandwidth(pk_sender.clone(), None, None)
+                .await
+                .unwrap();
+
+            // Message should be immediately received
+            select! {
+                _ = receiver_rx.recv() => {},
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("timeout");
+                },
+            }
         });
     }
 }
