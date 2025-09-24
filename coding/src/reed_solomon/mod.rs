@@ -450,8 +450,12 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     fn reshard(
         _config: &Config,
         commitment: &Self::Commitment,
+        index: u16,
         shard: Self::Shard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
+        if shard.index != index {
+            return Err(Error::WrongIndex(index));
+        }
         if shard.verify(shard.index, commitment) {
             Ok(((), shard.clone(), shard))
         } else {
