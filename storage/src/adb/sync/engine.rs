@@ -212,7 +212,7 @@ where
             let start_loc = self.target.lower_bound;
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
-                start_loc.as_u64(),
+                start_loc,
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1))
@@ -250,7 +250,7 @@ where
                     .outstanding_requests
                     .locations()
                     .iter()
-                    .map(|&loc| Location::new(loc))
+                    .copied()
                     .collect(),
                 self.fetch_batch_size,
             ) else {
@@ -264,7 +264,7 @@ where
             // Schedule the request
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
-                start_loc.as_u64(),
+                start_loc,
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, start_loc, batch_size)
@@ -407,7 +407,7 @@ where
     ) -> Result<(), Error<DB, R>> {
         // Mark request as complete
         self.outstanding_requests
-            .remove(fetch_result.start_loc.as_u64());
+            .remove(fetch_result.start_loc);
 
         let start_loc = fetch_result.start_loc;
         let FetchResult {
@@ -568,12 +568,12 @@ mod tests {
                 }),
             }
         });
-        requests.add(10, fut);
+        requests.add(Location::new(10), fut);
         assert_eq!(requests.len(), 1);
-        assert!(requests.locations().contains(&10));
+        assert!(requests.locations().contains(&Location::new(10)));
 
         // Test removing requests
-        requests.remove(10);
-        assert!(!requests.locations().contains(&10));
+        requests.remove(Location::new(10));
+        assert!(!requests.locations().contains(&Location::new(10)));
     }
 }

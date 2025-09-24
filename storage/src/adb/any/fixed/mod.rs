@@ -1563,11 +1563,11 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
 
             // Test historical proof generation for several historical states.
-            let start_loc = 20;
+            let start_loc = Location::new(20);
             let max_ops = NZU64!(10);
             for end_loc in 31..50 {
                 let (historical_proof, historical_ops) = db
-                    .historical_proof(end_loc, Location::new(start_loc), max_ops)
+                    .historical_proof(end_loc, start_loc, max_ops)
                     .await
                     .unwrap();
 
@@ -1582,22 +1582,19 @@ pub(super) mod test {
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
                 ref_db.sync().await.unwrap();
 
-                let (ref_proof, ref_ops) = ref_db
-                    .proof(Location::new(start_loc), max_ops)
-                    .await
-                    .unwrap();
+                let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
                 assert_eq!(ref_proof.size, historical_proof.size);
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
-                let end_loc = std::cmp::min(start_loc + max_ops.get(), end_loc);
-                assert_eq!(ref_ops, ops[start_loc as usize..end_loc as usize]);
+                let end_loc = std::cmp::min(start_loc.as_u64() + max_ops.get(), end_loc);
+                assert_eq!(ref_ops, ops[start_loc.as_u64() as usize..end_loc as usize]);
 
                 // Verify proof against reference root
                 let ref_root = ref_db.root(&mut hasher);
                 assert!(verify_proof(
                     &mut hasher,
                     &historical_proof,
-                    Location::new(start_loc),
+                    start_loc,
                     &historical_ops,
                     &ref_root
                 ),);

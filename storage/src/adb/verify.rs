@@ -229,7 +229,7 @@ mod tests {
 
             // Add operations we want to prove (starting at location 5)
             let operations = vec![10, 11, 12];
-            let start_loc = 5u64;
+            let start_loc = Location::new(5u64);
             for op in &operations {
                 let encoded = op.encode();
                 mmr.add(&mut hasher, &encoded);
@@ -241,7 +241,7 @@ mod tests {
             assert!(verify_proof(
                 &mut hasher,
                 &proof,
-                Location::new(start_loc),
+                start_loc,
                 &operations,
                 &root,
             ));
