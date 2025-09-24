@@ -15,7 +15,7 @@ pub enum Message<P: PublicKey> {
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
-    SetBandwidth {
+    LimitBandwidth {
         public_key: P,
         egress_cap: Option<usize>,
         ingress_cap: Option<usize>,
@@ -118,7 +118,7 @@ impl<P: PublicKey> Oracle<P> {
     ///
     /// Bandwidth is specified for the peer's egress (upload) and ingress (download)
     /// rates in bytes per second. Use `None` for unlimited bandwidth.
-    pub async fn set_bandwidth(
+    pub async fn limit_bandwidth(
         &mut self,
         public_key: P,
         egress_cap: Option<usize>,
@@ -126,7 +126,7 @@ impl<P: PublicKey> Oracle<P> {
     ) -> Result<(), Error> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::SetBandwidth {
+            .send(Message::LimitBandwidth {
                 public_key,
                 egress_cap,
                 ingress_cap,
