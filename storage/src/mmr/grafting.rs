@@ -846,7 +846,7 @@ mod tests {
                     ));
 
                     // Proof should fail if we inject the wrong peak element into the verifier.
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&p1]);
+                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&p1]);
                     assert!(!proof.verify_element_inclusion(
                         &mut verifier,
                         &b4,
@@ -855,7 +855,7 @@ mod tests {
                     ));
 
                     // Proof should fail if we give the verifier the wrong peak tree leaf number.
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&p1]);
+                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 2, vec![&p2]);
                     assert!(!proof.verify_element_inclusion(
                         &mut verifier,
                         &b4,
