@@ -173,7 +173,11 @@ impl<H: Hasher> Tree<H> {
             if level.len() == 1 {
                 break;
             }
-            let sibling_index = if index % 2 == 0 { index + 1 } else { index - 1 };
+            let sibling_index = if index.is_multiple_of(2) {
+                index + 1
+            } else {
+                index - 1
+            };
             let sibling = if sibling_index < level.len() {
                 level[sibling_index]
             } else {
@@ -234,7 +238,7 @@ impl<H: Hasher> Tree<H> {
 
             // Check if we need a right sibling
             let mut right = None;
-            if level_end % 2 == 0 {
+            if level_end.is_multiple_of(2) {
                 if level_end + 1 < level.len() {
                     // Our range ends at an even index, so we need the odd sibling to the right
                     right = Some(level[level_end + 1]);
@@ -311,7 +315,7 @@ impl<H: Hasher> Proof<H> {
         let mut computed = hasher.finalize();
         for sibling in self.siblings.iter() {
             // Determine the position of the sibling
-            let (left_node, right_node) = if position % 2 == 0 {
+            let (left_node, right_node) = if position.is_multiple_of(2) {
                 (&computed, sibling)
             } else {
                 (sibling, &computed)

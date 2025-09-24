@@ -2,7 +2,7 @@
 
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{leaf_pos_to_num, nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
+    iterator::{leaf_pos_to_loc, nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
     proof, Error,
     Error::*,
     Proof,
@@ -13,6 +13,7 @@ use alloc::{
     vec::Vec,
 };
 use commonware_cryptography::Hasher as CHasher;
+use core::ops::Range;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use commonware_runtime::ThreadPool;
@@ -156,7 +157,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the total number of leaves in the MMR.
     pub fn leaves(&self) -> u64 {
-        leaf_pos_to_num(self.size()).expect("invalid mmr size")
+        leaf_pos_to_loc(self.size()).expect("invalid mmr size")
     }
 
     /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
@@ -610,32 +611,32 @@ impl<H: CHasher> Mmr<H> {
         hasher.root(size, peaks)
     }
 
-    /// Return an inclusion proof for the specified element. Returns ElementPruned error if some
+    /// Return an inclusion proof for the element at location `loc`,  or ElementPruned error if some
     /// element needed to generate the proof has been pruned.
     ///
     /// # Warning
     ///
-    /// Panics if there are unprocessed batch updates.
-    pub fn proof(&self, element_pos: u64) -> Result<Proof<H::Digest>, Error> {
-        self.range_proof(element_pos, element_pos)
+    /// Panics if there are unprocessed batch updates, or if `loc` is out of bounds.
+    pub fn proof(&self, loc: u64) -> Result<Proof<H::Digest>, Error> {
+        self.range_proof(loc..loc + 1)
     }
 
-    /// Return an inclusion proof for the specified element. Returns ElementPruned error if some
-    /// element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for all elements within the provided `range` of locations. Returns
+    /// ElementPruned error if some element needed to generate the proof has been pruned.
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed batch updates.
-    pub fn range_proof(&self, start_pos: u64, end_pos: u64) -> Result<Proof<H::Digest>, Error> {
-        if start_pos < self.pruned_to_pos {
-            return Err(ElementPruned(start_pos));
-        }
+    /// Panics if there are unprocessed batch updates, or if the element range is out of bounds.
+    pub fn range_proof(&self, range: Range<u64>) -> Result<Proof<H::Digest>, Error> {
         assert!(
             self.dirty_nodes.is_empty(),
             "dirty nodes must be processed before computing proofs"
         );
         let size = self.size();
-        let positions = proof::nodes_required_for_range_proof(size, start_pos, end_pos);
+        assert!(range.start < size);
+        assert!(range.end <= size);
+
+        let positions = proof::nodes_required_for_range_proof(size, range);
         let digests = positions
             .into_iter()
             .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))
@@ -739,7 +740,7 @@ impl<H: CHasher> Mmr<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, iterator::leaf_num_to_pos, stability::ROOTS};
+    use crate::mmr::{hasher::Standard, iterator::leaf_loc_to_pos, stability::ROOTS};
     use commonware_cryptography::Sha256;
     use commonware_runtime::{create_pool, deterministic, tokio, Runner};
     use commonware_utils::hex;
@@ -780,7 +781,7 @@ mod tests {
 
     /// Test empty MMR behavior.
     #[test]
-    fn test_mmr_empty() {
+    fn test_mem_mmr_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
@@ -810,7 +811,7 @@ mod tests {
     /// structure in the example documented at the top of the mmr crate's mod.rs file with 19 nodes
     /// and 3 peaks.
     #[test]
-    fn test_mmr_add_eleven_values() {
+    fn test_mem_mmr_add_eleven_values() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
@@ -888,26 +889,29 @@ mod tests {
             mmr.prune_to_pos(14); // prune up to the tallest peak
             assert_eq!(mmr.oldest_retained_pos().unwrap(), 14);
 
-            // After pruning up to a peak, we shouldn't be able to prove any elements before it.
+            // After pruning, we shouldn't be able to generate a proof for any elements before the
+            // pruning boundary. (To be precise, due to the maintenance of pinned nodes, we may in
+            // fact still be able to generate them for some, but it's not guaranteed. For example,
+            // in this case, we actually can still generate a proof for the node with location 7
+            // even though it's pruned.)
             assert!(matches!(mmr.proof(0), Err(ElementPruned(_))));
-            assert!(matches!(mmr.proof(11), Err(ElementPruned(_))));
-            // We should still be able to prove any leaf following this peak, the first of which is
-            // at position 15.
-            assert!(mmr.proof(15).is_ok());
+            assert!(matches!(mmr.proof(6), Err(ElementPruned(_))));
+
+            // We should still be able to generate a proof for any leaf following the pruning
+            // boundary, the first of which is at location 8 and the last location 10.
+            assert!(mmr.proof(8).is_ok());
+            assert!(mmr.proof(10).is_ok());
 
             let root_after_prune = mmr.root(&mut hasher);
             assert_eq!(root, root_after_prune, "root changed after pruning");
+
             assert!(
-                mmr.proof(11).is_err(),
-                "attempts to prove elements at or before the oldest retained should fail"
-            );
-            assert!(
-                mmr.range_proof(10, 15).is_err(),
+                mmr.range_proof(5..9).is_err(),
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(15, mmr.last_leaf_pos().unwrap()).is_ok(),
-                "attempts to range_prove over elements following oldest retained should succeed"
+                mmr.range_proof(8..mmr.leaves()).is_ok(),
+                "attempts to range_prove over all elements following oldest retained should succeed"
             );
 
             // Test that we can initialize a new MMR from another's elements.
@@ -942,7 +946,7 @@ mod tests {
 
     /// Test that pruning all nodes never breaks adding new nodes.
     #[test]
-    fn test_mmr_prune_all() {
+    fn test_mem_mmr_prune_all() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
@@ -957,7 +961,7 @@ mod tests {
 
     /// Test that the MMR validity check works as expected.
     #[test]
-    fn test_mmr_validity() {
+    fn test_mem_mmr_validity() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
@@ -984,7 +988,7 @@ mod tests {
     /// Test that the MMR root computation remains stable by comparing against previously computed
     /// roots.
     #[test]
-    fn test_mmr_root_stability() {
+    fn test_mem_mmr_root_stability() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test root stability under different MMR building methods.
@@ -1079,7 +1083,7 @@ mod tests {
                 mmr.add(&mut hasher, &element);
             }
 
-            let leaf_pos = leaf_num_to_pos(100);
+            let leaf_pos = leaf_loc_to_pos(100);
             mmr.prune_to_pos(leaf_pos);
             while mmr.size() > leaf_pos {
                 assert!(mmr.pop().is_ok());

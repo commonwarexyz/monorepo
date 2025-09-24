@@ -39,7 +39,7 @@ use crate::{
     Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
-use commonware_utils::{hex, SystemTimeExt};
+use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 use futures::{
     task::{waker, ArcWake},
     Future,
@@ -208,6 +208,10 @@ impl Config {
         assert!(
             self.cycle != Duration::default() || self.timeout.is_none(),
             "cycle duration must be non-zero when timeout is set",
+        );
+        assert!(
+            self.cycle >= SYSTEM_TIME_PRECISION,
+            "cycle duration must be greater than or equal to system time precision"
         );
     }
 }
@@ -1224,6 +1228,18 @@ mod tests {
         let cfg = Config {
             timeout: Some(Duration::default()),
             cycle: Duration::default(),
+            ..Config::default()
+        };
+        deterministic::Runner::new(cfg);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "cycle duration must be greater than or equal to system time precision"
+    )]
+    fn test_bad_cycle() {
+        let cfg = Config {
+            cycle: SYSTEM_TIME_PRECISION - Duration::from_nanos(1),
             ..Config::default()
         };
         deterministic::Runner::new(cfg);

@@ -39,7 +39,7 @@ use tokio::runtime::{Builder, Runtime};
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
 #[cfg(feature = "iouring-network")]
-const IOURING_NETWORK_FORCE_POLL: Option<Duration> = Some(Duration::from_millis(100));
+const IOURING_NETWORK_FORCE_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 struct Metrics {
