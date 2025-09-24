@@ -2,7 +2,7 @@ use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::{BigRationalExt, SystemTimeExt};
+use commonware_utils::{time::SYSTEM_TIME_PRECISION, BigRationalExt, SystemTimeExt};
 use num_rational::BigRational;
 use num_traits::Zero;
 use std::{
@@ -432,6 +432,14 @@ impl<P: PublicKey> State<P> {
                 }
 
                 if let Some(duration) = bandwidth::duration(&meta.rate, &meta.remaining) {
+                    // Ensure the scheduled event advances by at least the platform precision so
+                    // `SystemTime` actually moves forward on coarse clocks (e.g. Windows).
+                    let duration = if duration > Duration::ZERO && duration < SYSTEM_TIME_PRECISION
+                    {
+                        SYSTEM_TIME_PRECISION
+                    } else {
+                        duration
+                    };
                     earliest = match earliest {
                         None => Some(duration),
                         Some(current) => Some(current.min(duration)),
