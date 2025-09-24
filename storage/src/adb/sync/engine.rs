@@ -169,8 +169,8 @@ where
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
         if config.target.lower_bound > config.target.upper_bound {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
-                lower_bound_pos: config.target.lower_bound.as_u64(),
-                upper_bound_pos: config.target.upper_bound.as_u64(),
+                lower_bound_pos: config.target.lower_bound,
+                upper_bound_pos: config.target.upper_bound,
             }));
         }
 
@@ -406,8 +406,7 @@ where
         fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
     ) -> Result<(), Error<DB, R>> {
         // Mark request as complete
-        self.outstanding_requests
-            .remove(fetch_result.start_loc);
+        self.outstanding_requests.remove(fetch_result.start_loc);
 
         let start_loc = fetch_result.start_loc;
         let FetchResult {

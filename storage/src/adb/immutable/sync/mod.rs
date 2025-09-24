@@ -631,13 +631,16 @@ mod tests {
                 update_rx: None,
             };
             let result: Result<ImmutableSyncTest, _> = sync::sync(config).await;
-            assert!(matches!(
-                result,
+            match result {
                 Err(sync::Error::Engine(sync::EngineError::InvalidTarget {
-                    lower_bound_pos: 31,
-                    upper_bound_pos: 30,
-                }))
-            ));
+                    lower_bound_pos,
+                    upper_bound_pos,
+                })) => {
+                    assert_eq!(lower_bound_pos, Location::new(31));
+                    assert_eq!(upper_bound_pos, Location::new(30));
+                }
+                _ => panic!("Expected InvalidTarget error"),
+            }
         });
     }
 

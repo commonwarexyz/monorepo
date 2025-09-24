@@ -59,8 +59,8 @@ where
 {
     if new_target.lower_bound > new_target.upper_bound {
         return Err(sync::Error::Engine(EngineError::InvalidTarget {
-            lower_bound_pos: new_target.lower_bound.as_u64(),
-            upper_bound_pos: new_target.upper_bound.as_u64(),
+            lower_bound_pos: new_target.lower_bound,
+            upper_bound_pos: new_target.upper_bound,
         }));
     }
 
@@ -143,7 +143,7 @@ mod tests {
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound: Location::new(0), upper_bound: Location::new(100) },
         Target { root: sha256::Digest::from([1; 32]), lower_bound: Location::new(200), upper_bound: Location::new(100) },
-        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: 200, upper_bound_pos: 100 }));
+        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: Location::new(200), upper_bound_pos: Location::new(100) }));
         "invalid bounds - lower > upper"
     )]
     #[test_case(
