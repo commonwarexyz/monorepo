@@ -3,11 +3,12 @@
 //! This is useful for hashing data, committing to it, and extracting secure
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
-
 use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_utils::{Array, Span};
+use core::{fmt::Display, ops::Deref};
 use rand_core::{
     impls::{next_u32_via_fill, next_u64_via_fill},
     CryptoRng, CryptoRngCore, RngCore,
@@ -278,7 +279,7 @@ impl Transcript {
 /// This is the primary way to compare two transcripts for equality.
 /// You can think of this as a hash over the transcript, providing a commitment
 /// to the data it recorded.
-#[derive(Debug, Clone, PartialEq, Eq, ZeroizeOnDrop)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Summary {
     hash: blake3::Hash,
 }
@@ -300,6 +301,51 @@ impl Read for Summary {
         Ok(Self {
             hash: blake3::Hash::from_bytes(ReadExt::read(buf)?),
         })
+    }
+}
+
+impl AsRef<[u8]> for Summary {
+    fn as_ref(&self) -> &[u8] {
+        self.hash.as_bytes().as_slice()
+    }
+}
+
+impl Deref for Summary {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl PartialOrd for Summary {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Summary {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.as_ref().cmp(other.as_ref())
+    }
+}
+
+impl Display for Summary {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", commonware_utils::hex(self.as_ref()))
+    }
+}
+
+impl Span for Summary {}
+impl Array for Summary {}
+
+impl crate::Digest for Summary {
+    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+        let mut bytes = [0u8; blake3::OUT_LEN];
+        rng.fill_bytes(&mut bytes[..]);
+        Self {
+            hash: blake3::Hash::from_bytes(bytes),
+        }
     }
 }
 
