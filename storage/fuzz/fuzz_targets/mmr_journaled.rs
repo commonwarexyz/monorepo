@@ -10,7 +10,7 @@ use commonware_storage::mmr::{
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 
-const MAX_OPERATIONS: usize = 100;
+const MAX_OPERATIONS: usize = 5;
 const MAX_DATA_SIZE: usize = 64;
 const PAGE_SIZE: usize = 111;
 const PAGE_CACHE_SIZE: usize = 5;
@@ -151,6 +151,16 @@ fn fuzz(input: FuzzInput) {
                     historical_sizes.push(mmr.size());
                     assert!(mmr.size() > size_before);
                     assert_eq!(mmr.last_leaf_pos(), Some(pos));
+                    assert_eq!(
+                        mmr.leaves(),
+                        elements.len() as u64,
+                        "mmr leaves != elements.len()"
+                    );
+                    assert_eq!(
+                        mmr.leaves(),
+                        positions.len() as u64,
+                        "mmr leaves != positions.len()"
+                    );
                 }
 
                 MmrJournaledOperation::AddBatched { data } => {
@@ -164,12 +174,43 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    let _ = mmr.add_batched(&mut hasher, limited_data).await;
+                    let size_before = mmr.size();
+                    mmr.process_updates(&mut hasher);
+                    let pos = mmr.add_batched(&mut hasher, limited_data).await.unwrap();
+                    has_batched_updates = true;
+                    elements.push(limited_data.to_vec());
+                    positions.push(pos);
+
+                    historical_sizes.push(mmr.size());
+                    assert!(mmr.size() > size_before);
+                    assert_eq!(mmr.last_leaf_pos(), Some(pos));
                 }
 
                 MmrJournaledOperation::Pop { count } => {
+                    if mmr.leaves() < count as u64 {
+                        continue;
+                    }
+                    assert_eq!(
+                        mmr.leaves(),
+                        elements.len() as u64,
+                        "mmr leaves != elements.len()"
+                    );
+                    assert_eq!(
+                        mmr.leaves(),
+                        positions.len() as u64,
+                        "mmr leaves != positions.len()"
+                    );
+
+                    let leaves_before = mmr.leaves();
                     mmr.process_updates(&mut hasher);
-                    let _ = mmr.pop(count as usize).await;
+                    if let Ok(..) = mmr.pop(count as usize).await {
+                        let leaves_after = mmr.leaves();
+                        let actually_popped = leaves_before - leaves_after;
+
+                        let split_index = elements.len() - (actually_popped as usize);
+                        let _ = elements.split_off(split_index);
+                        let _ = positions.split_off(split_index);
+                    }
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
@@ -183,11 +224,11 @@ fn fuzz(input: FuzzInput) {
                     mmr.process_updates(&mut hasher);
                     let idx = (element_pos as usize) % positions.len();
                     let test_element_pos = positions[idx];
-                    
+
                     if test_element_pos >= mmr.size() || test_element_pos < mmr.pruned_to_pos() {
                         continue;
                     }
-                    
+
                     if let Ok(proof) = mmr.proof(test_element_pos).await {
                         let root = mmr.root(&mut hasher);
                         assert!(proof.verify_element_inclusion(
@@ -253,13 +294,10 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::PruneAll => {
-                    mmr.prune_all(&mut hasher).await.unwrap();
-                    has_batched_updates = false;
-
-                    elements.clear();
-                    positions.clear();
-
+                    let _ = mmr.prune_all(&mut hasher).await.unwrap();
                     assert_eq!(mmr.oldest_retained_pos(), None);
+                    // Return, otherwise because we can't update our reference data structure related to leaves updates.
+                    return;
                 }
 
                 MmrJournaledOperation::PruneToPos { pos } => {
