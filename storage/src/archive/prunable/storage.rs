@@ -356,6 +356,14 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         self.intervals.next_gap(index)
     }
 
+    fn first_index(&self) -> Option<u64> {
+        self.intervals.first_index()
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        self.intervals.last_index()
+    }
+
     async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
     }

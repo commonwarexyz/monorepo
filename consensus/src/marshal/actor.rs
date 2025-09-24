@@ -9,6 +9,7 @@ use super::{
     },
 };
 use crate::{
+    marshal::ingress::mailbox::Identifier as BlockID,
     threshold_simplex::types::{Finalization, Notarization},
     types::Round,
     Block, Reporter,
@@ -20,7 +21,7 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::archive::{immutable, Archive as _, Identifier};
+use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
@@ -83,7 +84,6 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
     // ---------- State ----------
     // Last view processed
     last_processed_round: Round,
-
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
@@ -217,6 +217,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 codec_config: config.codec_config,
+                partition_prefix: config.partition_prefix,
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
                 cache,
@@ -224,7 +225,6 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                 finalized_blocks,
                 finalized_height,
                 processed_height,
-                partition_prefix: config.partition_prefix,
             },
             Mailbox::new(sender),
         )
@@ -258,17 +258,16 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
+        let finalizer_context = self.context.with_label("finalizer");
         let finalizer = Finalizer::new(
-            self.context.with_label("finalizer"),
+            finalizer_context.clone(),
             format!("{}-finalizer", self.partition_prefix.clone()),
             application,
             orchestrator,
             notifier_rx,
         )
         .await;
-        self.context
-            .with_label("finalizer")
-            .spawn(|_| finalizer.run());
+        finalizer_context.spawn(|_| finalizer.run());
 
         // Create a local pool for waiter futures
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
@@ -297,6 +296,10 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                         return;
                     };
                     match message {
+                        Message::GetTip { response } => {
+                            let tip = self.get_tip().await;
+                            let _ = response.send(tip);
+                        }
                         Message::Broadcast { block } => {
                             let _peers = buffer.broadcast(Recipients::All, block).await;
                         }
@@ -337,10 +340,24 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 resolver.fetch(Request::<B>::Block(commitment)).await;
                             }
                         }
-                        Message::Get { commitment, response } => {
-                            // Check for block locally
-                            let result = self.find_block(&mut buffer, commitment).await;
-                            let _ = response.send(result);
+                        Message::GetBlock { identifier, response } => {
+                            match identifier {
+                                BlockID::Commitment(commitment) => {
+                                    let result = self.find_block(&mut buffer, commitment).await;
+                                    let _ = response.send(result);
+                                }
+                                BlockID::Height(height) => {
+                                    let result = self.get_finalized_block(height).await;
+                                    let _ = response.send(result);
+                                }
+                                BlockID::Tip => {
+                                    let block = match self.get_tip().await {
+                                        Some((_, commitment)) => self.find_block(&mut buffer, commitment).await,
+                                        None => None,
+                                    };
+                                    let _ = response.send(block);
+                                }
+                            }
                         }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
@@ -635,7 +652,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
 
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: u64) -> Option<B> {
-        match self.finalized_blocks.get(Identifier::Index(height)).await {
+        match self.finalized_blocks.get(ArchiveID::Index(height)).await {
             Ok(block) => block,
             Err(e) => panic!("failed to get block: {e}"),
         }
@@ -648,7 +665,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     ) -> Option<Finalization<V, B::Commitment>> {
         match self
             .finalizations_by_height
-            .get(Identifier::Index(height))
+            .get(ArchiveID::Index(height))
             .await
         {
             Ok(finalization) => finalization,
@@ -696,6 +713,14 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let _ = notifier.try_send(());
     }
 
+    /// Get the tip of the finalized block sequence.
+    async fn get_tip(&mut self) -> Option<(u64, B::Commitment)> {
+        let height = self.finalizations_by_height.last_index()?;
+        self.get_finalization_by_height(height)
+            .await
+            .map(|f| (height, f.proposal.payload))
+    }
+
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
@@ -713,11 +738,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             return Some(block);
         }
         // Check finalized blocks.
-        match self
-            .finalized_blocks
-            .get(Identifier::Key(&commitment))
-            .await
-        {
+        match self.finalized_blocks.get(ArchiveID::Key(&commitment)).await {
             Ok(block) => block, // may be None
             Err(e) => panic!("failed to get block: {e}"),
         }

@@ -3,12 +3,23 @@ use crate::{
     types::Round,
     Block, Reporter,
 };
-use commonware_cryptography::bls12381::primitives::variant::Variant;
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use tracing::error;
+
+/// An identifier for a block request.
+pub enum Identifier<D: Digest> {
+    /// The height of the block to retrieve.
+    Height(u64),
+    /// The commitment of the block to retrieve.
+    Commitment(D),
+    /// The highest finalized block. It may be the case that marshal does not have some of the
+    /// blocks below this height.
+    Tip,
+}
 
 /// Messages sent to the marshal [Actor](super::super::actor::Actor).
 ///
@@ -16,19 +27,23 @@ use tracing::error;
 /// system to drive the state of the marshal.
 pub(crate) enum Message<V: Variant, B: Block> {
     // -------------------- Application Messages --------------------
-    /// A request to retrieve a block by its digest.
-    Get {
-        /// The digest of the block to retrieve.
-        commitment: B::Commitment,
+    /// A request to retrieve the information about the highest finalized block.
+    GetTip {
+        response: oneshot::Sender<Option<(u64, B::Commitment)>>,
+    },
+    /// A request to retrieve a block by its identifier.
+    GetBlock {
+        /// The identifier of the block to retrieve.
+        identifier: Identifier<B::Commitment>,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<Option<B>>,
     },
-    /// A request to retrieve a block by its digest.
+    /// A request to retrieve a block by its commitment.
     Subscribe {
         /// The view in which the block was notarized. This is an optimization
         /// to help locate the block.
         round: Option<Round>,
-        /// The digest of the block to retrieve.
+        /// The commitment of the block to retrieve.
         commitment: B::Commitment,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<B>,
@@ -71,14 +86,31 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         Self { sender }
     }
 
-    /// Get is a best-effort attempt to retrieve a given block from local
-    /// storage. It is not an indication to go fetch the block from the network.
-    pub async fn get(&mut self, commitment: B::Commitment) -> oneshot::Receiver<Option<B>> {
+    /// A request to retrieve the information about the highest finalized block.
+    pub async fn get_tip(&mut self) -> oneshot::Receiver<Option<(u64, B::Commitment)>> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
-            .send(Message::Get {
-                commitment,
+            .send(Message::GetTip { response: tx })
+            .await
+            .is_err()
+        {
+            error!("failed to send get tip message to actor: receiver dropped");
+        }
+        rx
+    }
+
+    /// A best-effort attempt to retrieve a given block from local
+    /// storage. It is not an indication to go fetch the block from the network.
+    pub async fn get_block(
+        &mut self,
+        identifier: Identifier<B::Commitment>,
+    ) -> oneshot::Receiver<Option<B>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetBlock {
+                identifier,
                 response: tx,
             })
             .await
@@ -89,7 +121,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         rx
     }
 
-    /// Subscribe is a request to retrieve a block by its commitment.
+    /// A request to retrieve a block by its commitment.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
