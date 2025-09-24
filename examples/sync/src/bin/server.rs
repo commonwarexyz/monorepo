@@ -8,7 +8,10 @@ use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
     Storage, StreamOf,
 };
-use commonware_storage::{adb::sync::Target, mmr::StandardHasher as Standard};
+use commonware_storage::{
+    adb::sync::Target,
+    mmr::{Location, StandardHasher as Standard},
+};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{self},
@@ -165,8 +168,8 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound_ops,
-            upper_bound_ops,
+            lower_bound: Location::new(lower_bound_ops),
+            upper_bound: Location::new(upper_bound_ops),
         },
     };
 

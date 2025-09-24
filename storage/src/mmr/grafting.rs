@@ -50,7 +50,7 @@
 //!
 //! The inverse of this procedure provides our algorithm for mapping a peak tree leaf's position to
 //! a base MMR node position: take the leaf's position in the peak tree, map it to any of the
-//! corresponding leaves in the base MMR, then walk up the base MMR structure exactly the ber of
+//! corresponding leaves in the base MMR, then walk up the base MMR structure exactly the number of
 //! levels we removed.
 //!
 //! In this example, leaf 0 in the peak tree corresponds to leaves \[0,1,3,4\] in the base MMR.
@@ -897,7 +897,7 @@ mod tests {
 
                     // Proof should fail if we give the verifier the wrong peak tree leaf number.
                     let mut verifier =
-                        Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(0), vec![&p1]);
+                        Verifier::<Sha256>::new(GRAFTING_HEIGHT, Location::new(2), vec![&p2]);
                     assert!(!proof.verify_element_inclusion(
                         &mut verifier,
                         &b4,

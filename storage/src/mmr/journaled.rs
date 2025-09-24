@@ -339,7 +339,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         context: E,
         cfg: SyncConfig<H::Digest>,
     ) -> Result<Self, crate::adb::Error> {
-        println!("SIZEEEE: {} {}", cfg.lower_bound_pos, cfg.upper_bound_pos);
         let journal = init_journal(
             context.with_label("mmr_journal"),
             JConfig {
@@ -1004,14 +1003,14 @@ mod tests {
 
             // Generate & verify proof from element that is not yet flushed to the journal.
             const TEST_ELEMENT: usize = 133;
-            let test_element_loc = TEST_ELEMENT as u64;
+            const TEST_ELEMENT_LOC: Location = Location::new(TEST_ELEMENT as u64);
 
-            let proof = mmr.proof(Location::new(test_element_loc)).await.unwrap();
+            let proof = mmr.proof(TEST_ELEMENT_LOC).await.unwrap();
             let root = mmr.root(&mut hasher);
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
                 &leaves[TEST_ELEMENT],
-                Location::new(test_element_loc),
+                TEST_ELEMENT_LOC,
                 &root,
             ));
 
@@ -1022,7 +1021,7 @@ mod tests {
 
             // Now that the element is flushed from the in-mem MMR, confirm its proof is still is
             // generated correctly.
-            let proof2 = mmr.proof(Location::new(test_element_loc)).await.unwrap();
+            let proof2 = mmr.proof(TEST_ELEMENT_LOC).await.unwrap();
             assert_eq!(proof, proof2);
 
             // Generate & verify a proof that spans flushed elements and the last element.
@@ -1031,7 +1030,7 @@ mod tests {
             assert!(proof.verify_range_inclusion(
                 &mut hasher,
                 &leaves[TEST_ELEMENT..LEAF_COUNT],
-                Location::new(test_element_loc),
+                TEST_ELEMENT_LOC,
                 &root
             ));
 
