@@ -16,8 +16,7 @@ pub struct Completion<P: PublicKey> {
     pub recipient: P,
     pub channel: Channel,
     pub message: Bytes,
-    pub deliver: bool,
-    pub arrival_complete_at: Option<SystemTime>,
+    pub deliver_at: Option<SystemTime>,
 }
 
 impl<P: PublicKey> Completion<P> {
@@ -27,15 +26,14 @@ impl<P: PublicKey> Completion<P> {
         recipient: P,
         channel: Channel,
         message: Bytes,
-        arrival_complete_at: SystemTime,
+        deliver_at: SystemTime,
     ) -> Self {
         Self {
             origin,
             recipient,
             channel,
             message,
-            deliver: true,
-            arrival_complete_at: Some(arrival_complete_at),
+            deliver_at: Some(deliver_at),
         }
     }
 
@@ -46,8 +44,7 @@ impl<P: PublicKey> Completion<P> {
             recipient,
             channel,
             message,
-            deliver: false,
-            arrival_complete_at: None,
+            deliver_at: None,
         }
     }
 }
@@ -756,8 +753,7 @@ mod tests {
 
         assert_eq!(completions.len(), 1);
         let completion = &completions[0];
-        assert!(completion.deliver);
-        assert_eq!(completion.arrival_complete_at, Some(now));
+        assert_eq!(completion.deliver_at, Some(now));
     }
 
     #[test]
@@ -778,8 +774,7 @@ mod tests {
         );
 
         assert_eq!(completions.len(), 1);
-        assert!(!completions[0].deliver);
-        assert!(completions[0].arrival_complete_at.is_none());
+        assert!(completions[0].deliver_at.is_none());
     }
 
     #[test]
@@ -838,9 +833,8 @@ mod tests {
         let completions = state.process(first_finish);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
-        assert!(completion_a.deliver);
         assert_eq!(
-            completion_a.arrival_complete_at,
+            completion_a.deliver_at,
             Some(first_finish + Duration::from_secs(1))
         );
 
@@ -870,8 +864,7 @@ mod tests {
         let completions = state.process(second_finish);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
-        assert!(completion_b.deliver);
-        assert_eq!(completion_b.arrival_complete_at, Some(second_finish));
+        assert_eq!(completion_b.deliver_at, Some(second_finish));
         assert_eq!(completion_b.message.len(), 1_000);
         assert_eq!(completion_b.message[0], 2);
     }
@@ -917,10 +910,9 @@ mod tests {
         let completions = state.process(first_finish);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
-        assert!(completion_a.deliver);
         assert_eq!(completion_a.message.len(), msg_a.len());
         assert_eq!(
-            completion_a.arrival_complete_at,
+            completion_a.deliver_at,
             Some(first_finish + Duration::from_millis(500))
         );
 
@@ -939,19 +931,18 @@ mod tests {
         let completions = state.process(second_finish);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
-        assert!(completion_b.deliver);
         assert_eq!(completion_b.message.len(), msg_b.len());
         assert_eq!(
-            completion_b.arrival_complete_at,
+            completion_b.deliver_at,
             Some(second_finish + Duration::from_millis(100))
         );
 
         assert_eq!(
-            completion_a.arrival_complete_at,
+            completion_a.deliver_at,
             Some(start + Duration::from_millis(2500))
         );
         assert_eq!(
-            completion_b.arrival_complete_at,
+            completion_b.deliver_at,
             Some(start + Duration::from_millis(3500))
         );
     }
@@ -984,11 +975,10 @@ mod tests {
         assert_eq!(completions.len(), 1);
 
         let completion = &completions[0];
-        assert!(completion.deliver);
         assert_eq!(completion.origin, origin);
         assert_eq!(completion.recipient, recipient);
         assert_eq!(
-            completion.arrival_complete_at,
+            completion.deliver_at,
             Some(first_deadline + Duration::from_millis(250))
         );
 
@@ -1021,7 +1011,7 @@ mod tests {
         let deadline = state.next().expect("completion scheduled");
         let completions = state.process(deadline);
         assert_eq!(completions.len(), 1);
-        assert!(completions[0].deliver);
+        assert!(completions[0].deliver_at.is_some());
 
         let more = state.process(deadline);
         assert!(more.is_empty());
@@ -1044,9 +1034,8 @@ mod tests {
             true,
         );
         assert_eq!(completions.len(), 1);
-        assert!(completions[0].deliver);
         assert_eq!(
-            completions[0].arrival_complete_at,
+            completions[0].deliver_at,
             Some(now + Duration::from_millis(100))
         );
 
@@ -1060,9 +1049,8 @@ mod tests {
             true,
         );
         assert_eq!(completions.len(), 1);
-        assert!(completions[0].deliver);
         assert_eq!(
-            completions[0].arrival_complete_at,
+            completions[0].deliver_at,
             Some(now + Duration::from_millis(100)) // must still be FIFO
         );
 
@@ -1146,7 +1134,7 @@ mod tests {
         let completions = state.process(first_finish);
         assert_eq!(completions.len(), 1);
         let completion_a = &completions[0];
-        assert!(completion_a.deliver);
+        assert!(completion_a.deliver_at.is_some());
         assert_eq!(completion_a.message.len(), msg_a.len());
 
         // Flow is idle, but the next launch is postponed until the prior arrival clears.
@@ -1200,7 +1188,7 @@ mod tests {
         let completions = state.process(second_finish);
         assert_eq!(completions.len(), 1);
         let completion_b = &completions[0];
-        assert!(completion_b.deliver);
+        assert!(completion_b.deliver_at.is_some());
         assert_eq!(completion_b.message.len(), msg_b.len());
         assert!(!state.active_flows.contains_key(&pair));
 
@@ -1235,7 +1223,7 @@ mod tests {
         let completions = state.process(third_finish);
         assert_eq!(completions.len(), 1);
         let completion_c = &completions[0];
-        assert!(completion_c.deliver);
+        assert!(completion_c.deliver_at.is_some());
         assert_eq!(completion_c.message.len(), msg_c.len());
         assert!(!state.active_flows.contains_key(&pair));
 
@@ -1273,9 +1261,8 @@ mod tests {
         let completions = state.tune(now, &origin, None, None); // unlimited egress
         assert_eq!(completions.len(), 1);
         let completion = &completions[0];
-        assert!(completion.deliver);
         assert_eq!(completion.message.len(), msg.len());
-        assert_eq!(completion.arrival_complete_at, Some(now));
+        assert_eq!(completion.deliver_at, Some(now));
 
         assert!(state.next().is_none());
     }
@@ -1325,9 +1312,8 @@ mod tests {
         let mut recipients: Vec<_> = completions
             .iter()
             .map(|c| {
-                assert!(c.deliver);
                 assert_eq!(c.message.len(), 1_000);
-                assert_eq!(c.arrival_complete_at, Some(finish));
+                assert_eq!(c.deliver_at, Some(finish));
                 c.recipient.clone()
             })
             .collect();
@@ -1387,7 +1373,7 @@ mod tests {
             last_deadline = deadline;
 
             for completion in state.process(deadline) {
-                assert!(completion.deliver);
+                assert!(completion.deliver_at.is_some());
                 delivered.push(completion.message.len());
             }
         }

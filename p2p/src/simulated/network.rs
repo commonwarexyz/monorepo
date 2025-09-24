@@ -283,23 +283,20 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     fn process_completions(&mut self, completions: Vec<Completion<P>>) {
         for completion in completions {
             // If there is no message to deliver, then skip
-            if !completion.deliver {
+            let Some(deliver_at) = completion.deliver_at else {
                 trace!(
                     origin = ?completion.origin,
                     recipient = ?completion.recipient,
                     "message dropped before delivery",
                 );
-            }
+                continue;
+            };
 
             // Send message to link
             let key = (completion.origin.clone(), completion.recipient.clone());
-            let Some(arrival_complete_at) = completion.arrival_complete_at else {
-                continue;
-            };
             match self.links.get_mut(&key) {
                 Some(link) => {
-                    if let Err(err) =
-                        link.send(completion.channel, completion.message, arrival_complete_at)
+                    if let Err(err) = link.send(completion.channel, completion.message, deliver_at)
                     {
                         error!(?err, "failed to send");
                     }
