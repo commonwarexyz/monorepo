@@ -59,23 +59,30 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                 S::encode(&config, data.as_slice()).unwrap();
 
                             shards.shuffle(&mut rng);
-                            let my_shard_and_proof = shards.pop().unwrap();
-                            let checked_shard = shards
-                                .iter()
+                            let my_shard = shards.pop().unwrap();
+                            let reshards = shards
+                                .into_iter()
                                 .take(min)
-                                .map(|(shard, proof)| {
-                                    let reshard =
-                                        S::reshard(&config, &commitment, proof, shard).unwrap();
-                                    S::check(&config, &commitment, reshard).unwrap()
+                                .map(|shard| {
+                                    let (_, _, reshard) =
+                                        S::reshard(&config, &commitment, shard).unwrap();
+                                    reshard
                                 })
                                 .collect::<Vec<_>>();
 
-                            (commitment, my_shard_and_proof, checked_shard)
+                            (commitment, my_shard, reshards)
                         },
-                        // We include the cost of checking your shard as part of decoding
-                        |(commitment, (my_shard, my_proof), reshards)| {
-                            S::reshard(&config, &commitment, &my_proof, &my_shard).unwrap();
-                            S::decode(&config, &commitment, my_shard, &reshards).unwrap();
+                        |(commitment, my_shard, reshards)| {
+                            let (checking_data, _, _) =
+                                S::reshard(&config, &commitment, my_shard).unwrap();
+                            let checked_shards = reshards
+                                .into_iter()
+                                .map(|reshard| {
+                                    S::check(&config, &commitment, &checking_data, reshard).unwrap()
+                                })
+                                .collect::<Vec<_>>();
+                            S::decode(&config, &commitment, checking_data, &checked_shards)
+                                .unwrap();
                         },
                         BatchSize::SmallInput,
                     );
