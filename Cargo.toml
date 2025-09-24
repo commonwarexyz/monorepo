@@ -62,6 +62,7 @@ bytes = { version = "1.7.1", default-features = false }
 sha2 = { version = "0.10.8", default-features = false }
 blake3 = { version = "1.8.2", default-features = false }
 rand = { version = "0.8.5", default-features = false }
+rand_chacha = { version = "0.3", default-features = false }
 rand_core = "0.6.4"
 rand_distr = "0.4.3"
 futures = "0.3.31"
@@ -103,6 +104,7 @@ blst = { version = "0.3.13", default-features = false }
 p256 = { version = "0.13.2", default-features = false }
 test-case = "3.3.1"
 chacha20poly1305 = "0.10.1"
+x25519-dalek = "2.0.1"
 
 # Fuzz deps
 libfuzzer-sys = "0.4.9"
