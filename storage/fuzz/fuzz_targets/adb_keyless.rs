@@ -4,7 +4,10 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::keyless::{Config, Keyless},
+    adb::{
+        keyless::{Config, Keyless},
+        verify_proof,
+    },
     mmr::hasher::Standard,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -32,12 +35,12 @@ enum Operation {
     Root,
     Proof {
         start_offset: u32,
-        max_ops: u8,
+        max_ops: u16,
     },
     HistoricalProof {
         size_offset: u32,
         start_offset: u32,
-        max_ops: u8,
+        max_ops: u16,
     },
     SimulateFailure {
         sync_log: bool,
@@ -142,6 +145,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
+        let mut hasher = Standard::<Sha256>::new();
         let mut db =
             Keyless::<_, Vec<u8>, Sha256>::init(context.clone(), test_config("keyless_fuzz_test"))
                 .await
@@ -216,7 +220,13 @@ fn fuzz(input: FuzzInput) {
                     if op_count > 0 && !has_uncommitted {
                         let start_loc = (*start_offset as u64) % op_count;
                         let max_ops_value = ((*max_ops as u64) % 100) + 1;
-                        let _ = db.proof(start_loc, NZU64!(max_ops_value)).await;
+                        if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
+                            let root = db.root(&mut hasher);
+                            assert!(
+                                verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                                "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops after pruning",
+                            );
+                        }
                     }
                 }
 
