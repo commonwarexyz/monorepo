@@ -469,21 +469,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         // Notify sender of successful sends
-        context
-            .clone()
-            .with_label("notifier")
-            .spawn(|_| async move {
-                // Wait for semaphore to be acquired on all sends
-                for _ in 0..sent.len() {
-                    acquired_receiver.next().await.unwrap();
-                }
+        context.with_label("notifier").spawn(|_| async move {
+            // Wait for semaphore to be acquired on all sends
+            for _ in 0..sent.len() {
+                acquired_receiver.next().await.unwrap();
+            }
 
-                // Notify sender of successful sends
-                if let Err(err) = reply.send(sent) {
-                    // This can only happen if the sender exited.
-                    error!(?err, "failed to send ack");
-                }
-            });
+            // Notify sender of successful sends
+            if let Err(err) = reply.send(sent) {
+                // This can only happen if the sender exited.
+                error!(?err, "failed to send ack");
+            }
+        });
     }
 
     /// Run the simulated network.
@@ -819,35 +816,32 @@ impl Link {
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
         let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes, SystemTime)>();
-        context
-            .clone()
-            .with_label("link")
-            .spawn(move |context| async move {
-                // Dial the peer and handshake by sending it the dialer's public key
-                let (mut sink, _) = context.dial(socket).await.unwrap();
-                if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
-                    error!(?err, "failed to send public key to listener");
-                    return;
-                }
+        context.with_label("link").spawn(move |context| async move {
+            // Dial the peer and handshake by sending it the dialer's public key
+            let (mut sink, _) = context.dial(socket).await.unwrap();
+            if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
+                error!(?err, "failed to send public key to listener");
+                return;
+            }
 
-                // Process messages in order, waiting for their receive time
-                while let Some((channel, message, receive_complete_at)) = outbox.next().await {
-                    // Wait until the message should arrive at receiver
-                    context.sleep_until(receive_complete_at).await;
+            // Process messages in order, waiting for their receive time
+            while let Some((channel, message, receive_complete_at)) = outbox.next().await {
+                // Wait until the message should arrive at receiver
+                context.sleep_until(receive_complete_at).await;
 
-                    // Send the message
-                    let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
-                    data.extend_from_slice(&channel.to_be_bytes());
-                    data.extend_from_slice(&message);
-                    let data = data.freeze();
-                    send_frame(&mut sink, &data, max_size).await.unwrap();
+                // Send the message
+                let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
+                data.extend_from_slice(&channel.to_be_bytes());
+                data.extend_from_slice(&message);
+                let data = data.freeze();
+                send_frame(&mut sink, &data, max_size).await.unwrap();
 
-                    // Bump received messages metric
-                    received_messages
-                        .get_or_create(&metrics::Message::new(&dialer, &receiver, channel))
-                        .inc();
-                }
-            });
+                // Bump received messages metric
+                received_messages
+                    .get_or_create(&metrics::Message::new(&dialer, &receiver, channel))
+                    .inc();
+            }
+        });
 
         Self {
             sampler,

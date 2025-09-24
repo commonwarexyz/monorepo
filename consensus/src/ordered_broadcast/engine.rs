@@ -981,12 +981,10 @@ impl<
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::<_, Node<C::PublicKey, V, D>>::init(
-            runtime.clone().with_label("journal"),
-            cfg,
-        )
-        .await
-        .expect("unable to init journal");
+        let journal =
+            Journal::<_, Node<C::PublicKey, V, D>>::init(runtime.with_label("journal"), cfg)
+                .await
+                .expect("unable to init journal");
 
         // Replay journal
         {
