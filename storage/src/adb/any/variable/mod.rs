@@ -294,15 +294,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                             Self::update_loc(
                                                 &mut self.snapshot,
                                                 key,
-                                                old_loc.as_u64(),
-                                                new_loc.as_u64(),
+                                                *old_loc,
+                                                *new_loc,
                                             );
                                         } else {
-                                            Self::delete_loc(
-                                                &mut self.snapshot,
-                                                key,
-                                                old_loc.as_u64(),
-                                            );
+                                            Self::delete_loc(&mut self.snapshot, key, *old_loc);
                                         }
                                     } else {
                                         assert!(new_loc.is_some());
@@ -383,7 +379,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         assert!(loc.as_u64() < self.op_count());
         if loc.as_u64() < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(loc.as_u64()));
+            return Err(Error::OperationPruned(loc));
         }
 
         let offset = self.locations.read(loc.as_u64()).await?;
@@ -407,13 +403,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Remove the location `delete_loc` from the snapshot if it's associated with `key`.
-    fn delete_loc(snapshot: &mut Index<T, u64>, key: &K, delete_loc: u64) {
+    fn delete_loc(snapshot: &mut Index<T, u64>, key: &K, delete_loc: Location) {
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return;
         };
 
         while let Some(&loc) = cursor.next() {
-            if loc == delete_loc {
+            if loc == delete_loc.as_u64() {
                 cursor.delete();
                 return;
             }
@@ -422,14 +418,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Update the location associated with `key` with value `old_loc` to `new_loc`. If there is no
     /// such key or value, this is a no-op.
-    fn update_loc(snapshot: &mut Index<T, u64>, key: &K, old_loc: u64, new_loc: u64) {
+    fn update_loc(snapshot: &mut Index<T, u64>, key: &K, old_loc: Location, new_loc: Location) {
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return;
         };
 
         while let Some(&loc) = cursor.next() {
-            if loc == old_loc {
-                cursor.update(new_loc);
+            if loc == old_loc.as_u64() {
+                cursor.update(new_loc.as_u64());
                 return;
             }
         }
@@ -446,17 +442,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         match self.locations.read(loc.as_u64()).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc.as_u64(), offset).await;
+                return self.get_from_offset(key, loc, offset).await;
             }
             Err(e) => Err(Error::Journal(e)),
         }
     }
 
     /// Get the operation at location `loc` in the log.
-    async fn get_op(&self, loc: u64) -> Result<Operation<K, V>, Error> {
-        match self.locations.read(loc).await {
+    async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {
+        match self.locations.read(loc.as_u64()).await {
             Ok(offset) => {
-                let section = loc / self.log_items_per_section;
+                let section = loc.as_u64() / self.log_items_per_section;
                 self.log.get(section, offset).await.map_err(Error::Journal)
             }
             Err(e) => Err(Error::Journal(e)),
@@ -465,10 +461,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the value of the operation with location `loc` and offset `offset` in the log if it
     /// matches `key`.
-    async fn get_from_offset(&self, key: &K, loc: u64, offset: u32) -> Result<Option<V>, Error> {
-        let section = loc / self.log_items_per_section;
+    async fn get_from_offset(
+        &self,
+        key: &K,
+        loc: Location,
+        offset: u32,
+    ) -> Result<Option<V>, Error> {
+        let section = loc.as_u64() / self.log_items_per_section;
         let Operation::Update(k, v) = self.log.get(section, offset).await? else {
-            panic!("didn't find Update operation at location {loc} and offset {offset}");
+            panic!(
+                "didn't find Update operation at location {} and offset {offset}",
+                loc.as_u64()
+            );
         };
 
         if k != *key {
@@ -509,7 +513,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
         if let Some(old_loc) = self.get_key_loc(&key).await? {
-            Self::update_loc(&mut self.snapshot, &key, old_loc.as_u64(), new_loc);
+            Self::update_loc(&mut self.snapshot, &key, old_loc, Location::new(new_loc));
         } else {
             self.snapshot.insert(&key, new_loc);
         };
@@ -528,7 +532,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Ok(());
         };
 
-        Self::delete_loc(&mut self.snapshot, &key, old_loc.as_u64());
+        Self::delete_loc(&mut self.snapshot, &key, old_loc);
         self.apply_op(Operation::Delete(key)).await?;
 
         Ok(())
@@ -659,7 +663,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
         let mut last_commit = self.op_count() - self.uncommitted_ops;
         if last_commit == 0 {
             return Ok(None);
@@ -671,7 +675,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some((last_commit, metadata)))
+        Ok(Some((Location::new(last_commit), metadata)))
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -694,8 +698,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub(super) async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
-        old_loc: u64,
-    ) -> Result<Option<u64>, Error> {
+        old_loc: Location,
+    ) -> Result<Option<Location>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
         let Some(key) = op.key() else {
             // `op` is not a key-related operation, so it is not active.
@@ -708,7 +712,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Iterate over all conflicting keys in the snapshot.
         while let Some(&loc) = cursor.next() {
-            if loc == old_loc {
+            if loc == old_loc.as_u64() {
                 // Update the location of the operation in the snapshot.
                 cursor.update(new_loc);
                 drop(cursor);
@@ -738,8 +742,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             if self.inactivity_floor_loc == self.op_count() {
                 break;
             }
-            let op = self.get_op(self.inactivity_floor_loc).await?;
-            self.move_op_if_active(op, self.inactivity_floor_loc)
+            let op = self
+                .get_op(Location::new(self.inactivity_floor_loc))
+                .await?;
+            self.move_op_if_active(op, Location::new(self.inactivity_floor_loc))
                 .await?;
             self.inactivity_floor_loc += 1;
         }
@@ -1026,7 +1032,10 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
 
             // Make sure we can still get the metadata.
-            assert_eq!(db.get_metadata().await.unwrap(), Some((8, metadata)));
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((Location::new(8), metadata))
+            );
 
             // Re-activate the keys by updating them.
             db.update(d1, v1.clone()).await.unwrap();
@@ -1045,7 +1054,10 @@ pub(super) mod test {
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.op_count(), 19);
-            assert_eq!(db.get_metadata().await.unwrap(), Some((18, None)));
+            assert_eq!(
+                db.get_metadata().await.unwrap(),
+                Some((Location::new(18), None))
+            );
 
             // Commit will raise the inactivity floor, which won't affect state but will affect the
             // root.

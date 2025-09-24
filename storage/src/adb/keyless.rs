@@ -558,7 +558,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
         let Some(loc) = self.last_commit_loc else {
             return Ok(None);
         };
@@ -569,7 +569,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             return Ok(None);
         };
 
-        Ok(Some((loc, metadata)))
+        Ok(Some((Location::new(loc), metadata)))
     }
 
     /// Return the root of the db.
@@ -759,7 +759,7 @@ mod test {
             assert_eq!(db.op_count(), 1); // commit op
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((0, metadata.clone()))
+                Some((Location::new(0), metadata.clone()))
             );
             assert_eq!(db.get(Location::new(0)).await.unwrap(), metadata); // the commit op
             let root = db.root(&mut hasher);
@@ -767,7 +767,7 @@ mod test {
             // Commit op should remain after reopen even without clean shutdown.
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1); // commit op should remain after re-open.
-            assert_eq!(db.get_metadata().await.unwrap(), Some((0, metadata)));
+            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(0), metadata)));
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.last_commit_loc(), Some(Location::new(0)));
 
@@ -795,7 +795,7 @@ mod test {
             // Make sure closing/reopening gets us back to the same state.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 3); // 2 appends, 1 commit
-            assert_eq!(db.get_metadata().await.unwrap(), Some((2, None)));
+            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(2), None)));
             assert_eq!(db.get(Location::new(2)).await.unwrap(), None); // the commit op
             let root = db.root(&mut hasher);
             db.close().await.unwrap();

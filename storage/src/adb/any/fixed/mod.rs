@@ -371,7 +371,7 @@ impl<
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         assert!(loc.as_u64() < self.op_count());
         if loc.as_u64() < self.inactivity_floor_loc {
-            return Err(Error::OperationPruned(loc.as_u64()));
+            return Err(Error::OperationPruned(loc));
         }
 
         Ok(self.log.read(loc.as_u64()).await?.into_value())
@@ -584,8 +584,8 @@ impl<
     pub(crate) async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
-        old_loc: u64,
-    ) -> Result<Option<u64>, Error> {
+        old_loc: Location,
+    ) -> Result<Option<Location>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
         let Some(key) = op.key() else {
             return Ok(None); // operations without keys cannot be active
@@ -597,7 +597,7 @@ impl<
 
         // Iterate over all conflicting keys in the snapshot.
         while let Some(&loc) = cursor.next() {
-            if loc == old_loc {
+            if loc == old_loc.as_u64() {
                 // Update the location of the operation in the snapshot.
                 cursor.update(new_loc);
                 drop(cursor);
@@ -624,7 +624,7 @@ impl<
                 break;
             }
             let op = self.log.read(self.inactivity_floor_loc).await?;
-            self.move_op_if_active(op, self.inactivity_floor_loc)
+            self.move_op_if_active(op, Location::new(self.inactivity_floor_loc))
                 .await?;
             self.inactivity_floor_loc += 1;
         }

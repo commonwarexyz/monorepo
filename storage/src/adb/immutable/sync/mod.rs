@@ -6,7 +6,7 @@ use crate::{
         Error,
     },
     journal::variable,
-    mmr::StandardHasher as Standard,
+    mmr::{Location, StandardHasher as Standard},
     store::operation::Variable,
     translator::Translator,
 };
@@ -130,7 +130,7 @@ where
             // Get the size of the journal
             let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
             if size > upper_bound + 1 {
-                return Err(crate::adb::Error::UnexpectedData(size));
+                return Err(crate::adb::Error::UnexpectedData(Location::new(size)));
             }
 
             Ok(journal::Journal::new(
@@ -419,7 +419,7 @@ mod tests {
             assert_eq!(got_db.root(&mut hasher), target_root);
             assert_eq!(
                 got_db.get_metadata().await.unwrap(),
-                Some((0, Some(Sha256::fill(1))))
+                Some((Location::new(0), Some(Sha256::fill(1))))
             );
 
             got_db.destroy().await.unwrap();

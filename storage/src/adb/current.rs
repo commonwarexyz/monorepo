@@ -298,10 +298,10 @@ impl<
             let op = self.any.log.read(self.any.inactivity_floor_loc).await?;
             let old_loc = self
                 .any
-                .move_op_if_active(op, self.any.inactivity_floor_loc)
+                .move_op_if_active(op, Location::new(self.any.inactivity_floor_loc))
                 .await?;
             if let Some(old_loc) = old_loc {
-                self.status.set_bit(old_loc, false);
+                self.status.set_bit(old_loc.as_u64(), false);
                 self.status.append(true);
             }
             self.any.inactivity_floor_loc += 1;

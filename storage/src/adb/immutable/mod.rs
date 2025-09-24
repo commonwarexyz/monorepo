@@ -460,7 +460,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         assert!(loc.as_u64() < self.op_count());
         if loc.as_u64() < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(loc.as_u64()));
+            return Err(Error::OperationPruned(loc));
         }
 
         let offset = self.locations.read(loc.as_u64()).await?;
@@ -475,12 +475,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// otherwise assumed valid.
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
         if loc.as_u64() < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(loc.as_u64()));
+            return Err(Error::OperationPruned(loc));
         }
 
         match self.locations.read(loc.as_u64()).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc.as_u64(), offset).await;
+                return self.get_from_offset(key, loc, offset).await;
             }
             Err(e) => Err(Error::Journal(e)),
         }
@@ -489,14 +489,22 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the value of the operation with location `loc` and offset `offset` in the log if it
     /// matches `key`, or return [Error::OperationPruned] if the location precedes the oldest
     /// retained.
-    async fn get_from_offset(&self, key: &K, loc: u64, offset: u32) -> Result<Option<V>, Error> {
-        if loc < self.oldest_retained_loc {
+    async fn get_from_offset(
+        &self,
+        key: &K,
+        loc: Location,
+        offset: u32,
+    ) -> Result<Option<V>, Error> {
+        if loc.as_u64() < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }
 
-        let section = loc / self.log_items_per_section;
+        let section = loc.as_u64() / self.log_items_per_section;
         let Variable::Set(k, v) = self.log.get(section, offset).await? else {
-            panic!("didn't find Set operation at location {loc} and offset {offset}");
+            panic!(
+                "didn't find Set operation at location {} and offset {offset}",
+                loc.as_u64()
+            );
         };
 
         if k != *key {
@@ -599,7 +607,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         assert!(start_loc.as_u64() < op_count);
 
         if start_loc.as_u64() < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(start_loc.as_u64()));
+            return Err(Error::OperationPruned(start_loc));
         }
 
         let end_loc = std::cmp::min(op_count, start_loc.as_u64() + max_ops.get());
@@ -659,7 +667,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
@@ -669,7 +677,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some((last_commit, metadata)))
+        Ok(Some((Location::new(last_commit), metadata)))
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -879,7 +887,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 2);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((1, metadata.clone()))
+                Some((Location::new(1), metadata.clone()))
             );
             // Set the second key.
             db.set(k2, v2.clone()).await.unwrap();
@@ -888,12 +896,12 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 3);
 
             // Make sure we can still get metadata.
-            assert_eq!(db.get_metadata().await.unwrap(), Some((1, metadata)));
+            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(1), metadata)));
 
             // Commit the second key.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 4);
-            assert_eq!(db.get_metadata().await.unwrap(), Some((3, None)));
+            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(3), None)));
 
             // Capture state.
             let root = db.root(&mut hasher);
@@ -911,7 +919,7 @@ pub(super) mod test {
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.get_metadata().await.unwrap(), Some((3, None)));
+            assert_eq!(db.get_metadata().await.unwrap(), Some((Location::new(3), None)));
 
             // Cleanup.
             db.destroy().await.unwrap();
@@ -1178,7 +1186,7 @@ pub(super) mod test {
             let proof_result = db
                 .proof(Location::new(pruned_pos), NZU64!(pruned_pos + 100))
                 .await;
-            assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
+            assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos.as_u64() == pruned_pos));
 
             db.destroy().await.unwrap();
         });

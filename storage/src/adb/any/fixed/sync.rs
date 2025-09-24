@@ -203,7 +203,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
         journal.prune(lower_bound).await?;
         journal
     } else {
-        return Err(adb::Error::UnexpectedData(journal_size));
+        return Err(adb::Error::UnexpectedData(Location::new(journal_size)));
     };
     let journal_size = journal.size().await?;
     assert!(journal_size <= upper_bound + 1);
