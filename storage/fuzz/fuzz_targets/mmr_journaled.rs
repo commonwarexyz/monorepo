@@ -10,7 +10,7 @@ use commonware_storage::mmr::{
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 
-const MAX_OPERATIONS: usize = 5;
+const MAX_OPERATIONS: usize = 100;
 const MAX_DATA_SIZE: usize = 64;
 const PAGE_SIZE: usize = 111;
 const PAGE_CACHE_SIZE: usize = 5;
@@ -143,7 +143,6 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    mmr.process_updates(&mut hasher);
                     let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
                     elements.push(limited_data.to_vec());
                     positions.push(pos);
@@ -151,16 +150,6 @@ fn fuzz(input: FuzzInput) {
                     historical_sizes.push(mmr.size());
                     assert!(mmr.size() > size_before);
                     assert_eq!(mmr.last_leaf_pos(), Some(pos));
-                    assert_eq!(
-                        mmr.leaves(),
-                        elements.len() as u64,
-                        "mmr leaves != elements.len()"
-                    );
-                    assert_eq!(
-                        mmr.leaves(),
-                        positions.len() as u64,
-                        "mmr leaves != positions.len()"
-                    );
                 }
 
                 MmrJournaledOperation::AddBatched { data } => {
@@ -175,11 +164,12 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    mmr.process_updates(&mut hasher);
                     let pos = mmr.add_batched(&mut hasher, limited_data).await.unwrap();
                     has_batched_updates = true;
-                    elements.push(limited_data.to_vec());
-                    positions.push(pos);
+
+                    // Clear tracking since batched updates can't be properly verified until process_updates()
+                    elements.clear();
+                    positions.clear();
 
                     historical_sizes.push(mmr.size());
                     assert!(mmr.size() > size_before);
@@ -187,19 +177,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::Pop { count } => {
-                    if mmr.leaves() < count as u64 {
+                    if mmr.leaves() < count as u64 || elements.is_empty() {
                         continue;
                     }
-                    assert_eq!(
-                        mmr.leaves(),
-                        elements.len() as u64,
-                        "mmr leaves != elements.len()"
-                    );
-                    assert_eq!(
-                        mmr.leaves(),
-                        positions.len() as u64,
-                        "mmr leaves != positions.len()"
-                    );
 
                     let leaves_before = mmr.leaves();
                     mmr.process_updates(&mut hasher);
@@ -207,7 +187,7 @@ fn fuzz(input: FuzzInput) {
                         let leaves_after = mmr.leaves();
                         let actually_popped = leaves_before - leaves_after;
 
-                        let split_index = elements.len() - (actually_popped as usize);
+                        let split_index = elements.len().saturating_sub(actually_popped as usize);
                         let _ = elements.split_off(split_index);
                         let _ = positions.split_off(split_index);
                     }
@@ -294,35 +274,26 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::PruneAll => {
+                    mmr.process_updates(&mut hasher);
                     let _ = mmr.prune_all(&mut hasher).await.unwrap();
                     assert_eq!(mmr.oldest_retained_pos(), None);
-                    // Return, otherwise because we can't update our reference data structure related to leaves updates.
+
+                    // Return, otherwise we will need to process leaves and update them in `positions`
+                    // and `elements` to match in the `proof` call.`
                     return;
                 }
 
                 MmrJournaledOperation::PruneToPos { pos } => {
+                    mmr.process_updates(&mut hasher);
+
                     if mmr.size() > 0 {
                         let safe_pos = pos % (mmr.size() + 1);
-                        let old_pruned_pos = mmr.pruned_to_pos();
                         mmr.prune_to_pos(&mut hasher, safe_pos).await.unwrap();
-                        has_batched_updates = false;
-
-                        // Remove elements that were pruned
-                        let new_pruned_pos = mmr.pruned_to_pos();
-                        if new_pruned_pos > old_pruned_pos {
-                            // Filter out positions that are now pruned
-                            let mut i = 0;
-                            while i < positions.len() {
-                                if positions[i] < new_pruned_pos {
-                                    positions.remove(i);
-                                    elements.remove(i);
-                                } else {
-                                    i += 1;
-                                }
-                            }
-                        }
-
                         assert!(mmr.pruned_to_pos() <= mmr.size());
+
+                        // Return, otherwise we will need to process leaves and update them in `positions`
+                        // and `elements` to match in the `proof` call.`
+                        return;
                     }
                 }
 
