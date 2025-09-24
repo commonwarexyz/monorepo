@@ -29,27 +29,37 @@ pub struct Remaining {
 }
 
 impl Remaining {
+    /// Creates a new tracker with `bytes` whole bytes remaining and no fractional progress.
     pub fn new(bytes: u128) -> Self {
         Self { bytes, carry: 0 }
     }
 
+    /// Returns an empty tracker (no bytes or fractional work outstanding).
     pub fn zero() -> Self {
         Self { bytes: 0, carry: 0 }
     }
 
+    /// Whole bytes that still need to be transmitted.
     pub fn bytes(&self) -> u128 {
         self.bytes
     }
 
+    /// Fractional progress toward the next byte, expressed in planner units.
     pub fn carry(&self) -> u128 {
         self.carry
     }
 
+    /// Indicates whether all bytes have been delivered.
     pub fn is_empty(&self) -> bool {
         self.bytes == 0
     }
 
-    pub fn without_carry(self) -> Self {
+    /// Drops any fractional progress, typically when switching to a new rate scale.
+    #[must_use]
+    pub fn clear_fraction(self) -> Self {
+        if self.carry == 0 {
+            return self;
+        }
         Self {
             bytes: self.bytes,
             carry: 0,
@@ -442,6 +452,45 @@ pub fn duration(rate: &Rate, bytes: u128) -> Option<Duration> {
     }
 }
 
+/// Calculate the time required to complete the outstanding work tracked by [`Remaining`].
+///
+/// The computation reuses the carry embedded in `remaining`, so partially transmitted bytes shorten
+/// the returned deadline relative to a whole-byte estimate.
+pub fn finish_duration(rate: &Rate, remaining: Remaining) -> Option<Duration> {
+    match rate {
+        Rate::Unlimited => Some(Duration::ZERO),
+        Rate::Finite(ratio) => {
+            if remaining.is_empty() {
+                return Some(Duration::ZERO);
+            }
+            if ratio.is_zero() {
+                return None;
+            }
+
+            let denom = ratio.den.saturating_mul(NANOS_PER_SEC);
+            if denom == 0 {
+                return Some(Duration::ZERO);
+            }
+
+            let required = remaining
+                .bytes
+                .saturating_mul(denom)
+                .saturating_sub(remaining.carry);
+
+            if required == 0 {
+                return Some(Duration::ZERO);
+            }
+
+            let ns = if ratio.num == 0 {
+                u128::MAX
+            } else {
+                required.div_ceil(ratio.num)
+            };
+            Some(Duration::from_nanos_saturating(ns))
+        }
+    }
+}
+
 /// Calculate the remaining work after transferring data for `elapsed` at the provided [Rate].
 ///
 /// `Remaining` tracks both the whole bytes still outstanding and any fractional progress (recorded
@@ -473,10 +522,12 @@ pub fn transfer(rate: &Rate, elapsed: Duration, remaining: Remaining) -> Remaini
             let numerator = ratio.num.saturating_mul(delta_ns);
             let total = numerator.saturating_add(remaining.carry);
             let bytes = (total / denom).min(remaining.bytes);
-            let carry = total % denom;
+            let leftover = total % denom;
+            let remaining_bytes = remaining.bytes.saturating_sub(bytes);
+            let carry = if remaining_bytes == 0 { 0 } else { leftover };
 
             Remaining {
-                bytes: remaining.bytes.saturating_sub(bytes),
+                bytes: remaining_bytes,
                 carry,
             }
         }
@@ -569,6 +620,22 @@ mod tests {
         let after_long = transfer(&rate, Duration::from_millis(1500), after_short);
         assert_eq!(after_long.bytes(), 9);
         assert_eq!(after_long.carry(), 0); // 0.75 + previous 0.25 == 1 byte
+    }
+
+    #[test]
+    fn finish_duration_accounts_for_fractional_progress() {
+        let rate = Rate::Finite(Ratio { num: 1, den: 2 });
+        let initial = Remaining::new(1);
+        let partial = transfer(&rate, Duration::from_millis(500), initial);
+        assert_eq!(partial.bytes(), 1);
+        assert!(partial.carry() > 0);
+
+        let duration_full = duration(&rate, 1).expect("finite duration");
+        assert_eq!(duration_full, Duration::from_secs(2));
+
+        let finish = finish_duration(&rate, partial).expect("finish duration");
+        assert_eq!(finish, Duration::from_millis(1500));
+        assert!(finish < duration_full);
     }
 
     #[test]

@@ -379,8 +379,7 @@ impl<P: PublicKey> State<P> {
                     .duration_since(meta.last_update)
                     .unwrap_or(Duration::ZERO);
                 if !elapsed.is_zero() {
-                    meta.remaining =
-                        bandwidth::transfer(&meta.rate, elapsed, meta.remaining);
+                    meta.remaining = bandwidth::transfer(&meta.rate, elapsed, meta.remaining);
                 }
             }
 
@@ -418,14 +417,14 @@ impl<P: PublicKey> State<P> {
 
         for (flow_id, rate) in allocations {
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
-                // Preserve any fractional progress stored in `Remaining` so low-throughput flows
-                // low-throughput flows keep making forward progress across ticks. If the planner
-                // assigns the exact same finite rate we can keep the remainder; otherwise the
-                // old fraction is expressed in a different rate and must be discarded (we already
-                // accounted for all bytes transferable at the old rate earlier in this rebalance,
-                // and any leftover fraction would be wrong once the rate changes).
+                // Preserve fractional progress stored in `Remaining` so low-throughput flows keep
+                // advancing across ticks. If the planner assigns the exact same finite rate we can
+                // keep the remainder; otherwise the old fraction is expressed in a different rate
+                // and must be discarded (we already accounted for all bytes transferable at the
+                // old rate earlier in this rebalance, and any leftover fraction would be wrong
+                // once the rate changes).
                 if meta.rate != rate {
-                    meta.remaining = meta.remaining.without_carry();
+                    meta.remaining = meta.remaining.clear_fraction();
                 }
                 meta.rate = rate.clone();
                 meta.last_update = now;
@@ -438,7 +437,7 @@ impl<P: PublicKey> State<P> {
                     continue;
                 }
 
-                if let Some(duration) = bandwidth::duration(&meta.rate, meta.remaining.bytes()) {
+                if let Some(duration) = bandwidth::finish_duration(&meta.rate, meta.remaining) {
                     earliest = match earliest {
                         None => Some(duration),
                         Some(current) => Some(current.min(duration)),
