@@ -104,7 +104,7 @@ struct Status<P: PublicKey> {
 ///   next queued message for that peer pair, allowing back-to-back transmissions without waiting
 ///   for another outer tick. `schedule` keeps track of the earliest queued start time so `next`
 ///   always reflects both bandwidth expiries and queue readiness.
-pub struct State<P: PublicKey + Ord + Clone> {
+pub struct State<P: PublicKey> {
     bandwidth_limits: BTreeMap<P, Bandwidth>,
     next_flow_id: u64,
     assign_sequences: BTreeMap<(P, P), u128>,
@@ -118,7 +118,7 @@ pub struct State<P: PublicKey + Ord + Clone> {
     buffered: BTreeMap<(P, P), BTreeMap<u128, Buffered>>,
 }
 
-impl<P: PublicKey + Ord + Clone> State<P> {
+impl<P: PublicKey> State<P> {
     /// Creates a new scheduler.
     pub fn new() -> Self {
         Self {
