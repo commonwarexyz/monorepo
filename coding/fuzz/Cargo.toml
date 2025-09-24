@@ -12,13 +12,24 @@ cargo-fuzz = true
 commonware-cryptography = { workspace = true }
 libfuzzer-sys = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
+rand_chacha = { workspace = true }
 
 [dependencies.commonware-coding]
 path = ".."
 
+[lib]
+bench = false
+
 [[bin]]
 name = "reed_solomon"
 path = "fuzz_targets/reed_solomon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "no_coding"
+path = "fuzz_targets/no_coding.rs"
 test = false
 doc = false
 bench = false

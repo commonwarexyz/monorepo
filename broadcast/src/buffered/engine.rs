@@ -15,7 +15,7 @@ use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
 /// A responder waiting for a message.
@@ -76,7 +76,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
 
     /// Pending requests from the application.
     #[allow(clippy::type_complexity)]
-    waiters: HashMap<M::Commitment, Vec<Waiter<P, M::Digest, M>>>,
+    waiters: BTreeMap<M::Commitment, Vec<Waiter<P, M::Digest, M>>>,
 
     ////////////////////////////////////////
     // Cache
@@ -85,7 +85,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     ///
     /// We store messages outside of the deques to minimize memory usage
     /// when receiving duplicate messages.
-    items: HashMap<M::Commitment, HashMap<M::Digest, M>>,
+    items: BTreeMap<M::Commitment, BTreeMap<M::Digest, M>>,
 
     /// A LRU cache of the latest received identities and digests from each peer.
     ///
@@ -93,13 +93,13 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
     #[allow(clippy::type_complexity)]
-    deques: HashMap<P, VecDeque<Pair<M::Commitment, M::Digest>>>,
+    deques: BTreeMap<P, VecDeque<Pair<M::Commitment, M::Digest>>>,
 
     /// The number of times each digest (globally unique) exists in one of the deques.
     ///
     /// Multiple peers can send the same message and we only want to store
     /// the message once.
-    counts: HashMap<M::Digest, usize>,
+    counts: BTreeMap<M::Digest, usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -125,10 +125,10 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
             deque_size: cfg.deque_size,
             codec_config: cfg.codec_config,
             mailbox_receiver,
-            waiters: HashMap::new(),
-            deques: HashMap::new(),
-            items: HashMap::new(),
-            counts: HashMap::new(),
+            waiters: BTreeMap::new(),
+            deques: BTreeMap::new(),
+            items: BTreeMap::new(),
+            counts: BTreeMap::new(),
             metrics,
         };
 
