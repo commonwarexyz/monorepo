@@ -1,5 +1,6 @@
 //! Types used in [aggregation](super).
 
+use crate::{types::Epoch, Epochable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
@@ -71,13 +72,15 @@ impl Error {
     }
 }
 
-/// Epoch represents a configuration period in the aggregation protocol.
-/// Validators may change between epochs, requiring new threshold signatures.
-pub type Epoch = u64;
-
 /// Index represents the sequential position of items being aggregated.
 /// Indices are monotonically increasing within each epoch.
 pub type Index = u64;
+
+impl Epochable for Index {
+    type Epoch = ();
+
+    fn epoch(&self) -> Self::Epoch {}
+}
 
 /// Suffix used to identify an acknowledgment (ack) namespace for domain separation.
 /// Used when signing and verifying acks to prevent signature reuse across different message types.

@@ -1,42 +1,38 @@
 use super::{
+    cache,
     config::Config,
     finalizer::Finalizer,
     ingress::{
-        handler::{self, Handler, Request},
+        handler::{self, Request},
         mailbox::{Mailbox, Message},
         orchestrator::{Orchestration, Orchestrator},
     },
 };
 use crate::{
     threshold_simplex::types::{Finalization, Notarization},
+    types::Round,
     Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{Codec, Decode, Encode};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
-use commonware_resolver::{
-    p2p::{self, Coordinator},
-    Resolver,
-};
+use commonware_p2p::Recipients;
+use commonware_resolver::Resolver;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::{
-    archive::{self, immutable, prunable, Archive as _, Identifier},
-    translator::TwoCap,
-};
+use commonware_storage::archive::{immutable, Archive as _, Identifier};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
 };
-use governor::{clock::Clock as GClock, Quota};
+use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
+    cmp::max,
     collections::{btree_map::Entry, BTreeMap},
-    marker::PhantomData,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tracing::{debug, info, warn};
 
@@ -60,31 +56,19 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<
-    B: Block,
-    R: Rng + Spawner + Metrics + Clock + GClock + Storage,
-    V: Variant,
-    P: PublicKey,
-    Z: Coordinator<PublicKey = P>,
-> {
+pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> {
     // ---------- Context ----------
-    context: R,
+    context: E,
 
     // ---------- Message Passing ----------
-    // Coordinator
-    coordinator: Z,
     // Mailbox
     mailbox: mpsc::Receiver<Message<V, B>>,
 
     // ---------- Configuration ----------
-    // Public key
-    public_key: P,
     // Identity
     identity: V::Public,
     // Mailbox size
     mailbox_size: usize,
-    // Backfill quota
-    backfill_quota: Quota,
     // Unique application namespace
     namespace: Vec<u8>,
     /// Minimum number of views to retain temporary data after the application processes a block
@@ -98,69 +82,43 @@ pub struct Actor<
 
     // ---------- State ----------
     // Last view processed
-    last_processed_view: u64,
+    last_processed_round: Round,
 
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
-    // ---------- Prunable Storage ----------
-    // Verified blocks stored by view
-    verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
-    // Notarized blocks stored by view. Stored separately from the verified blocks since they may
-    // be different (e.g. from an equivocation).
-    notarized_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
-    // Notarizations stored by view
-    notarizations_by_view:
-        prunable::Archive<TwoCap, R, B::Commitment, Notarization<V, B::Commitment>>,
-    // Finalizations stored by view
-    finalizations_by_view:
-        prunable::Archive<TwoCap, R, B::Commitment, Finalization<V, B::Commitment>>,
-
-    // ---------- Immutable Storage ----------
+    // ---------- Storage ----------
+    // Prunable cache
+    cache: cache::Manager<E, B, V>,
     // Finalizations stored by height
-    finalizations_by_height: immutable::Archive<R, B::Commitment, Finalization<V, B::Commitment>>,
+    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<V, B::Commitment>>,
     // Finalized blocks stored by height
-    finalized_blocks: immutable::Archive<R, B::Commitment, B>,
+    finalized_blocks: immutable::Archive<E, B::Commitment, B>,
 
     // ---------- Metrics ----------
     // Latest height metric
     finalized_height: Gauge,
     // Latest processed height
     processed_height: Gauge,
-
-    // ---------- Phantom data ----------
-    _variant: PhantomData<V>,
 }
 
-impl<
-        B: Block,
-        R: Rng + Spawner + Metrics + Clock + GClock + Storage,
-        V: Variant,
-        P: PublicKey,
-        Z: Coordinator<PublicKey = P>,
-    > Actor<B, R, V, P, Z>
-{
+impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
     /// Create a new application actor.
-    pub async fn init(context: R, config: Config<V, P, Z, B>) -> (Self, Mailbox<V, B>) {
-        // Initialize prunable
-        let verified_blocks = Self::init_prunable_archive(
-            &context,
-            "verified_blocks",
-            &config,
+    pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B>) {
+        // Initialize cache
+        let prunable_config = cache::Config {
+            partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
+            prunable_items_per_section: config.prunable_items_per_section,
+            replay_buffer: config.replay_buffer,
+            write_buffer: config.write_buffer,
+            freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+        };
+        let cache = cache::Manager::init(
+            context.with_label("cache"),
+            prunable_config,
             config.codec_config.clone(),
         )
         .await;
-        let notarized_blocks = Self::init_prunable_archive(
-            &context,
-            "notarized_blocks",
-            &config,
-            config.codec_config.clone(),
-        )
-        .await;
-        let notarizations_by_view =
-            Self::init_prunable_archive(&context, "notarizations_by_view", &config, ()).await;
-        let finalizations_by_view =
-            Self::init_prunable_archive(&context, "finalizations_by_view", &config, ()).await;
 
         // Initialize finalizations by height
         let start = Instant::now();
@@ -252,66 +210,57 @@ impl<
         (
             Self {
                 context,
-
-                coordinator: config.coordinator,
                 mailbox,
-
-                public_key: config.public_key,
                 identity: config.identity,
                 mailbox_size: config.mailbox_size,
-                backfill_quota: config.backfill_quota,
-                namespace: config.namespace.clone(),
+                namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
-                codec_config: config.codec_config.clone(),
-                partition_prefix: config.partition_prefix,
-
-                last_processed_view: 0,
+                codec_config: config.codec_config,
+                last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
-
-                verified_blocks,
-                notarized_blocks,
-                notarizations_by_view,
-                finalizations_by_view,
+                cache,
                 finalizations_by_height,
                 finalized_blocks,
-
                 finalized_height,
                 processed_height,
-
-                _variant: PhantomData,
+                partition_prefix: config.partition_prefix,
             },
             Mailbox::new(sender),
         )
     }
 
     /// Start the actor.
-    pub fn start(
+    pub fn start<R, P>(
         mut self,
         application: impl Reporter<Activity = B>,
         buffer: buffered::Mailbox<P, B>,
-        backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(application, buffer, backfill))
+        resolver: (mpsc::Receiver<handler::Message<B>>, R),
+    ) -> Handle<()>
+    where
+        R: Resolver<Key = handler::Request<B>>,
+        P: PublicKey,
+    {
+        self.context.spawn_ref()(self.run(application, buffer, resolver))
     }
 
     /// Run the application actor.
-    async fn run(
+    async fn run<R, P>(
         mut self,
         application: impl Reporter<Activity = B>,
         mut buffer: buffered::Mailbox<P, B>,
-        backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) {
-        // Initialize resolvers
-        let (mut resolver_rx, mut resolver) = self.init_resolver(backfill);
-
+        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
+    ) where
+        R: Resolver<Key = handler::Request<B>>,
+        P: PublicKey,
+    {
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
         let finalizer = Finalizer::new(
             self.context.with_label("finalizer"),
-            self.partition_prefix.clone(),
+            format!("{}-finalizer", self.partition_prefix.clone()),
             application,
             orchestrator,
             notifier_rx,
@@ -349,48 +298,42 @@ impl<
                     };
                     match message {
                         Message::Broadcast { block } => {
-                            let ack = buffer.broadcast(Recipients::All, block).await;
-                            drop(ack);
+                            let _peers = buffer.broadcast(Recipients::All, block).await;
                         }
-                        Message::Verified { view, block } => {
-                            self.put_verified_block(view, block.commitment(), block).await;
+                        Message::Verified { round, block } => {
+                            self.cache_verified(round, block.commitment(), block).await;
                         }
                         Message::Notarization { notarization } => {
-                            let view = notarization.proposal.view;
+                            let round = notarization.round();
                             let commitment = notarization.proposal.payload;
 
                             // Store notarization by view
-                            self.put_notarization_by_view(view, commitment, notarization.clone()).await;
+                            self.cache.put_notarization(round, commitment, notarization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
                                 // If found, persist the block
-                                self.put_notarized_block(view, commitment, block).await;
-                                continue;
+                                self.cache_block(round, commitment, block).await;
                             } else {
-                                debug!(view, "notarized block missing");
-                                resolver.fetch(Request::<B>::Notarized { view }).await;
+                                debug!(?round, "notarized block missing");
+                                resolver.fetch(Request::<B>::Notarized { round }).await;
                             }
                         }
                         Message::Finalization { finalization } => {
-                            // Store finalization by view
-                            let view = finalization.proposal.view;
+                            // Cache finalization by round
+                            let round = finalization.round();
                             let commitment = finalization.proposal.payload;
-                            self.put_finalization_by_view(view, commitment, finalization.clone()).await;
+                            self.cache.put_finalization(round, commitment, finalization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
                                 // If found, persist the block
                                 let height = block.height();
-                                self.put_finalized_block(height, commitment, block, &mut notifier_tx).await;
-                                debug!(view, height, "finalized block stored");
-                                self.finalized_height.set(height as i64);
-
-                                // Cancel useless requests
-                                resolver.retain(Request::<B>::Notarized { view }.predicate()).await;
+                                self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx).await;
+                                debug!(?round, height, "finalized block stored");
                             } else {
-                                // Otherwise, fetch the block from the network
-                                debug!(view, ?commitment, "finalized block missing");
+                                // Otherwise, fetch the block from the network.
+                                debug!(?round, ?commitment, "finalized block missing");
                                 resolver.fetch(Request::<B>::Block(commitment)).await;
                             }
                         }
@@ -399,7 +342,7 @@ impl<
                             let result = self.find_block(&mut buffer, commitment).await;
                             let _ = response.send(result);
                         }
-                        Message::Subscribe { view, commitment, response } => {
+                        Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
                                 let _ = response.send(block);
@@ -410,17 +353,24 @@ impl<
                             // if we have an associated view. If we only have the digest, don't make
                             // the request as we wouldn't know when to drop it, and the request may
                             // never complete if the block is not finalized.
-                            if let Some(view) = view {
-                                // Fetch from network
-                                //
-                                // If this is a valid view, this request should be fine to "keep
-                                // open" even if the oneshot is cancelled.
-                                debug!(view, ?commitment, "requested block missing");
-                                resolver.fetch(Request::<B>::Notarized { view }).await;
+                            if let Some(round) = round {
+                                if round < self.last_processed_round {
+                                    // At this point, we have failed to find the block locally, and
+                                    // we know that its round is less than the last processed round.
+                                    // This means that something else was finalized in that round,
+                                    // so we drop the response to indicate that the block may never
+                                    // be available.
+                                    continue;
+                                }
+                                // Attempt to fetch the block (with notarization) from the resolver.
+                                // If this is a valid view, this request should be fine to keep open
+                                // until resolution or pruning (even if the oneshot is canceled).
+                                debug!(?round, ?commitment, "requested block missing");
+                                resolver.fetch(Request::<B>::Notarized { round }).await;
                             }
 
                             // Register subscriber
-                            debug!(view, ?commitment, "registering subscriber");
+                            debug!(?round, ?commitment, "registering subscriber");
                             match self.block_subscriptions.entry(commitment) {
                                 Entry::Occupied(mut entry) => {
                                     entry.get_mut().subscribers.push(response);
@@ -449,7 +399,7 @@ impl<
                     match message {
                         Orchestration::Get { height, result } => {
                             // Check if in blocks
-                            let block = self.get_finalized_block(Identifier::Index(height)).await;
+                            let block = self.get_finalized_block(height).await;
                             result.send(block).unwrap_or_else(|_| warn!(?height, "Failed to send block to orchestrator"));
                         }
                         Orchestration::Processed { height, digest } => {
@@ -461,23 +411,20 @@ impl<
                             resolver.retain(Request::<B>::Finalized { height }.predicate()).await;
 
                             // If finalization exists, prune the archives
-                            if let Some(finalization) = self.get_finalization_by_height(Identifier::Index(height)).await {
+                            if let Some(finalization) = self.get_finalization_by_height(height).await {
                                 // Trail the previous processed finalized block by the timeout
-                                let min_view = self.last_processed_view.saturating_sub(self.view_retention_timeout);
+                                let lpr = self.last_processed_round;
+                                let prune_round = Round::new(lpr.epoch(), lpr.view().saturating_sub(self.view_retention_timeout));
 
                                 // Prune archives
-                                match try_join!(
-                                    self.verified_blocks.prune(min_view),
-                                    self.notarized_blocks.prune(min_view),
-                                    self.notarizations_by_view.prune(min_view),
-                                    self.finalizations_by_view.prune(min_view),
-                                ) {
-                                    Ok(_) => debug!(min_view, "pruned archives"),
-                                    Err(e) => panic!("failed to prune archives: {e}"),
-                                }
+                                self.cache.prune(prune_round).await;
 
-                                // Update the last processed height and view
-                                self.last_processed_view = finalization.proposal.view;
+                                // Update the last processed round
+                                let round = finalization.round();
+                                self.last_processed_round = round;
+
+                                // Cancel useless requests
+                                resolver.retain(Request::<B>::Notarized { round }.predicate()).await;
                             }
                         }
                         Orchestration::Repair { height } => {
@@ -490,7 +437,7 @@ impl<
 
                             // Attempt to repair the gap backwards from the end of the gap, using
                             // blocks from our local storage.
-                            let Some(mut cursor) = self.get_finalized_block(Identifier::Index(gap_end)).await else {
+                            let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
                                 panic!("gapped block missing that should exist: {gap_end}");
                             };
 
@@ -498,7 +445,8 @@ impl<
                             while cursor.height() > height {
                                 let commitment = cursor.parent();
                                 if let Some(block) = self.find_block(&mut buffer, commitment).await {
-                                    self.put_finalized_block(block.height(), commitment, block.clone(), &mut notifier_tx).await;
+                                    let finalization = self.cache.get_finalization_for(commitment).await;
+                                    self.finalize(block.height(), commitment, block.clone(), finalization, &mut notifier_tx).await;
                                     debug!(height = block.height(), "repaired block");
                                     cursor = block;
                                 } else {
@@ -540,13 +488,13 @@ impl<
                                 }
                                 Request::Finalized { height } => {
                                     // Get finalization
-                                    let Some(finalization) = self.get_finalization_by_height(Identifier::Index(height)).await else {
+                                    let Some(finalization) = self.get_finalization_by_height(height).await else {
                                         debug!(height, "finalization missing on request");
                                         continue;
                                     };
 
                                     // Get block
-                                    let Some(block) = self.get_finalized_block(Identifier::Index(height)).await else {
+                                    let Some(block) = self.get_finalized_block(height).await else {
                                         debug!(height, "finalized block missing on request");
                                         continue;
                                     };
@@ -554,10 +502,10 @@ impl<
                                     // Send finalization
                                     let _ = response.send((finalization, block).encode().into());
                                 }
-                                Request::Notarized { view } => {
+                                Request::Notarized { round } => {
                                     // Get notarization
-                                    let Some(notarization) = self.get_notarization_by_view(Identifier::Index(view)).await else {
-                                        debug!(view, "notarization missing on request");
+                                    let Some(notarization) = self.cache.get_notarization(round).await else {
+                                        debug!(?round, "notarization missing on request");
                                         continue;
                                     };
 
@@ -588,11 +536,8 @@ impl<
 
                                     // Persist the block, also persisting the finalization if we have it
                                     let height = block.height();
-                                    if let Some(finalization) = self.get_finalization_from_view(Identifier::Key(&commitment)).await {
-                                        self.put_finalization_and_finalized_block(height, commitment, finalization, block, &mut notifier_tx).await;
-                                    } else {
-                                        self.put_finalized_block(height, commitment, block, &mut notifier_tx).await;
-                                    }
+                                    let finalization = self.cache.get_finalization_for(commitment).await;
+                                    self.finalize(height, commitment, block, finalization, &mut notifier_tx).await;
                                     debug!(?commitment, height, "received block");
                                     let _ = response.send(true);
                                 },
@@ -615,9 +560,9 @@ impl<
                                     // Valid finalization received
                                     debug!(height, "received finalization");
                                     let _ = response.send(true);
-                                    self.put_finalization_and_finalized_block(height, block.commitment(), finalization, block, &mut notifier_tx).await;
+                                    self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx).await;
                                 },
-                                Request::Notarized { view } => {
+                                Request::Notarized { round } => {
                                     // Parse notarization
                                     let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
                                         let _ = response.send(false);
@@ -625,7 +570,7 @@ impl<
                                     };
 
                                     // Validation
-                                    if notarization.proposal.view != view
+                                    if notarization.round() != round
                                         || notarization.proposal.payload != block.commitment()
                                         || !notarization.verify(&self.namespace, &self.identity)
                                     {
@@ -634,11 +579,24 @@ impl<
                                     }
 
                                     // Valid notarization received
-                                    let commitment = block.commitment();
-                                    debug!(view, ?commitment, "received notarization");
-                                    self.put_notarized_block(view, commitment, block).await;
-                                    self.put_notarization_by_view(view, commitment, notarization).await;
                                     let _ = response.send(true);
+                                    let commitment = block.commitment();
+                                    debug!(?round, ?commitment, "received notarization");
+
+                                    // If there exists a finalization certificate for this block, we
+                                    // should finalize it. While not necessary, this could finalize
+                                    // the block faster in the case where a notarization then a
+                                    // finalization is received via the consensus engine and we
+                                    // resolve the request for the notarization before we resolve
+                                    // the request for the block.
+                                    let height = block.height();
+                                    if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
+                                        self.finalize(height, commitment, block.clone(), Some(finalization), &mut notifier_tx).await;
+                                    }
+
+                                    // Cache the notarization and block
+                                    self.cache_block(round, commitment, block).await;
+                                    self.cache.put_notarization(round, commitment, notarization).await;
                                 },
                             }
                         },
@@ -646,65 +604,6 @@ impl<
                 },
             }
         }
-    }
-
-    // -------------------- Initialization --------------------
-
-    /// Helper to initialize an archive.
-    async fn init_prunable_archive<T: Codec>(
-        context: &R,
-        name: &str,
-        config: &Config<V, P, Z, B>,
-        codec_config: T::Cfg,
-    ) -> prunable::Archive<TwoCap, R, B::Commitment, T> {
-        let start = Instant::now();
-        let prunable_config = prunable::Config {
-            partition: format!("{}-{name}", config.partition_prefix),
-            translator: TwoCap,
-            items_per_section: config.prunable_items_per_section,
-            compression: None,
-            codec_config,
-            buffer_pool: config.freezer_journal_buffer_pool.clone(),
-            replay_buffer: config.replay_buffer,
-            write_buffer: config.write_buffer,
-        };
-        let archive = prunable::Archive::init(context.with_label(name), prunable_config)
-            .await
-            .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
-        info!(elapsed = ?start.elapsed(), "restored {name} archive");
-        archive
-    }
-
-    /// Helper to initialize a resolver.
-    fn init_resolver(
-        &self,
-        backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) -> (
-        mpsc::Receiver<handler::Message<B>>,
-        p2p::Mailbox<Request<B>>,
-    ) {
-        let (handler, receiver) = mpsc::channel(self.mailbox_size);
-        let handler = Handler::new(handler);
-        let (resolver_engine, resolver) = p2p::Engine::new(
-            self.context.with_label("resolver"),
-            p2p::Config {
-                coordinator: self.coordinator.clone(),
-                consumer: handler.clone(),
-                producer: handler,
-                mailbox_size: self.mailbox_size,
-                requester_config: requester::Config {
-                    public_key: self.public_key.clone(),
-                    rate_limit: self.backfill_quota,
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                },
-                fetch_retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-                priority_responses: false,
-            },
-        );
-        resolver_engine.start(backfill);
-        (receiver, resolver)
     }
 
     // -------------------- Waiters --------------------
@@ -718,166 +617,25 @@ impl<
         }
     }
 
-    // -------------------- Storage --------------------
+    // -------------------- Prunable Storage --------------------
 
-    /// Add a verified block to the archive.
-    async fn put_verified_block(&mut self, view: u64, commitment: B::Commitment, block: B) {
+    /// Add a verified block to the prunable archive.
+    async fn cache_verified(&mut self, round: Round, commitment: B::Commitment, block: B) {
         self.notify_subscribers(commitment, &block).await;
-
-        match self.verified_blocks.put_sync(view, commitment, block).await {
-            Ok(_) => {
-                debug!(view, "verified stored");
-            }
-            Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(view, "verified already pruned");
-            }
-            Err(e) => {
-                panic!("failed to insert verified block: {e}");
-            }
-        }
+        self.cache.put_verified(round, commitment, block).await;
     }
 
-    /// Add a notarization to the archive by view.
-    async fn put_notarization_by_view(
-        &mut self,
-        view: u64,
-        commitment: B::Commitment,
-        notarization: Notarization<V, B::Commitment>,
-    ) {
-        match self
-            .notarizations_by_view
-            .put_sync(view, commitment, notarization)
-            .await
-        {
-            Ok(_) => {
-                debug!(view, "notarization by view stored");
-            }
-            Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(view, "notarization by view already pruned");
-            }
-            Err(e) => {
-                panic!("failed to insert notarization by view: {e}");
-            }
-        }
-    }
-
-    /// Add a finalization to the archive by view.
-    async fn put_finalization_by_view(
-        &mut self,
-        view: u64,
-        commitment: B::Commitment,
-        finalization: Finalization<V, B::Commitment>,
-    ) {
-        match self
-            .finalizations_by_view
-            .put_sync(view, commitment, finalization)
-            .await
-        {
-            Ok(_) => {
-                debug!(view, "finalization by view stored");
-            }
-            Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(view, "finalization by view already pruned");
-            }
-            Err(e) => {
-                panic!("failed to insert finalization by view: {e}");
-            }
-        }
-    }
-
-    /// Add a notarized block to the archive.
-    async fn put_notarized_block(&mut self, view: u64, commitment: B::Commitment, block: B) {
+    /// Add a notarized block to the prunable archive.
+    async fn cache_block(&mut self, round: Round, commitment: B::Commitment, block: B) {
         self.notify_subscribers(commitment, &block).await;
-
-        match self
-            .notarized_blocks
-            .put_sync(view, commitment, block)
-            .await
-        {
-            Ok(_) => {
-                debug!(view, "notarized stored");
-            }
-            Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(view, "notarized already pruned");
-            }
-            Err(e) => {
-                panic!("failed to insert notarization: {e}");
-            }
-        }
+        self.cache.put_block(round, commitment, block).await;
     }
 
-    /// Add a finalized block to the archive.
-    ///
-    /// At the end of the method, the notifier is notified to indicate that there has been an update
-    /// to the archive of finalized blocks.
-    async fn put_finalized_block(
-        &mut self,
-        height: u64,
-        commitment: B::Commitment,
-        block: B,
-        notifier: &mut mpsc::Sender<()>,
-    ) {
-        self.notify_subscribers(commitment, &block).await;
+    // -------------------- Immutable Storage --------------------
 
-        if let Err(e) = self
-            .finalized_blocks
-            .put_sync(height, commitment, block)
-            .await
-        {
-            panic!("failed to insert block: {e}");
-        }
-        let _ = notifier.try_send(());
-    }
-
-    /// Add a finalization and finalized block to the archive.
-    async fn put_finalization_and_finalized_block(
-        &mut self,
-        height: u64,
-        commitment: B::Commitment,
-        finalization: Finalization<V, B::Commitment>,
-        block: B,
-        notifier: &mut mpsc::Sender<()>,
-    ) {
-        self.notify_subscribers(commitment, &block).await;
-
-        if let Err(e) = try_join!(
-            self.finalizations_by_height
-                .put_sync(height, commitment, finalization),
-            self.finalized_blocks.put_sync(height, commitment, block),
-        ) {
-            panic!("failed to insert finalization: {e}");
-        }
-        let _ = notifier.try_send(());
-    }
-
-    /// Looks for a block anywhere in local storage.
-    async fn find_block(
-        &mut self,
-        buffer: &mut buffered::Mailbox<P, B>,
-        commitment: B::Commitment,
-    ) -> Option<B> {
-        // Check buffer.
-        if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
-            return Some(block);
-        }
-        // Check verified.
-        if let Some(block) = self.get_verified_block(Identifier::Key(&commitment)).await {
-            return Some(block);
-        }
-        // Check notarized blocks.
-        if let Some(block) = self.get_notarized_block(Identifier::Key(&commitment)).await {
-            return Some(block);
-        }
-        // Check finalized blocks.
-        if let Some(block) = self.get_finalized_block(Identifier::Key(&commitment)).await {
-            return Some(block);
-        }
-        None
-    }
-
-    /// Get a finalized block from the archive.
-    async fn get_finalized_block(&self, id: Identifier<'_, B::Commitment>) -> Option<B> {
-        match self.finalized_blocks.get(id).await {
+    /// Get a finalized block from the immutable archive.
+    async fn get_finalized_block(&self, height: u64) -> Option<B> {
+        match self.finalized_blocks.get(Identifier::Index(height)).await {
             Ok(block) => block,
             Err(e) => panic!("failed to get block: {e}"),
         }
@@ -886,49 +644,82 @@ impl<
     /// Get a finalization from the archive by height.
     async fn get_finalization_by_height(
         &self,
-        id: Identifier<'_, B::Commitment>,
+        height: u64,
     ) -> Option<Finalization<V, B::Commitment>> {
-        match self.finalizations_by_height.get(id).await {
+        match self
+            .finalizations_by_height
+            .get(Identifier::Index(height))
+            .await
+        {
             Ok(finalization) => finalization,
             Err(e) => panic!("failed to get finalization: {e}"),
         }
     }
 
-    /// Get a notarization from the archive by view.
-    async fn get_notarization_by_view(
-        &self,
-        id: Identifier<'_, B::Commitment>,
-    ) -> Option<Notarization<V, B::Commitment>> {
-        match self.notarizations_by_view.get(id).await {
-            Ok(notarization) => notarization,
-            Err(e) => panic!("failed to get notarization by view: {e}"),
+    /// Add a finalized block, and optionally a finalization, to the archive.
+    ///
+    /// At the end of the method, the notifier is notified to indicate that there has been an update
+    /// to the archive of finalized blocks.
+    async fn finalize(
+        &mut self,
+        height: u64,
+        commitment: B::Commitment,
+        block: B,
+        finalization: Option<Finalization<V, B::Commitment>>,
+        notifier: &mut mpsc::Sender<()>,
+    ) {
+        self.notify_subscribers(commitment, &block).await;
+
+        // In parallel, update the finalized blocks and finalizations archives
+        if let Err(e) = try_join!(
+            // Update the finalized blocks archive
+            self.finalized_blocks.put_sync(height, commitment, block),
+            // Update the finalizations archive (if provided)
+            async {
+                if let Some(finalization) = finalization {
+                    self.finalizations_by_height
+                        .put_sync(height, commitment, finalization)
+                        .await?;
+                }
+                Ok::<_, _>(())
+            }
+        ) {
+            panic!("failed to finalize: {e}");
         }
+
+        // Update metrics
+        let new_value: i64 = height as i64;
+        let old_value: i64 = self.finalized_height.get();
+        self.finalized_height.set(max(new_value, old_value));
+
+        // Notify the finalizer
+        let _ = notifier.try_send(());
     }
 
-    /// Get a finalization from the archive by view.
-    async fn get_finalization_from_view(
-        &self,
-        id: Identifier<'_, B::Commitment>,
-    ) -> Option<Finalization<V, B::Commitment>> {
-        match self.finalizations_by_view.get(id).await {
-            Ok(finalization) => finalization,
-            Err(e) => panic!("failed to get finalization by view: {e}"),
-        }
-    }
+    // -------------------- Mixed Storage --------------------
 
-    /// Get a verified block from the archive.
-    async fn get_verified_block(&self, id: Identifier<'_, B::Commitment>) -> Option<B> {
-        match self.verified_blocks.get(id).await {
-            Ok(verified) => verified,
-            Err(e) => panic!("failed to get verified block: {e}"),
+    /// Looks for a block anywhere in local storage.
+    async fn find_block<P: PublicKey>(
+        &mut self,
+        buffer: &mut buffered::Mailbox<P, B>,
+        commitment: B::Commitment,
+    ) -> Option<B> {
+        // Check buffer.
+        if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
+            return Some(block);
         }
-    }
-
-    /// Get a notarized block from the archive.
-    async fn get_notarized_block(&self, id: Identifier<'_, B::Commitment>) -> Option<B> {
-        match self.notarized_blocks.get(id).await {
-            Ok(block) => block,
-            Err(e) => panic!("failed to get notarized block: {e}"),
+        // Check verified / notarized blocks via cache manager.
+        if let Some(block) = self.cache.find_block(commitment).await {
+            return Some(block);
+        }
+        // Check finalized blocks.
+        match self
+            .finalized_blocks
+            .get(Identifier::Key(&commitment))
+            .await
+        {
+            Ok(block) => block, // may be None
+            Err(e) => panic!("failed to get block: {e}"),
         }
     }
 }

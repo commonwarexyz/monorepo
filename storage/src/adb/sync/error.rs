@@ -3,20 +3,8 @@
 use crate::adb::sync::Target;
 use commonware_cryptography::Digest;
 
-/// Errors that can occur during database synchronization.
 #[derive(Debug, thiserror::Error)]
-pub enum Error<T, U, D>
-where
-    T: std::error::Error + Send + 'static,
-    U: std::error::Error + Send + 'static,
-    D: Digest,
-{
-    /// Database error
-    #[error("database error: {0}")]
-    Database(T),
-    /// Resolver error
-    #[error("resolver error: {0:?}")]
-    Resolver(U),
+pub enum EngineError<D: Digest> {
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch { expected: D, actual: D },
@@ -46,17 +34,33 @@ where
     PinnedNodes(String),
 }
 
-impl<T, U, D> Error<T, U, D>
+/// Errors that can occur during database synchronization.
+#[derive(Debug, thiserror::Error)]
+pub enum Error<U, D>
 where
-    T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
-    pub fn resolver(err: impl Into<U>) -> Self {
-        Self::Resolver(err.into())
-    }
+    /// Database error
+    #[error("database error: {0}")]
+    Database(crate::adb::Error),
 
-    pub fn database(err: impl Into<T>) -> Self {
+    /// Resolver error
+    #[error("resolver error: {0:?}")]
+    Resolver(U),
+
+    /// Engine error
+    #[error("engine error: {0}")]
+    Engine(EngineError<D>),
+}
+
+impl<T, U, D> From<T> for Error<U, D>
+where
+    U: std::error::Error + Send + 'static,
+    D: Digest,
+    T: Into<crate::adb::Error>,
+{
+    fn from(err: T) -> Self {
         Self::Database(err.into())
     }
 }

@@ -9,10 +9,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
-use commonware_stream::{
-    public_key::{Connection, Sender},
-    Receiver as _, Sender as _,
-};
+use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -93,7 +90,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
     pub async fn run<Si: Sink, St: Stream>(
         mut self,
         peer: C,
-        connection: Connection<Si, St>,
+        (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
         channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type
@@ -109,7 +106,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             RateLimiter::direct_with_clock(self.allowed_ping_rate, &self.context);
 
         // Send/Receive messages from the peer
-        let (mut conn_sender, mut conn_receiver) = connection.split();
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
             let peer = peer.clone();
             let rate_limits = rate_limits.clone();
@@ -164,7 +160,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 loop {
                     // Receive a message from the peer
                     let msg = conn_receiver
-                        .receive()
+                        .recv()
                         .await
                         .map_err(Error::ReceiveFailed)?;
 

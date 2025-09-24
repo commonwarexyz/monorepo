@@ -1,5 +1,5 @@
 use crate::{
-    adb::{self, any, sync},
+    adb::{self, any},
     index::Index,
     journal::fixed,
     mmr::{
@@ -29,7 +29,6 @@ where
     type Op = Fixed<K, V>;
     type Journal = fixed::Journal<E, Fixed<K, V>>;
     type Hasher = H;
-    type Error = adb::Error;
     type Config = adb::any::fixed::Config<T>;
     type Digest = H::Digest;
 
@@ -38,7 +37,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+    ) -> Result<Self::Journal, adb::Error> {
         let journal_config = fixed::Config {
             partition: config.log_journal_partition.clone(),
             items_per_blob: config.log_items_per_blob,
@@ -63,7 +62,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, adb::Error> {
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
@@ -82,12 +81,11 @@ where
                 pinned_nodes,
             },
         )
-        .await
-        .map_err(adb::Error::Mmr)?;
+        .await?;
 
         // Convert MMR size to number of operations.
         let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
-            return Err(adb::Error::Mmr(crate::mmr::Error::InvalidSize(mmr.size())));
+            return Err(crate::mmr::Error::InvalidSize(mmr.size()).into());
         };
 
         // Apply the missing operations from the log to the MMR.
@@ -139,20 +137,18 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, Self::Error> {
-        let size = journal.size().await.map_err(adb::Error::from)?;
+    ) -> Result<Self::Journal, adb::Error> {
+        let size = journal.size().await?;
 
         if size <= lower_bound {
             // Close the existing journal before creating a new one
-            journal.close().await.map_err(adb::Error::from)?;
+            journal.close().await?;
 
             // Create a new journal with the new bounds
-            Self::create_journal(context, config, lower_bound, upper_bound)
-                .await
-                .map_err(adb::Error::from)
+            Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Just prune to the lower bound
-            journal.prune(lower_bound).await.map_err(adb::Error::from)?;
+            journal.prune(lower_bound).await?;
             Ok(journal)
         }
     }
@@ -170,9 +166,8 @@ where
 ///    - Prunes the journal to `lower_bound`
 ///    - Reuses existing journal data overlapping with the sync range
 ///
-/// 3. **Prune and Rewind**: existing_size > upper_bound + 1
-///    - Prunes the journal to `lower_bound`
-///    - Rewinds the journal to size `upper_bound + 1`
+/// 3. **Unexpected Data**: existing_size > upper_bound + 1
+///    - Returns [adb::Error::UnexpectedData]
 ///
 /// # Invariants
 ///
@@ -182,13 +177,11 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     cfg: fixed::Config,
     lower_bound: u64,
     upper_bound: u64,
-) -> Result<fixed::Journal<E, A>, crate::journal::Error> {
-    if lower_bound > upper_bound {
-        return Err(crate::journal::Error::InvalidSyncRange(
-            lower_bound,
-            upper_bound,
-        ));
-    }
+) -> Result<fixed::Journal<E, A>, adb::Error> {
+    assert!(
+        lower_bound <= upper_bound,
+        "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
+    );
 
     let mut journal = fixed::Journal::<E, A>::init(context.clone(), cfg.clone()).await?;
     let journal_size = journal.size().await?;
@@ -209,16 +202,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
         journal.prune(lower_bound).await?;
         journal
     } else {
-        debug!(
-                journal_size,
-                lower_bound,
-                upper_bound,
-                "Existing journal data exceeds sync range, pruning to lower bound and rewinding to upper bound"
-            );
-        journal.prune(lower_bound).await?;
-        journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
-        journal.sync().await?;
-        journal
+        return Err(adb::Error::UnexpectedData(journal_size));
     };
     let journal_size = journal.size().await?;
     assert!(journal_size <= upper_bound + 1);
@@ -267,8 +251,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
     // Create the tail blob with the correct size to reflect the position
     let (tail_blob, tail_actual_size) = context
         .open(&cfg.partition, &tail_index.to_be_bytes())
-        .await
-        .map_err(crate::journal::Error::Runtime)?;
+        .await?;
     assert_eq!(
         tail_actual_size, 0,
         "Expected empty blob for fresh initialization"
@@ -276,9 +259,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
 
     let tail = Append::new(tail_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
     if tail_items > 0 {
-        tail.resize(tail_size)
-            .await
-            .map_err(crate::journal::Error::Runtime)?;
+        tail.resize(tail_size).await?;
     }
 
     // Initialize metrics
@@ -552,10 +533,10 @@ mod tests {
             let result: Result<AnyTest, _> = sync::sync(config).await;
             assert!(matches!(
                 result,
-                Err(sync::Error::InvalidTarget {
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget {
                     lower_bound_pos: 31,
                     upper_bound_pos: 30,
-                }),
+                })),
             ));
         });
     }
@@ -847,7 +828,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             Arc::try_unwrap(target_db)
@@ -908,7 +891,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             Arc::try_unwrap(target_db)
@@ -1045,7 +1030,10 @@ mod tests {
                 .unwrap();
 
             let result = client.step().await;
-            assert!(matches!(result, Err(sync::Error::InvalidTarget { .. })));
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
+            ));
 
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -1958,13 +1946,13 @@ mod tests {
     }
 
     /// Test `init_sync` when existing data exceeds the sync target range.
-    /// This tests the "prune and rewind" scenario where existing data goes beyond the upper bound.
+    /// This tests that UnexpectedData error is returned when existing data goes beyond the upper bound.
     #[test_traced]
-    fn test_init_sync_existing_data_with_rewind() {
+    fn test_init_sync_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = fixed::Config {
-                partition: "test_rewind".into(),
+                partition: "test_unexpected_data".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
                 buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
@@ -1983,51 +1971,24 @@ mod tests {
             assert_eq!(initial_size, 30);
             journal.close().await.unwrap();
 
-            // Initialize with sync boundaries that require both pruning and rewinding
-            // Lower bound: 8 (prune operations 0-7)
-            // Upper bound: 22 (rewind operations 23-29)
+            // Initialize with sync boundaries where existing data exceeds the upper bound
             let lower_bound = 8;
-            let upper_bound = 22;
-            let expected_final_size = upper_bound + 1; // upper_bound is inclusive
-            let mut journal = init_journal(context.clone(), cfg.clone(), lower_bound, upper_bound)
-                .await
-                .expect("Failed to initialize journal with rewind");
+            for upper_bound in 9..29 {
+                let result = init_journal::<Context, Digest>(
+                    context.clone(),
+                    cfg.clone(),
+                    lower_bound,
+                    upper_bound,
+                )
+                .await;
 
-            // Verify the journal has been rewound to the upper bound + 1
-            assert_eq!(journal.size().await.unwrap(), expected_final_size);
-
-            // Verify the journal has been pruned to the lower bound
-            assert_eq!(
-                journal.oldest_retained_pos().await.unwrap(),
-                Some(lower_bound)
-            );
-
-            // Verify operations before the lower bound are pruned
-            for i in 0..lower_bound {
-                let result = journal.read(i).await;
-                assert!(matches!(result, Err(journal::Error::ItemPruned(_))),);
+                assert!(matches!(result, Err(adb::Error::UnexpectedData(_))));
             }
-
-            // Verify operations from lower bound to upper bound (inclusive) are readable
-            for i in lower_bound..expected_final_size {
-                let result = journal.read(i).await;
-                assert!(result.is_ok(),);
-                assert_eq!(result.unwrap(), test_digest(i));
-            }
-
-            // Verify that new operations can be appended from the sync position
-            let append_pos = journal.append(test_digest(777)).await.unwrap();
-            assert_eq!(append_pos, expected_final_size);
-
-            // Verify the appended operation is readable
-            let read_value = journal.read(append_pos).await.unwrap();
-            assert_eq!(read_value, test_digest(777));
-
-            journal.destroy().await.unwrap();
+            context.remove(&cfg.partition, None).await.unwrap();
         });
     }
 
-    /// Test `init_sync` returns InvalidSyncRange when lower_bound > upper_bound.
+    #[should_panic]
     #[test_traced]
     fn test_init_sync_invalid_range() {
         let executor = deterministic::Runner::default();
@@ -2041,22 +2002,13 @@ mod tests {
 
             let lower_bound = 6;
             let upper_bound = 5;
-            let result = init_journal::<Context, Digest>(
+            let _result = init_journal::<Context, Digest>(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
                 upper_bound,
             )
             .await;
-
-            // Verify that we get the expected error
-            match result {
-                Err(journal::Error::InvalidSyncRange(lb, ub)) => {
-                    assert_eq!(lb, lower_bound);
-                    assert_eq!(ub, upper_bound);
-                }
-                _ => panic!("Expected InvalidSyncRange error"),
-            }
         });
     }
 

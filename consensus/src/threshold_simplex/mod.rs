@@ -164,7 +164,7 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use types::View;
+use crate::types::View;
 
 pub mod types;
 
@@ -209,7 +209,8 @@ pub(crate) fn interesting(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{threshold_simplex::types::seed_namespace, Monitor};
+    use crate::{threshold_simplex::types::seed_namespace, types::Round, Monitor};
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -343,6 +344,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -421,6 +423,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -599,6 +602,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -687,6 +691,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -778,6 +783,7 @@ mod tests {
                     context.with_label("network"),
                     Config {
                         max_size: 1024 * 1024,
+                        disconnect_on_block: true,
                     },
                 );
 
@@ -854,6 +860,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -959,6 +966,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -1048,6 +1056,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1175,6 +1184,7 @@ mod tests {
                 supervisor: supervisor.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
+                epoch: 333,
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -1231,6 +1241,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -1320,6 +1331,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1497,6 +1509,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: true,
                 },
             );
 
@@ -1585,6 +1598,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1685,6 +1699,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -1763,6 +1778,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1899,6 +1915,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -1977,6 +1994,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2109,6 +2127,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -2187,6 +2206,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2288,6 +2308,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -2381,6 +2402,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2481,6 +2503,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -2571,6 +2594,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2659,6 +2683,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -2752,6 +2777,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2818,6 +2844,184 @@ mod tests {
         }
     }
 
+    fn reconfigurer<V: Variant>(seed: u64) {
+        // Create context
+        let n = 4;
+        let threshold = quorum(n);
+        let required_containers = 50;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = PrivateKey::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Derive threshold
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Start engine
+                let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(
+                    0,
+                    (
+                        polynomial.clone(),
+                        validators.clone(),
+                        Some(shares[idx_scheme].clone()),
+                    ),
+                );
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                    namespace: namespace.clone(),
+                    participants,
+                };
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                if idx_scheme == 0 {
+                    let cfg = mocks::reconfigurer::Config {
+                        supervisor,
+                        namespace: namespace.clone(),
+                    };
+                    let engine: mocks::reconfigurer::Reconfigurer<_, V, Sha256, _> =
+                        mocks::reconfigurer::Reconfigurer::new(
+                            context.with_label("byzantine_engine"),
+                            cfg,
+                        );
+                    engine.start(pending);
+                } else {
+                    supervisors.push(supervisor.clone());
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        participant: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(scheme.public_key());
+                    let cfg = config::Config {
+                        crypto: scheme,
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: supervisor.clone(),
+                        supervisor,
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: 333,
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        max_fetch_count: 1,
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                        fetch_concurrent: 1,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine = Engine::new(context.with_label("engine"), cfg);
+                    engine.start(pending, recovered, resolver);
+                }
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Check supervisors for correct activity
+            let byz = &validators[0];
+            for supervisor in supervisors.iter() {
+                // Ensure no faults
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = supervisor.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+            }
+
+            // Ensure reconfigurer is blocked (epoch mismatch)
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(!blocked.is_empty());
+            for (a, b) in blocked {
+                assert_ne!(&a, byz);
+                assert_eq!(&b, byz);
+            }
+        });
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_reconfigurer() {
+        for seed in 0..5 {
+            reconfigurer::<MinPk>(seed);
+            reconfigurer::<MinSig>(seed);
+        }
+    }
+
     fn nuller<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
@@ -2836,6 +3040,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -2925,6 +3130,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3022,6 +3228,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -3112,6 +3319,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 333,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3189,6 +3397,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -3267,6 +3476,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -3344,6 +3554,7 @@ mod tests {
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    disconnect_on_block: false,
                 },
             );
 
@@ -3431,6 +3642,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 333,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_millis(100),
                     notarization_timeout: Duration::from_millis(200),
@@ -3455,8 +3667,7 @@ mod tests {
             }
 
             // Prepare TLE test data
-            let target = 10u64; // Encrypt for view 10
-            let target_bytes = target.to_be_bytes();
+            let target = Round::new(333, 10); // Encrypt for view 10
             let message_content = b"Secret message for future view10"; // 32 bytes
             let message = Block::new(*message_content);
 
@@ -3465,7 +3676,7 @@ mod tests {
             let ciphertext = encrypt::<_, V>(
                 &mut context,
                 public_key,
-                (Some(&seed_namespace), &target_bytes),
+                (Some(&seed_namespace), &target.encode()),
                 &message,
             );
 
@@ -3475,7 +3686,7 @@ mod tests {
                 // Wait for notarization
                 context.sleep(Duration::from_millis(100)).await;
                 let notarizations = supervisor.notarizations.lock().unwrap();
-                let Some(notarization) = notarizations.get(&target) else {
+                let Some(notarization) = notarizations.get(&target.view()) else {
                     continue;
                 };
 

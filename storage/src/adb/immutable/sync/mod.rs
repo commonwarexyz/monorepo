@@ -1,8 +1,9 @@
 use crate::{
     adb::{
-        any::variable::sync::init_journal,
+        any::variable::sync::{get_size, init_journal},
         immutable,
         sync::{self, Journal as _},
+        Error,
     },
     journal::variable,
     mmr::StandardHasher as Standard,
@@ -12,56 +13,9 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{Array, NZUsize};
-use futures::{pin_mut, StreamExt};
-use std::num::NonZeroU64;
+use commonware_utils::Array;
 
 mod journal;
-
-// Compute the next append location (size) by scanning the variable journal and
-// counting only items whose logical location is within [lower_bound, upper_bound].
-async fn compute_size<E, K, V>(
-    journal: &variable::Journal<E, Variable<K, V>>,
-    items_per_section: NonZeroU64,
-    lower_bound: u64,
-    upper_bound: u64,
-) -> Result<u64, crate::journal::Error>
-where
-    E: Storage + Metrics,
-    K: Array,
-    V: Codec,
-{
-    let items_per_section = items_per_section.get();
-    let mut size = lower_bound;
-    let mut current_section: Option<u64> = None;
-    let mut index_in_section: u64 = 0;
-    let stream = journal.replay(0, 0, NZUsize!(1024)).await?;
-    pin_mut!(stream);
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok((section, _offset, _size, _op)) => {
-                if current_section != Some(section) {
-                    current_section = Some(section);
-                    index_in_section = 0;
-                }
-                let loc = section
-                    .saturating_mul(items_per_section)
-                    .saturating_add(index_in_section);
-                if loc < lower_bound {
-                    index_in_section = index_in_section.saturating_add(1);
-                    continue;
-                }
-                if loc > upper_bound {
-                    return Ok(size);
-                }
-                size = loc.saturating_add(1);
-                index_in_section = index_in_section.saturating_add(1);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(size)
-}
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
@@ -74,7 +28,6 @@ where
     type Op = Variable<K, V>;
     type Journal = journal::Journal<E, K, V>;
     type Hasher = H;
-    type Error = crate::adb::Error;
     type Config = immutable::Config<T, V::Cfg>;
     type Digest = H::Digest;
     type Context = E;
@@ -84,9 +37,9 @@ where
         config: &Self::Config,
         lower_bound_loc: u64,
         upper_bound_loc: u64,
-    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+    ) -> Result<Self::Journal, Error> {
         // Open the journal and discard operations outside the sync range.
-        let journal = init_journal(
+        let (journal, size) = init_journal(
             context.with_label("log"),
             variable::Config {
                 partition: config.log_journal_partition.clone(),
@@ -98,15 +51,6 @@ where
             lower_bound_loc,
             upper_bound_loc,
             config.log_items_per_section,
-        )
-        .await?;
-
-        // Compute next append location based on logical locations within [lower_bound, upper_bound]
-        let size = compute_size(
-            &journal,
-            config.log_items_per_section,
-            lower_bound_loc,
-            upper_bound_loc,
         )
         .await?;
 
@@ -140,7 +84,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, Error> {
         let journal = journal.into_inner();
         let sync_config = Config {
             db_config,
@@ -164,15 +108,13 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, Self::Error> {
+    ) -> Result<Self::Journal, Error> {
         let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
         if size <= lower_bound {
             // Close existing journal and create new one
             journal.close().await.map_err(crate::adb::Error::from)?;
-            Self::create_journal(context, config, lower_bound, upper_bound)
-                .await
-                .map_err(crate::adb::Error::from)
+            Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Extract the Variable journal to perform section-based pruning
             let mut variable_journal = journal.into_inner();
@@ -185,15 +127,11 @@ where
                 .await
                 .map_err(crate::adb::Error::from)?;
 
-            // Compute next append location based on logical locations within [lower_bound, upper_bound]
-            let size = compute_size(
-                &variable_journal,
-                config.log_items_per_section,
-                lower_bound,
-                upper_bound,
-            )
-            .await
-            .map_err(crate::adb::Error::from)?;
+            // Get the size of the journal
+            let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
+            if size > upper_bound + 1 {
+                return Err(crate::adb::Error::UnexpectedData(size));
+            }
 
             Ok(journal::Journal::new(
                 variable_journal,
@@ -695,10 +633,10 @@ mod tests {
             let result: Result<ImmutableSyncTest, _> = sync::sync(config).await;
             assert!(matches!(
                 result,
-                Err(sync::Error::InvalidTarget {
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget {
                     lower_bound_pos: 31,
                     upper_bound_pos: 30,
-                })
+                }))
             ));
         });
     }
@@ -930,7 +868,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             let target_db =
@@ -989,7 +929,9 @@ mod tests {
             let result = client.step().await;
             assert!(matches!(
                 result,
-                Err(sync::Error::SyncTargetMovedBackward { .. })
+                Err(sync::Error::Engine(
+                    sync::EngineError::SyncTargetMovedBackward { .. }
+                ))
             ));
 
             let target_db =
@@ -1126,7 +1068,10 @@ mod tests {
                 .unwrap();
 
             let result = client.step().await;
-            assert!(matches!(result, Err(sync::Error::InvalidTarget { .. })));
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
+            ));
 
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
