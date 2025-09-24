@@ -10,12 +10,15 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    network::metered::Network as MeteredNetwork, process::metered::Metrics as MeteredProcess,
-    signal::Signal, storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
-    utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
+    network::metered::Network as MeteredNetwork,
+    process::metered::Metrics as MeteredProcess,
+    signal::Signal,
+    storage::metered::Storage as MeteredStorage,
+    telemetry::metrics::task::Label,
+    utils::{signal::Stopper, Aborter},
+    Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
-use futures::future::AbortHandle;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -36,7 +39,7 @@ use tokio::runtime::{Builder, Runtime};
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
 #[cfg(feature = "iouring-network")]
-const IOURING_NETWORK_FORCE_POLL: Option<Duration> = Some(Duration::from_millis(100));
+const IOURING_NETWORK_FORCE_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 struct Metrics {
@@ -368,7 +371,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    children: Arc<Mutex<Vec<AbortHandle>>>,
+    children: Arc<Mutex<Vec<Aborter>>>,
 }
 
 impl Context {
@@ -402,7 +405,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (_, gauge) = spawn_metrics!(self, future);
+        let (_, metric) = spawn_metrics!(self, future);
 
         // Set up the task
         let catch_panics = self.executor.cfg.catch_panics;
@@ -413,7 +416,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, gauge, catch_panics, children);
+        let (f, handle) = Handle::init_future(future, metric, catch_panics, children);
 
         // Spawn the task
         executor.runtime.spawn(f);
@@ -430,7 +433,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (_, gauge) = spawn_metrics!(self, future);
+        let (_, metric) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -438,7 +441,7 @@ impl crate::Spawner for Context {
         move |f: F| {
             let (f, handle) = Handle::init_future(
                 f,
-                gauge,
+                metric,
                 executor.cfg.catch_panics,
                 // Give spawned task its own empty children list
                 Arc::new(Mutex::new(Vec::new())),
@@ -463,8 +466,8 @@ impl crate::Spawner for Context {
         let child_handle = self.spawn(f);
 
         // Register this child with the parent
-        if let Some(abort_handle) = child_handle.abort_handle() {
-            parent_children.lock().unwrap().push(abort_handle);
+        if let Some(aborter) = child_handle.aborter() {
+            parent_children.lock().unwrap().push(aborter);
         }
 
         child_handle
@@ -479,11 +482,11 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (_, gauge) = spawn_metrics!(self, blocking, dedicated);
+        let (_, metric) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor.clone();
-        let (f, handle) = Handle::init_blocking(|| f(self), gauge, executor.cfg.catch_panics);
+        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.cfg.catch_panics);
 
         // Spawn the blocking task
         if dedicated {
@@ -504,12 +507,12 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (_, gauge) = spawn_metrics!(self, blocking, dedicated);
+        let (_, metric) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor.clone();
         move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, gauge, executor.cfg.catch_panics);
+            let (f, handle) = Handle::init_blocking(f, metric, executor.cfg.catch_panics);
 
             // Spawn the blocking task
             if dedicated {
