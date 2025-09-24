@@ -155,21 +155,21 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, lower_bound_ops, upper_bound_ops) = {
+    let (root, lower_bound, upper_bound) = {
         let mut hasher = Standard::new();
         let database = state.database.read().await;
         (
             database.root(&mut hasher),
-            database.lower_bound_ops(),
-            database.op_count().saturating_sub(1),
+            database.lower_bound(),
+            Location::new(database.op_count().saturating_sub(1)),
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound: Location::new(lower_bound_ops),
-            upper_bound: Location::new(upper_bound_ops),
+            lower_bound,
+            upper_bound,
         },
     };
 

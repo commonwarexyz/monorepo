@@ -32,9 +32,9 @@ impl<D: Digest> Read for Target<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
-        let lower_bound_ops = u64::read(buf)?;
-        let upper_bound_ops = u64::read(buf)?;
-        if lower_bound_ops > upper_bound_ops {
+        let lower_bound = u64::read(buf)?;
+        let upper_bound = u64::read(buf)?;
+        if lower_bound > upper_bound {
             return Err(CodecError::Invalid(
                 "storage::adb::sync::Target",
                 "lower_bound > upper_bound",
@@ -42,8 +42,8 @@ impl<D: Digest> Read for Target<D> {
         }
         Ok(Self {
             root,
-            lower_bound: Location::new(lower_bound_ops),
-            upper_bound: Location::new(upper_bound_ops),
+            lower_bound: Location::new(lower_bound),
+            upper_bound: Location::new(upper_bound),
         })
     }
 }

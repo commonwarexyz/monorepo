@@ -655,8 +655,8 @@ mod tests {
 
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.oldest_retained_loc;
-            let upper_bound_ops = Location::new(target_db.op_count() - 1); // exclude final op
+            let lower_bound = target_db.oldest_retained_loc;
+            let upper_bound = Location::new(target_db.op_count() - 1); // exclude final op
 
             // Add final op after capturing the range
             apply_ops(&mut target_db, target_ops[29..].to_vec()).await;
@@ -668,8 +668,8 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    lower_bound: lower_bound_ops,
-                    upper_bound: upper_bound_ops,
+                    lower_bound,
+                    upper_bound,
                 },
                 context,
                 resolver: target_db.clone(),
@@ -682,10 +682,7 @@ mod tests {
             // Verify state matches the specified range
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), target_root);
-            assert_eq!(
-                synced_db.op_count(),
-                upper_bound_ops.saturating_add(1).as_u64()
-            );
+            assert_eq!(synced_db.op_count(), upper_bound.saturating_add(1).as_u64());
 
             synced_db.destroy().await.unwrap();
             let target_db =
@@ -726,8 +723,8 @@ mod tests {
             target_db.commit(None).await.unwrap();
             let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.oldest_retained_loc;
-            let upper_bound_ops = Location::new(target_db.op_count() - 1); // Up to the last operation
+            let lower_bound = target_db.oldest_retained_loc;
+            let upper_bound = Location::new(target_db.op_count() - 1); // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
@@ -736,8 +733,8 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    lower_bound: lower_bound_ops,
-                    upper_bound: upper_bound_ops,
+                    lower_bound,
+                    upper_bound,
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -749,10 +746,7 @@ mod tests {
 
             // Verify database state
             let mut hasher = test_hasher();
-            assert_eq!(
-                sync_db.op_count(),
-                upper_bound_ops.saturating_add(1).as_u64()
-            );
+            assert_eq!(sync_db.op_count(), upper_bound.saturating_add(1).as_u64());
             assert_eq!(sync_db.root(&mut hasher), root);
 
             sync_db.destroy().await.unwrap();
@@ -790,8 +784,8 @@ mod tests {
             // Prepare target
             let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.oldest_retained_loc;
-            let upper_bound_ops = target_db.op_count() - 1;
+            let lower_bound = target_db.oldest_retained_loc;
+            let upper_bound = Location::new(target_db.op_count() - 1);
 
             // Sync should complete immediately without fetching
             let resolver = Arc::new(commonware_runtime::RwLock::new(target_db));
@@ -800,8 +794,8 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    lower_bound: lower_bound_ops,
-                    upper_bound: Location::new(upper_bound_ops),
+                    lower_bound,
+                    upper_bound,
                 },
                 context,
                 resolver: resolver.clone(),
@@ -811,7 +805,7 @@ mod tests {
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
-            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(sync_db.op_count(), upper_bound.saturating_add(1).as_u64());
             let mut hasher = test_hasher();
             assert_eq!(sync_db.root(&mut hasher), root);
 
