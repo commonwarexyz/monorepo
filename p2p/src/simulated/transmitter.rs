@@ -2,7 +2,10 @@ use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::{Ratio, SystemTimeExt};
+use commonware_utils::SystemTimeExt;
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use num_traits::Zero;
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
     time::{Duration, SystemTime},
@@ -83,7 +86,7 @@ struct Status<P: PublicKey> {
     channel: Channel,
     message: Bytes,
     sequence: Option<u128>, // delivered if some
-    remaining: Ratio,
+    remaining: BigRational,
     rate: Rate,
     last_update: SystemTime,
 }
@@ -423,7 +426,7 @@ impl<P: PublicKey> State<P> {
 
                 if matches!(meta.rate, Rate::Unlimited) {
                     if !meta.remaining.is_zero() {
-                        meta.remaining = Ratio::zero();
+                        meta.remaining = BigRational::zero();
                         completed.push(flow_id);
                     }
                     continue;
@@ -663,7 +666,7 @@ impl<P: PublicKey> State<P> {
         } = entry;
 
         let deliver = should_deliver && origin != recipient;
-        let remaining = Ratio::from_int(message.len() as u128);
+        let remaining = BigRational::from_integer(BigInt::from(message.len() as u128));
         let sequence = if deliver {
             Some(self.increment(&origin, &recipient))
         } else {
@@ -680,7 +683,7 @@ impl<P: PublicKey> State<P> {
                 message,
                 sequence,
                 remaining,
-                rate: Rate::Finite(Ratio::zero()),
+                rate: Rate::Finite(BigRational::zero()),
                 last_update: now,
             },
         );

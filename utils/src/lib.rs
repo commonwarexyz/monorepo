@@ -36,9 +36,6 @@ pub use priority_set::PrioritySet;
 pub mod futures;
 mod stable_buf;
 pub use stable_buf::StableBuf;
-mod ratio;
-pub use ratio::Ratio;
-
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
