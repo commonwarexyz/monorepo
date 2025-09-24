@@ -125,12 +125,15 @@ pub trait Scheme {
         data: impl Buf,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
-    /// Check the integrity of a shard, producing a reshard to sent to others.
+    /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
     ///
-    /// At a minimum, this checks that the shard is included in the data attested
-    /// to by the commitment.
+    /// This takes in an index, which is the index you expect the shard to be.
     ///
-    /// This might have a stronger guarantee, in the case of [ValidatingScheme].
+    /// This will produce a [Scheme::CheckedShard] which counts towards the minimum
+    /// number of shards you need to reconstruct the data, in [Scheme::decode].
+    ///
+    /// You also get [Scheme::CheckingData], which has information you can use to check
+    /// the shards you receive from others.
     #[allow(clippy::type_complexity)]
     fn reshard(
         config: &Config,
@@ -141,8 +144,10 @@ pub trait Scheme {
 
     /// Check the integrity of a reshard, producing a checked shard.
     ///
-    /// This requires the checking data produced from your own shard, in the
-    /// [Scheme::reshard] function.
+    /// This requires the [Scheme::CheckingData] produced by [Scheme::reshard].
+    ///
+    /// This takes in an index, to make sure that the reshard you're checking
+    /// is associated with the participant you expect it to be.
     fn check(
         config: &Config,
         commitment: &Self::Commitment,
