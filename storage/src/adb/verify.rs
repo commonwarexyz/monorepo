@@ -28,7 +28,7 @@ pub fn extract_pinned_nodes<D: Digest>(
     start_loc: Location,
     operations_len: u64,
 ) -> Result<Vec<D>, Error> {
-    let end_loc = start_loc.saturating_add(operations_len);
+    let end_loc = start_loc + operations_len;
     proof.extract_pinned_nodes(start_loc..end_loc)
 }
 
@@ -64,7 +64,7 @@ pub fn digests_required_for_proof<D: Digest>(
     end_loc: Location,
 ) -> Vec<Position> {
     let size = Position::from(Location::new(op_count));
-    proof::nodes_required_for_range_proof(size.into(), start_loc..(end_loc.saturating_add(1)))
+    proof::nodes_required_for_range_proof(size.into(), start_loc..(end_loc + 1))
         .into_iter()
         .collect()
 }

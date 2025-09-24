@@ -534,7 +534,7 @@ impl<
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let end_loc = std::cmp::min(op_count, start_loc.as_u64().saturating_add(max_ops.get()));
+        let end_loc = std::cmp::min(op_count, start_loc.as_u64() + max_ops.get());
 
         let mmr_size = Position::from(Location::from(op_count)).as_u64();
         let proof = self
@@ -635,7 +635,7 @@ impl<
             let op = self.log.read(self.inactivity_floor_loc.as_u64()).await?;
             self.move_op_if_active(op, self.inactivity_floor_loc)
                 .await?;
-            self.inactivity_floor_loc = self.inactivity_floor_loc.saturating_add(1);
+            self.inactivity_floor_loc = self.inactivity_floor_loc + 1;
         }
 
         self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc.as_u64()))

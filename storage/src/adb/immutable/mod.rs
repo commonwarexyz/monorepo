@@ -211,8 +211,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
                 lower_bound_pos: Position::from(cfg.lower_bound),
-                upper_bound_pos: Position::from(cfg.upper_bound.saturating_add(1))
-                    .saturating_sub(1),
+                upper_bound_pos: Position::from(cfg.upper_bound + 1) - 1,
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
@@ -1148,7 +1147,7 @@ pub(super) mod test {
             assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
             // Try to fetch a pruned key.
-            let pruned_loc = oldest_retained_loc.saturating_sub(1);
+            let pruned_loc = oldest_retained_loc - 1;
             let pruned_key = Sha256::hash(&pruned_loc.as_u64().to_be_bytes());
             assert!(db.get(&pruned_key).await.unwrap().is_none());
 
@@ -1185,7 +1184,7 @@ pub(super) mod test {
             );
 
             // Try to fetch a pruned key.
-            let pruned_loc = oldest_retained_loc.saturating_sub(3);
+            let pruned_loc = oldest_retained_loc - 3;
             let pruned_key = Sha256::hash(&pruned_loc.as_u64().to_be_bytes());
             assert!(db.get(&pruned_key).await.unwrap().is_none());
 

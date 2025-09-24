@@ -645,7 +645,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// Panics if there are unprocessed updates.
     pub async fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
-        self.range_proof(loc..loc.saturating_add(1)).await
+        self.range_proof(loc..(loc + 1)).await
     }
 
     /// Return an inclusion proof for the elements within the specified location range, or
@@ -976,7 +976,7 @@ mod tests {
 
             // Make sure pruning to an older location is a no-op.
             assert!(mmr
-                .prune_to_pos(&mut hasher, leaf_pos.saturating_sub(1))
+                .prune_to_pos(&mut hasher, leaf_pos - 1)
                 .await
                 .is_ok());
             assert_eq!(mmr.pruned_to_pos(), leaf_pos);

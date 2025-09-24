@@ -41,7 +41,7 @@ pub fn find_next(
     let mut fetched_ops_iter = fetched_operations
         .iter()
         .map(|(&start_loc, &operation_count)| {
-            let end_loc = start_loc.saturating_add(operation_count).saturating_sub(1);
+            let end_loc = start_loc + operation_count - 1;
             (start_loc, end_loc)
         })
         .peekable();
@@ -50,8 +50,8 @@ pub fn find_next(
         .iter()
         .map(|&start_loc| {
             let end_loc = start_loc
-                .saturating_add(fetch_batch_size.get())
-                .saturating_sub(1);
+                + fetch_batch_size.get()
+                - 1;
             (start_loc, end_loc)
         })
         .peekable();
@@ -78,15 +78,15 @@ pub fn find_next(
                 // This is the first range.
                 if lower_bound < range_start {
                     // There's a gap between the lower bound and the start of the first range.
-                    let gap_end = range_start.saturating_sub(1);
+                    let gap_end = range_start - 1;
                     return Some((lower_bound, gap_end));
                 }
             }
             Some(covered_end) => {
                 // Check if there's a gap between current coverage and this range
-                if covered_end.saturating_add(1) < range_start {
-                    let gap_start = covered_end.saturating_add(1);
-                    let gap_end = range_start.saturating_sub(1);
+                if covered_end + 1 < range_start {
+                    let gap_start = covered_end + 1;
+                    let gap_end = range_start - 1;
                     return Some((gap_start, gap_end));
                 }
             }
@@ -113,7 +113,7 @@ pub fn find_next(
         Some(covered_end) => {
             // Check if there's a gap after the last covered location
             if covered_end < upper_bound {
-                let gap_start = covered_end.saturating_add(1);
+                let gap_start = covered_end + 1;
                 Some((gap_start, upper_bound))
             } else {
                 None

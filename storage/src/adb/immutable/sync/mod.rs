@@ -685,7 +685,7 @@ mod tests {
             // Verify state matches the specified range
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), target_root);
-            assert_eq!(synced_db.op_count(), upper_bound.saturating_add(1).as_u64());
+            assert_eq!(synced_db.op_count(), (upper_bound + 1).as_u64());
 
             synced_db.destroy().await.unwrap();
             let target_db =
@@ -749,7 +749,7 @@ mod tests {
 
             // Verify database state
             let mut hasher = test_hasher();
-            assert_eq!(sync_db.op_count(), upper_bound.saturating_add(1).as_u64());
+            assert_eq!(sync_db.op_count(), (upper_bound + 1).as_u64());
             assert_eq!(sync_db.root(&mut hasher), root);
 
             sync_db.destroy().await.unwrap();
@@ -808,7 +808,7 @@ mod tests {
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
-            assert_eq!(sync_db.op_count(), upper_bound.saturating_add(1).as_u64());
+            assert_eq!(sync_db.op_count(), (upper_bound + 1).as_u64());
             let mut hasher = test_hasher();
             assert_eq!(sync_db.root(&mut hasher), root);
 
@@ -862,7 +862,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    lower_bound: initial_lower_bound.saturating_sub(1),
+                    lower_bound: initial_lower_bound - 1,
                     upper_bound: initial_upper_bound,
                 })
                 .await
@@ -924,7 +924,7 @@ mod tests {
                 .send(Target {
                     root: initial_root,
                     lower_bound: initial_lower_bound,
-                    upper_bound: initial_upper_bound.saturating_sub(1),
+                    upper_bound: initial_upper_bound - 1,
                 })
                 .await
                 .unwrap();
@@ -1015,7 +1015,7 @@ mod tests {
             assert_eq!(synced_db.root(&mut hasher), final_root);
             assert_eq!(
                 synced_db.op_count(),
-                final_upper_bound.saturating_add(1).as_u64()
+                (final_upper_bound + 1).as_u64()
             );
             assert_eq!(synced_db.oldest_retained_loc, final_lower_bound);
 
@@ -1128,15 +1128,15 @@ mod tests {
             let _ = update_sender
                 .send(Target {
                     root: sha256::Digest::from([2u8; 32]),
-                    lower_bound: lower_bound.saturating_add(1),
-                    upper_bound: upper_bound.saturating_add(1),
+                    lower_bound: lower_bound + 1,
+                    upper_bound: upper_bound + 1,
                 })
                 .await;
 
             // Verify the synced database has the expected state
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), root);
-            assert_eq!(synced_db.op_count(), upper_bound.saturating_add(1).as_u64());
+            assert_eq!(synced_db.op_count(), (upper_bound + 1).as_u64());
             assert_eq!(synced_db.oldest_retained_loc, lower_bound);
 
             synced_db.destroy().await.unwrap();

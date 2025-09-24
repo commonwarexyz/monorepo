@@ -168,7 +168,7 @@ impl<D: Digest> Proof<D> {
         let mut node_positions = BTreeSet::new();
         let mut nodes_required = BTreeMap::new();
         for (_, loc) in elements {
-            let required = nodes_required_for_range_proof(self.size, *loc..loc.saturating_add(1));
+            let required = nodes_required_for_range_proof(self.size, *loc..(*loc + 1));
             for req_pos in &required {
                 node_positions.insert(*req_pos);
             }
@@ -431,7 +431,7 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<Location>) 
     }
 
     let start_element_pos = Position::from(range.start);
-    let end_element_pos = Position::from(range.end.saturating_sub(1));
+    let end_element_pos = Position::from(range.end - 1);
     assert!(end_element_pos.as_u64() < size, "range is out of bounds");
 
     // Find the mountains that contain no elements from the range. The peaks of these mountains
@@ -519,10 +519,7 @@ pub(crate) fn nodes_required_for_multi_proof(
     // TODO(#1472): Optimize this loop
     locations
         .iter()
-        .map(|loc| loc.as_u64())
-        .flat_map(|loc| {
-            nodes_required_for_range_proof(size, Location::new(loc)..Location::new(loc + 1))
-        })
+        .flat_map(|loc| nodes_required_for_range_proof(size, *loc..(*loc + 1)))
         .collect()
 }
 

@@ -360,7 +360,7 @@ impl<H: CHasher> Mmr<H> {
                     panic!("pos was not for a leaf");
                 }
                 let sibling_digest = self.get_node_unchecked(sibling_pos);
-                digest = if sibling_pos.as_u64() == parent_pos.as_u64().saturating_sub(1) {
+                digest = if sibling_pos.as_u64() == parent_pos.as_u64() - 1 {
                     // The sibling is the right child of the parent.
                     hasher.node_digest(parent_pos, &digest, sibling_digest)
                 } else {
@@ -628,7 +628,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
-        self.range_proof(loc..loc.saturating_add(1))
+        self.range_proof(loc..(loc + 1))
     }
 
     /// Return an inclusion proof for all elements within the provided `range` of locations. Returns

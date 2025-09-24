@@ -745,7 +745,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             let op = self.get_op(self.inactivity_floor_loc).await?;
             self.move_op_if_active(op, self.inactivity_floor_loc)
                 .await?;
-            self.inactivity_floor_loc = self.inactivity_floor_loc.saturating_add(1);
+            self.inactivity_floor_loc = self.inactivity_floor_loc + 1;
         }
 
         self.apply_op(Operation::CommitFloor(
