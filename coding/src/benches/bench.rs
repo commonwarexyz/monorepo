@@ -1,6 +1,6 @@
 use commonware_coding::{Config, Scheme};
 use criterion::{criterion_main, BatchSize, Criterion};
-use rand::{seq::SliceRandom, RngCore, SeedableRng as _};
+use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
 mod no_coding;
