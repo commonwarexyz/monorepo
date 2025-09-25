@@ -182,19 +182,16 @@ mod tests {
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.
-            let mut range_start = 0;
-            let mut range_end = 49;
+            let mut range_start = Location::new(0);
+            let mut range_end = Location::new(49);
             while range_start < range_end {
                 let range = range_start..range_end;
-                let range_usize = range_start as usize..range_end as usize;
-                let range_proof = mmr
-                    .range_proof(Location::new(range.start)..Location::new(range.end))
-                    .unwrap();
+                let range_proof = mmr.range_proof(range.clone()).unwrap();
                 let proof_store = ProofStore::new(
                     &mut hasher,
                     &range_proof,
-                    &elements[range_usize],
-                    Location::new(range.start),
+                    &elements[range_start.as_u64() as usize..range_end.as_u64() as usize],
+                    range_start,
                     &root,
                 )
                 .unwrap();
@@ -206,15 +203,11 @@ mod tests {
                 while subrange_start < subrange_end {
                     // Verify a proof over a sub-range of the original range.
                     let sub_range = subrange_start..subrange_end;
-                    let sub_range_usize = subrange_start as usize..subrange_end as usize;
-                    let sub_range_proof = proof_store
-                        .range_proof(Location::new(sub_range.start)..Location::new(sub_range.end))
-                        .await
-                        .unwrap();
+                    let sub_range_proof = proof_store.range_proof(sub_range.clone()).await.unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
-                        &elements[sub_range_usize],
-                        Location::new(sub_range.start),
+                        &elements[subrange_start.as_u64() as usize..subrange_end.as_u64() as usize],
+                        subrange_start,
                         &root
                     ));
                     subrange_start += 1;
