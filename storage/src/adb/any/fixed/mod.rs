@@ -108,7 +108,7 @@ pub struct Any<
     /// # Invariant
     ///
     /// Only references operations of type [Operation::Update].
-    pub(crate) snapshot: Index<T, u64>,
+    pub(crate) snapshot: Index<T, Location>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -132,7 +132,7 @@ impl<
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
-        let mut snapshot: Index<T, u64> =
+        let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let mut hasher = Standard::<H>::new();
         let (inactivity_floor_loc, mmr, log) =
@@ -258,7 +258,7 @@ impl<
     pub(crate) async fn build_snapshot_from_log<const N: usize>(
         inactivity_floor_loc: Location,
         log: &Journal<E, Operation<K, V>>,
-        snapshot: &mut Index<T, u64>,
+        snapshot: &mut Index<T, Location>,
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<(), Error> {
         if let Some(ref bitmap) = bitmap {
@@ -280,21 +280,31 @@ impl<
                 Ok((i, op)) => {
                     match op {
                         Operation::Delete(key) => {
-                            let result =
-                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
+                            let result = Any::<E, K, V, H, T>::delete_key(
+                                snapshot,
+                                log,
+                                &key,
+                                Location::new(i),
+                            )
+                            .await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 // Mark previous location (if any) of the deleted key as inactive.
                                 if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc, false);
+                                    bitmap.set_bit(old_loc.as_u64(), false);
                                 }
                             }
                         }
                         Operation::Update(key, _) => {
-                            let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, i).await?;
+                            let result = Any::<E, K, V, H, T>::update_loc(
+                                snapshot,
+                                log,
+                                &key,
+                                Location::new(i),
+                            )
+                            .await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc, false);
+                                    bitmap.set_bit(old_loc.as_u64(), false);
                                 }
                                 bitmap.append(true);
                             }
@@ -318,11 +328,11 @@ impl<
     /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
     /// insert it if the key isn't already present.
     async fn update_loc(
-        snapshot: &mut Index<T, u64>,
+        snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
-        new_loc: u64,
-    ) -> Result<Option<u64>, Error> {
+        new_loc: Location,
+    ) -> Result<Option<Location>, Error> {
         // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
         // cursor to look for the key.
         let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
@@ -331,7 +341,7 @@ impl<
 
         // Iterate over conflicts in the snapshot.
         while let Some(&loc) = cursor.next() {
-            let (k, _) = Self::get_update_op(log, Location::new(loc)).await?;
+            let (k, _) = Self::get_update_op(log, loc).await?;
             if k == *key {
                 // Found the key in the snapshot.
                 assert!(new_loc > loc);
@@ -358,10 +368,7 @@ impl<
         loc: Location,
     ) -> Result<(K, V), Error> {
         let Operation::Update(k, v) = log.read(loc.as_u64()).await? else {
-            panic!(
-                "location does not reference update operation. loc={}",
-                loc.as_u64()
-            );
+            panic!("location does not reference update operation. loc={loc}");
         };
 
         Ok((k, v))
@@ -388,9 +395,9 @@ impl<
     /// value.
     pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
         for &loc in self.snapshot.get(key) {
-            let (k, v) = Self::get_update_op(&self.log, Location::new(loc)).await?;
+            let (k, v) = Self::get_update_op(&self.log, loc).await?;
             if k == *key {
-                return Ok(Some((v, Location::new(loc))));
+                return Ok(Some((v, loc)));
             }
         }
 
@@ -425,10 +432,15 @@ impl<
         &mut self,
         key: K,
         value: V,
-    ) -> Result<Option<u64>, Error> {
+    ) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
-        let res =
-            Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
+        let res = Any::<_, _, _, H, T>::update_loc(
+            &mut self.snapshot,
+            &self.log,
+            &key,
+            Location::new(new_loc),
+        )
+        .await?;
 
         let op = Operation::Update(key, value);
         self.apply_op(op).await?;
@@ -439,9 +451,9 @@ impl<
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
-    pub async fn delete(&mut self, key: K) -> Result<Option<u64>, Error> {
+    pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
         let loc = self.op_count();
-        let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
+        let r = Self::delete_key(&mut self.snapshot, &self.log, &key, Location::new(loc)).await?;
         if r.is_some() {
             self.apply_op(Operation::Delete(key)).await?;
         };
@@ -452,18 +464,18 @@ impl<
     /// Delete `key` from the snapshot if it exists, returning the location that was previously
     /// associated with it.
     async fn delete_key(
-        snapshot: &mut Index<T, u64>,
+        snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
-        delete_loc: u64,
-    ) -> Result<Option<u64>, Error> {
+        delete_loc: Location,
+    ) -> Result<Option<Location>, Error> {
         // If the translated key is in the snapshot, get a cursor to look for the key.
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return Ok(None);
         };
         // Iterate over all conflicting keys in the snapshot.
         while let Some(&loc) = cursor.next() {
-            let (k, _) = Self::get_update_op(log, Location::new(loc)).await?;
+            let (k, _) = Self::get_update_op(log, loc).await?;
             if k == *key {
                 // The key is in the snapshot, so delete it.
                 //
@@ -597,7 +609,7 @@ impl<
         let Some(key) = op.key() else {
             return Ok(None); // operations without keys cannot be active
         };
-        let new_loc = self.op_count();
+        let new_loc = Location::new(self.op_count());
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
@@ -1377,7 +1389,7 @@ pub(super) mod test {
                     .unwrap();
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
-            let mut snapshot: Index<TwoCap, u64> =
+            let mut snapshot: Index<TwoCap, Location> =
                 Index::init(context.with_label("snapshot"), TwoCap);
             AnyTest::build_snapshot_from_log::<SHA256_SIZE>(
                 inactivity_floor_loc,

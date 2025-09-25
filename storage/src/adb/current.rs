@@ -242,7 +242,7 @@ impl<
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let update_result = self.any.update_return_loc(key, value).await?;
         if let Some(old_loc) = update_result {
-            self.status.set_bit(old_loc, false);
+            self.status.set_bit(old_loc.as_u64(), false);
         }
         self.status.append(true);
 
@@ -258,7 +258,7 @@ impl<
         };
 
         self.status.append(false);
-        self.status.set_bit(old_loc, false);
+        self.status.set_bit(old_loc.as_u64(), false);
 
         Ok(())
     }
