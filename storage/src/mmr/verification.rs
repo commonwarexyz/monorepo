@@ -86,7 +86,7 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    historical_range_proof(mmr, mmr.size(), range.start..range.end).await
+    historical_range_proof(mmr, mmr.size(), range).await
 }
 
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR

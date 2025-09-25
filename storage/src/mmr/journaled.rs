@@ -667,7 +667,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         range: Range<Location>,
     ) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
-        verification::historical_range_proof(self, size, range.start..range.end).await
+        verification::historical_range_proof(self, size, range).await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
@@ -1497,10 +1497,11 @@ mod tests {
                 .await
                 .unwrap();
 
+            let loc = Location::new(range.start as u64);
             assert!(proof.verify_range_inclusion(
                 &mut hasher,
-                &elements[range.start..range.end],
-                Location::new(range.start as u64),
+                &elements[range],
+                loc,
                 &expected_root // Compare to historical (reference) root
             ));
 
