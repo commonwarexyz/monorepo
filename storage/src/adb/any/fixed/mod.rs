@@ -537,15 +537,16 @@ impl<
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let end_loc = std::cmp::min(op_count, start_loc.as_u64() + max_ops.get());
+        let op_count = Location::new(op_count);
+        let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops.get()).unwrap());
 
-        let mmr_size = Position::from(Location::from(op_count)).as_u64();
+        let mmr_size = Position::from(op_count).as_u64();
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_loc..Location::new(end_loc))
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc.as_u64()) as usize);
-        let futures = (start_loc.as_u64()..end_loc)
+        let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
+        let futures = (start_loc.as_u64()..end_loc.as_u64())
             .map(|i| self.log.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -1569,19 +1570,17 @@ pub(super) mod test {
             let start_loc = Location::new(20);
             let max_ops = NZU64!(10);
             for end_loc in 31..50 {
+                let end_loc = Location::new(end_loc);
                 let (historical_proof, historical_ops) = db
-                    .historical_proof(end_loc, start_loc, max_ops)
+                    .historical_proof(end_loc.as_u64(), start_loc, max_ops)
                     .await
                     .unwrap();
 
-                assert_eq!(
-                    historical_proof.size,
-                    Position::from(Location::new(end_loc))
-                );
+                assert_eq!(historical_proof.size, Position::from(end_loc));
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
-                apply_ops(&mut ref_db, ops[0..end_loc as usize].to_vec()).await;
+                apply_ops(&mut ref_db, ops[0..end_loc.as_u64() as usize].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
                 ref_db.sync().await.unwrap();
 
@@ -1589,8 +1588,11 @@ pub(super) mod test {
                 assert_eq!(ref_proof.size, historical_proof.size);
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
-                let end_loc = std::cmp::min(start_loc.as_u64() + max_ops.get(), end_loc);
-                assert_eq!(ref_ops, ops[start_loc.as_u64() as usize..end_loc as usize]);
+                let end_loc = std::cmp::min(start_loc.checked_add(max_ops.get()).unwrap(), end_loc);
+                assert_eq!(
+                    ref_ops,
+                    ops[start_loc.as_u64() as usize..end_loc.as_u64() as usize]
+                );
 
                 // Verify proof against reference root
                 let ref_root = ref_db.root(&mut hasher);

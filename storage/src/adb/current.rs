@@ -422,18 +422,17 @@ impl<
         let mmr = &self.any.mmr;
         let leaves = mmr.leaves();
         assert!(start_loc < leaves, "start_loc is invalid");
-        let max_loc = start_loc.as_u64() + max_ops.get();
-        let end_loc = core::cmp::min(max_loc, leaves);
+        let max_loc = start_loc.checked_add(max_ops.get()).unwrap();
+        let end_loc = core::cmp::min(max_loc, Location::new(leaves));
 
         // Generate the proof from the grafted MMR.
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
-        let mut proof =
-            verification::range_proof(&grafted_mmr, start_loc..Location::new(end_loc)).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, start_loc..end_loc).await?;
 
         // Collect the operations necessary to verify the proof.
-        let mut ops = Vec::with_capacity((end_loc - start_loc.as_u64()) as usize);
-        let futures = (start_loc.as_u64()..end_loc)
+        let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
+        let futures = (start_loc.as_u64()..end_loc.as_u64())
             .map(|i| self.any.log.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -444,7 +443,7 @@ impl<
         // Gather the chunks necessary to verify the proof.
         let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let start = start_loc.as_u64() / chunk_bits; // chunk that contains the very first bit.
-        let end = (end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
+        let end = (end_loc - 1).as_u64() / chunk_bits; // chunk that contains the very last bit.
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
             let bit_offset = i * chunk_bits;

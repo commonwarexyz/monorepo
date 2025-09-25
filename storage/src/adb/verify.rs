@@ -40,7 +40,7 @@ pub fn verify_proof_and_extract_digests<Op, H, D>(
     start_loc: Location,
     operations: &[Op],
     target_root: &D,
-) -> Result<Vec<(u64, D)>, Error>
+) -> Result<Vec<(Position, D)>, Error>
 where
     Op: Encode,
     H: Hasher<Digest = D>,
@@ -49,12 +49,7 @@ where
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
     proof
         .verify_range_inclusion_and_extract_digests(hasher, &elements, start_loc, target_root)
-        .map(|result| {
-            result
-                .into_iter()
-                .map(|(pos, digest)| (pos.into(), digest))
-                .collect()
-        })
+        .map(|result| result.into_iter().collect())
 }
 
 /// Calculate the digests required to construct a [Proof] for a range of operations.
@@ -105,13 +100,9 @@ where
 /// If you have not yet verified the proof, use [create_proof_store] instead.
 pub fn create_proof_store_from_digests<D: Digest>(
     proof: &Proof<D>,
-    digests: Vec<(u64, D)>,
+    digests: Vec<(Position, D)>,
 ) -> ProofStore<D> {
-    let digests_converted: Vec<(Position, D)> = digests
-        .into_iter()
-        .map(|(pos, digest)| (Position::new(pos), digest))
-        .collect();
-    ProofStore::new_from_digests(proof.size, digests_converted)
+    ProofStore::new_from_digests(proof.size, digests)
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].

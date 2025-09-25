@@ -229,7 +229,9 @@ impl<H: CHasher> Mmr<H> {
             pos >= self.pruned_to_pos,
             "pos precedes oldest retained position"
         );
-        (pos.as_u64() - self.pruned_to_pos.as_u64()) as usize
+        (pos.checked_sub(self.pruned_to_pos.as_u64())
+            .unwrap()
+            .as_u64()) as usize
     }
 
     /// Add `element` to the MMR and return its position in the MMR. The element can be an arbitrary

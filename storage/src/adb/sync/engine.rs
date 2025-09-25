@@ -204,7 +204,7 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let target_size = self.target.upper_bound.as_u64() + 1;
+        let target_size = self.target.upper_bound.checked_add(1).unwrap().as_u64();
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
@@ -249,7 +249,7 @@ where
             };
 
             // Calculate batch size for this gap
-            let gap_size = NZU64!(end_loc.as_u64() - start_loc.as_u64() + 1);
+            let gap_size = NZU64!(end_loc.checked_sub(start_loc.as_u64()).unwrap().as_u64() + 1);
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
@@ -315,7 +315,7 @@ where
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
         self.fetched_operations.retain(|&start_loc, operations| {
-            let end_loc = start_loc.as_u64() + operations.len() as u64 - 1;
+            let end_loc = start_loc.checked_add(operations.len() as u64 - 1).unwrap();
             end_loc >= next_loc
         });
 
@@ -326,7 +326,8 @@ where
                 self.fetched_operations
                     .iter()
                     .find_map(|(range_start, range_ops)| {
-                        let range_end = range_start.as_u64() + range_ops.len() as u64 - 1;
+                        let range_end =
+                            range_start.checked_add(range_ops.len() as u64 - 1).unwrap();
                         if *range_start <= next_loc && next_loc <= range_end {
                             Some(*range_start)
                         } else {

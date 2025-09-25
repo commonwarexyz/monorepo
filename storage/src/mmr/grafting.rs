@@ -112,7 +112,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
         let join = try_join_all(futures).await?;
         for (i, digest) in join.into_iter().enumerate() {
             let Some(digest) = digest else {
-                panic!("missing grafted digest for leaf {}", leaves[i].as_u64());
+                panic!("missing grafted digest for leaf {}", leaves[i]);
             };
             let leaf_pos = Position::from(leaves[i]);
             self.grafted_digests.insert(leaf_pos, digest);
@@ -124,7 +124,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     /// Compute the position of the leaf in the base tree onto which we should graft the leaf at
     /// position `pos` in the source tree.
     fn destination_pos(&self, pos: Position) -> Position {
-        Position::new(destination_pos(pos.as_u64(), self.height))
+        destination_pos(pos, self.height)
     }
 }
 
@@ -142,7 +142,8 @@ pub struct HasherFork<'a, H: CHasher> {
 /// This algorithm performs walks down corresponding branches of the peak and base trees. When we
 /// find the node in the peak tree we are looking for, we return the position of the corresponding
 /// node reached in the base tree.
-fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
+fn destination_pos(peak_node_pos: Position, height: u32) -> Position {
+    let peak_node_pos = peak_node_pos.as_u64();
     let leading_zeros = (peak_node_pos + 1).leading_zeros();
     assert!(leading_zeros >= height, "destination_pos > u64::MAX");
     let mut peak_pos = u64::MAX >> leading_zeros;
@@ -170,13 +171,13 @@ fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
         base_height -= 1;
     }
 
-    base_pos
+    Position::new(base_pos)
 }
 
 /// Inverse computation of destination_pos, with an analogous implementation involving walks down
 /// corresponding branches of both trees. Returns none if there is no corresponding node.
-pub(super) fn source_pos(base_node_pos: u64, height: u32) -> Option<u64> {
-    if pos_to_height(Position::new(base_node_pos)) < height {
+pub(super) fn source_pos(base_node_pos: Position, height: u32) -> Option<Position> {
+    if pos_to_height(base_node_pos) < height {
         // Nodes below the grafting height do not have a corresponding peak tree node.
         return None;
     }
@@ -203,7 +204,7 @@ pub(super) fn source_pos(base_node_pos: u64, height: u32) -> Option<u64> {
         peak_height -= 1;
     }
 
-    Some(peak_pos)
+    Some(Position::new(peak_pos))
 }
 
 impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
@@ -240,11 +241,8 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
-        self.hasher.node_digest(
-            Position::new(destination_pos(pos.as_u64(), self.height)),
-            left_digest,
-            right_digest,
-        )
+        self.hasher
+            .node_digest(destination_pos(pos, self.height), left_digest, right_digest)
     }
 
     fn root<'a>(
@@ -252,8 +250,8 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher
-            .root(destination_pos(size, self.height), peak_digests)
+        let dest_pos = destination_pos(Position::new(size), self.height);
+        self.hasher.root(dest_pos.as_u64(), peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -294,11 +292,8 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
-        self.hasher.node_digest(
-            Position::new(destination_pos(pos.as_u64(), self.height)),
-            left_digest,
-            right_digest,
-        )
+        self.hasher
+            .node_digest(destination_pos(pos, self.height), left_digest, right_digest)
     }
 
     fn root<'a>(
@@ -306,8 +301,8 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher
-            .root(destination_pos(size, self.height), peak_digests)
+        let dest_pos = destination_pos(Position::new(size), self.height);
+        self.hasher.root(dest_pos.as_u64(), peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -374,16 +369,18 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
 
         // This base tree node corresponds to a peak-tree leaf, so we need to perform the peak-tree
         // leaf digest computation.
-        let pos_u64 = pos.as_u64();
-        let source_pos = source_pos(pos_u64, self.height);
+        let source_pos = source_pos(pos, self.height);
         let Some(source_pos) = source_pos else {
             // malformed proof input
-            debug!(pos = pos_u64, "no grafting source pos");
+            debug!(pos = pos.as_u64(), "no grafting source pos");
             return digest;
         };
-        let Ok(index) = Location::try_from(Position::new(source_pos)) else {
+        let Ok(index) = Location::try_from(source_pos) else {
             // malformed proof input
-            debug!(pos = source_pos, "grafting source pos is not a leaf");
+            debug!(
+                pos = source_pos.as_u64(),
+                "grafting source pos is not a leaf"
+            );
             return digest;
         };
         if index < self.loc {
@@ -479,12 +476,12 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
             return self.base_mmr.get_node(pos).await;
         }
 
-        let source_pos = source_pos(pos.as_u64(), self.height);
+        let source_pos = source_pos(pos, self.height);
         let Some(source_pos) = source_pos else {
             return Ok(None);
         };
 
-        self.peak_tree.get_node(Position::new(source_pos)).await
+        self.peak_tree.get_node(source_pos).await
     }
 }
 
@@ -625,6 +622,7 @@ mod tests {
     fn test_hasher_dest_source_pos_conversion() {
         for grafting_height in 1..10 {
             for pos in 0..10000 {
+                let pos = Position::new(pos);
                 let dest_pos = destination_pos(pos, grafting_height);
                 let source_pos = source_pos(dest_pos, grafting_height).unwrap();
                 assert_eq!(pos, source_pos);
@@ -636,7 +634,8 @@ mod tests {
     fn test_hasher_source_dest_pos_conversion() {
         for grafting_height in 1..10 {
             for pos in 0..10000 {
-                if pos_to_height(Position::new(pos)) < grafting_height {
+                let pos = Position::new(pos);
+                if pos_to_height(pos) < grafting_height {
                     // Base tree nodes below the grafting height do not have a corresponding peak
                     // tree node.
                     assert!(source_pos(pos, grafting_height).is_none());

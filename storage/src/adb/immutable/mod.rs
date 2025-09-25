@@ -606,15 +606,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::OperationPruned(start_loc));
         }
 
-        let end_loc = std::cmp::min(op_count, start_loc.as_u64() + max_ops.get());
-        let mmr_size = Position::from(Location::new(op_count));
+        let op_count = Location::new(op_count);
+        let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops.get()).unwrap());
+        let mmr_size = Position::from(op_count);
 
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size.into(), start_loc..Location::new(end_loc))
+            .historical_range_proof(mmr_size.into(), start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc.as_u64()) as usize);
-        for loc in start_loc.as_u64()..end_loc {
+        let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
+        for loc in start_loc.as_u64()..end_loc.as_u64() {
             let section = loc / self.log_items_per_section;
             let offset = self.locations.read(loc).await?;
             let op = self.log.get(section, offset).await?;
