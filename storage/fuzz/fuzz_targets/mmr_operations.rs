@@ -251,8 +251,8 @@ fn fuzz(input: FuzzInput) {
                         } else {
                             // Node is not pruned, so it should exist
                             if node.is_none() {
-                                panic!("Could not get non-pruned node at position {} (size: {}, pruned_to: {})",
-                                    safe_pos, mmr.size(), mmr.pruned_to_pos());
+                                panic!("Could not get non-pruned node at position {safe_pos} (size: {}, pruned_to: {})",
+                                    mmr.size(), mmr.pruned_to_pos());
                             }
                         }
                     }
