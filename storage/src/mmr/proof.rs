@@ -1188,15 +1188,14 @@ mod tests {
         ));
 
         // Test 2: Single element range (first element)
-        let range = 0..1;
-        let single_proof = mmr
-            .range_proof(Location::new(range.start)..Location::new(range.end))
-            .unwrap();
+        let range = Location::new(0)..Location::new(1);
+        let single_proof = mmr.range_proof(range.clone()).unwrap();
+        let range_start = range.start;
         let single_digests = single_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range.start as usize..range.end as usize],
-                Location::new(range.start),
+                &elements[range_start.as_u64() as usize..range.end.as_u64() as usize],
+                range_start,
                 &root,
             )
             .unwrap();
@@ -1204,46 +1203,43 @@ mod tests {
 
         // Test 3: Single element range (middle element)
         let mid_idx = 24;
-        let range = mid_idx..mid_idx + 1;
-        let mid_proof = mmr
-            .range_proof(Location::new(range.start)..Location::new(range.end))
-            .unwrap();
+        let range = Location::new(mid_idx)..Location::new(mid_idx + 1);
+        let range_start = range.start;
+        let mid_proof = mmr.range_proof(range.clone()).unwrap();
         let mid_digests = mid_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range.start as usize..range.end as usize],
-                Location::new(range.start),
+                &elements[range_start.as_u64() as usize..range.end.as_u64() as usize],
+                range_start,
                 &root,
             )
             .unwrap();
         assert!(mid_digests.len() > 1);
 
         // Test 4: Single element range (last element)
-        let last_idx = elements.len() - 1;
-        let range = last_idx as u64..last_idx as u64 + 1;
-        let last_proof = mmr
-            .range_proof(Location::new(range.start)..Location::new(range.end))
-            .unwrap();
+        let last_idx = elements.len() as u64 - 1;
+        let range = Location::new(last_idx)..Location::new(last_idx + 1);
+        let range_start = range.start;
+        let last_proof = mmr.range_proof(range.clone()).unwrap();
         let last_digests = last_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range.start as usize..range.end as usize],
-                Location::new(range.start),
+                &elements[range_start.as_u64() as usize..range.end.as_u64() as usize],
+                range_start,
                 &root,
             )
             .unwrap();
         assert!(last_digests.len() > 1);
 
         // Test 5: Small range at the beginning
-        let range = 0..5;
-        let small_proof = mmr
-            .range_proof(Location::new(range.start)..Location::new(range.end))
-            .unwrap();
+        let range = Location::new(0)..Location::new(5);
+        let range_start = range.start;
+        let small_proof = mmr.range_proof(range.clone()).unwrap();
         let small_digests = small_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range.start as usize..range.end as usize],
-                Location::new(range.start),
+                &elements[range.start.as_u64() as usize..range.end.as_u64() as usize],
+                range_start,
                 &root,
             )
             .unwrap();
@@ -1251,20 +1247,19 @@ mod tests {
         assert!(small_digests.len() > 5);
 
         // Test 6: Medium range in the middle
-        let range = 10..31;
-        let mid_range_proof = mmr
-            .range_proof(Location::new(range.start)..Location::new(range.end))
-            .unwrap();
+        let range = Location::new(10)..Location::new(31);
+        let range_start = range.start;
+        let mid_range_proof = mmr.range_proof(range.clone()).unwrap();
         let mid_range_digests = mid_range_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range.start as usize..range.end as usize],
-                Location::new(range.start),
+                &elements[range.start.as_u64() as usize..range.end.as_u64() as usize],
+                range_start,
                 &root,
             )
             .unwrap();
         let num_elements = range.end - range.start;
-        assert!(mid_range_digests.len() > num_elements as usize);
+        assert!(mid_range_digests.len() as u64 > num_elements);
     }
 
     #[test]
