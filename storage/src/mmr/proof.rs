@@ -682,9 +682,10 @@ mod tests {
 
         // confirm the proof of inclusion for each leaf successfully verifies
         for leaf in 0u64..11 {
-            let proof: Proof<Digest> = mmr.proof(Location::new(leaf)).unwrap();
+            let leaf = Location::new(leaf);
+            let proof: Proof<Digest> = mmr.proof(leaf).unwrap();
             assert!(
-                proof.verify_element_inclusion(&mut hasher, &element, Location::new(leaf), &root),
+                proof.verify_element_inclusion(&mut hasher, &element, leaf, &root),
                 "valid proof should verify successfully"
             );
         }
