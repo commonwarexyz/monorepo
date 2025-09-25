@@ -4,6 +4,7 @@ use crate::{
     Block, Reporter,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_storage::archive;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -19,6 +20,16 @@ pub enum Identifier<D: Digest> {
     /// The highest finalized block. It may be the case that marshal does not have some of the
     /// blocks below this height.
     Tip,
+}
+
+// Allows using archive identifiers directly for convenience.
+impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
+    fn from(src: archive::Identifier<'_, D>) -> Self {
+        match src {
+            archive::Identifier::Index(index) => Self::Height(index),
+            archive::Identifier::Key(key) => Self::Commitment(*key),
+        }
+    }
 }
 
 /// Messages sent to the marshal [Actor](super::super::actor::Actor).
@@ -107,13 +118,13 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     /// storage. It is not an indication to go fetch the block from the network.
     pub async fn get_block(
         &mut self,
-        identifier: Identifier<B::Commitment>,
+        identifier: impl Into<Identifier<B::Commitment>>,
     ) -> oneshot::Receiver<Option<B>> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
             .send(Message::GetBlock {
-                identifier,
+                identifier: identifier.into(),
                 response: tx,
             })
             .await
