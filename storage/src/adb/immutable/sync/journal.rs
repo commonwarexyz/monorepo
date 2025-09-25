@@ -83,7 +83,10 @@ where
         self.inner.append(section, op).await?;
         self.size += 1;
         if self.size > 0 && self.size % self.items_per_section == 0 {
-            // Sync this full section before appending to the next section
+            // Sync this full section before appending to the next section.
+            // TODO: Once https://github.com/commonwarexyz/monorepo/issues/1718 is implemented,
+            // we should use the new contiguous variable journal type, which will handle section
+            // syncing internally. It will also handle calculation of the section internally.
             self.inner.sync(section).await?;
         }
         Ok(())
