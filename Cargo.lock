@@ -1146,6 +1146,7 @@ dependencies = [
  "cfg-if",
  "commonware-broadcast",
  "commonware-codec",
+ "commonware-coding",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
