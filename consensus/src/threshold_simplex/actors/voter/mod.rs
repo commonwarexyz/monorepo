@@ -213,13 +213,15 @@ mod tests {
                 .unwrap();
 
             // Run the actor
-            actor.start(
-                batcher,
-                resolver,
-                pending_sender,
-                recovered_sender,
-                recovered_receiver,
-            );
+            context.with_label("voter").spawn(|_| {
+                actor.run(
+                    batcher,
+                    resolver,
+                    pending_sender,
+                    recovered_sender,
+                    recovered_receiver,
+                )
+            });
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
@@ -527,13 +529,15 @@ mod tests {
                 .unwrap();
 
             // Start the actor
-            actor.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                pending_sender,
-                recovered_sender,
-                recovered_receiver,
-            );
+            context.with_label("voter").spawn(|_| {
+                actor.run(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    pending_sender,
+                    recovered_sender,
+                    recovered_receiver,
+                )
+            });
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
