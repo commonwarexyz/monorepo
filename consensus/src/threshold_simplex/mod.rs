@@ -166,6 +166,7 @@
 
 use crate::types::View;
 
+pub mod signing;
 pub mod types;
 
 cfg_if::cfg_if! {
