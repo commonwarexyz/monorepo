@@ -7,70 +7,12 @@ use commonware_cryptography::{
 };
 use commonware_storage::bmt::{self, Builder};
 use rand::seq::SliceRandom;
-use rand_core::CryptoRngCore;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
-fn gf16_mul(a: u16, b: u16) -> u16 {
-    #[inline(always)]
-    fn mul_u(a: u16, mut b: u16) -> (u16, u16) {
-        let mut a = u32::from(a);
-        let mut u = 0u32;
-        while b > 0 {
-            u ^= a & (0u32.wrapping_sub(u32::from(b & 1)));
-            b >>= 1;
-            a <<= 1;
-        }
-        (u as u16, (u >> 16) as u16)
-    }
-    let (mut out, mut hi) = mul_u(a, b);
-    while hi > 0 {
-        // 0x2D is the irreducible polynomial used in the RS Simd crate.
-        let (l, h) = mul_u(hi, 0x2D);
-        out ^= l;
-        hi = h
-    }
-    out
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct Gf16x8 {
-    data: [u8; 16],
-}
-
-impl Gf16x8 {
-    fn zero() -> Self {
-        Self { data: [0u8; 16] }
-    }
-
-    fn add(&mut self, other: &Self) {
-        for i in 0..16 {
-            self.data[i] ^= other.data[i];
-        }
-    }
-
-    fn scale(&self, s: u16) -> Self {
-        let mut data = [0u8; 16];
-        for i in 0..8 {
-            let a = u16::from(self.data[2 * i]) | (u16::from(self.data[2 * i + 1]) << 8);
-            data[2 * i..2 * (i + 1)].copy_from_slice(&gf16_mul(a, s).to_le_bytes());
-        }
-        Self { data }
-    }
-
-    fn rand(mut rng: impl CryptoRngCore) -> Self {
-        let mut data = [0u8; 16];
-        rng.fill_bytes(&mut data);
-        Self { data }
-    }
-}
-
-impl AsRef<[u8]> for Gf16x8 {
-    fn as_ref(&self) -> &[u8] {
-        self.data.as_slice()
-    }
-}
+mod field;
+use field::Gf16x8;
 
 fn row_checksum(coeffs: &[Gf16x8], row: &[u8]) -> Gf16x8 {
     assert_eq!(2 * coeffs.len(), row.len());
@@ -79,7 +21,7 @@ fn row_checksum(coeffs: &[Gf16x8], row: &[u8]) -> Gf16x8 {
         .chunks_exact(2)
         .map(|x| u16::from(x[0]) | (u16::from(x[1]) << 8));
     for (coeff, row_el) in coeffs.iter().zip(row_els) {
-        out.add(&coeff.scale(row_el));
+        out = out.add(&coeff.scale(row_el));
     }
     out
 }
@@ -93,16 +35,14 @@ fn encode_checks(topology: &Topology, mut checks: Vec<Vec<Gf16x8>>) -> Vec<Vec<G
             .expect("TODO");
     for i in 0..topology.min_rows() {
         for (j, check) in checks.iter().enumerate() {
-            chunk[16 * j..16 * (j + 1)].copy_from_slice(check[i].as_ref());
+            chunk[16 * j..16 * (j + 1)].copy_from_slice(check[i].bytes().as_slice());
         }
         encoder.add_original_shard(&chunk).expect("TODO");
     }
     let res = encoder.encode().expect("TODO");
     for recovery in res.recovery_iter() {
         for (i, bytes) in recovery.chunks_exact(16).enumerate() {
-            let el = Gf16x8 {
-                data: bytes.try_into().expect("TODO"),
-            };
+            let el = Gf16x8::try_from(bytes).expect("TODO");
             checks[i].push(el);
         }
     }
