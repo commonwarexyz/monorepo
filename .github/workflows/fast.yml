@@ -176,7 +176,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y gcc-arm-none-eabi
-    - name: Lint and build no_std crates
+    - name: Build no_std crates
       run: ./.github/scripts/check_no_std.sh
 
   Unsafe:
