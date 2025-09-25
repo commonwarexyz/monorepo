@@ -2,10 +2,7 @@
 
 use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
 use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-use commonware_stream::{
-    public_key::{Config, Connection, IncomingConnection},
-    Receiver as _, Sender as _,
-};
+use commonware_stream::{dial, listen, Config};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
@@ -22,7 +19,7 @@ fn fuzz(data: &[u8]) {
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_config = Config {
-            crypto: dialer_crypto.clone(),
+            signing_key: dialer_crypto.clone(),
             namespace: NAMESPACE.to_vec(),
             max_message_size: MAX_MESSAGE_SIZE,
             synchrony_bound: Duration::from_secs(1),
@@ -31,7 +28,7 @@ fn fuzz(data: &[u8]) {
         };
 
         let listener_config = Config {
-            crypto: listener_crypto.clone(),
+            signing_key: listener_crypto.clone(),
             namespace: NAMESPACE.to_vec(),
             max_message_size: MAX_MESSAGE_SIZE,
             synchrony_bound: Duration::from_secs(1),
@@ -40,38 +37,37 @@ fn fuzz(data: &[u8]) {
         };
 
         let listener_handle = context.clone().spawn(move |context| async move {
-            let incoming = IncomingConnection::verify(
-                &context,
+            listen(
+                context,
+                |_| async { true },
                 listener_config,
-                listener_sink,
                 listener_stream,
+                listener_sink,
             )
-            .await?;
-            Connection::upgrade_listener(context, incoming).await
+            .await
         });
 
-        let dialer_connection = Connection::upgrade_dialer(
+        let (mut dialer_sender, mut dialer_receiver) = dial(
             context.clone(),
             dialer_config,
-            dialer_sink,
-            dialer_stream,
             listener_crypto.public_key(),
+            dialer_stream,
+            dialer_sink,
         )
         .await
         .unwrap();
 
-        let listener_connection = listener_handle.await.unwrap().unwrap();
-
-        let (mut dialer_sender, mut dialer_receiver) = dialer_connection.split();
-        let (mut listener_sender, mut listener_receiver) = listener_connection.split();
+        let (listener_peer, mut listener_sender, mut listener_receiver) =
+            listener_handle.await.unwrap().unwrap();
+        assert_eq!(listener_peer, dialer_crypto.public_key());
 
         for chunk in data.chunks(1024) {
             dialer_sender.send(chunk).await.unwrap();
-            let recv_result = listener_receiver.receive().await.unwrap();
+            let recv_result = listener_receiver.recv().await.unwrap();
             assert_eq!(recv_result, chunk);
 
             listener_sender.send(chunk).await.unwrap();
-            let recv_result = dialer_receiver.receive().await.unwrap();
+            let recv_result = dialer_receiver.recv().await.unwrap();
             assert_eq!(recv_result, chunk);
         }
     });
