@@ -58,4 +58,11 @@ pub struct Config<V: Variant, B: Block> {
 
     /// Maximum number of blocks to repair at once
     pub max_repair: u64,
+
+    /// Whether to skip waiting for application processing in the finalizer.
+    /// 
+    /// When true, the finalizer won't wait for the application to process blocks,
+    /// allowing it to run ahead as fast as possible. This is useful for teams that
+    /// prefer to poll consensus state at their own pace.
+    pub skip_application_wait: bool,
 }

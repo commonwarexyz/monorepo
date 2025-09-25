@@ -168,6 +168,7 @@ mod tests {
             freezer_journal_compression: None,
             freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             immutable_items_per_section: NZU64!(10),
+            skip_application_wait: false,  // Default to waiting for application
         };
 
         // Create the resolver
