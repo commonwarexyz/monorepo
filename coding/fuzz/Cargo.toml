@@ -33,3 +33,10 @@ path = "fuzz_targets/no_coding.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "reed_solomon_config"
+path = "fuzz_targets/reed_solomon_config.rs"
+test = false
+doc = false
+bench = false
