@@ -576,11 +576,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Warning
     ///
-    /// Panics if there are uncommitted operations.
+    /// Panics if there are uncommitted operations, or if start_loc is out of bounds.
     pub async fn proof(
         &self,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_loc, max_ops)
             .await
@@ -589,21 +589,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
     /// operations.
     ///
-    ///
     /// # Panics
     ///
-    /// - Panics if `start_loc` greater than or equal to `op_count`.
+    /// - Panics if `start_loc` is greater than or equal to `op_count`.
     /// - Panics if `op_count` is greater than the number of operations.
     pub async fn historical_proof(
         &self,
         op_count: u64,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         assert!(op_count <= self.op_count());
         assert!(start_loc < op_count);
 
-        let end_loc = std::cmp::min(op_count, start_loc + max_ops);
+        let end_loc = std::cmp::min(op_count, start_loc + max_ops.get());
         let mmr_size = leaf_loc_to_pos(op_count);
 
         let proof = self
@@ -1137,7 +1136,7 @@ pub(super) mod test {
 
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
-            let max_ops = 4;
+            let max_ops = NZU64!(4);
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
             let start_loc = leaf_pos_to_loc(start_pos).unwrap();
