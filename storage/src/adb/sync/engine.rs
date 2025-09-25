@@ -231,27 +231,18 @@ where
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
-            let _operation_counts: BTreeMap<u64, u64> = self
+            let operation_counts: BTreeMap<Location, u64> = self
                 .fetched_operations
                 .iter()
-                .map(|(&start_loc, operations)| (start_loc.as_u64(), operations.len() as u64))
+                .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
                 .collect();
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next(
                 Location::new(log_size),
                 self.target.upper_bound,
-                &self
-                    .fetched_operations
-                    .iter()
-                    .map(|(&k, v)| (k, v.len() as u64))
-                    .collect(),
-                &self
-                    .outstanding_requests
-                    .locations()
-                    .iter()
-                    .copied()
-                    .collect(),
+                &operation_counts,
+                self.outstanding_requests.locations(),
                 self.fetch_batch_size,
             ) else {
                 break; // No more gaps to fill
