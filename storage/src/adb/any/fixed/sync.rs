@@ -81,7 +81,7 @@ where
         .await?;
 
         // Convert MMR size to number of operations.
-        let mmr_ops = mmr.leaves() as u64;
+        let mmr_ops = mmr.leaves();
 
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
