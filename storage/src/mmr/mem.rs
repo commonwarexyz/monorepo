@@ -621,14 +621,14 @@ impl<H: CHasher> Mmr<H> {
         hasher.root(size, peaks)
     }
 
-    /// Return an inclusion proof for the element at location `loc` Returns ElementPruned error if
-    /// some element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for the element at location `loc`, or ElementPruned error if some
+    /// element needed to generate the proof has been pruned.
     ///
     /// # Warning
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unprocessed batch updates, or if `loc` is out of bounds.
     pub fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
-        self.range_proof(loc..(loc + 1))
+        self.range_proof(loc..loc + 1)
     }
 
     /// Return an inclusion proof for all elements within the provided `range` of locations. Returns
@@ -636,7 +636,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Panics
     ///
-    /// Panics if there are unprocessed batch updates.
+    /// Panics if there are unprocessed batch updates, or if the element range is out of bounds.
     pub fn range_proof(&self, range: Range<Location>) -> Result<Proof<H::Digest>, Error> {
         assert!(
             self.dirty_nodes.is_empty(),

@@ -298,7 +298,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let mut collected_digests: Vec<(Position, D)> = Vec::new();
+        let mut collected_digests = Vec::new();
         let Ok(peak_digests) = self.reconstruct_peak_digests(
             hasher,
             elements,
@@ -690,57 +690,52 @@ mod tests {
         }
 
         // confirm mangling the proof or proof args results in failed validation
-        const LEAF: u64 = 10;
-        let proof = mmr.proof(Location::new(LEAF)).unwrap();
+        const LEAF: Location = Location::new(10);
+        let proof = mmr.proof(LEAF).unwrap();
         assert!(
-            proof.verify_element_inclusion(&mut hasher, &element, Location::new(LEAF), &root),
+            proof.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
             "proof verification should be successful"
         );
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &element, Location::new(LEAF + 1), &root),
+            !proof.verify_element_inclusion(&mut hasher, &element, LEAF + 1, &root),
             "proof verification should fail with incorrect element position"
         );
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &element, Location::new(LEAF - 1), &root),
+            !proof.verify_element_inclusion(&mut hasher, &element, LEAF - 1, &root),
             "proof verification should fail with incorrect element position 2"
         );
         assert!(
-            !proof.verify_element_inclusion(
-                &mut hasher,
-                &test_digest(0),
-                Location::new(LEAF),
-                &root
-            ),
+            !proof.verify_element_inclusion(&mut hasher, &test_digest(0), LEAF, &root),
             "proof verification should fail with mangled element"
         );
         let root2 = test_digest(0);
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &element, Location::new(LEAF), &root2),
+            !proof.verify_element_inclusion(&mut hasher, &element, LEAF, &root2),
             "proof verification should fail with mangled root"
         );
         let mut proof2 = proof.clone();
         proof2.digests[0] = test_digest(0);
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, Location::new(LEAF), &root),
+            !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
             "proof verification should fail with mangled proof hash"
         );
         proof2 = proof.clone();
         proof2.size = 10;
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, Location::new(LEAF), &root),
+            !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
             "proof verification should fail with incorrect size"
         );
         proof2 = proof.clone();
         proof2.digests.push(test_digest(0));
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, Location::new(LEAF), &root),
+            !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
             "proof verification should fail with extra hash"
         );
         proof2 = proof.clone();
         while !proof2.digests.is_empty() {
             proof2.digests.pop();
             assert!(
-                !proof2.verify_element_inclusion(&mut hasher, &element, Location::new(7), &root),
+                !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
                 "proof verification should fail with missing digests"
             );
         }
@@ -757,7 +752,7 @@ mod tests {
             .digests
             .extend(proof.digests[PEAK_COUNT - 1..].iter().cloned());
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, Location::new(LEAF), &root),
+            !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
             "proof verification should fail with extra hash even if it's unused by the computation"
         );
     }
@@ -884,17 +879,13 @@ mod tests {
             );
         }
         // Bad start_loc should cause verification to fail.
-        for loc in 0..elements.len() as u64 {
+        for loc in 0..elements.len() {
+            let loc = Location::new(loc as u64);
             if loc == range.start {
                 continue;
             }
             assert!(
-                !range_proof.verify_range_inclusion(
-                    &mut hasher,
-                    valid_elements,
-                    Location::new(loc),
-                    &root
-                ),
+                !range_proof.verify_range_inclusion(&mut hasher, valid_elements, loc, &root),
                 "bad start_loc should fail verification {loc}",
             );
         }
