@@ -721,8 +721,10 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     ///
     /// We return the height and commitment using the highest known finalization that we know the
     /// block height for. While it's possible that we have a later finalization, if we do not have
-    /// the full block for that finalization, we do not know it's height and therefore we do not
-    /// return it's information.
+    /// the full block for that finalization, we do not know it's height and therefore it would not
+    /// yet be found in the `finalizations_by_height` archive. While not checked explicitly, we
+    /// should have the associated block (in the `finalized_blocks` archive) for the information
+    /// returned.
     async fn get_latest(&mut self) -> Option<(u64, B::Commitment)> {
         let height = self.finalizations_by_height.last_index()?;
         let finalization = self
