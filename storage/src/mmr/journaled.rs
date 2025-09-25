@@ -279,14 +279,15 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pinned_nodes,
             pool: cfg.thread_pool,
         });
-        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, metadata_prune_pos).await?;
+        let prune_pos = Position::new(metadata_prune_pos);
+        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
 
         let mut s = Self {
             mem_mmr,
             journal,
             journal_size,
             metadata,
-            pruned_to_pos: Position::new(metadata_prune_pos),
+            pruned_to_pos: prune_pos,
         };
 
         if let Some(leaf) = orphaned_leaf {
@@ -307,10 +308,10 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         mem_mmr: &mut MemMmr<H>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, H::Digest>,
-        prune_pos: u64,
+        prune_pos: Position,
     ) -> Result<(), Error> {
         let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(Position::new(prune_pos)) {
+        for pos in nodes_to_pin(prune_pos) {
             let digest = Mmr::<E, H>::get_from_metadata_or_journal(metadata, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
@@ -393,13 +394,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         if cfg.lower_bound_pos < journal_size {
-            Self::add_extra_pinned_nodes(
-                &mut mem_mmr,
-                &metadata,
-                &journal,
-                cfg.lower_bound_pos.as_u64(),
-            )
-            .await?;
+            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound_pos)
+                .await?;
         }
         metadata.sync().await?;
 
@@ -560,7 +556,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             &mut self.mem_mmr,
             &self.metadata,
             &self.journal,
-            self.pruned_to_pos.as_u64(),
+            self.pruned_to_pos,
         )
         .await?;
 
