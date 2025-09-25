@@ -12,6 +12,7 @@
 
 use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
+use std::fmt::Debug;
 
 mod reed_solomon;
 use commonware_cryptography::Digest;
@@ -21,6 +22,7 @@ mod no_coding;
 pub use no_coding::{NoCoding, NoCodingError};
 
 /// Configuration common to all encoding schemes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Config {
     /// The minimum number of shards needed to encode the data.
     pub minimum_shards: u16,
@@ -30,6 +32,13 @@ pub struct Config {
     /// `N = extra_shards + minimum_shards`, but by specifying the `extra_shards`
     /// rather than `N`, we avoid needing to check that `minimum_shards <= N`.
     pub extra_shards: u16,
+}
+
+impl Config {
+    /// Returns the total number of shards produced by this configuration.
+    pub fn total_shards(&self) -> u16 {
+        self.minimum_shards + self.extra_shards
+    }
 }
 
 impl FixedSize for Config {
@@ -95,19 +104,19 @@ impl Read for Config {
 /// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..]).unwrap();
 /// assert_eq!(&data[..], &data3[..]);
 /// ```
-pub trait Scheme {
+pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// A commitment attesting to the shards of data.
     type Commitment: Digest;
     /// A shard of data, to be received by a participant.
-    type Shard: Codec + Send + Sync + 'static;
+    type Shard: Clone + Eq + Codec + Send + Sync + 'static;
     /// A shard shared with other participants, to aid them in reconstruction.
     ///
     /// In most cases, this will be the same as `Shard`, but some schemes might
     /// have extra information in `Shard` that may not be necessary to reconstruct
     /// the data.
-    type ReShard: Codec + Send + Sync + 'static;
+    type ReShard: Clone + Eq + Codec + Send + Sync + 'static;
     /// Data which can assist in checking shards.
-    type CheckingData;
+    type CheckingData: Clone + Send;
     /// A shard that has been checked for inclusion in the commitment.
     ///
     /// This allows excluding [Scheme::ReShard]s which are invalid, and shouldn't
