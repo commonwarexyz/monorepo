@@ -47,9 +47,7 @@ where
     D: Digest,
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof
-        .verify_range_inclusion_and_extract_digests(hasher, &elements, start_loc, target_root)
-        .map(|result| result.into_iter().collect())
+    proof.verify_range_inclusion_and_extract_digests(hasher, &elements, start_loc, target_root)
 }
 
 /// Calculate the digests required to construct a [Proof] for a range of operations.
@@ -67,10 +65,10 @@ pub fn digests_required_for_proof<D: Digest>(
 /// Create a [Proof] from a op_count and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
-pub fn create_proof<D: Digest>(op_count: Location, digests: Vec<D>) -> Proof<D> {
-    let size = Position::from(op_count);
+pub fn create_proof<D: Digest>(op_count: u64, digests: Vec<D>) -> Proof<D> {
+    let size = Position::new(op_count);
     Proof::<D> {
-        size: size.into(),
+        size: size.as_u64(),
         digests,
     }
 }
@@ -358,7 +356,7 @@ mod tests {
             }
 
             // Construct proof
-            let proof = create_proof(Location::new(op_count), digests.clone());
+            let proof = create_proof(op_count, digests.clone());
             assert_eq!(proof.size, Position::from(Location::new(op_count)));
             assert_eq!(proof.digests.len(), digests.len());
 
