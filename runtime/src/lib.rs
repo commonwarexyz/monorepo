@@ -22,6 +22,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use commonware_macros::select;
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
 use std::{
@@ -309,8 +310,6 @@ pub trait Clock: Clone + Send + Sync + 'static {
     ///
     /// let executor = deterministic::Runner::default();
     /// executor.start(|context| async move {
-    ///     // Before: manual select! pattern
-    ///     // After: simple timeout() call
     ///     match context
     ///         .timeout(Duration::from_millis(100), async { 42 })
     ///         .await
@@ -331,7 +330,7 @@ pub trait Clock: Clone + Send + Sync + 'static {
         T: Send + 'static,
     {
         async move {
-            commonware_macros::select! {
+            select! {
                 result = future => {
                     Ok(result)
                 },
@@ -1822,7 +1821,6 @@ mod tests {
         let executor = deterministic::Runner::default();
         test_clock_timeout(executor);
     }
-
 
     #[test]
     fn test_deterministic_root_finishes() {
