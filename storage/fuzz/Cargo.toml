@@ -101,3 +101,17 @@ path = "fuzz_targets/ordinal_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "extract_pinned_nodes"
+path = "fuzz_targets/extract_pinned_nodes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_multi_inclusion"
+path = "fuzz_targets/verify_multi_inclusion.rs"
+test = false
+doc = false
+bench = false
