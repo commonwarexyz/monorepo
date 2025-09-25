@@ -192,7 +192,7 @@ where
 
     // Check if we have enough operations
     let db_size = database.op_count();
-    if request.start_loc.as_u64() >= db_size {
+    if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc >= database size ({}) >= ({})",
             request.start_loc, db_size

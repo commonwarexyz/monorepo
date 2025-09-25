@@ -96,7 +96,7 @@ impl ReferenceMmr {
     }
 
     fn prune_to_pos(&mut self, pos: Position) {
-        if pos.as_u64() <= self.total_nodes_added {
+        if pos <= self.total_nodes_added {
             self.pruned_to_pos = pos;
         }
     }
@@ -145,7 +145,7 @@ fn fuzz(input: FuzzInput) {
                 MmrOperation::Add { data } => {
                     // Skip adding if we're fully pruned (pruned_to_pos == size)
                     // because the MMR needs access to previous nodes to compute parent hashes
-                    if mmr.pruned_to_pos().as_u64() == mmr.size() && mmr.size() > 0 {
+                    if mmr.pruned_to_pos() == mmr.size() && mmr.size() > 0 {
                         continue;
                     }
 
@@ -252,7 +252,7 @@ fn fuzz(input: FuzzInput) {
                             // Node is not pruned, so it should exist
                             if node.is_none() {
                                 panic!("Could not get non-pruned node at position {} (size: {}, pruned_to: {})",
-                                    safe_pos.as_u64(), mmr.size(), mmr.pruned_to_pos().as_u64());
+                                    safe_pos, mmr.size(), mmr.pruned_to_pos());
                             }
                         }
                     }
@@ -326,7 +326,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::PruneAll => {
                     // Skip prune_all if we're already fully pruned to avoid issues with subsequent adds
-                    if mmr.pruned_to_pos().as_u64() == mmr.size() {
+                    if mmr.pruned_to_pos() == mmr.size() {
                         continue;
                     }
 
@@ -366,7 +366,7 @@ fn fuzz(input: FuzzInput) {
                         }
 
                         // Skip if trying to prune beyond the current size
-                        if pos.as_u64() > mmr.size() {
+                        if pos > mmr.size() {
                             continue;
                         }
 
@@ -409,9 +409,9 @@ fn fuzz(input: FuzzInput) {
                 // Last leaf position should be valid
                 if let Some(last_pos) = mmr.last_leaf_pos() {
                     assert!(
-                        last_pos.as_u64() < mmr.size(),
-                        "Operation {op_idx}: Last leaf position {} >= size {}",
-                        last_pos.as_u64(), mmr.size()
+                        last_pos < mmr.size(),
+                        "Operation {op_idx}: Last leaf position {last_pos} >= size {}",
+                         mmr.size()
                     );
                 }
             } else {

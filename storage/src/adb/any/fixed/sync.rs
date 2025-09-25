@@ -74,10 +74,7 @@ where
                 lower_bound_pos: Position::from(lower_bound),
                 // The last node of an MMR with `upper_bound` + 1 operations is at the position
                 // right before where the next leaf goes.
-                upper_bound_pos: Position::from(
-                    // TODO make this less ugly
-                    Position::from(upper_bound + 1).as_u64() - 1,
-                ),
+                upper_bound_pos: Position::from(upper_bound + 1) - 1,
                 pinned_nodes,
             },
         )
@@ -141,7 +138,7 @@ where
     ) -> Result<Self::Journal, adb::Error> {
         let size = journal.size().await?;
 
-        if size <= lower_bound.as_u64() {
+        if size <= lower_bound {
             // Close the existing journal before creating a new one
             journal.close().await?;
 
@@ -400,7 +397,7 @@ mod tests {
                 fetch_batch_size,
                 target: Target {
                     root: target_root,
-                    lower_bound: Location::new(lower_bound.as_u64()),
+                    lower_bound,
                     upper_bound: Location::new(target_op_count - 1), // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
@@ -589,7 +586,7 @@ mod tests {
             // Verify the synced database has the correct range of operations
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
-            assert_eq!(synced_db.op_count(), (upper_bound + 1).as_u64());
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
 
             // Verify the final root digest matches our target
             assert_eq!(synced_db.root(&mut hasher), root);
@@ -657,7 +654,7 @@ mod tests {
             let sync_db: AnyTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(sync_db.op_count(), (upper_bound + 1).as_u64());
+            assert_eq!(sync_db.op_count(), upper_bound + 1);
             assert_eq!(
                 sync_db.inactivity_floor_loc,
                 target_db.read().await.inactivity_floor_loc
@@ -758,7 +755,7 @@ mod tests {
             let sync_db: AnyTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(sync_db.op_count(), (upper_bound + 1).as_u64());
+            assert_eq!(sync_db.op_count(), upper_bound + 1);
             assert_eq!(sync_db.op_count(), target_db.op_count());
             assert_eq!(sync_db.inactivity_floor_loc, lower_bound);
             assert_eq!(
@@ -1100,7 +1097,7 @@ mod tests {
             // Verify the synced database has the expected state
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), root);
-            assert_eq!(synced_db.op_count(), (upper_bound + 1).as_u64());
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
 
             synced_db.destroy().await.unwrap();
@@ -1172,7 +1169,7 @@ mod tests {
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
                     let log_size = client.journal().size().await.unwrap();
-                    if log_size > initial_lower_bound.as_u64() {
+                    if log_size > initial_lower_bound {
                         break client;
                     }
                 }
@@ -1472,7 +1469,7 @@ mod tests {
                 .unwrap();
 
             // Verify database state
-            assert_eq!(db.op_count(), (upper_bound + 1).as_u64());
+            assert_eq!(db.op_count(), upper_bound + 1);
             assert_eq!(db.inactivity_floor_loc, lower_bound);
             assert_eq!(db.mmr.size(), source_db.mmr.size());
             assert_eq!(
@@ -1572,7 +1569,7 @@ mod tests {
                 // Verify database state
                 let expected_op_count = upper_bound + 1;
                 assert_eq!(db.log.size().await.unwrap(), expected_op_count);
-                assert_eq!(db.mmr.size(), Position::from(Location::new(expected_op_count)).as_u64());
+                assert_eq!(db.mmr.size(), Position::from(Location::new(expected_op_count)));
                 assert_eq!(db.op_count(), expected_op_count);
                 assert_eq!(db.inactivity_floor_loc, Location::new(lower_bound));
 

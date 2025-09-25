@@ -378,7 +378,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
         let source_pos = source_pos(pos_u64, self.height);
         let Some(source_pos) = source_pos else {
             // malformed proof input
-            debug!(pos = pos.as_u64(), "no grafting source pos");
+            debug!(pos = pos_u64, "no grafting source pos");
             return digest;
         };
         let Ok(index) = Location::try_from(Position::new(source_pos)) else {
@@ -386,7 +386,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
             debug!(pos = source_pos, "grafting source pos is not a leaf");
             return digest;
         };
-        if index.as_u64() < self.loc.as_u64() {
+        if index < self.loc {
             // malformed proof input
             debug!(
                 index = index.as_u64(),
@@ -395,18 +395,18 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
             );
             return digest;
         };
-        let index_u64 = index.as_u64() - self.loc.as_u64();
-        if index_u64 >= self.elements.len() as u64 {
+        let index = index - self.loc;
+        if index >= self.elements.len() as u64 {
             // malformed proof input
             debug!(
-                index = index_u64,
+                index = index.as_u64(),
                 len = self.elements.len(),
                 "grafting index is out of bounds"
             );
             return digest;
         }
         self.hasher
-            .update_with_element(self.elements[index_u64 as usize]);
+            .update_with_element(self.elements[index.as_u64() as usize]);
         self.hasher.update_with_digest(&digest);
 
         self.hasher.finalize()

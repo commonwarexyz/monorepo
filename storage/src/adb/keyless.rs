@@ -384,7 +384,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Get the value at location `loc` in the database.
     pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc.as_u64() < self.size);
+        assert!(loc < self.size);
         let offset = self.locations.read(loc.as_u64()).await?;
 
         let section = loc.as_u64() / self.log_items_per_section;
@@ -427,7 +427,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     ///
     /// Panics if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc.as_u64() <= self.last_commit_loc.unwrap_or(Location::new(0)).as_u64());
+        assert!(loc <= self.last_commit_loc.unwrap_or(Location::new(0)));
 
         // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
         // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
@@ -671,7 +671,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     #[cfg(test)]
     /// Simulate pruning failure by consuming the db and abandoning pruning operation mid-flight.
     pub(super) async fn simulate_prune_failure(mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc.as_u64() <= self.last_commit_loc.unwrap_or(Location::new(0)).as_u64());
+        assert!(loc <= self.last_commit_loc.unwrap_or(Location::new(0)));
         // Perform the same steps as pruning except "crash" right after the log is pruned.
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
@@ -1278,7 +1278,7 @@ mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.op_count(), 2 * ELEMENTS + 2);
-            assert!(db.oldest_retained_loc().await.unwrap().unwrap().as_u64() <= PRUNE_LOC);
+            assert!(db.oldest_retained_loc().await.unwrap().unwrap() <= PRUNE_LOC);
 
             // Test that we can't get pruned values
             for i in 0..oldest_retained.unwrap().as_u64() {
@@ -1303,7 +1303,7 @@ mod test {
 
             for (start_loc, max_ops) in test_cases {
                 // Skip if start_loc is before oldest retained
-                if start_loc.as_u64() < oldest_retained.unwrap().as_u64() {
+                if start_loc < oldest_retained.unwrap() {
                     continue;
                 }
 
@@ -1346,7 +1346,7 @@ mod test {
             let final_oldest = db.oldest_retained_loc().await.unwrap().unwrap();
 
             // Should still be able to prove the remaining operations
-            if final_oldest.as_u64() < db.op_count() {
+            if final_oldest < db.op_count() {
                 let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
                 assert!(
                     verify_proof(&mut hasher, &final_proof, final_oldest, &final_ops, &root),

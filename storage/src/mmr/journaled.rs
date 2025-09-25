@@ -352,7 +352,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         )
         .await?;
         let journal_size = journal.size().await?;
-        assert!(journal_size <= cfg.upper_bound_pos.as_u64() + 1);
+        assert!(journal_size <= cfg.upper_bound_pos + 1);
 
         // Open the metadata.
         let metadata_cfg = MConfig {
@@ -392,7 +392,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         });
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
-        if cfg.lower_bound_pos.as_u64() < journal_size {
+        if cfg.lower_bound_pos < journal_size {
             Self::add_extra_pinned_nodes(
                 &mut mem_mmr,
                 &metadata,
@@ -533,7 +533,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 return Err(Error::Empty);
             }
             new_size -= 1;
-            if new_size < self.pruned_to_pos.as_u64() {
+            if new_size < self.pruned_to_pos {
                 return Err(Error::ElementPruned(Position::new(new_size)));
             }
             if PeakIterator::check_validity(new_size) {
@@ -689,7 +689,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         h: &mut impl Hasher<H>,
         pos: Position,
     ) -> Result<(), Error> {
-        assert!(pos.as_u64() <= self.size());
+        assert!(pos <= self.size());
         if pos <= self.pruned_to_pos {
             return Ok(());
         }
@@ -720,7 +720,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
     /// Return the position of the oldest retained node in the MMR, not including pinned nodes.
     pub fn oldest_retained_pos(&self) -> Option<Position> {
-        if self.pruned_to_pos.as_u64() == self.size() {
+        if self.pruned_to_pos == self.size() {
             return None;
         }
 
@@ -878,7 +878,7 @@ mod tests {
             assert!(mmr.get_node(Position::new(0)).await.is_err());
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert!(mmr.prune_all(&mut hasher).await.is_ok());
-            assert_eq!(mmr.pruned_to_pos().as_u64(), 0);
+            assert_eq!(mmr.pruned_to_pos(), 0);
             assert!(mmr
                 .prune_to_pos(&mut hasher, Position::new(0))
                 .await
@@ -969,7 +969,7 @@ mod tests {
                 .await
                 .unwrap();
             // prune all remaining leaves 1 at a time.
-            while mmr.size() > leaf_pos.as_u64() {
+            while mmr.size() > leaf_pos {
                 assert!(mmr.pop(1).await.is_ok());
             }
             assert!(matches!(mmr.pop(1).await, Err(Error::ElementPruned(_))));
@@ -1169,7 +1169,7 @@ mod tests {
                     .prune_to_pos(&mut hasher, Position::new(prune_pos))
                     .await
                     .unwrap();
-                assert_eq!(prune_pos, pruned_mmr.pruned_to_pos().as_u64());
+                assert_eq!(prune_pos, pruned_mmr.pruned_to_pos());
 
                 let digest = test_digest(LEAF_COUNT + i);
                 leaves.push(digest);
@@ -1196,7 +1196,7 @@ mod tests {
             pruned_mmr.prune_all(&mut hasher).await.unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
             assert_eq!(pruned_mmr.oldest_retained_pos(), None);
-            assert_eq!(pruned_mmr.pruned_to_pos().as_u64(), size);
+            assert_eq!(pruned_mmr.pruned_to_pos(), size);
 
             // Close MMR after adding a new node without syncing and make sure state is as expected
             // on reopening.
@@ -1217,14 +1217,14 @@ mod tests {
                 pruned_mmr.oldest_retained_pos().map(|p| p.as_u64()),
                 Some(size)
             );
-            assert_eq!(pruned_mmr.pruned_to_pos().as_u64(), size);
+            assert_eq!(pruned_mmr.pruned_to_pos(), size);
 
             // Make sure pruning to older location is a no-op.
             assert!(pruned_mmr
                 .prune_to_pos(&mut hasher, Position::new(size - 1))
                 .await
                 .is_ok());
-            assert_eq!(pruned_mmr.pruned_to_pos().as_u64(), size);
+            assert_eq!(pruned_mmr.pruned_to_pos(), size);
 
             // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
             // retained nodes.
@@ -1606,7 +1606,7 @@ mod tests {
 
             // Verify the journaled MMR has the same properties as the original MMR
             assert_eq!(new_mmr.size(), original_size);
-            assert_eq!(new_mmr.pruned_to_pos().as_u64(), original_size);
+            assert_eq!(new_mmr.pruned_to_pos(), original_size);
             assert_eq!(new_mmr.oldest_retained_pos(), None);
             // Verify the roots match
             let new_journal_digest = new_mmr.root(&mut hasher);
@@ -1638,7 +1638,7 @@ mod tests {
 
             // Size and other metadata should be unchanged
             assert_eq!(new_mmr.size(), original_size + 1); // +1 for element we just added
-            assert_eq!(new_mmr.pruned_to_pos().as_u64(), original_size);
+            assert_eq!(new_mmr.pruned_to_pos(), original_size);
             assert_eq!(
                 new_mmr.oldest_retained_pos().map(|p| p.as_u64()),
                 Some(original_size)
@@ -1742,7 +1742,7 @@ mod tests {
 
             // Should be fresh MMR starting empty
             assert_eq!(sync_mmr.size(), 0);
-            assert_eq!(sync_mmr.pruned_to_pos().as_u64(), 0);
+            assert_eq!(sync_mmr.pruned_to_pos(), 0);
             assert_eq!(sync_mmr.oldest_retained_pos(), None);
 
             // Should be able to add new elements

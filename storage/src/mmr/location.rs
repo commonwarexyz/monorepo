@@ -2,7 +2,7 @@ use super::position::Position;
 use core::{
     convert::TryFrom,
     fmt,
-    ops::{Add, Sub},
+    ops::{Add, AddAssign, Sub, SubAssign},
 };
 use thiserror::Error;
 
@@ -108,6 +108,49 @@ impl Sub<u64> for Location {
     #[inline]
     fn sub(self, rhs: u64) -> Self::Output {
         Self(self.0 - rhs)
+    }
+}
+
+impl PartialEq<u64> for Location {
+    #[inline]
+    fn eq(&self, other: &u64) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialOrd<u64> for Location {
+    #[inline]
+    fn partial_cmp(&self, other: &u64) -> Option<core::cmp::Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+// Allow u64 to be compared with Location too
+impl PartialEq<Location> for u64 {
+    #[inline]
+    fn eq(&self, other: &Location) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialOrd<Location> for u64 {
+    #[inline]
+    fn partial_cmp(&self, other: &Location) -> Option<core::cmp::Ordering> {
+        self.partial_cmp(&other.0)
+    }
+}
+
+impl AddAssign<u64> for Location {
+    #[inline]
+    fn add_assign(&mut self, rhs: u64) {
+        self.0 += rhs;
+    }
+}
+
+impl SubAssign<u64> for Location {
+    #[inline]
+    fn sub_assign(&mut self, rhs: u64) {
+        self.0 -= rhs;
     }
 }
 
@@ -229,29 +272,29 @@ mod tests {
     #[test]
     fn test_checked_add() {
         let loc = Location::new(10);
-        assert_eq!(loc.checked_add(5).unwrap().as_u64(), 15);
+        assert_eq!(loc.checked_add(5).unwrap(), 15);
         assert!(Location::new(u64::MAX).checked_add(1).is_none());
     }
 
     #[test]
     fn test_checked_sub() {
         let loc = Location::new(10);
-        assert_eq!(loc.checked_sub(5).unwrap().as_u64(), 5);
+        assert_eq!(loc.checked_sub(5).unwrap(), 5);
         assert!(loc.checked_sub(11).is_none());
     }
 
     #[test]
     fn test_saturating_add() {
         let loc = Location::new(10);
-        assert_eq!(loc.saturating_add(5).as_u64(), 15);
-        assert_eq!(Location::new(u64::MAX).saturating_add(1).as_u64(), u64::MAX);
+        assert_eq!(loc.saturating_add(5), 15);
+        assert_eq!(Location::new(u64::MAX).saturating_add(1), u64::MAX);
     }
 
     #[test]
     fn test_saturating_sub() {
         let loc = Location::new(10);
-        assert_eq!(loc.saturating_sub(5).as_u64(), 5);
-        assert_eq!(Location::new(0).saturating_sub(1).as_u64(), 0);
+        assert_eq!(loc.saturating_sub(5), 5);
+        assert_eq!(Location::new(0).saturating_sub(1), 0);
     }
 
     #[test]
@@ -264,13 +307,45 @@ mod tests {
     fn test_add() {
         let loc1 = Location::new(10);
         let loc2 = Location::new(5);
-        assert_eq!((loc1 + loc2).as_u64(), 15);
+        assert_eq!((loc1 + loc2), 15);
     }
 
     #[test]
     fn test_sub() {
         let loc1 = Location::new(10);
         let loc2 = Location::new(3);
-        assert_eq!((loc1 - loc2).as_u64(), 7);
+        assert_eq!((loc1 - loc2), 7);
+    }
+
+    #[test]
+    fn test_comparison_with_u64() {
+        let loc = Location::new(42);
+
+        // Test equality
+        assert_eq!(loc, 42u64);
+        assert_eq!(42u64, loc);
+        assert_ne!(loc, 43u64);
+        assert_ne!(43u64, loc);
+
+        // Test ordering
+        assert!(loc < 43u64);
+        assert!(43u64 > loc);
+        assert!(loc > 41u64);
+        assert!(41u64 < loc);
+        assert!(loc <= 42u64);
+        assert!(42u64 >= loc);
+    }
+
+    #[test]
+    fn test_assignment_with_u64() {
+        let mut loc = Location::new(10);
+
+        // Test add assignment
+        loc += 5;
+        assert_eq!(loc, 15u64);
+
+        // Test sub assignment
+        loc -= 3;
+        assert_eq!(loc, 12u64);
     }
 }

@@ -270,7 +270,7 @@ mod tests {
             // Generate proof for a range
             let start_loc = Location::new(2);
             let operations_len = 4u64;
-            let end_loc = Location::new(start_loc.as_u64() + operations_len);
+            let end_loc = start_loc + operations_len;
             let range = start_loc..end_loc;
             let proof = mmr.range_proof(range).unwrap();
 
@@ -368,7 +368,7 @@ mod tests {
 
             // Construct proof
             let proof = create_proof(Location::new(op_count), digests.clone());
-            assert_eq!(proof.size, Position::from(Location::new(op_count)).as_u64());
+            assert_eq!(proof.size, Position::from(Location::new(op_count)));
             assert_eq!(proof.digests.len(), digests.len());
 
             assert!(verify_proof(

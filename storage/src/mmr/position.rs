@@ -1,7 +1,7 @@
 use super::location::Location;
 use core::{
     fmt,
-    ops::{Add, Sub},
+    ops::{Add, AddAssign, Deref, Sub, SubAssign},
 };
 
 /// A [Position] is an index into an MMR's nodes.
@@ -56,6 +56,19 @@ impl Position {
 impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Position({})", self.0)
+    }
+}
+
+impl Deref for Position {
+    type Target = u64;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<u64> for Position {
+    fn as_ref(&self) -> &u64 {
+        &self.0
     }
 }
 
@@ -118,6 +131,49 @@ impl Sub<u64> for Position {
     }
 }
 
+impl PartialEq<u64> for Position {
+    #[inline]
+    fn eq(&self, other: &u64) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialOrd<u64> for Position {
+    #[inline]
+    fn partial_cmp(&self, other: &u64) -> Option<core::cmp::Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+// Allow u64 to be compared with Position too
+impl PartialEq<Position> for u64 {
+    #[inline]
+    fn eq(&self, other: &Position) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialOrd<Position> for u64 {
+    #[inline]
+    fn partial_cmp(&self, other: &Position) -> Option<core::cmp::Ordering> {
+        self.partial_cmp(&other.0)
+    }
+}
+
+impl AddAssign<u64> for Position {
+    #[inline]
+    fn add_assign(&mut self, rhs: u64) {
+        self.0 += rhs;
+    }
+}
+
+impl SubAssign<u64> for Position {
+    #[inline]
+    fn sub_assign(&mut self, rhs: u64) {
+        self.0 -= rhs;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
@@ -152,29 +208,29 @@ mod tests {
     #[test]
     fn test_checked_add() {
         let pos = Position::new(10);
-        assert_eq!(pos.checked_add(5).unwrap().as_u64(), 15);
+        assert_eq!(pos.checked_add(5).unwrap(), 15);
         assert!(Position::new(u64::MAX).checked_add(1).is_none());
     }
 
     #[test]
     fn test_checked_sub() {
         let pos = Position::new(10);
-        assert_eq!(pos.checked_sub(5).unwrap().as_u64(), 5);
+        assert_eq!(pos.checked_sub(5).unwrap(), 5);
         assert!(pos.checked_sub(11).is_none());
     }
 
     #[test]
     fn test_saturating_add() {
         let pos = Position::new(10);
-        assert_eq!(pos.saturating_add(5).as_u64(), 15);
-        assert_eq!(Position::new(u64::MAX).saturating_add(1).as_u64(), u64::MAX);
+        assert_eq!(pos.saturating_add(5), 15);
+        assert_eq!(Position::new(u64::MAX).saturating_add(1), u64::MAX);
     }
 
     #[test]
     fn test_saturating_sub() {
         let pos = Position::new(10);
-        assert_eq!(pos.saturating_sub(5).as_u64(), 5);
-        assert_eq!(Position::new(0).saturating_sub(1).as_u64(), 0);
+        assert_eq!(pos.saturating_sub(5), 5);
+        assert_eq!(Position::new(0).saturating_sub(1), 0);
     }
 
     #[test]
@@ -187,13 +243,45 @@ mod tests {
     fn test_add() {
         let pos1 = Position::new(10);
         let pos2 = Position::new(5);
-        assert_eq!((pos1 + pos2).as_u64(), 15);
+        assert_eq!((pos1 + pos2), 15);
     }
 
     #[test]
     fn test_sub() {
         let pos1 = Position::new(10);
         let pos2 = Position::new(3);
-        assert_eq!((pos1 - pos2).as_u64(), 7);
+        assert_eq!((pos1 - pos2), 7);
+    }
+
+    #[test]
+    fn test_comparison_with_u64() {
+        let pos = Position::new(42);
+
+        // Test equality
+        assert_eq!(pos, 42u64);
+        assert_eq!(42u64, pos);
+        assert_ne!(pos, 43u64);
+        assert_ne!(43u64, pos);
+
+        // Test ordering
+        assert!(pos < 43u64);
+        assert!(43u64 > pos);
+        assert!(pos > 41u64);
+        assert!(41u64 < pos);
+        assert!(pos <= 42u64);
+        assert!(42u64 >= pos);
+    }
+
+    #[test]
+    fn test_assignment_with_u64() {
+        let mut pos = Position::new(10);
+
+        // Test add assignment
+        pos += 5;
+        assert_eq!(pos, 15u64);
+
+        // Test sub assignment
+        pos -= 3;
+        assert_eq!(pos, 12u64);
     }
 }

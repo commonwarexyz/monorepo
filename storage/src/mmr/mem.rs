@@ -180,7 +180,7 @@ impl<H: CHasher> Mmr<H> {
     /// Return the position of the oldest retained node in the MMR, not including those cached in
     /// pinned_nodes.
     pub fn oldest_retained_pos(&self) -> Option<Position> {
-        if self.pruned_to_pos.as_u64() == self.size() {
+        if self.pruned_to_pos == self.size() {
             return None;
         }
 
@@ -360,7 +360,7 @@ impl<H: CHasher> Mmr<H> {
                     panic!("pos was not for a leaf");
                 }
                 let sibling_digest = self.get_node_unchecked(sibling_pos);
-                digest = if sibling_pos.as_u64() == parent_pos.as_u64() - 1 {
+                digest = if sibling_pos == parent_pos - 1 {
                     // The sibling is the right child of the parent.
                     hasher.node_digest(parent_pos, &digest, sibling_digest)
                 } else {
@@ -1101,7 +1101,7 @@ mod tests {
 
             let leaf_pos = Position::from(Location::new(100));
             mmr.prune_to_pos(leaf_pos);
-            while mmr.size() > leaf_pos.as_u64() {
+            while mmr.size() > leaf_pos {
                 assert!(mmr.pop().is_ok());
             }
             assert_eq!(hex(&mmr.root(&mut hasher)), ROOTS[100]);

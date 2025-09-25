@@ -165,10 +165,10 @@ impl<
 
         // Ensure consistency between the bitmap and the db.
         let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
-        if status.bit_count() < inactivity_floor_loc.as_u64() {
+        if status.bit_count() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
-            while status.bit_count() < inactivity_floor_loc.as_u64() {
+            while status.bit_count() < inactivity_floor_loc {
                 status.append(false);
             }
 
@@ -292,7 +292,7 @@ impl<
     /// since it applies at least one operation.
     async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
-            if self.any.inactivity_floor_loc.as_u64() == self.op_count() {
+            if self.any.inactivity_floor_loc == self.op_count() {
                 break;
             }
             let op = self
@@ -308,7 +308,7 @@ impl<
                 self.status.set_bit(old_loc.as_u64(), false);
                 self.status.append(true);
             }
-            self.any.inactivity_floor_loc = self.any.inactivity_floor_loc + 1;
+            self.any.inactivity_floor_loc += 1;
         }
 
         self.any
@@ -421,7 +421,7 @@ impl<
         // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
         let leaves = mmr.leaves();
-        assert!(start_loc.as_u64() < leaves, "start_loc is invalid");
+        assert!(start_loc < leaves, "start_loc is invalid");
         let max_loc = start_loc.as_u64() + max_ops.get();
         let end_loc = core::cmp::min(max_loc, leaves);
 
@@ -478,10 +478,10 @@ impl<
             return false;
         };
         let op_count = op_count.as_u64();
-        let end_loc = start_loc.as_u64() + ops.len() as u64;
+        let end_loc = start_loc + ops.len() as u64;
         if end_loc > op_count {
             debug!(
-                loc = end_loc,
+                loc = end_loc.as_u64(),
                 op_count, "proof verification failed, invalid range"
             );
             return false;

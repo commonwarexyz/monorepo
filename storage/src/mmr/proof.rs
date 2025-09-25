@@ -349,20 +349,19 @@ impl<D: Digest> Proof<D> {
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
-            if start_loc.as_u64() == 0 {
+            if start_loc == 0 {
                 return Ok(vec![]);
             }
             return Err(ReconstructionError::MissingElements);
         }
-        let start_loc_u64 = start_loc.as_u64();
         let start_element_pos = Position::from(start_loc);
         let end_element_pos = if elements.len() == 1 {
             start_element_pos
         } else {
-            let end_loc = start_loc_u64 + elements.len() as u64 - 1;
-            Position::from(Location::new(end_loc))
+            let end_loc = start_loc + elements.len() as u64 - 1;
+            Position::from(end_loc)
         };
-        if end_element_pos.as_u64() >= self.size {
+        if end_element_pos >= self.size {
             return Err(ReconstructionError::InvalidEndLoc);
         }
 
@@ -432,7 +431,7 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<Location>) 
 
     let start_element_pos = Position::from(range.start);
     let end_element_pos = Position::from(range.end - 1);
-    assert!(end_element_pos.as_u64() < size, "range is out of bounds");
+    assert!(end_element_pos < size, "range is out of bounds");
 
     // Find the mountains that contain no elements from the range. The peaks of these mountains
     // are required to prove the range, so they are added to the result.
@@ -488,13 +487,9 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<Location>) 
             end_tree_with_element.1,
         );
         // filter the right path for right siblings only
-        siblings.extend(
-            right_path_iter.filter(|(parent_pos, pos)| parent_pos.as_u64() == pos.as_u64() + 1),
-        );
+        siblings.extend(right_path_iter.filter(|(parent_pos, pos)| *parent_pos == *pos + 1));
         // filter the left path for left siblings only
-        siblings.extend(
-            left_path_iter.filter(|(parent_pos, pos)| parent_pos.as_u64() != pos.as_u64() + 1),
-        );
+        siblings.extend(left_path_iter.filter(|(parent_pos, pos)| *parent_pos != *pos + 1));
 
         // If the range spans more than one tree, then the digests must already be in the correct
         // order. Otherwise, we enforce the desired order through sorting.
@@ -955,7 +950,7 @@ mod tests {
         // prune up to the first peak
         const PRUNE_POS: u64 = 62;
         mmr.prune_to_pos(Position::new(PRUNE_POS));
-        assert_eq!(mmr.oldest_retained_pos().unwrap().as_u64(), PRUNE_POS);
+        assert_eq!(mmr.oldest_retained_pos().unwrap(), PRUNE_POS);
 
         // Test range proofs over all possible ranges of at least 2 elements
         let root = mmr.root(&mut hasher);
@@ -987,7 +982,7 @@ mod tests {
             mmr.add(&mut hasher, elements.last().unwrap());
         }
         mmr.prune_to_pos(Position::new(130)); // a bit after the new highest peak
-        assert_eq!(mmr.oldest_retained_pos().unwrap().as_u64(), 130);
+        assert_eq!(mmr.oldest_retained_pos().unwrap(), 130);
 
         let updated_root = mmr.root(&mut hasher);
         let range = elements.len() as u64 - 10..elements.len() as u64;
@@ -1126,10 +1121,8 @@ mod tests {
                         );
 
                     let pinned_nodes = extract_result.unwrap();
-                    let expected_pinned: Vec<u64> =
-                        nodes_to_pin(Position::from(Location::new(leaf)))
-                            .map(|pos| pos.as_u64())
-                            .collect();
+                    let expected_pinned: Vec<Position> =
+                        nodes_to_pin(Position::from(Location::new(leaf))).collect();
 
                     // Verify count matches expected
                     assert_eq!(
@@ -1142,7 +1135,7 @@ mod tests {
                     // The pinned_nodes Vec is in the same order as expected_pinned
                     for (i, &expected_pos) in expected_pinned.iter().enumerate() {
                         let extracted_hash = pinned_nodes[i];
-                        let actual_hash = mmr.get_node(Position::new(expected_pos)).unwrap();
+                        let actual_hash = mmr.get_node(expected_pos).unwrap();
                         assert_eq!(
                                 extracted_hash, actual_hash,
                                 "Hash mismatch at position {expected_pos} (index {i}) for {num_elements} elements, boundary={leaf}, range=[{leaf}, {end_loc}]"
@@ -1182,7 +1175,7 @@ mod tests {
         assert_eq!(node_digests.len(), mmr.size() as usize);
         node_digests.sort_by_key(|(pos, _)| pos.as_u64());
         for (i, (pos, d)) in node_digests.into_iter().enumerate() {
-            assert_eq!(pos.as_u64(), i as u64);
+            assert_eq!(pos, i as u64);
             assert_eq!(mmr.get_node(pos).unwrap(), d);
         }
         // Make sure the wrong root fails.

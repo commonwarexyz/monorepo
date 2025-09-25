@@ -336,7 +336,7 @@ where
                     .iter()
                     .find_map(|(range_start, range_ops)| {
                         let range_end = range_start.as_u64() + range_ops.len() as u64 - 1;
-                        if range_start.as_u64() <= next_loc && next_loc <= range_end {
+                        if *range_start <= next_loc && next_loc <= range_end {
                             Some(*range_start)
                         } else {
                             None
@@ -379,7 +379,7 @@ where
         let journal_size = self.journal.size().await?;
 
         // Calculate the target journal size (upper bound is inclusive)
-        let target_journal_size = self.target.upper_bound.as_u64() + 1;
+        let target_journal_size = self.target.upper_bound + 1;
 
         // Check if we've completed sync
         if journal_size >= target_journal_size {

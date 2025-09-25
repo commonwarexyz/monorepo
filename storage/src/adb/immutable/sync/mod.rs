@@ -111,7 +111,7 @@ where
     ) -> Result<Self::Journal, Error> {
         let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
-        if size <= lower_bound.as_u64() {
+        if size <= lower_bound {
             // Close existing journal and create new one
             journal.close().await.map_err(crate::adb::Error::from)?;
             Self::create_journal(context, config, lower_bound, upper_bound).await
@@ -129,7 +129,7 @@ where
 
             // Get the size of the journal
             let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
-            if size > upper_bound.as_u64() + 1 {
+            if size > upper_bound + 1 {
                 return Err(crate::adb::Error::UnexpectedData(Location::new(size)));
             }
 
@@ -561,7 +561,7 @@ mod tests {
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
                     let log_size = client.journal().size().await.unwrap();
-                    if log_size > initial_lower_bound.as_u64() {
+                    if log_size > initial_lower_bound {
                         break client;
                     }
                 }
@@ -685,7 +685,7 @@ mod tests {
             // Verify state matches the specified range
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), target_root);
-            assert_eq!(synced_db.op_count(), (upper_bound + 1).as_u64());
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
 
             synced_db.destroy().await.unwrap();
             let target_db =
@@ -749,7 +749,7 @@ mod tests {
 
             // Verify database state
             let mut hasher = test_hasher();
-            assert_eq!(sync_db.op_count(), (upper_bound + 1).as_u64());
+            assert_eq!(sync_db.op_count(), upper_bound + 1);
             assert_eq!(sync_db.root(&mut hasher), root);
 
             sync_db.destroy().await.unwrap();
@@ -808,7 +808,7 @@ mod tests {
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
-            assert_eq!(sync_db.op_count(), (upper_bound + 1).as_u64());
+            assert_eq!(sync_db.op_count(), upper_bound + 1);
             let mut hasher = test_hasher();
             assert_eq!(sync_db.root(&mut hasher), root);
 
@@ -1013,7 +1013,7 @@ mod tests {
             // Verify the synced database has the expected state
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), final_root);
-            assert_eq!(synced_db.op_count(), (final_upper_bound + 1).as_u64());
+            assert_eq!(synced_db.op_count(), final_upper_bound + 1);
             assert_eq!(synced_db.oldest_retained_loc, final_lower_bound);
 
             synced_db.destroy().await.unwrap();
@@ -1133,7 +1133,7 @@ mod tests {
             // Verify the synced database has the expected state
             let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), root);
-            assert_eq!(synced_db.op_count(), (upper_bound + 1).as_u64());
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
             assert_eq!(synced_db.oldest_retained_loc, lower_bound);
 
             synced_db.destroy().await.unwrap();

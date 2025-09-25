@@ -347,9 +347,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Confirm post-conditions hold.
         assert_eq!(
             self.log_size,
-            Location::try_from(Position::from(self.mmr.size()))
-                .unwrap()
-                .as_u64()
+            Location::try_from(Position::from(self.mmr.size())).unwrap()
         );
         assert_eq!(self.log_size, self.locations.size().await?);
 
@@ -377,8 +375,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Panics if `loc` is greater than or equal to the number of operations in the log.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc.as_u64() < self.op_count());
-        if loc.as_u64() < self.oldest_retained_loc.as_u64() {
+        assert!(loc < self.op_count());
+        if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }
 
@@ -409,7 +407,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         };
 
         while let Some(&loc) = cursor.next() {
-            if loc == delete_loc.as_u64() {
+            if loc == delete_loc {
                 cursor.delete();
                 return;
             }
@@ -424,7 +422,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         };
 
         while let Some(&loc) = cursor.next() {
-            if loc == old_loc.as_u64() {
+            if loc == old_loc {
                 cursor.update(new_loc.as_u64());
                 return;
             }
@@ -438,7 +436,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Panics if `loc` is greater than or equal to the number of operations in the log.
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc.as_u64() < self.op_count());
+        assert!(loc < self.op_count());
 
         match self.locations.read(loc.as_u64()).await {
             Ok(offset) => {
@@ -469,10 +467,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ) -> Result<Option<V>, Error> {
         let section = loc.as_u64() / self.log_items_per_section;
         let Operation::Update(k, v) = self.log.get(section, offset).await? else {
-            panic!(
-                "didn't find Update operation at location {} and offset {offset}",
-                loc.as_u64()
-            );
+            panic!("didn't find Update operation at location {loc} and offset {offset}");
         };
 
         if k != *key {
@@ -614,7 +609,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         assert!(op_count <= self.op_count());
-        assert!(start_loc.as_u64() < op_count);
+        assert!(start_loc < op_count);
 
         let end_loc = std::cmp::min(op_count, start_loc.as_u64() + max_ops);
         let mmr_size = Position::from(Location::from(op_count)).as_u64();
@@ -712,7 +707,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Iterate over all conflicting keys in the snapshot.
         while let Some(&loc) = cursor.next() {
-            if loc == old_loc.as_u64() {
+            if loc == old_loc {
                 // Update the location of the operation in the snapshot.
                 cursor.update(new_loc);
                 drop(cursor);
@@ -739,13 +734,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         max_steps: u64,
     ) -> Result<(), Error> {
         for _ in 0..max_steps {
-            if self.inactivity_floor_loc.as_u64() == self.op_count() {
+            if self.inactivity_floor_loc == self.op_count() {
                 break;
             }
             let op = self.get_op(self.inactivity_floor_loc).await?;
             self.move_op_if_active(op, self.inactivity_floor_loc)
                 .await?;
-            self.inactivity_floor_loc = self.inactivity_floor_loc + 1;
+            self.inactivity_floor_loc += 1;
         }
 
         self.apply_op(Operation::CommitFloor(
@@ -763,8 +758,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        assert!(target_prune_loc.as_u64() <= self.inactivity_floor_loc.as_u64());
-        if target_prune_loc.as_u64() <= self.oldest_retained_loc.as_u64() {
+        assert!(target_prune_loc <= self.inactivity_floor_loc);
+        if target_prune_loc <= self.oldest_retained_loc {
             return Ok(());
         }
 
@@ -942,7 +937,7 @@ pub(super) mod test {
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
                 db.commit(None).await.unwrap();
-                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc.as_u64());
+                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
             }
 
             db.destroy().await.unwrap();
@@ -1167,7 +1162,7 @@ pub(super) mod test {
             db.raise_inactivity_floor(None, 100).await.unwrap();
             db.sync().await.unwrap();
             let root = db.root(&mut hasher);
-            assert!(start_loc < db.inactivity_floor_loc.as_u64());
+            assert!(start_loc < db.inactivity_floor_loc);
 
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();

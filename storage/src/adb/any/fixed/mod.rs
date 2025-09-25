@@ -242,9 +242,7 @@ impl<
         // At this point the MMR and log should be consistent.
         assert_eq!(
             log.size().await?,
-            Location::try_from(Position::from(mmr.size()))
-                .unwrap()
-                .as_u64()
+            Location::try_from(Position::from(mmr.size())).unwrap()
         );
 
         Ok((inactivity_floor_loc, mmr, log))
@@ -264,7 +262,7 @@ impl<
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<(), Error> {
         if let Some(ref bitmap) = bitmap {
-            assert_eq!(inactivity_floor_loc.as_u64(), bitmap.bit_count());
+            assert_eq!(inactivity_floor_loc, bitmap.bit_count());
         }
 
         let stream = log
@@ -378,8 +376,8 @@ impl<
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc.as_u64() < self.op_count());
-        if loc.as_u64() < self.inactivity_floor_loc.as_u64() {
+        assert!(loc < self.op_count());
+        if loc < self.inactivity_floor_loc {
             return Err(Error::OperationPruned(loc));
         }
 
@@ -606,7 +604,7 @@ impl<
 
         // Iterate over all conflicting keys in the snapshot.
         while let Some(&loc) = cursor.next() {
-            if loc == old_loc.as_u64() {
+            if loc == old_loc {
                 // Update the location of the operation in the snapshot.
                 cursor.update(new_loc);
                 drop(cursor);
@@ -629,13 +627,13 @@ impl<
     /// since it applies at least one operation.
     async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
-            if self.inactivity_floor_loc.as_u64() == self.op_count() {
+            if self.inactivity_floor_loc == self.op_count() {
                 break;
             }
             let op = self.log.read(self.inactivity_floor_loc.as_u64()).await?;
             self.move_op_if_active(op, self.inactivity_floor_loc)
                 .await?;
-            self.inactivity_floor_loc = self.inactivity_floor_loc + 1;
+            self.inactivity_floor_loc += 1;
         }
 
         self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc.as_u64()))
@@ -651,7 +649,7 @@ impl<
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
-        assert!(target_prune_loc.as_u64() <= self.inactivity_floor_loc.as_u64());
+        assert!(target_prune_loc <= self.inactivity_floor_loc);
         if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.
             return Ok(());
@@ -876,7 +874,7 @@ pub(super) mod test {
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
                 db.commit().await.unwrap();
-                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc.as_u64());
+                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
             }
 
             db.destroy().await.unwrap();
@@ -1089,7 +1087,7 @@ pub(super) mod test {
             db.raise_inactivity_floor(100).await.unwrap();
             db.sync().await.unwrap();
             let root = db.root(&mut hasher);
-            assert!(start_loc < db.inactivity_floor_loc.as_u64());
+            assert!(start_loc < db.inactivity_floor_loc);
 
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
@@ -1477,7 +1475,7 @@ pub(super) mod test {
                 .unwrap();
             assert_eq!(
                 historical_proof.size,
-                Position::from(Location::from(original_op_count)).as_u64()
+                Position::from(Location::from(original_op_count))
             );
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_ops.len(), 10);
@@ -1511,7 +1509,7 @@ pub(super) mod test {
                 .historical_proof(1, Location::new(0), NZU64!(1))
                 .await
                 .unwrap();
-            assert_eq!(single_proof.size, Position::from(Location::new(1)).as_u64());
+            assert_eq!(single_proof.size, Position::from(Location::new(1)));
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
@@ -1542,7 +1540,7 @@ pub(super) mod test {
                 .historical_proof(3, Location::new(0), NZU64!(3))
                 .await
                 .unwrap();
-            assert_eq!(min_proof.size, Position::from(Location::new(3)).as_u64());
+            assert_eq!(min_proof.size, Position::from(Location::new(3)));
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
@@ -1573,7 +1571,7 @@ pub(super) mod test {
 
                 assert_eq!(
                     historical_proof.size,
-                    Position::from(Location::new(end_loc)).as_u64()
+                    Position::from(Location::new(end_loc))
                 );
 
                 // Create  reference database at the given historical size
@@ -1619,7 +1617,7 @@ pub(super) mod test {
                 .historical_proof(5, Location::new(1), NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(proof.size, Position::from(Location::new(5)).as_u64());
+            assert_eq!(proof.size, Position::from(Location::new(5)));
             assert_eq!(ops.len(), 4);
 
             let mut hasher = Standard::<Sha256>::new();

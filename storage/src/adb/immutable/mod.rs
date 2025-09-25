@@ -386,9 +386,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Confirm post-conditions hold.
         assert_eq!(
             log_size,
-            Location::try_from(Position::new(mmr.size()))
-                .unwrap()
-                .as_u64()
+            Location::try_from(Position::new(mmr.size())).unwrap()
         );
         assert_eq!(log_size, locations.size().await?);
 
@@ -419,7 +417,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Panics if `loc` is beyond the last commit point.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        assert!(loc.as_u64() <= self.last_commit.unwrap_or(Location::new(0)).as_u64());
+        assert!(loc <= self.last_commit.unwrap_or(Location::new(0)));
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
@@ -445,7 +443,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
-            if loc < self.oldest_retained_loc.as_u64() {
+            if loc < self.oldest_retained_loc {
                 continue;
             }
             if let Some(v) = self.get_from_loc(key, Location::new(loc)).await? {
@@ -459,7 +457,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
     /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
     pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
-        assert!(loc.as_u64() < self.op_count());
+        assert!(loc < self.op_count());
         if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }
@@ -502,10 +500,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let section = loc.as_u64() / self.log_items_per_section;
         let Variable::Set(k, v) = self.log.get(section, offset).await? else {
-            panic!(
-                "didn't find Set operation at location {} and offset {offset}",
-                loc.as_u64()
-            );
+            panic!("didn't find Set operation at location {loc} and offset {offset}");
         };
 
         if k != *key {
@@ -529,9 +524,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// during this call.
     pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
         let loc = self.log_size;
-        let oldest_retained_loc = self.oldest_retained_loc.as_u64();
         self.snapshot
-            .insert_and_prune(&key, loc, |v| *v < oldest_retained_loc);
+            .insert_and_prune(&key, loc, |v| *v < self.oldest_retained_loc);
 
         let op = Variable::Set(key, value);
         self.apply_op(op).await
@@ -606,7 +600,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
         assert!(op_count <= self.op_count());
-        assert!(start_loc.as_u64() < op_count);
+        assert!(start_loc < op_count);
 
         if start_loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(start_loc));
@@ -1197,7 +1191,7 @@ pub(super) mod test {
             let proof_result = db
                 .proof(Location::new(pruned_pos), NZU64!(pruned_pos + 100))
                 .await;
-            assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos.as_u64() == pruned_pos));
+            assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
 
             db.destroy().await.unwrap();
         });
