@@ -18,7 +18,7 @@ use commonware_cryptography::{
     Hasher, PublicKey,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
-use commonware_stream::{public_key::Connection, Receiver, Sender};
+use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use tracing::{debug, info};
@@ -29,7 +29,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 /// Application actor.
 pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
-    indexer: Connection<Si, St>,
+    indexer: (Sender<Si>, Receiver<St>),
     namespace: Vec<u8>,
     public: <MinSig as Variant>::Public,
     other_public: <MinSig as Variant>::Public,
@@ -61,7 +61,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
 
     /// Run the application actor.
     pub async fn run(mut self) {
-        let (mut indexer_sender, mut indexer_receiver) = self.indexer.split();
+        let (mut indexer_sender, mut indexer_receiver) = self.indexer;
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { epoch, response } => {
@@ -92,7 +92,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
-                                .receive()
+                                .recv()
                                 .await
                                 .expect("failed to receive from indexer");
                             let msg = Outbound::<H::Digest>::decode(result)
@@ -133,7 +133,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
-                        .receive()
+                        .recv()
                         .await
                         .expect("failed to receive from indexer");
                     let msg =
@@ -161,7 +161,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
-                        .receive()
+                        .recv()
                         .await
                         .expect("failed to receive from indexer");
                     let msg =
@@ -207,7 +207,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
-                                .receive()
+                                .recv()
                                 .await
                                 .expect("failed to receive from indexer");
                             let message = Outbound::<H::Digest>::decode(result)

@@ -32,13 +32,15 @@ use crate::{
         metered::Storage as MeteredStorage,
     },
     telemetry::metrics::task::Label,
-    utils::signal::{Signal, Stopper},
+    utils::{
+        signal::{Signal, Stopper},
+        Aborter,
+    },
     Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
-use commonware_utils::{hex, SystemTimeExt};
+use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 use futures::{
-    future::AbortHandle,
     task::{waker, ArcWake},
     Future,
 };
@@ -206,6 +208,10 @@ impl Config {
         assert!(
             self.cycle != Duration::default() || self.timeout.is_none(),
             "cycle duration must be non-zero when timeout is set",
+        );
+        assert!(
+            self.cycle >= SYSTEM_TIME_PRECISION,
+            "cycle duration must be greater than or equal to system time precision"
         );
     }
 }
@@ -680,7 +686,7 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    children: Arc<Mutex<Vec<AbortHandle>>>,
+    children: Arc<Mutex<Vec<Aborter>>>,
 }
 
 impl Context {
@@ -819,7 +825,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, gauge) = spawn_metrics!(self, future);
+        let (label, metric) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor();
@@ -829,7 +835,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, gauge, false, children);
+        let (f, handle) = Handle::init_future(future, metric, false, children);
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -846,7 +852,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, gauge) = spawn_metrics!(self, future);
+        let (label, metric) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor();
@@ -854,7 +860,7 @@ impl crate::Spawner for Context {
         move |f: F| {
             // Give spawned task its own empty children list
             let (f, handle) =
-                Handle::init_future(f, gauge, false, Arc::new(Mutex::new(Vec::new())));
+                Handle::init_future(f, metric, false, Arc::new(Mutex::new(Vec::new())));
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -875,8 +881,8 @@ impl crate::Spawner for Context {
         let child_handle = self.spawn(f);
 
         // Register this child with the parent
-        if let Some(abort_handle) = child_handle.abort_handle() {
-            parent_children.lock().unwrap().push(abort_handle);
+        if let Some(aborter) = child_handle.aborter() {
+            parent_children.lock().unwrap().push(aborter);
         }
 
         child_handle
@@ -891,11 +897,11 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
+        let (label, metric) = spawn_metrics!(self, blocking, dedicated);
 
         // Initialize the blocking task
         let executor = self.executor();
-        let (f, handle) = Handle::init_blocking(|| f(self), gauge, false);
+        let (f, handle) = Handle::init_blocking(|| f(self), metric, false);
 
         // Spawn the task
         let f = async move { f() };
@@ -913,12 +919,12 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
+        let (label, metric) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor();
         move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, gauge, false);
+            let (f, handle) = Handle::init_blocking(f, metric, false);
 
             // Spawn the task
             let f = async move { f() };
@@ -1283,6 +1289,18 @@ mod tests {
         let cfg = Config {
             timeout: Some(Duration::default()),
             cycle: Duration::default(),
+            ..Config::default()
+        };
+        deterministic::Runner::new(cfg);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "cycle duration must be greater than or equal to system time precision"
+    )]
+    fn test_bad_cycle() {
+        let cfg = Config {
+            cycle: SYSTEM_TIME_PRECISION - Duration::from_nanos(1),
             ..Config::default()
         };
         deterministic::Runner::new(cfg);

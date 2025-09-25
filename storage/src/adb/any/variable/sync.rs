@@ -13,7 +13,7 @@ use crate::{
         variable::{Config as VConfig, Journal as VJournal},
     },
     metadata::Metadata,
-    mmr::{hasher::Standard, iterator::leaf_num_to_pos},
+    mmr::{hasher::Standard, iterator::leaf_loc_to_pos},
     store::operation::Variable,
     translator::Translator,
 };
@@ -194,8 +194,8 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
-                lower_bound: leaf_num_to_pos(lower_bound),
-                upper_bound: leaf_num_to_pos(upper_bound + 1) - 1,
+                lower_bound_pos: leaf_loc_to_pos(lower_bound),
+                upper_bound_pos: leaf_loc_to_pos(upper_bound + 1) - 1,
                 pinned_nodes,
             },
         )
@@ -935,7 +935,7 @@ mod tests {
             assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
             assert_eq!(
                 synced_db.mmr.pruned_to_pos(),
-                leaf_num_to_pos(lower_bound_ops)
+                leaf_loc_to_pos(lower_bound_ops)
             );
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
 
@@ -1012,7 +1012,7 @@ mod tests {
             assert!(sync_db.oldest_retained_loc().unwrap() <= lower_bound_ops);
             assert_eq!(
                 sync_db.mmr.pruned_to_pos(),
-                leaf_num_to_pos(lower_bound_ops)
+                leaf_loc_to_pos(lower_bound_ops)
             );
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);

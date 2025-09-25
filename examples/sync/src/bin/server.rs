@@ -18,7 +18,7 @@ use commonware_sync::{
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     variable, Error, Key,
 };
-use commonware_utils::parse_duration;
+use commonware_utils::DurationExt;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
@@ -591,7 +591,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .unwrap()
             .parse()
             .map_err(|e| format!("Invalid metrics port: {e}"))?,
-        op_interval: parse_duration(matches.get_one::<String>("op-interval").unwrap())
+        op_interval: Duration::parse(matches.get_one::<String>("op-interval").unwrap())
             .map_err(|e| format!("Invalid operation interval: {e}"))?,
         ops_per_interval: matches
             .get_one::<String>("ops-per-interval")

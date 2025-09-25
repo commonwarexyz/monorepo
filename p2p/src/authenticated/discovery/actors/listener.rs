@@ -6,7 +6,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
-use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
+use commonware_stream::{listen, Config as StreamConfig};
 use governor::{
     clock::ReasonablyRealtime,
     middleware::NoOpMiddleware,
@@ -74,31 +74,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
-        // Wait for the peer to send us their public key
-        //
-        // IncomingConnection limits how long we will wait for the peer to send us their public key
-        // to ensure an adversary can't force us to hold many pending connections open.
-        let incoming = match IncomingConnection::verify(&context, stream_cfg, sink, stream).await {
-            Ok(partial) => partial,
+        let (peer, send, recv) = match listen(
+            context,
+            |peer| tracker.listenable(peer),
+            stream_cfg,
+            stream,
+            sink,
+        )
+        .await
+        {
+            Ok(x) => x,
             Err(err) => {
-                debug!(?err, "failed to verify incoming handshake");
-                return;
-            }
-        };
-        let peer = incoming.peer();
-        debug!(?peer, ?address, "verified handshake");
-
-        // Check if the peer is listenable
-        if !tracker.listenable(peer.clone()).await {
-            debug!(?peer, ?address, "peer not listenable");
-            return;
-        }
-
-        // Perform handshake
-        let stream = match Connection::upgrade_listener(context, incoming).await {
-            Ok(connection) => connection,
-            Err(err) => {
-                debug!(?err, ?peer, ?address, "failed to upgrade connection");
+                debug!(?err, "failed to complete handshake");
                 return;
             }
         };
@@ -112,7 +99,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         debug!(?peer, ?address, "reserved connection");
 
         // Start peer to handle messages
-        supervisor.spawn(stream, reservation).await;
+        supervisor.spawn((send, recv), reservation).await;
     }
 
     #[allow(clippy::type_complexity)]
