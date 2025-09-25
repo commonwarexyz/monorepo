@@ -477,7 +477,7 @@ impl<
             return false;
         };
         let op_count = op_count.as_u64();
-        let end_loc = start_loc + ops.len() as u64;
+        let end_loc = start_loc.checked_add(ops.len() as u64).unwrap();
         if end_loc > op_count {
             debug!(
                 loc = end_loc.as_u64(),

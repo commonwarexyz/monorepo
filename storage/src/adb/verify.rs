@@ -28,7 +28,7 @@ pub fn extract_pinned_nodes<D: Digest>(
     start_loc: Location,
     operations_len: u64,
 ) -> Result<Vec<D>, Error> {
-    let end_loc = start_loc + operations_len;
+    let end_loc = start_loc.checked_add(operations_len).unwrap();
     proof.extract_pinned_nodes(start_loc..end_loc)
 }
 

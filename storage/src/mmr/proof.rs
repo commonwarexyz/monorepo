@@ -358,7 +358,7 @@ impl<D: Digest> Proof<D> {
         let end_element_pos = if elements.len() == 1 {
             start_element_pos
         } else {
-            let end_loc = start_loc + elements.len() as u64 - 1;
+            let end_loc = start_loc.checked_add(elements.len() as u64 - 1).unwrap();
             Position::from(end_loc)
         };
         if end_element_pos >= self.size {
