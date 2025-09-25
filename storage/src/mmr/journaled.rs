@@ -805,7 +805,10 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Mmr<E, H>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Hasher as _, stability::ROOTS, Location, StandardHasher as Standard};
+    use crate::mmr::{
+        hasher::Hasher as _, location::LocationRangeExt as _, stability::ROOTS, Location,
+        StandardHasher as Standard,
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
@@ -1024,10 +1027,10 @@ mod tests {
 
             // Generate & verify a proof that spans flushed elements and the last element.
             let range = Location::new(TEST_ELEMENT as u64)..Location::new(LEAF_COUNT as u64);
-            let proof = mmr.range_proof(range).await.unwrap();
+            let proof = mmr.range_proof(range.clone()).await.unwrap();
             assert!(proof.verify_range_inclusion(
                 &mut hasher,
-                &leaves[TEST_ELEMENT..LEAF_COUNT],
+                &leaves[range.to_usize_range()],
                 TEST_ELEMENT_LOC,
                 &root
             ));

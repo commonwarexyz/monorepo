@@ -618,7 +618,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, mem::Mmr};
+    use crate::mmr::{hasher::Standard, location::LocationRangeExt as _, mem::Mmr};
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -773,15 +773,13 @@ mod tests {
 
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
-                let range = i as u64..j as u64;
-                let range_proof = mmr
-                    .range_proof(Location::new(range.start)..Location::new(range.end))
-                    .unwrap();
+                let range = Location::new(i as u64)..Location::new(j as u64);
+                let range_proof = mmr.range_proof(range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &mut hasher,
-                        &elements[range.start as usize..range.end as usize],
-                        Location::new(range.start),
+                        &elements[range.to_usize_range()],
+                        range.start,
                         &root,
                     ),
                     "valid range proof should verify successfully {i}:{j}",
@@ -791,18 +789,11 @@ mod tests {
 
         // Create a proof over a range of elements, confirm it verifies successfully, then mangle
         // the proof & proof input in various ways, confirming verification fails.
-        let range = 33..40;
-        let range_proof = mmr
-            .range_proof(Location::new(range.start)..Location::new(range.end))
-            .unwrap();
-        let valid_elements = &elements[range.start as usize..range.end as usize];
+        let range = Location::new(33)..Location::new(40);
+        let range_proof = mmr.range_proof(range.clone()).unwrap();
+        let valid_elements = &elements[range.to_usize_range()];
         assert!(
-            range_proof.verify_range_inclusion(
-                &mut hasher,
-                valid_elements,
-                Location::new(range.start),
-                &root
-            ),
+            range_proof.verify_range_inclusion(&mut hasher, valid_elements, range.start, &root),
             "valid range proof should verify successfully"
         );
         // Remove digests from the proof until it's empty, confirming proof verification fails for
@@ -814,7 +805,7 @@ mod tests {
                 !invalid_proof.verify_range_inclusion(
                     &mut hasher,
                     valid_elements,
-                    Location::new(range.start),
+                    range.start,
                     &root,
                 ),
                 "range proof with removed elements should fail"
@@ -824,7 +815,7 @@ mod tests {
         // used to generate the proof.
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
-                if i == range.start as usize && j == range.end as usize {
+                if i == range.start.as_u64() as usize && j == range.end.as_u64() as usize {
                     // skip the valid range
                     continue;
                 }
@@ -832,7 +823,7 @@ mod tests {
                     !range_proof.verify_range_inclusion(
                         &mut hasher,
                         &elements[i..j],
-                        Location::new(range.start),
+                        range.start,
                         &root,
                     ),
                     "range proof with invalid element range should fail {i}:{j}",
@@ -845,7 +836,7 @@ mod tests {
             !range_proof.verify_range_inclusion(
                 &mut hasher,
                 valid_elements,
-                Location::new(range.start),
+                range.start,
                 &invalid_root,
             ),
             "range proof with invalid root should fail"
@@ -859,7 +850,7 @@ mod tests {
                 !invalid_proof.verify_range_inclusion(
                     &mut hasher,
                     valid_elements,
-                    Location::new(range.start),
+                    range.start,
                     &root,
                 ),
                 "mangled range proof should fail verification"
@@ -873,7 +864,7 @@ mod tests {
                 !invalid_proof.verify_range_inclusion(
                     &mut hasher,
                     valid_elements,
-                    Location::new(range.start),
+                    range.start,
                     &root,
                 ),
                 "mangled range proof should fail verification. inserted element at: {i}",
@@ -949,15 +940,13 @@ mod tests {
                 continue;
             }
             for j in (i + 2)..elements.len() {
-                let range = i as u64..j as u64;
-                let range_proof = mmr
-                    .range_proof(Location::new(range.start)..Location::new(range.end))
-                    .unwrap();
+                let range = Location::new(i as u64)..Location::new(j as u64);
+                let range_proof = mmr.range_proof(range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &mut hasher,
-                        &elements[range.start as usize..range.end as usize],
-                        Location::new(range.start),
+                        &elements[range.to_usize_range()],
+                        range.start,
                         &root,
                     ),
                     "valid range proof over remaining elements should verify successfully",
@@ -975,15 +964,13 @@ mod tests {
         assert_eq!(mmr.oldest_retained_pos().unwrap(), 130);
 
         let updated_root = mmr.root(&mut hasher);
-        let range = elements.len() as u64 - 10..elements.len() as u64;
-        let range_proof = mmr
-            .range_proof(Location::new(range.start)..Location::new(range.end))
-            .unwrap();
+        let range = Location::new(elements.len() as u64 - 10)..Location::new(elements.len() as u64);
+        let range_proof = mmr.range_proof(range.clone()).unwrap();
         assert!(
                 range_proof.verify_range_inclusion(
                     &mut hasher,
-                    &elements[range.start as usize..range.end as usize],
-                    Location::new(range.start),
+                    &elements[range.to_usize_range()],
+                    range.start,
                     &updated_root,
                 ),
                 "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
@@ -1005,10 +992,8 @@ mod tests {
         // serializes=>deserializes correctly.
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
-                let range = i as u64..j as u64;
-                let proof = mmr
-                    .range_proof(Location::new(range.start)..Location::new(range.end))
-                    .unwrap();
+                let range = Location::new(i as u64)..Location::new(j as u64);
+                let proof = mmr.range_proof(range).unwrap();
 
                 let expected_size = proof.encode_size();
                 let serialized_proof = proof.encode().freeze();
@@ -1187,7 +1172,7 @@ mod tests {
         let single_digests = single_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range_start.as_u64() as usize..range.end.as_u64() as usize],
+                &elements[range.to_usize_range()],
                 range_start,
                 &root,
             )
@@ -1202,7 +1187,7 @@ mod tests {
         let mid_digests = mid_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range_start.as_u64() as usize..range.end.as_u64() as usize],
+                &elements[range.to_usize_range()],
                 range_start,
                 &root,
             )
@@ -1217,7 +1202,7 @@ mod tests {
         let last_digests = last_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range_start.as_u64() as usize..range.end.as_u64() as usize],
+                &elements[range.to_usize_range()],
                 range_start,
                 &root,
             )
@@ -1231,7 +1216,7 @@ mod tests {
         let small_digests = small_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range.start.as_u64() as usize..range.end.as_u64() as usize],
+                &elements[range.to_usize_range()],
                 range_start,
                 &root,
             )
@@ -1246,7 +1231,7 @@ mod tests {
         let mid_range_digests = mid_range_proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
-                &elements[range.start.as_u64() as usize..range.end.as_u64() as usize],
+                &elements[range.to_usize_range()],
                 range_start,
                 &root,
             )

@@ -2,7 +2,7 @@ use super::position::Position;
 use core::{
     convert::TryFrom,
     fmt,
-    ops::{Add, AddAssign, Sub, SubAssign},
+    ops::{Add, AddAssign, Range, Sub, SubAssign},
 };
 use thiserror::Error;
 
@@ -208,6 +208,19 @@ impl NonLeafPositionError {
     #[inline]
     pub const fn position(self) -> Position {
         self.pos
+    }
+}
+
+/// Extension trait for converting `Range<Location>` into other range types.
+pub trait LocationRangeExt {
+    /// Convert a `Range<Location>` to a `Range<usize>` suitable for slice indexing.
+    fn to_usize_range(&self) -> Range<usize>;
+}
+
+impl LocationRangeExt for Range<Location> {
+    #[inline]
+    fn to_usize_range(&self) -> Range<usize> {
+        self.start.as_u64() as usize..self.end.as_u64() as usize
     }
 }
 

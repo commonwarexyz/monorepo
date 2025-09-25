@@ -156,7 +156,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{mem::Mmr, StandardHasher as Standard};
+    use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
@@ -190,7 +190,7 @@ mod tests {
                 let proof_store = ProofStore::new(
                     &mut hasher,
                     &range_proof,
-                    &elements[range_start.as_u64() as usize..range_end.as_u64() as usize],
+                    &elements[range.to_usize_range()],
                     range_start,
                     &root,
                 )
@@ -206,7 +206,7 @@ mod tests {
                     let sub_range_proof = proof_store.range_proof(sub_range.clone()).await.unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
-                        &elements[subrange_start.as_u64() as usize..subrange_end.as_u64() as usize],
+                        &elements[sub_range.to_usize_range()],
                         subrange_start,
                         &root
                     ));

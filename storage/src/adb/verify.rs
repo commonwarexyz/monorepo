@@ -135,7 +135,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{iterator::nodes_to_pin, mem::Mmr};
+    use crate::mmr::{iterator::nodes_to_pin, location::LocationRangeExt as _, mem::Mmr};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
@@ -290,17 +290,15 @@ mod tests {
                 positions.push(pos);
             }
             let root = mmr.root(&mut hasher);
-            let range = 1..4;
-            let proof = mmr
-                .range_proof(Location::new(range.start)..Location::new(range.end))
-                .unwrap();
+            let range = Location::new(1)..Location::new(4);
+            let proof = mmr.range_proof(range.clone()).unwrap();
 
             // Verify and extract digests for subset of operations
             let result = verify_proof_and_extract_digests(
                 &mut hasher,
                 &proof,
                 Location::new(1), // start_loc
-                &operations[range.start as usize..range.end as usize],
+                &operations[range.to_usize_range()],
                 &root,
             );
             assert!(result.is_ok());
@@ -313,7 +311,7 @@ mod tests {
                 &mut hasher,
                 &proof,
                 Location::new(1),
-                &operations[range.start as usize..range.end as usize],
+                &operations[range.to_usize_range()],
                 &wrong_root,
             )
             .is_err());
@@ -385,34 +383,32 @@ mod tests {
                 positions.push(pos);
             }
             let root = mmr.root(&mut hasher);
-            let range = 0..3;
-            let proof = mmr
-                .range_proof(Location::new(range.start)..Location::new(range.end))
-                .unwrap();
+            let range = Location::new(0)..Location::new(3);
+            let proof = mmr.range_proof(range.clone()).unwrap();
 
             // Create proof store
             let result = create_proof_store(
                 &mut hasher,
                 &proof,
-                Location::new(0),                                      // start_loc
-                &operations[range.start as usize..range.end as usize], // Only the first 3 operations covered by the proof
+                range.start,                         // start_loc
+                &operations[range.to_usize_range()], // Only the first 3 operations covered by the proof
                 &root,
             );
             assert!(result.is_ok());
             let proof_store = result.unwrap();
 
             // Verify we can generate sub-proofs from the store
-            let sub_proof =
-                verification::range_proof(&proof_store, Location::new(0)..Location::new(2))
-                    .await
-                    .unwrap();
+            let range = Location::new(0)..Location::new(2);
+            let sub_proof = verification::range_proof(&proof_store, range.clone())
+                .await
+                .unwrap();
 
             // Verify the sub-proof
             assert!(verify_proof(
                 &mut hasher,
                 &sub_proof,
-                Location::new(0),
-                &operations[0..2],
+                range.start,
+                &operations[range.to_usize_range()],
                 &root,
             ));
         });
