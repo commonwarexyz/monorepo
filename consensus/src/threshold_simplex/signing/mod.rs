@@ -6,7 +6,8 @@ use crate::{
     },
     types::Round,
 };
-use commonware_codec::Encode;
+use bytes::{Buf, BufMut};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
@@ -72,6 +73,17 @@ impl<S: SigningScheme> Clone for Vote<S> {
     }
 }
 
+impl<S> PartialEq for Vote<S>
+where
+    S: SigningScheme,
+    S::SignerId: PartialEq,
+    S::Signature: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.signer == other.signer && self.signature == other.signature
+    }
+}
+
 /// Threshold randomness recovered from consensus certificates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Seed<V: Variant> {
@@ -100,12 +112,339 @@ impl<S: SigningScheme> VoteVerification<S> {
     }
 }
 
+impl<S> Write for Vote<S>
+where
+    S: SigningScheme,
+    S::SignerId: Write,
+    S::Signature: Write,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.signer.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl<S> EncodeSize for Vote<S>
+where
+    S: SigningScheme,
+    S::SignerId: EncodeSize,
+    S::Signature: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        self.signer.encode_size() + self.signature.encode_size()
+    }
+}
+
+impl<S> Read for Vote<S>
+where
+    S: SigningScheme,
+    S::SignerId: Read<Cfg = ()>,
+    S::Signature: Read<Cfg = S::SignatureReadCfg>,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let signer = S::SignerId::read(reader)?;
+        let signature = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;
+
+        Ok(Self { signer, signature })
+    }
+}
+
+/// Partial notarize vote carrying the proposal and signatures.
+#[derive(Clone)]
+pub struct Notarize<S: SigningScheme, D: Digest> {
+    pub proposal: Proposal<D>,
+    pub vote: Vote<S>,
+}
+
+impl<S, D> Write for Notarize<S, D>
+where
+    S: SigningScheme,
+    S::SignerId: Write,
+    S::Signature: Write,
+    D: Digest,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.proposal.write(writer);
+        self.vote.write(writer);
+    }
+}
+
+impl<S, D> EncodeSize for Notarize<S, D>
+where
+    S: SigningScheme,
+    S::SignerId: EncodeSize,
+    S::Signature: EncodeSize,
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        self.proposal.encode_size() + self.vote.encode_size()
+    }
+}
+
+impl<S, D> Read for Notarize<S, D>
+where
+    S: SigningScheme,
+    S::SignerId: Read<Cfg = ()>,
+    S::Signature: Read<Cfg = S::SignatureReadCfg>,
+    D: Digest,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let proposal = Proposal::read(reader)?;
+        let vote = Vote::read(reader)?;
+
+        Ok(Self { proposal, vote })
+    }
+}
+
+/// Partial nullify vote for a given round.
+#[derive(Clone)]
+pub struct Nullify<S: SigningScheme> {
+    pub round: Round,
+    pub vote: Vote<S>,
+}
+
+impl<S> Write for Nullify<S>
+where
+    S: SigningScheme,
+    S::SignerId: Write,
+    S::Signature: Write,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.round.write(writer);
+        self.vote.write(writer);
+    }
+}
+
+impl<S> EncodeSize for Nullify<S>
+where
+    S: SigningScheme,
+    S::SignerId: EncodeSize,
+    S::Signature: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        self.round.encode_size() + self.vote.encode_size()
+    }
+}
+
+impl<S> Read for Nullify<S>
+where
+    S: SigningScheme,
+    S::SignerId: Read<Cfg = ()>,
+    S::Signature: Read<Cfg = S::SignatureReadCfg>,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let round = Round::read(reader)?;
+        let vote = Vote::read(reader)?;
+
+        Ok(Self { round, vote })
+    }
+}
+
+/// Partial finalize vote carrying the proposal and signatures.
+#[derive(Clone)]
+pub struct Finalize<S: SigningScheme, D: Digest> {
+    pub proposal: Proposal<D>,
+    pub vote: Vote<S>,
+}
+
+impl<S, D> Write for Finalize<S, D>
+where
+    S: SigningScheme,
+    S::SignerId: Write,
+    S::Signature: Write,
+    D: Digest,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.proposal.write(writer);
+        self.vote.write(writer);
+    }
+}
+
+impl<S, D> EncodeSize for Finalize<S, D>
+where
+    S: SigningScheme,
+    S::SignerId: EncodeSize,
+    S::Signature: EncodeSize,
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        self.proposal.encode_size() + self.vote.encode_size()
+    }
+}
+
+impl<S, D> Read for Finalize<S, D>
+where
+    S: SigningScheme,
+    S::SignerId: Read<Cfg = ()>,
+    S::Signature: Read<Cfg = S::SignatureReadCfg>,
+    D: Digest,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let proposal = Proposal::read(reader)?;
+        let vote = Vote::read(reader)?;
+
+        Ok(Self { proposal, vote })
+    }
+}
+
+/// Aggregated notarization certificate with randomness seed.
+#[derive(Clone)]
+pub struct Notarization<S: SigningScheme, D: Digest> {
+    pub proposal: Proposal<D>,
+    pub certificate: S::Certificate,
+}
+
+impl<S, D> Write for Notarization<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: Write,
+    D: Digest,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.proposal.write(writer);
+        self.certificate.write(writer);
+    }
+}
+
+impl<S, D> EncodeSize for Notarization<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: EncodeSize,
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        self.proposal.encode_size() + self.certificate.encode_size()
+    }
+}
+
+impl<S, D> Read for Notarization<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: Read<Cfg = S::CertificateReadCfg>,
+    D: Digest,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let proposal = Proposal::read(reader)?;
+        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+
+        Ok(Self {
+            proposal,
+            certificate,
+        })
+    }
+}
+
+/// Aggregated nullification certificate for a round.
+#[derive(Clone)]
+pub struct Nullification<S: SigningScheme> {
+    pub round: Round,
+    pub certificate: S::Certificate,
+}
+
+impl<S> Write for Nullification<S>
+where
+    S: SigningScheme,
+    S::Certificate: Write,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.round.write(writer);
+        self.certificate.write(writer);
+    }
+}
+
+impl<S> EncodeSize for Nullification<S>
+where
+    S: SigningScheme,
+    S::Certificate: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        self.round.encode_size() + self.certificate.encode_size()
+    }
+}
+
+impl<S> Read for Nullification<S>
+where
+    S: SigningScheme,
+    S::Certificate: Read<Cfg = S::CertificateReadCfg>,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let round = Round::read(reader)?;
+        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+
+        Ok(Self { round, certificate })
+    }
+}
+
+/// Aggregated finalization certificate.
+#[derive(Clone)]
+pub struct Finalization<S: SigningScheme, D: Digest> {
+    pub proposal: Proposal<D>,
+    pub certificate: S::Certificate,
+}
+
+impl<S, D> Write for Finalization<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: Write,
+    D: Digest,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.proposal.write(writer);
+        self.certificate.write(writer);
+    }
+}
+
+impl<S, D> EncodeSize for Finalization<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: EncodeSize,
+    D: Digest,
+{
+    fn encode_size(&self) -> usize {
+        self.proposal.encode_size() + self.certificate.encode_size()
+    }
+}
+
+impl<S, D> Read for Finalization<S, D>
+where
+    S: SigningScheme,
+    S::Certificate: Read<Cfg = S::CertificateReadCfg>,
+    D: Digest,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let proposal = Proposal::read(reader)?;
+        let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
+
+        Ok(Self {
+            proposal,
+            certificate,
+        })
+    }
+}
+
 /// Trait that signing schemes must implement.
 pub trait SigningScheme: Send + Sync {
     type SignerId: Clone + Ord;
     type Signature: Clone;
     type Certificate: Clone;
     type Randomness;
+
+    type SignatureReadCfg;
+    type CertificateReadCfg;
 
     fn sign_vote<D: Digest>(
         &self,
@@ -136,9 +475,10 @@ pub trait SigningScheme: Send + Sync {
         &self,
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
-    ) -> Result<Option<Self::Randomness>, Error>
-    where
-        Self: Sized;
+    ) -> Result<Option<Self::Randomness>, Error>;
+
+    fn signature_read_cfg() -> Self::SignatureReadCfg;
+    fn certificate_read_cfg() -> Self::CertificateReadCfg;
 }
 
 /// Placeholder for the upcoming BLS threshold implementation.
@@ -171,6 +511,9 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
     type Signature = (V::Signature, V::Signature);
     type Certificate = (V::Signature, V::Signature);
     type Randomness = Seed<V>;
+
+    type SignatureReadCfg = ((), ());
+    type CertificateReadCfg = ((), ());
 
     fn sign_vote<D: Digest>(
         &self,
@@ -302,7 +645,6 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
     ) -> VoteVerification<Self>
     where
         I: IntoIterator<Item = Vote<Self>>,
-        Self: Sized,
     {
         let votes: Vec<Vote<Self>> = votes.into_iter().collect();
         if votes.is_empty() {
@@ -465,10 +807,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         &self,
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
-    ) -> Result<Option<Self::Randomness>, Error>
-    where
-        Self: Sized,
-    {
+    ) -> Result<Option<Self::Randomness>, Error> {
         let aggregate_pair = |messages: &[_], certificate: &Self::Certificate| {
             let signature =
                 aggregate_signatures::<V, _>(&[certificate.0.clone(), certificate.1.clone()]);
@@ -521,12 +860,21 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
 
         Ok(Some(Seed::new(round, certificate.1.clone())))
     }
+
+    fn signature_read_cfg() -> Self::SignatureReadCfg {
+        ((), ())
+    }
+
+    fn certificate_read_cfg() -> Self::CertificateReadCfg {
+        ((), ())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threshold_simplex::types::{Finalize, Notarize, Nullify};
+    use crate::threshold_simplex::types;
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops::{evaluate_all, generate_shares},
@@ -595,7 +943,7 @@ mod tests {
             )
             .expect("sign vote");
 
-        let legacy = Notarize::<MinSig, _>::sign(namespace, &share, proposal.clone());
+        let legacy = types::Notarize::<MinSig, _>::sign(namespace, &share, proposal.clone());
         assert!(vote.signature.0 == legacy.proposal_signature.value);
         assert!(vote.signature.1 == legacy.seed_signature.value);
     }
@@ -619,7 +967,7 @@ mod tests {
             .sign_vote::<Sha256Digest>(VoteContext::Nullify { namespace, round }, share.index)
             .expect("sign vote");
 
-        let legacy = Nullify::<MinSig>::sign(namespace, &share, round);
+        let legacy = types::Nullify::<MinSig>::sign(namespace, &share, round);
         assert!(vote.signature.0 == legacy.view_signature.value);
         assert!(vote.signature.1 == legacy.seed_signature.value);
     }
@@ -651,7 +999,7 @@ mod tests {
             )
             .expect("sign vote");
 
-        let legacy = Finalize::<MinSig, _>::sign(namespace, &share, proposal.clone());
+        let legacy = types::Finalize::<MinSig, _>::sign(namespace, &share, proposal.clone());
         assert!(vote.signature.0 == legacy.proposal_signature.value);
         let seed_ns = seed_namespace(namespace);
         let seed_bytes = proposal.round.encode();
@@ -693,6 +1041,122 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn vote_codec_roundtrip() {
+        let mut rng = StdRng::seed_from_u64(41);
+        let threshold = 3usize;
+        let (public_poly, mut shares) =
+            generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
+        let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
+        let identity = *public_poly.constant();
+        let share = shares.remove(0);
+        let scheme: BlsThresholdScheme<MinSig> =
+            BlsThresholdScheme::new(polynomial, identity, share.clone(), threshold);
+
+        let round = Round::new(0, 7);
+        let payload = Sha256Digest::from([2u8; 32]);
+        let proposal = Proposal::new(round, 6, payload);
+
+        let vote = scheme
+            .sign_vote(
+                VoteContext::Notarize {
+                    namespace: b"codec-vote",
+                    proposal: &proposal,
+                },
+                share.index,
+            )
+            .expect("vote");
+
+        let encoded = vote.encode();
+        let decoded = <Vote<BlsThresholdScheme<MinSig>>>::decode(encoded).expect("decode");
+        assert_eq!(decoded, vote);
+    }
+
+    #[test]
+    fn notarize_vote_codec_roundtrip() {
+        let mut rng = StdRng::seed_from_u64(43);
+        let threshold = 3usize;
+        let (public_poly, mut shares) =
+            generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
+        let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
+        let identity = *public_poly.constant();
+        let share = shares.remove(0);
+        let scheme: BlsThresholdScheme<MinSig> =
+            BlsThresholdScheme::new(polynomial, identity, share.clone(), threshold);
+
+        let round = Round::new(0, 9);
+        let payload = Sha256Digest::from([9u8; 32]);
+        let proposal = Proposal::new(round, 8, payload);
+
+        let vote = scheme
+            .sign_vote(
+                VoteContext::Notarize {
+                    namespace: b"codec-notarize-vote",
+                    proposal: &proposal,
+                },
+                share.index,
+            )
+            .expect("vote");
+
+        let message: Notarize<BlsThresholdScheme<MinSig>, Sha256Digest> = Notarize {
+            proposal: proposal.clone(),
+            vote,
+        };
+
+        let encoded = message.encode();
+        let decoded =
+            <Notarize<BlsThresholdScheme<MinSig>, Sha256Digest>>::decode(encoded).expect("decode");
+        assert_eq!(decoded.proposal, message.proposal);
+        assert_eq!(decoded.vote, message.vote);
+    }
+
+    #[test]
+    fn notarization_certificate_codec_roundtrip() {
+        let threshold = 3usize;
+        let (schemes, _) = build_scheme_set(45, 4, threshold);
+        let round = Round::new(0, 30);
+        let payload = Sha256Digest::from([4u8; 32]);
+        let proposal = Proposal::new(round, 29, payload);
+        let namespace = b"codec-notarization";
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(threshold)
+            .map(|scheme| {
+                scheme
+                    .sign_vote(
+                        VoteContext::Notarize {
+                            namespace,
+                            proposal: &proposal,
+                        },
+                        scheme.share.index,
+                    )
+                    .expect("sign vote")
+            })
+            .collect();
+
+        let certificate = schemes[0]
+            .assemble_certificate(
+                VoteContext::Notarize {
+                    namespace,
+                    proposal: &proposal,
+                },
+                &votes,
+            )
+            .expect("assemble");
+
+        let message: Notarization<BlsThresholdScheme<MinSig>, Sha256Digest> = Notarization {
+            proposal: proposal.clone(),
+            certificate,
+        };
+
+        let encoded = message.encode();
+        let decoded = <Notarization<BlsThresholdScheme<MinSig>, Sha256Digest>>::decode(encoded)
+            .expect("decode");
+        assert_eq!(decoded.proposal, message.proposal);
+        assert_eq!(decoded.certificate, message.certificate);
     }
 
     #[test]
