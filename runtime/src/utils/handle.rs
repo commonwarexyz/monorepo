@@ -332,9 +332,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let context = context.with_label(LABEL);
-            let spawn_blocking = context.clone().spawn_blocking_ref(false);
-
-            let blocking_handle = spawn_blocking(|| {
+            let blocking_handle = context.clone().spawn_blocking(false, |_| {
                 // Simulate some blocking work
                 42
             });

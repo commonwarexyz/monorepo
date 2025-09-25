@@ -7,7 +7,7 @@ use commonware_runtime::{Metrics, Spawner};
 /// once, and that the reservation is released when the peer connection fails or is closed.
 pub struct Reservation<E: Spawner + Metrics, P: PublicKey> {
     /// Context needed to spawn tasks if needed.
-    context: E,
+    context: Option<E>,
 
     /// Metadata about the reservation.
     metadata: Metadata<P>,
@@ -22,7 +22,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Reservation<E, P> {
     /// Create a new reservation for a peer.
     pub fn new(context: E, metadata: Metadata<P>, releaser: Releaser<E, P>) -> Self {
         Self {
-            context,
+            context: Some(context),
             metadata,
             releaser: Some(releaser),
         }
@@ -53,8 +53,11 @@ impl<E: Spawner + Metrics, P: PublicKey> Drop for Reservation<E, P> {
         // While it may not be immediately obvious how a deadlock could occur, we take the
         // conservative approach of avoiding it.
         let metadata = self.metadata.clone();
-        self.context.spawn_ref()(async move {
-            releaser.release(metadata).await;
-        });
+        self.context
+            .take()
+            .expect("context is only consumed on drop")
+            .spawn(move |_| async move {
+                releaser.release(metadata).await;
+            });
     }
 }

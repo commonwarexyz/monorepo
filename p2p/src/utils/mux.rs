@@ -48,7 +48,7 @@ type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 
 /// A multiplexer of p2p channels into subchannels.
 pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
-    context: E,
+    context: Option<E>,
     sender: S,
     receiver: R,
     mailbox_size: usize,
@@ -67,7 +67,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     ) -> (Self, MuxHandle<E, S, R>) {
         let (control_tx, control_rx) = mpsc::channel(mailbox_size);
         let mux = Self {
-            context: context.clone(),
+            context: Some(context.clone()),
             sender,
             receiver,
             mailbox_size,
@@ -76,7 +76,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
         };
 
         let handle = MuxHandle {
-            context,
+            context: Some(context),
             sender: mux.sender.clone(),
             control_tx,
         };
@@ -86,7 +86,10 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 
     /// Start the demuxer using the given spawner.
     pub fn start(mut self) -> Handle<Result<(), R::Error>> {
-        self.context.spawn_ref()(self.run())
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|_| self.run())
     }
 
     /// Drive demultiplexing of messages into per-subchannel receivers.
@@ -157,7 +160,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 /// A clonable handle that allows registering routes at any time, even after the [Muxer] is running.
 #[derive(Clone)]
 pub struct MuxHandle<E: Spawner, S: Sender, R: Receiver> {
-    context: E,
+    context: Option<E>,
     sender: S,
     control_tx: mpsc::Sender<Control<R>>,
 }
@@ -223,7 +226,7 @@ impl<S: Sender> Sender for SubSender<S> {
 
 /// Receiver that yields messages for a specific subchannel.
 pub struct SubReceiver<E: Spawner, R: Receiver> {
-    context: E,
+    context: Option<E>,
     receiver: mpsc::Receiver<Message<R::PublicKey>>,
     control_tx: Option<mpsc::Sender<Control<R>>>,
     subchannel: Channel,
@@ -262,9 +265,12 @@ impl<E: Spawner, R: Receiver> Drop for SubReceiver<E, R> {
         }
 
         // Otherwise, spawn a task to deregister the subchannel.
-        self.context.spawn_ref()(async move {
-            let _ = control_tx.send(Control::Deregister { subchannel }).await;
-        });
+        self.context
+            .take()
+            .expect("context is only consumed on drop")
+            .spawn(move |_| async move {
+                let _ = control_tx.send(Control::Deregister { subchannel }).await;
+            });
     }
 }
 

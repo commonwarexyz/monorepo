@@ -58,7 +58,7 @@ struct BlockSubscription<B: Block> {
 /// behind.
 pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> {
     // ---------- Context ----------
-    context: E,
+    context: Option<E>,
 
     // ---------- Message Passing ----------
     // Mailbox
@@ -209,7 +209,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                context,
+                context: Some(context),
                 mailbox,
                 identity: config.identity,
                 mailbox_size: config.mailbox_size,
@@ -241,12 +241,16 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         R: Resolver<Key = handler::Request<B>>,
         P: PublicKey,
     {
-        self.context.spawn_ref()(self.run(application, buffer, resolver))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context, application, buffer, resolver))
     }
 
     /// Run the application actor.
     async fn run<R, P>(
         mut self,
+        context: E,
         application: impl Reporter<Activity = B>,
         mut buffer: buffered::Mailbox<P, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
@@ -259,16 +263,14 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
         let finalizer = Finalizer::new(
-            self.context.with_label("finalizer"),
+            context.with_label("finalizer"),
             format!("{}-finalizer", self.partition_prefix.clone()),
             application,
             orchestrator,
             notifier_rx,
         )
         .await;
-        self.context
-            .with_label("finalizer")
-            .spawn(|_| finalizer.run());
+        context.with_label("finalizer").spawn(|_| finalizer.run());
 
         // Create a local pool for waiter futures
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();

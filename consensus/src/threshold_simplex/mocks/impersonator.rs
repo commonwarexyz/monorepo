@@ -27,7 +27,7 @@ pub struct Impersonator<
     H: Hasher,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
-    context: E,
+    context: Option<E>,
     supervisor: S,
 
     namespace: Vec<u8>,
@@ -45,7 +45,7 @@ impl<
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context,
+            context: Some(context),
             supervisor: cfg.supervisor,
 
             namespace: cfg.namespace,
@@ -56,7 +56,10 @@ impl<
     }
 
     pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(pending_network))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|_| self.run(pending_network))
     }
 
     async fn run(self, pending_network: (impl Sender, impl Receiver)) {

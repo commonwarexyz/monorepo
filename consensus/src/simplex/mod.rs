@@ -662,9 +662,7 @@ mod tests {
                 let mut engine_handlers = Vec::new();
                 for scheme in schemes.into_iter() {
                     // Create scheme context
-                    let context = context
-                        .clone()
-                        .with_label(&format!("validator-{}", scheme.public_key()));
+                    let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                     // Start engine
                     let validator = scheme.public_key();

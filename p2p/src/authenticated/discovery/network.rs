@@ -27,7 +27,7 @@ pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
     C: Signer,
 > {
-    context: E,
+    context: Option<E>,
     cfg: Config<C>,
 
     channels: Channels<C::PublicKey>,
@@ -78,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
         (
             Self {
-                context,
+                context: Some(context),
                 cfg,
 
                 channels,
@@ -120,10 +120,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context))
     }
 
-    async fn run(self) {
+    async fn run(self, context: E) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
 
@@ -132,7 +135,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
-            self.context.with_label("spawner"),
+            context.with_label("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
@@ -155,7 +158,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             handshake_timeout: self.cfg.handshake_timeout,
         };
         let listener = listener::Actor::new(
-            self.context.with_label("listener"),
+            context.with_label("listener"),
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
@@ -167,7 +170,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
         // Start dialer
         let dialer = dialer::Actor::new(
-            self.context.with_label("dialer"),
+            context.with_label("dialer"),
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,

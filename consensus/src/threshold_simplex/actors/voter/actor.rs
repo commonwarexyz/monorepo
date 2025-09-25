@@ -440,7 +440,7 @@ pub struct Actor<
         Share = group::Share,
     >,
 > {
-    context: E,
+    context: Option<E>,
     crypto: C,
     blocker: B,
     automaton: A,
@@ -548,7 +548,7 @@ impl<
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
-                context: context.clone(),
+                context: Some(context.clone()),
                 crypto: cfg.crypto,
                 blocker: cfg.blocker,
                 automaton: cfg.automaton,
@@ -728,7 +728,7 @@ impl<
         Some((context.clone(), self.automaton.propose(context).await))
     }
 
-    fn timeout_deadline(&mut self) -> SystemTime {
+    fn timeout_deadline(&mut self, context: &E) -> SystemTime {
         // Return the earliest deadline
         let view = self.views.get_mut(&self.view).unwrap();
         if let Some(deadline) = view.leader_deadline {
@@ -745,13 +745,14 @@ impl<
         }
 
         // Set nullify retry, if none already set
-        let null_retry = self.context.current() + self.nullify_retry;
+        let null_retry = context.current() + self.nullify_retry;
         view.nullify_retry = Some(null_retry);
         null_retry
     }
 
     async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
+        context: &E,
         batcher: &mut batcher::Mailbox<C::PublicKey, V, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
@@ -823,7 +824,7 @@ impl<
         // Handle the nullify
         if !retry {
             batcher.constructed(Voter::Nullify(nullify.clone())).await;
-            self.handle_nullify(nullify.clone()).await;
+            self.handle_nullify(context, nullify.clone()).await;
 
             // Sync the journal
             self.journal
@@ -846,11 +847,11 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn handle_nullify(&mut self, nullify: Nullify<V>) {
+    async fn handle_nullify(&mut self, context: &E, nullify: Nullify<V>) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view();
         let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
+            context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
@@ -1033,16 +1034,16 @@ impl<
         true
     }
 
-    fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
+    fn since_view_start(&self, context: &E, view: u64) -> Option<(bool, f64)> {
         let round = self.views.get(&view)?;
         let (leader, _) = round.leader.as_ref()?;
-        let Ok(elapsed) = self.context.current().duration_since(round.start) else {
+        let Ok(elapsed) = context.current().duration_since(round.start) else {
             return None;
         };
         Some((*leader == self.crypto.public_key(), elapsed.as_secs_f64()))
     }
 
-    fn enter_view(&mut self, view: u64, seed: V::Signature) {
+    fn enter_view(&mut self, context: &E, view: u64, seed: V::Signature) {
         // Ensure view is valid
         if view <= self.view {
             trace!(
@@ -1055,13 +1056,13 @@ impl<
 
         // Setup new view
         let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
+            context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
         ));
-        round.leader_deadline = Some(self.context.current() + self.leader_timeout);
-        round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
+        round.leader_deadline = Some(context.current() + self.leader_timeout);
+        round.advance_deadline = Some(context.current() + self.notarization_timeout);
         round.set_leader(seed);
         self.view = view;
 
@@ -1107,11 +1108,11 @@ impl<
         self.tracked_views.set(self.views.len() as i64);
     }
 
-    async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
+    async fn handle_notarize(&mut self, context: &E, notarize: Notarize<V, D>) {
         // Check to see if notarize is for proposal in view
         let view = notarize.view();
         let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
+            context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
@@ -1130,7 +1131,7 @@ impl<
         round.add_verified_notarize(notarize).await;
     }
 
-    async fn notarization(&mut self, notarization: Notarization<V, D>) -> Action {
+    async fn notarization(&mut self, context: &E, notarization: Notarization<V, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
         if !interesting(
@@ -1158,15 +1159,15 @@ impl<
         }
 
         // Handle notarization
-        self.handle_notarization(notarization).await;
+        self.handle_notarization(context, notarization).await;
         Action::Process
     }
 
-    async fn handle_notarization(&mut self, notarization: Notarization<V, D>) {
+    async fn handle_notarization(&mut self, context: &E, notarization: Notarization<V, D>) {
         // Create round (if it doesn't exist)
         let view = notarization.view();
         let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
+            context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
@@ -1185,10 +1186,10 @@ impl<
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(context, view + 1, seed);
     }
 
-    async fn nullification(&mut self, nullification: Nullification<V>) -> Action {
+    async fn nullification(&mut self, context: &E, nullification: Nullification<V>) -> Action {
         // Check if we are still in a view where this notarization could help
         if !interesting(
             self.activity_timeout,
@@ -1215,15 +1216,15 @@ impl<
         }
 
         // Handle notarization
-        self.handle_nullification(nullification).await;
+        self.handle_nullification(context, nullification).await;
         Action::Process
     }
 
-    async fn handle_nullification(&mut self, nullification: Nullification<V>) {
+    async fn handle_nullification(&mut self, context: &E, nullification: Nullification<V>) {
         // Create round (if it doesn't exist)
         let view = nullification.view();
         let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
+            context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
@@ -1242,14 +1243,14 @@ impl<
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(context, view + 1, seed);
     }
 
-    async fn handle_finalize(&mut self, finalize: Finalize<V, D>) {
+    async fn handle_finalize(&mut self, context: &E, finalize: Finalize<V, D>) {
         // Get view for finalize
         let view = finalize.view();
         let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
+            context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
@@ -1268,7 +1269,7 @@ impl<
         round.add_verified_finalize(finalize).await
     }
 
-    async fn finalization(&mut self, finalization: Finalization<V, D>) -> Action {
+    async fn finalization(&mut self, context: &E, finalization: Finalization<V, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
         if !interesting(
@@ -1296,15 +1297,15 @@ impl<
         }
 
         // Process finalization
-        self.handle_finalization(finalization).await;
+        self.handle_finalization(context, finalization).await;
         Action::Process
     }
 
-    async fn handle_finalization(&mut self, finalization: Finalization<V, D>) {
+    async fn handle_finalization(&mut self, context: &E, finalization: Finalization<V, D>) {
         // Create round (if it doesn't exist)
         let view = finalization.view();
         let round = self.views.entry(view).or_insert(Round::new(
-            &self.context,
+            context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
@@ -1328,7 +1329,7 @@ impl<
         }
 
         // Enter next view
-        self.enter_view(view + 1, seed);
+        self.enter_view(context, view + 1, seed);
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<V, D>> {
@@ -1419,6 +1420,7 @@ impl<
 
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
+        context: &E,
         batcher: &mut batcher::Mailbox<C::PublicKey, V, D>,
         resolver: &mut resolver::Mailbox<V, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
@@ -1432,7 +1434,7 @@ impl<
                 .get_or_create(&metrics::NOTARIZE)
                 .inc();
             batcher.constructed(Voter::Notarize(notarize.clone())).await;
-            self.handle_notarize(notarize.clone()).await;
+            self.handle_notarize(context, notarize.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1453,7 +1455,7 @@ impl<
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
+            if let Some((leader, elapsed)) = self.since_view_start(context, view) {
                 if leader {
                     self.notarization_latency.observe(elapsed);
                 }
@@ -1466,7 +1468,8 @@ impl<
             self.outbound_messages
                 .get_or_create(&metrics::NOTARIZATION)
                 .inc();
-            self.handle_notarization(notarization.clone()).await;
+            self.handle_notarization(context, notarization.clone())
+                .await;
 
             // Sync the journal
             self.journal
@@ -1500,7 +1503,8 @@ impl<
             self.outbound_messages
                 .get_or_create(&metrics::NULLIFICATION)
                 .inc();
-            self.handle_nullification(nullification.clone()).await;
+            self.handle_nullification(context, nullification.clone())
+                .await;
 
             // Sync the journal
             self.journal
@@ -1579,7 +1583,7 @@ impl<
                 .get_or_create(&metrics::FINALIZE)
                 .inc();
             batcher.constructed(Voter::Finalize(finalize.clone())).await;
-            self.handle_finalize(finalize.clone()).await;
+            self.handle_finalize(context, finalize.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1600,7 +1604,7 @@ impl<
         // Attempt to finalization
         if let Some(finalization) = self.construct_finalization(view, false).await {
             // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
+            if let Some((leader, elapsed)) = self.since_view_start(context, view) {
                 if leader {
                     self.finalization_latency.observe(elapsed);
                 }
@@ -1613,7 +1617,8 @@ impl<
             self.outbound_messages
                 .get_or_create(&metrics::FINALIZATION)
                 .inc();
-            self.handle_finalization(finalization.clone()).await;
+            self.handle_finalization(context, finalization.clone())
+                .await;
 
             // Sync the journal
             self.journal
@@ -1645,17 +1650,24 @@ impl<
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(
-            batcher,
-            resolver,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
-        ))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| {
+                self.run(
+                    context,
+                    batcher,
+                    resolver,
+                    pending_sender,
+                    recovered_sender,
+                    recovered_receiver,
+                )
+            })
     }
 
     async fn run(
         mut self,
+        context: E,
         mut batcher: batcher::Mailbox<C::PublicKey, V, D>,
         mut resolver: resolver::Mailbox<V, D>,
         pending_sender: impl Sender<PublicKey = C::PublicKey>,
@@ -1674,11 +1686,11 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.enter_view(1, V::Signature::zero());
+        self.enter_view(&context, 1, V::Signature::zero());
 
         // Initialize journal
         let journal = Journal::<_, Voter<V, D>>::init(
-            self.context.with_label("journal"),
+            context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible
@@ -1691,7 +1703,7 @@ impl<
         .expect("unable to open journal");
 
         // Rebuild from journal
-        let start = self.context.current();
+        let start = context.current();
         {
             let stream = journal
                 .replay(0, 0, self.replay_buffer)
@@ -1709,7 +1721,7 @@ impl<
                             [public_key_index as usize]
                             == self.crypto.public_key();
                         let proposal = notarize.proposal.clone();
-                        self.handle_notarize(notarize.clone()).await;
+                        self.handle_notarize(&context, notarize.clone()).await;
                         self.reporter.report(Activity::Notarize(notarize)).await;
 
                         // Update round info
@@ -1724,7 +1736,8 @@ impl<
                     }
                     Voter::Notarization(notarization) => {
                         // Handle notarization
-                        self.handle_notarization(notarization.clone()).await;
+                        self.handle_notarization(&context, notarization.clone())
+                            .await;
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
@@ -1739,7 +1752,7 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_nullify(nullify.clone()).await;
+                        self.handle_nullify(&context, nullify.clone()).await;
                         self.reporter.report(Activity::Nullify(nullify)).await;
 
                         // Update round info
@@ -1750,7 +1763,8 @@ impl<
                     }
                     Voter::Nullification(nullification) => {
                         // Handle nullification
-                        self.handle_nullification(nullification.clone()).await;
+                        self.handle_nullification(&context, nullification.clone())
+                            .await;
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
@@ -1765,7 +1779,7 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_finalize(finalize.clone()).await;
+                        self.handle_finalize(&context, finalize.clone()).await;
                         self.reporter.report(Activity::Finalize(finalize)).await;
 
                         // Update round info
@@ -1778,7 +1792,8 @@ impl<
                     }
                     Voter::Finalization(finalization) => {
                         // Handle finalization
-                        self.handle_finalization(finalization.clone()).await;
+                        self.handle_finalization(&context, finalization.clone())
+                            .await;
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
@@ -1793,7 +1808,7 @@ impl<
         self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
-        let end = self.context.current();
+        let end = context.current();
         let elapsed = end.duration_since(start).unwrap_or_default();
         let observed_view = self.view;
         info!(
@@ -1803,8 +1818,8 @@ impl<
         );
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
-            round.leader_deadline = Some(self.context.current());
-            round.advance_deadline = Some(self.context.current());
+            round.leader_deadline = Some(context.current());
+            round.advance_deadline = Some(context.current());
         }
         self.current_view.set(observed_view as i64);
         self.tracked_views.set(self.views.len() as i64);
@@ -1817,7 +1832,7 @@ impl<
             .await;
 
         // Create shutdown tracker
-        let mut shutdown = self.context.stopped();
+        let mut shutdown = context.stopped();
 
         // Process messages
         let mut pending_set = None;
@@ -1860,7 +1875,7 @@ impl<
             };
 
             // Wait for a timeout to fire or for a message to arrive
-            let timeout = self.timeout_deadline();
+            let timeout = self.timeout_deadline(&context);
             let start = self.view;
             let view;
             select! {
@@ -1874,9 +1889,10 @@ impl<
                         .expect("unable to close journal");
                     return;
                 },
-                _ = self.context.sleep_until(timeout) => {
+                _ = context.sleep_until(timeout) => {
                     // Trigger the timeout
-                    self.timeout(&mut batcher, &mut pending_sender, &mut recovered_sender).await;
+                    self.timeout(&context, &mut batcher, &mut pending_sender, &mut recovered_sender)
+                        .await;
                     view = self.view;
                 },
                 proposed = propose_wait => {
@@ -1971,21 +1987,21 @@ impl<
                     // Handle verifier and resolver
                     match msg {
                         Voter::Notarize(notarize) => {
-                            self.handle_notarize(notarize).await;
+                            self.handle_notarize(&context, notarize).await;
                         }
                         Voter::Nullify(nullify) => {
-                            self.handle_nullify(nullify).await;
+                            self.handle_nullify(&context, nullify).await;
                         }
                         Voter::Finalize(finalize) => {
-                            self.handle_finalize(finalize).await;
+                            self.handle_finalize(&context, finalize).await;
                         }
                         Voter::Notarization(notarization)  => {
                             trace!(view, "received notarization from resolver");
-                            self.handle_notarization(notarization).await;
+                            self.handle_notarization(&context, notarization).await;
                         },
                         Voter::Nullification(nullification) => {
                             trace!(view, "received nullification from resolver");
-                            self.handle_nullification(nullification).await;
+                            self.handle_nullification(&context, nullification).await;
                         },
                         Voter::Finalization(_) => {
                             unreachable!("unexpected message type");
@@ -2022,19 +2038,19 @@ impl<
                             self.inbound_messages
                                 .get_or_create(&Inbound::notarization(&sender))
                                 .inc();
-                            self.notarization(notarization).await
+                            self.notarization(&context, notarization).await
                         }
                         Voter::Nullification(nullification) => {
                             self.inbound_messages
                                 .get_or_create(&Inbound::nullification(&sender))
                                 .inc();
-                            self.nullification(nullification).await
+                            self.nullification(&context, nullification).await
                         }
                         Voter::Finalization(finalization) => {
                             self.inbound_messages
                                 .get_or_create(&Inbound::finalization(&sender))
                                 .inc();
-                            self.finalization(finalization).await
+                            self.finalization(&context, finalization).await
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
                             warn!(?sender, "blocking peer for invalid message type");
@@ -2059,6 +2075,7 @@ impl<
 
             // Attempt to send any new view messages
             self.notify(
+                &context,
                 &mut batcher,
                 &mut resolver,
                 &mut pending_sender,
@@ -2083,7 +2100,7 @@ impl<
                 if !is_active && leader != &self.crypto.public_key() {
                     debug!(view, ?leader, "skipping leader timeout due to inactivity");
                     self.skipped_views.inc();
-                    round.leader_deadline = Some(self.context.current());
+                    round.leader_deadline = Some(context.current());
                 }
             }
         }

@@ -21,7 +21,7 @@ use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
 pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
-    context: E,
+    context: Option<E>,
 
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<Data>>,
@@ -47,7 +47,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         // Create actor
         (
             Self {
-                context,
+                context: Some(context),
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 messages_dropped,
@@ -95,7 +95,10 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed.
     pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
-        self.context.spawn_ref()(self.run(routing))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|_| self.run(routing))
     }
 
     /// Runs the [Actor] event loop, processing incoming messages control messages

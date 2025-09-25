@@ -17,7 +17,7 @@ use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: E,
+    context: Option<E>,
 
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
@@ -62,7 +62,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context,
+                context: Some(context),
                 receiver,
                 directory,
                 mailboxes: HashMap::new(),
@@ -74,7 +74,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|_| self.run())
     }
 
     async fn run(mut self) {

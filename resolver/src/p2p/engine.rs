@@ -50,7 +50,7 @@ pub struct Engine<
     NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
-    context: E,
+    context: Option<E>,
 
     /// Consumes data that is fetched from the network
     consumer: Con,
@@ -115,7 +115,7 @@ impl<
         );
         (
             Self {
-                context,
+                context: Some(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
                 coordinator: cfg.coordinator,
@@ -139,12 +139,15 @@ impl<
     /// - Fetching data from other peers and notifying the `Consumer`
     /// - Serving data to other peers by requesting it from the `Producer`
     pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(network))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context, network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (NetS, NetR)) {
-        let mut shutdown = self.context.stopped();
+    async fn run(mut self, context: E, network: (NetS, NetR)) {
+        let mut shutdown = context.stopped();
 
         // Wrap channel
         let (mut sender, mut receiver) = wrap((), network.0, network.1);
@@ -175,13 +178,13 @@ impl<
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {
-                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
+                Some(deadline) => Either::Left(context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
 
             // Get requester timeout (if any)
             let deadline_active = match self.fetcher.get_active_deadline() {
-                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
+                Some(deadline) => Either::Left(context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
 

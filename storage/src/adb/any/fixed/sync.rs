@@ -1434,7 +1434,7 @@ mod tests {
 
             // Create log with operations
             let mut log = init_journal(
-                context.clone().with_label("ops_log"),
+                context.with_label("ops_log"),
                 fixed::Config {
                     partition: format!("ops_log_{}", context.next_u64()),
                     items_per_blob: NZU64!(1024),
@@ -1524,7 +1524,7 @@ mod tests {
 
                 // Create log with operations
                 let mut log = init_journal(
-                    context.clone().with_label("boundary_log"),
+                    context.with_label("boundary_log"),
                     fixed::Config {
                         partition: format!("boundary_log_{}_{}", lower_bound, context.next_u64()),
                         items_per_blob: NZU64!(1024),

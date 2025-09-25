@@ -25,7 +25,7 @@ pub struct Conflicter<
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    context: E,
+    context: Option<E>,
     crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
@@ -42,7 +42,7 @@ impl<
 {
     pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
-            context,
+            context: Some(context),
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
@@ -52,10 +52,13 @@ impl<
     }
 
     pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(voter_network))
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context, voter_network))
     }
 
-    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
+    async fn run(mut self, mut context: E, voter_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
@@ -78,7 +81,7 @@ impl<
                         .unwrap();
 
                     // Notarize random digest
-                    let payload = H::Digest::random(&mut self.context);
+                    let payload = H::Digest::random(&mut context);
                     let proposal =
                         Proposal::new(notarize.proposal.round, notarize.proposal.parent, payload);
                     let msg = Notarize::sign(
@@ -108,7 +111,7 @@ impl<
                         .unwrap();
 
                     // Finalize random digest
-                    let payload = H::Digest::random(&mut self.context);
+                    let payload = H::Digest::random(&mut context);
                     let proposal =
                         Proposal::new(finalize.proposal.round, finalize.proposal.parent, payload);
                     let msg = Finalize::sign(

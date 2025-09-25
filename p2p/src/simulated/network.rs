@@ -44,7 +44,7 @@ pub struct Config {
 
 /// Implementation of a simulated network.
 pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
-    context: E,
+    context: Option<E>,
 
     // Maximum size of a message that can be sent over the network
     max_size: usize,
@@ -108,7 +108,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         );
         (
             Self {
-                context,
+                context: Some(context),
                 max_size: cfg.max_size,
                 disconnect_on_block: cfg.disconnect_on_block,
                 next_addr,
@@ -155,7 +155,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Handle an ingress message.
     ///
     /// This method is called when a message is received from the oracle.
-    async fn handle_ingress(&mut self, message: ingress::Message<P>) {
+    async fn handle_ingress(&mut self, context: &mut E, message: ingress::Message<P>) {
         // It is important to ensure that no failed receipt of a message will cause us to exit.
         // This could happen if the caller drops the `Oracle` after updating the network topology.
         // Thus, we create a helper function to send the result to the oracle and log any errors.
@@ -178,7 +178,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 if !self.peers.contains_key(&public_key) {
                     let peer = Peer::new(
-                        &mut self.context.clone(),
+                        &mut context.clone(),
                         public_key.clone(),
                         self.get_next_socket(),
                         self.max_size,
@@ -195,7 +195,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Create a sender that allows sending messages to the network for a certain channel
                 let sender = Sender::new(
-                    self.context.clone(),
+                    context.clone(),
                     public_key,
                     channel,
                     self.max_size,
@@ -211,7 +211,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             } => match self.peers.contains_key(&public_key) {
                 true => {
                     // Update bandwidth limits
-                    let now = self.context.current();
+                    let now = context.current();
                     let completions =
                         self.transmitter
                             .limit(now, &public_key, egress_cap, ingress_cap);
@@ -245,7 +245,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 let link = Link::new(
-                    &mut self.context,
+                    context,
                     sender,
                     receiver,
                     peer.socket,
@@ -313,7 +313,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// This method is called when a task is received from the sender, which can come from
     /// any peer in the network.
-    fn handle_task(&mut self, task: Task<P>) {
+    fn handle_task(&mut self, context: &mut E, task: Task<P>) {
         // Collect recipients
         let (channel, origin, recipients, message, reply) = task;
         let recipients = match recipients {
@@ -323,7 +323,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         };
 
         // Send to all recipients
-        let now = self.context.current();
+        let now = context.current();
         let mut sent = Vec::new();
         for recipient in recipients {
             // Skip self
@@ -355,10 +355,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .inc();
 
             // Sample latency
-            let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
+            let latency = Duration::from_millis(link.sampler.sample(context) as u64);
 
             // Determine if the message should be delivered
-            let should_deliver = self.context.gen_bool(link.success_rate);
+            let should_deliver = context.gen_bool(link.success_rate);
 
             // Enqueue message for delivery
             let completions = self.transmitter.enqueue(
@@ -386,18 +386,21 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        self.context
+            .take()
+            .expect("context is only consumed on start")
+            .spawn(|context| self.run(context))
     }
 
-    async fn run(mut self) {
+    async fn run(mut self, mut context: E) {
         loop {
             let tick = match self.transmitter.next() {
-                Some(when) => Either::Left(self.context.sleep_until(when)),
+                Some(when) => Either::Left(context.sleep_until(when)),
                 None => Either::Right(future::pending()),
             };
             select! {
                 _ = tick => {
-                    let now = self.context.current();
+                    let now = context.current();
                     let completions = self.transmitter.advance(now);
                     self.process_completions(completions);
                 },
@@ -407,7 +410,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         Some(message) => message,
                         None => break,
                     };
-                    self.handle_ingress(message).await;
+                    self.handle_ingress(&mut context, message).await;
                 },
                 task = self.receiver.next() => {
                     // If receiver is closed, exit
@@ -415,7 +418,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         Some(task) => task,
                         None => break,
                     };
-                    self.handle_task(task);
+                    self.handle_task(&mut context, task);
                 },
             }
         }
@@ -703,35 +706,32 @@ impl Link {
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
         let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes, SystemTime)>();
-        context
-            .clone()
-            .with_label("link")
-            .spawn(move |context| async move {
-                // Dial the peer and handshake by sending it the dialer's public key
-                let (mut sink, _) = context.dial(socket).await.unwrap();
-                if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
-                    error!(?err, "failed to send public key to listener");
-                    return;
-                }
+        context.with_label("link").spawn(move |context| async move {
+            // Dial the peer and handshake by sending it the dialer's public key
+            let (mut sink, _) = context.dial(socket).await.unwrap();
+            if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
+                error!(?err, "failed to send public key to listener");
+                return;
+            }
 
-                // Process messages in order, waiting for their receive time
-                while let Some((channel, message, receive_complete_at)) = outbox.next().await {
-                    // Wait until the message should arrive at receiver
-                    context.sleep_until(receive_complete_at).await;
+            // Process messages in order, waiting for their receive time
+            while let Some((channel, message, receive_complete_at)) = outbox.next().await {
+                // Wait until the message should arrive at receiver
+                context.sleep_until(receive_complete_at).await;
 
-                    // Send the message
-                    let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
-                    data.extend_from_slice(&channel.to_be_bytes());
-                    data.extend_from_slice(&message);
-                    let data = data.freeze();
-                    send_frame(&mut sink, &data, max_size).await.unwrap();
+                // Send the message
+                let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
+                data.extend_from_slice(&channel.to_be_bytes());
+                data.extend_from_slice(&message);
+                let data = data.freeze();
+                send_frame(&mut sink, &data, max_size).await.unwrap();
 
-                    // Bump received messages metric
-                    received_messages
-                        .get_or_create(&metrics::Message::new(&dialer, &receiver, channel))
-                        .inc();
-                }
-            });
+                // Bump received messages metric
+                received_messages
+                    .get_or_create(&metrics::Message::new(&dialer, &receiver, channel))
+                    .inc();
+            }
+        });
 
         Self {
             sampler,
@@ -773,7 +773,7 @@ mod tests {
             };
             let network_context = context.with_label("network");
             let (network, mut oracle) = Network::new(network_context.clone(), cfg);
-            network_context.spawn(|_| network.run());
+            network_context.spawn(|context| network.run(context));
 
             // Create two public keys
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
