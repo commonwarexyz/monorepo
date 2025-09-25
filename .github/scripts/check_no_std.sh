@@ -14,7 +14,6 @@ base_rustflags="${RUSTFLAGS:-}"
 for package in "${no_std_packages[@]}"; do
   build_cmd=(cargo build -p "$package" --no-default-features --target "$target" --release)
   pretty_cmd="${build_cmd[*]}"
-
   if [ -n "$CI" ]; then
     echo "::group::${pretty_cmd}"
   else
