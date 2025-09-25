@@ -23,6 +23,21 @@ pub(crate) enum Message<V: Variant, B: Block> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<Option<B>>,
     },
+    /// A request to retrieve a block by its height.
+    GetByHeight {
+        /// The height of the block to retrieve.
+        height: u64,
+        /// A channel to send the retrieved block.
+        response: oneshot::Sender<Option<B>>,
+    },
+    /// A request to retrieve a finalization and block by its height.
+    GetFinalization {
+        /// The height of the finalization to retrieve.
+        height: u64,
+        /// A channel to send the finalization and block.
+        #[allow(clippy::type_complexity)]
+        response: oneshot::Sender<Option<(Finalization<V, B::Commitment>, B)>>,
+    },
     /// A request to retrieve a block by its digest.
     Subscribe {
         /// The view in which the block was notarized. This is an optimization
@@ -85,6 +100,45 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
             .is_err()
         {
             error!("failed to send get message to actor: receiver dropped");
+        }
+        rx
+    }
+
+    /// GetByHeight is a request to retrieve a finalized block by its height.
+    /// If the block is not found locally, the response will be [None].
+    pub async fn get_by_height(&mut self, height: u64) -> oneshot::Receiver<Option<B>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetByHeight {
+                height,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            error!("failed to send get by height message to actor: receiver dropped");
+        }
+        rx
+    }
+
+    /// GetFinalization is a request to retrieve a finalization and block by its height.
+    /// If the finalization or the block is not found locally, the response will be [None].
+    pub async fn get_finalization(
+        &mut self,
+        height: u64,
+    ) -> oneshot::Receiver<Option<(Finalization<V, B::Commitment>, B)>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .sender
+            .send(Message::GetFinalization {
+                height,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            error!("failed to send get finalization message to actor: receiver dropped");
         }
         rx
     }
