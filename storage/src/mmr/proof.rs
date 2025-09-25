@@ -4,13 +4,13 @@
 //! These lower level functions are kept outside of the [Proof] structure and not re-exported by the
 //! parent module.
 
+#[cfg(any(feature = "std", test))]
+use crate::mmr::iterator::nodes_to_pin;
 use crate::mmr::{
     hasher::Hasher,
     iterator::{leaf_loc_to_pos, PathIterator, PeakIterator},
     Error,
 };
-#[cfg(any(feature = "std", test))]
-use crate::mmr::iterator::nodes_to_pin;
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet},
     vec,
