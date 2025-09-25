@@ -331,9 +331,8 @@ impl<
         self.commit_ops().await?; // (1)
 
         let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
-        let dirty_chunks = self.status.dirty_chunks();
         grafter
-            .load_grafted_digests(&dirty_chunks, &self.any.mmr)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
 
@@ -708,9 +707,8 @@ impl<
         self.commit_ops().await?; // (1)
 
         let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
-        let dirty_chunks = self.status.dirty_chunks();
         grafter
-            .load_grafted_digests(&dirty_chunks, &self.any.mmr)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
