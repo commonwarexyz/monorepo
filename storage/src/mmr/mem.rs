@@ -642,6 +642,20 @@ impl<H: CHasher> Mmr<H> {
             self.dirty_nodes.is_empty(),
             "dirty nodes must be processed before computing proofs"
         );
+        let leaves = self.leaves();
+        assert!(
+            range.start < leaves,
+            "range start {} >= leaf count {}",
+            range.start,
+            leaves
+        );
+        assert!(
+            range.end <= leaves,
+            "range end {} > leaf count {}",
+            range.end,
+            leaves
+        );
+
         let size = self.size();
         let positions = proof::nodes_required_for_range_proof(size, range);
         let digests = positions

@@ -908,16 +908,17 @@ mod tests {
             mmr.prune_to_pos(Position::new(i));
             let pruned_root = mmr.root(&mut hasher);
             assert_eq!(root, pruned_root);
-            for loc in 0..elements.len() as u64 {
-                let proof = mmr.proof(Location::new(loc));
-                if Position::from(Location::new(loc)) < Position::new(i) {
+            for loc in 0..elements.len() {
+                let loc = Location::new(loc as u64);
+                let proof = mmr.proof(loc);
+                if Position::from(loc) < Position::new(i) {
                     continue;
                 }
                 assert!(proof.is_ok());
                 assert!(proof.unwrap().verify_element_inclusion(
                     &mut hasher,
-                    &elements[loc as usize],
-                    Location::new(loc),
+                    &elements[loc.as_u64() as usize],
+                    loc,
                     &root
                 ));
             }
