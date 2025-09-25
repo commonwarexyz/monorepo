@@ -176,7 +176,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y gcc-arm-none-eabi
-    - name: Build no_std crates
+    - name: Check no_std compatibility
       run: ./.github/scripts/check_no_std.sh
 
   Unsafe:
