@@ -81,10 +81,7 @@ where
         .await?;
 
         // Convert MMR size to number of operations.
-        let Ok(mmr_ops) = Location::try_from(Position::from(mmr.size())) else {
-            return Err(crate::mmr::Error::InvalidSize(mmr.size()).into()); // TODO what error should we return?
-        };
-        let mmr_ops = mmr_ops.as_u64();
+        let mmr_ops = mmr.leaves() as u64;
 
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
