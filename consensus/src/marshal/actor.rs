@@ -296,9 +296,9 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                         return;
                     };
                     match message {
-                        Message::GetTip { response } => {
-                            let tip = self.get_tip().await;
-                            let _ = response.send(tip);
+                        Message::GetLatest { response } => {
+                            let latest = self.get_latest().await;
+                            let _ = response.send(latest);
                         }
                         Message::Broadcast { block } => {
                             let _peers = buffer.broadcast(Recipients::All, block).await;
@@ -350,8 +350,8 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     let result = self.get_finalized_block(height).await;
                                     let _ = response.send(result);
                                 }
-                                BlockID::Tip => {
-                                    let block = match self.get_tip().await {
+                                BlockID::Latest => {
+                                    let block = match self.get_latest().await {
                                         Some((_, commitment)) => self.find_block(&mut buffer, commitment).await,
                                         None => None,
                                     };
@@ -713,12 +713,23 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let _ = notifier.try_send(());
     }
 
-    /// Get the tip of the finalized block sequence.
-    async fn get_tip(&mut self) -> Option<(u64, B::Commitment)> {
+    /// Get the latest finalized block information (height and commitment tuple).
+    ///
+    /// Blocks are only finalized directly with a finalization or indirectly via a descendant
+    /// block's finalization. Thus, the highest known finalized block must itself have a direct
+    /// finalization.
+    ///
+    /// We return the height and commitment using the highest known finalization that we know the
+    /// block height for. While it's possible that we have a later finalization, if we do not have
+    /// the full block for that finalization, we do not know it's height and therefore we do not
+    /// return it's information.
+    async fn get_latest(&mut self) -> Option<(u64, B::Commitment)> {
         let height = self.finalizations_by_height.last_index()?;
-        self.get_finalization_by_height(height)
+        let finalization = self
+            .get_finalization_by_height(height)
             .await
-            .map(|f| (height, f.proposal.payload))
+            .expect("finalization missing");
+        Some((height, finalization.proposal.payload))
     }
 
     // -------------------- Mixed Storage --------------------

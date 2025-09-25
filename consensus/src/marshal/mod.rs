@@ -717,7 +717,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_get_tip_empty_and_after_finalize() {
+    fn test_get_latest_empty_and_after_finalize() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
@@ -734,9 +734,9 @@ mod tests {
             )
             .await;
 
-            // Initially, no tip
-            let tip_rx = actor.get_tip().await;
-            assert!(tip_rx.await.unwrap().is_none());
+            // Initially, no latest
+            let latest_rx = actor.get_latest().await;
+            assert!(latest_rx.await.unwrap().is_none());
 
             // Create and verify a block, then finalize it
             let parent = Sha256::hash(b"");
@@ -753,18 +753,18 @@ mod tests {
             let finalization = make_finalization(proposal, &shares, QUORUM);
             actor.report(Activity::Finalization(finalization)).await;
 
-            // Tip should now be the finalized block
-            let tip_rx = actor.get_tip().await;
-            let tip = tip_rx.await.unwrap();
-            assert!(tip.is_some());
-            let (height, digest) = tip.unwrap();
+            // Latest should now be the finalized block
+            let latest_rx = actor.get_latest().await;
+            let latest = latest_rx.await.unwrap();
+            assert!(latest.is_some());
+            let (height, digest) = latest.unwrap();
             assert_eq!(height, 1);
             assert_eq!(digest, commitment);
         })
     }
 
     #[test_traced("WARN")]
-    fn test_get_block_by_height_and_tip() {
+    fn test_get_block_by_height_and_latest() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
@@ -780,9 +780,9 @@ mod tests {
             )
             .await;
 
-            // Before any finalization, GetBlock::Tip should be None
+            // Before any finalization, GetBlock::Latest should be None
             use crate::marshal::ingress::mailbox::Identifier as BlockID;
-            let rx = actor.get_block(BlockID::Tip).await;
+            let rx = actor.get_block(BlockID::Latest).await;
             assert!(rx.await.unwrap().is_none());
 
             // Finalize a block at height 1
@@ -805,11 +805,11 @@ mod tests {
             assert_eq!(by_height.height(), 1);
             assert_eq!(by_height.digest(), commitment);
 
-            // Get by tip
-            let rx = actor.get_block(BlockID::Tip).await;
-            let by_tip = rx.await.unwrap().expect("missing block by tip");
-            assert_eq!(by_tip.height(), 1);
-            assert_eq!(by_tip.digest(), commitment);
+            // Get by latest
+            let rx = actor.get_block(BlockID::Latest).await;
+            let by_latest = rx.await.unwrap().expect("missing block by latest");
+            assert_eq!(by_latest.height(), 1);
+            assert_eq!(by_latest.digest(), commitment);
 
             // Missing height
             let rx = actor.get_block(BlockID::Height(2)).await;

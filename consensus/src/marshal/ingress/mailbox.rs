@@ -19,7 +19,7 @@ pub enum Identifier<D: Digest> {
     Commitment(D),
     /// The highest finalized block. It may be the case that marshal does not have some of the
     /// blocks below this height.
-    Tip,
+    Latest,
 }
 
 // Allows using archive identifiers directly for convenience.
@@ -39,13 +39,13 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 pub(crate) enum Message<V: Variant, B: Block> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve the information about the highest finalized block.
-    GetTip {
+    GetLatest {
         response: oneshot::Sender<Option<(u64, B::Commitment)>>,
     },
     /// A request to retrieve a block by its identifier.
     ///
-    /// Requesting by height or tip will only return finalized blocks, whereas requesting by
-    /// commitment may return non-finalized or even unverified blocks.
+    /// Requesting by [Identifier::Height] or [Identifier::Latest] will only return finalized
+    /// blocks, whereas requesting by commitment may return non-finalized or even unverified blocks.
     GetBlock {
         /// The identifier of the block to retrieve.
         identifier: Identifier<B::Commitment>,
@@ -101,15 +101,15 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 
     /// A request to retrieve the information about the highest finalized block.
-    pub async fn get_tip(&mut self) -> oneshot::Receiver<Option<(u64, B::Commitment)>> {
+    pub async fn get_latest(&mut self) -> oneshot::Receiver<Option<(u64, B::Commitment)>> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
-            .send(Message::GetTip { response: tx })
+            .send(Message::GetLatest { response: tx })
             .await
             .is_err()
         {
-            error!("failed to send get tip message to actor: receiver dropped");
+            error!("failed to send get latest message to actor: receiver dropped");
         }
         rx
     }
