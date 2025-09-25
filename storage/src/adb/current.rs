@@ -174,8 +174,9 @@ impl<
 
             // Load the digests of the grafting destination nodes from `mmr` into the grafting
             // hasher so the new leaf digests can be computed during sync.
-            let dirty_chunks = status.dirty_chunks();
-            grafter.load_grafted_digests(&dirty_chunks, &mmr).await?;
+            grafter
+                .load_grafted_digests(&status.dirty_chunks(), &mmr)
+                .await?;
             status.sync(&mut grafter).await?;
         }
 
@@ -184,8 +185,9 @@ impl<
         Any::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, Some(&mut status))
             .await
             .unwrap();
-        let dirty_chunks = status.dirty_chunks();
-        grafter.load_grafted_digests(&dirty_chunks, &mmr).await?;
+        grafter
+            .load_grafted_digests(&status.dirty_chunks(), &mmr)
+            .await?;
         status.sync(&mut grafter).await?;
 
         let any = Any {
