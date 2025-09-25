@@ -48,7 +48,7 @@ impl PeakIterator {
         let last_peak = PeakIterator::new(size)
             .last()
             .expect("PeakIterator has at least one peak when size > 0");
-        Position::new(last_peak.0.as_u64() - last_peak.1 as u64)
+        last_peak.0.checked_sub(last_peak.1 as u64).unwrap()
     }
 
     /// Return if an MMR of the given `size` has a valid structure.
@@ -183,9 +183,9 @@ pub(crate) const fn pos_to_height(pos: Position) -> u32 {
 /// ```
 #[derive(Debug)]
 pub struct PathIterator {
-    leaf_pos: u64, // position of the leaf node in the path
-    node_pos: u64, // current node position in the path from peak to leaf
-    two_h: u64,    // 2^height of the current node
+    leaf_pos: Position, // position of the leaf node in the path
+    node_pos: Position, // current node position in the path from peak to leaf
+    two_h: u64,         // 2^height of the current node
 }
 
 impl PathIterator {
@@ -194,8 +194,8 @@ impl PathIterator {
     /// itself.
     pub fn new(leaf_pos: Position, peak_pos: Position, height: u32) -> PathIterator {
         PathIterator {
-            leaf_pos: leaf_pos.as_u64(),
-            node_pos: peak_pos.as_u64(),
+            leaf_pos,
+            node_pos: peak_pos,
             two_h: 1 << height,
         }
     }
@@ -214,11 +214,11 @@ impl Iterator for PathIterator {
         self.two_h >>= 1;
 
         if left_pos < self.leaf_pos {
-            let r = Some((Position::new(self.node_pos), Position::new(left_pos)));
+            let r = Some((self.node_pos, left_pos));
             self.node_pos = right_pos;
             return r;
         }
-        let r = Some((Position::new(self.node_pos), Position::new(right_pos)));
+        let r = Some((self.node_pos, right_pos));
         self.node_pos = left_pos;
         r
     }
