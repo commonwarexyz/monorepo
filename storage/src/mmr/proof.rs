@@ -374,16 +374,15 @@ impl<D: Digest> Proof<D> {
         let mut proof_digests_used = 0;
         let mut elements_iter = elements.iter();
         for (peak_pos, height) in PeakIterator::new(self.size) {
-            let peak_pos_u64 = peak_pos.as_u64();
-            let leftmost_pos = peak_pos_u64 + 2 - (1 << (height + 1));
-            if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos.as_u64() {
+            let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
+            if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
                 let hash = peak_digest_from_range(
                     hasher,
                     RangeInfo {
-                        pos: peak_pos_u64,
+                        pos: peak_pos,
                         two_h: 1 << height,
-                        leftmost_pos: start_element_pos.as_u64(),
-                        rightmost_pos: end_element_pos.as_u64(),
+                        leftmost_pos: start_element_pos,
+                        rightmost_pos: end_element_pos,
                     },
                     &mut elements_iter,
                     &mut siblings_iter,
@@ -520,10 +519,10 @@ pub(crate) fn nodes_required_for_multi_proof(
 
 /// Information about the current range of nodes being traversed.
 struct RangeInfo {
-    pos: u64,           // current node position in the tree
-    two_h: u64,         // 2^height of the current node
-    leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
-    rightmost_pos: u64, // rightmost leaf in the tree to be traversed
+    pos: Position,           // current node position in the tree
+    two_h: u64,              // 2^height of the current node
+    leftmost_pos: Position,  // leftmost leaf in the tree to be traversed
+    rightmost_pos: Position, // rightmost leaf in the tree to be traversed
 }
 
 fn peak_digest_from_range<'a, I, H, E, S>(
@@ -542,9 +541,7 @@ where
     assert_ne!(range_info.two_h, 0);
     if range_info.two_h == 1 {
         match elements.next() {
-            Some(element) => {
-                return Ok(hasher.leaf_digest(Position::new(range_info.pos), element.as_ref()))
-            }
+            Some(element) => return Ok(hasher.leaf_digest(range_info.pos, element.as_ref())),
             None => return Err(ReconstructionError::MissingDigests),
         }
     }
@@ -602,17 +599,17 @@ where
 
     if let Some(ref mut collected_digests) = collected_digests {
         collected_digests.push((
-            Position::new(left_pos),
+            left_pos,
             left_digest.expect("left_digest guaranteed to be Some after checks above"),
         ));
         collected_digests.push((
-            Position::new(right_pos),
+            right_pos,
             right_digest.expect("right_digest guaranteed to be Some after checks above"),
         ));
     }
 
     Ok(hasher.node_digest(
-        Position::new(range_info.pos),
+        range_info.pos,
         &left_digest.expect("left_digest guaranteed to be Some after checks above"),
         &right_digest.expect("right_digest guaranteed to be Some after checks above"),
     ))
