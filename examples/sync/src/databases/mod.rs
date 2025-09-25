@@ -8,13 +8,15 @@ use commonware_storage::{
 };
 use std::{future::Future, num::NonZeroU64};
 
-pub mod any;
+pub mod fixed;
 pub mod immutable;
+pub mod variable;
 
 /// Database type to sync.
 #[derive(Debug, Clone, Copy)]
 pub enum DatabaseType {
-    Any,
+    Fixed,
+    Variable,
     Immutable,
 }
 
@@ -23,10 +25,11 @@ impl std::str::FromStr for DatabaseType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "any" => Ok(DatabaseType::Any),
+            "any::fixed" => Ok(DatabaseType::Fixed),
+            "any::variable" => Ok(DatabaseType::Variable),
             "immutable" => Ok(DatabaseType::Immutable),
             _ => Err(format!(
-                "Invalid database type: '{s}'. Must be 'any' or 'immutable'",
+                "Invalid database type: '{s}'. Must be 'any::fixed', 'any::variable', or 'immutable'",
             )),
         }
     }
@@ -35,7 +38,8 @@ impl std::str::FromStr for DatabaseType {
 impl DatabaseType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            DatabaseType::Any => "any",
+            DatabaseType::Fixed => "any::fixed",
+            DatabaseType::Variable => "any::variable",
             DatabaseType::Immutable => "immutable",
         }
     }

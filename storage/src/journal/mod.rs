@@ -36,6 +36,8 @@ where
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
     #[error("invalid blob name: {0}")]
