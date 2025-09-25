@@ -11,7 +11,7 @@ use tokio::{
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
-    // Files must be seeked prior to any read or write operation and are thus
+    // Files must be sought prior to any read or write operation and are thus
     // not safe to concurrently interact with. If we switched to mapping files
     // we could remove this lock.
     file: Arc<Mutex<fs::File>>,
