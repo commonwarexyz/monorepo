@@ -40,16 +40,15 @@
 //! The actor uses a combination of prunable and immutable storage to store blocks and
 //! finalizations. Prunable storage is used to store data that is only needed for a short
 //! period of time, such as unverified blocks or notarizations. Immutable storage is used to
-//! store data that needs to be persisted indefinitely, such as finalized blocks. This allows
-//! the actor to keep its storage footprint small while still providing a full history of the
-//! chain.
+//! store data that needs to be persisted indefinitely, such as finalized blocks.
+//!
+//! Marshal will store all blocks from a configurable starting height onward. This allows for
+//! state sync from a specific height rather than from genesis.
 //!
 //! ## Limitations and Future Work
 //!
 //! - Only works with [crate::simplex] rather than general consensus.
 //! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
-//! - No state sync supported. Will attempt to sync every block in the history of the chain.
-//! - Stores the entire history of the chain, which requires indefinite amounts of disk space.
 //! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
 //!   uncertified blocks from the network.
 
@@ -230,7 +229,7 @@ mod tests {
         let application = Application::<B>::default();
 
         // Start the application
-        actor.start(application.clone(), buffer, resolver);
+        actor.start(0, application.clone(), buffer, resolver);
 
         (application, mailbox)
     }

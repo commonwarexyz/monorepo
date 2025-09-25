@@ -27,6 +27,9 @@ pub struct Finalizer<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Report
 
     // Metadata store that stores the last indexed height.
     metadata: Metadata<R, FixedBytes<1>, u64>,
+
+    // The lowest height from which to begin syncing if no metadata exists.
+    sync_height: u64,
 }
 
 impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>>
@@ -39,6 +42,7 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
         application: Z,
         orchestrator: Orchestrator<B>,
         notifier_rx: mpsc::Receiver<()>,
+        sync_height: u64,
     ) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
@@ -57,6 +61,7 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
             orchestrator,
             notifier_rx,
             metadata,
+            sync_height,
         }
     }
 
@@ -67,9 +72,16 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
 
     /// Run the finalizer, which continuously fetches and processes finalized blocks.
     async fn run(mut self) {
-        // Initialize last indexed from metadata store.
-        // If the key does not exist, we assume the genesis block (height 0) has been indexed.
-        let mut latest = *self.metadata.get(&LATEST_KEY).unwrap_or(&0);
+        // Ensure metadata (and `latest`) stores the max of the existing value and `sync_height`.
+        let current = self.metadata.get(&LATEST_KEY).copied();
+        let desired = current.map_or(self.sync_height, |h| h.max(self.sync_height));
+        if current != Some(desired) {
+            if let Err(e) = self.metadata.put_sync(LATEST_KEY.clone(), desired).await {
+                error!("failed to update metadata: {e}");
+                return;
+            }
+        }
+        let mut latest = desired;
 
         // The main loop to process finalized blocks. This loop will hot-spin until a block is
         // available, at which point it will process it and continue. If a block is not available,
