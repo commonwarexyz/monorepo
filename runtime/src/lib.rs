@@ -300,6 +300,27 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 
     /// Await a future with a timeout, returning `Error::Timeout` if it expires.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use commonware_runtime::{deterministic, Error, Runner, Clock};
+    ///
+    /// let executor = deterministic::Runner::default();
+    /// executor.start(|context| async move {
+    ///     // Before: manual select! pattern
+    ///     // After: simple timeout() call
+    ///     match context
+    ///         .timeout(Duration::from_millis(100), async { 42 })
+    ///         .await
+    ///     {
+    ///         Ok(value) => assert_eq!(value, 42),
+    ///         Err(Error::Timeout) => panic!("should not timeout"),
+    ///         Err(e) => panic!("unexpected error: {:?}", e),
+    ///     }
+    /// });
+    /// ```
     fn timeout<F, T>(
         &self,
         duration: Duration,
@@ -1802,22 +1823,6 @@ mod tests {
         test_clock_timeout(executor);
     }
 
-    #[test]
-    fn test_timeout_usage_demo() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Before: manual select! pattern
-            // After: simple timeout() call
-            match context
-                .timeout(Duration::from_millis(100), async { 42 })
-                .await
-            {
-                Ok(value) => assert_eq!(value, 42),
-                Err(Error::Timeout) => panic!("should not timeout"),
-                Err(e) => panic!("unexpected error: {:?}", e),
-            }
-        });
-    }
 
     #[test]
     fn test_deterministic_root_finishes() {
