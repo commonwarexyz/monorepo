@@ -10,7 +10,6 @@ use commonware_storage::{
 };
 use libfuzzer_sys::fuzz_target;
 
-
 const MAX_OPERATIONS: usize = 50;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -102,7 +101,7 @@ where
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|_| async move {
-        let num_elements = (input.num_elements as usize).max(1);
+        let num_elements = (input.num_elements as u64).max(1);
 
         match input.proof {
             ProofType::Mmr => {
@@ -111,17 +110,17 @@ fn fuzz(input: FuzzInput) {
                 let element = Digest::from(*b"01234567012345670123456701234567");
 
                 let mut leaves = Vec::new();
-                for _ in 0..num_elements {
+                for _ in 0u64..num_elements {
                     leaves.push(mmr.add(&mut hasher, &element));
                 }
 
                 let root = mmr.root(&mut hasher);
 
-                for &pos in &leaves {
-                    let original_proof = mmr.proof(pos).unwrap();
+                for leaf in 0u64..num_elements {
+                    let original_proof = mmr.proof(leaf).unwrap();
 
                     assert!(
-                        original_proof.verify_element_inclusion(&mut hasher, &element, pos, &root),
+                        original_proof.verify_element_inclusion(&mut hasher, &element, leaf, &root),
                         "Original MMR proof must be valid"
                     );
 
@@ -138,7 +137,7 @@ fn fuzz(input: FuzzInput) {
                             let is_valid = mutated_proof.verify_element_inclusion(
                                 &mut hasher,
                                 &element,
-                                pos,
+                                leaf,
                                 &root,
                             );
                             assert!(!is_valid, "Mutated MMR proof must be invalid");
