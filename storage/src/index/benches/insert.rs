@@ -34,9 +34,9 @@ impl Metrics for DummyMetrics {
 }
 
 fn bench_insert(c: &mut Criterion) {
-    for index in ["ordered", "unordered"] {
+    for variant in ["ordered", "unordered"] {
         for items in N_ITEMS {
-            let label = format!("{}/items={},index={}", module_path!(), items, index);
+            let label = format!("{}/variant={variant} items={items}", module_path!());
             c.bench_function(&label, |b| {
                 b.iter_custom(move |iters| {
                     // Setup items
