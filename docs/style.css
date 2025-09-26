@@ -52,6 +52,15 @@ body {
     align-items: center;
 }
 
+.meta-info {
+    font-size: 0.85em;
+    margin-top: 10px;
+}
+
+.meta-info--compact {
+    margin-top: 5px;
+}
+
 h1 {
     font-size: 1.5em;
     margin-bottom: 10px;
@@ -147,34 +156,27 @@ summary {
     list-style: none;
 }
 
-details.benchmark-set {
-    margin-top: 10px;
-    margin-bottom: 10px;
-    border: 1px solid #eee;
+details.collapsible {
+    margin: 10px 0;
     padding: 8px;
+    border: 1px solid #ddd;
 }
 
-details.benchmark-set summary {
+details.collapsible > summary {
     cursor: pointer;
     outline: none;
     overflow-wrap: anywhere;
     white-space: normal;
     max-width: 100%;
-    list-style: none;
+}
+
+details.benchmark-set {
+    border-color: #eee;
 }
 
 details.benchmark-set .benchmark-title {
     font-weight: 700;
     font-size: 1.2em;
-    color: -webkit-link;
-    text-decoration: underline;
-}
-
-details.benchmark-graph-details {
-    margin-top: 10px;
-    margin-bottom: 10px;
-    border: 1px solid #bbb;
-    padding: 8px;
 }
 
 .benchmark-performance {
@@ -183,17 +185,13 @@ details.benchmark-graph-details {
     font-style: italic;
 }
 
+details.benchmark-graph-details {
+    border-color: #bbb;
+}
+
 .benchmark-graph-title {
     font-weight: 300;
     font-size: 0.8em;
-    cursor: pointer;
-    outline: none;
-    overflow-wrap: anywhere;
-    white-space: normal;
-    max-width: 100%;
-    list-style: none;
-    color: -webkit-link;
-    text-decoration: underline;
 }
 
 .benchmark-chart {
@@ -204,41 +202,29 @@ details.benchmark-graph-details {
 }
 
 details.benchmark-module {
-    margin-top: 10px;
-    margin-bottom: 10px;
-    border: 1px solid #ddd;
-    padding: 8px;
+    border-color: #ddd;
 }
 
 details.benchmark-module summary.module-title {
     font-size: 1em;
     font-weight: 500;
-    cursor: pointer;
-    outline: none;
-    overflow-wrap: anywhere;
-    white-space: normal;
-    max-width: 100%;
-    list-style: none;
-    color: -webkit-link;
-    text-decoration: underline;
 }
 
 details.benchmark-function {
-    margin-top: 10px;
-    margin-bottom: 10px;
-    border: 1px solid #ccc;
-    padding: 8px;
+    border-color: #ccc;
 }
 
 summary.function-title {
     font-size: 0.9em;
     font-weight: 400;
-    cursor: pointer;
-    outline: none;
-    overflow-wrap: anywhere;
-    white-space: normal;
-    max-width: 100%;
-    list-style: none;
+}
+
+.benchmark-title,
+.benchmark-graph-title,
+.module-title,
+.function-title,
+.podcast-episode-title,
+.podcast-links a {
     color: -webkit-link;
     text-decoration: underline;
 }
@@ -302,4 +288,75 @@ ul ul,
 ol ul,
 ul ol {
     margin: 5px 0;
+}
+
+/* Podcast-specific styles */
+details.podcast-episode {
+    margin: 0 0 20px;
+}
+
+details.podcast-episode summary.podcast-title {
+    font-weight: bold;
+    font-size: 1em;
+    margin-bottom: 8px;
+}
+
+.podcast-episode-title:hover {
+    color: blue;
+}
+
+.podcast-meta {
+    font-size: 0.8em;
+    color: gray;
+    font-style: italic;
+    font-weight: normal;
+}
+
+.podcast-content {
+    margin-top: 15px;
+}
+
+.podcast-content .video-container {
+    margin: 15px 0 10px 0;
+}
+
+.podcast-content p {
+    margin-bottom: 10px;
+    line-height: 1.3;
+}
+
+.podcast-content .meta {
+    margin-bottom: 15px;
+}
+
+.podcast-links {
+    display: flex;
+    gap: 15px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+}
+
+
+.podcast-links a {
+    font-size: 0.9em;
+}
+
+.podcast-links a:hover {
+    color: blue;
+}
+
+/* Mobile-specific podcast improvements */
+@media (max-width: 600px) {
+    .podcast-episode {
+        margin-bottom: 30px;
+        padding-bottom: 20px;
+    }
+
+    .podcast-links {
+        gap: 10px;
+    }
+
+    .podcast-links a {
+        font-size: 0.85em;
+    }
 }
