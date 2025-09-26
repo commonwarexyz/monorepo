@@ -1318,6 +1318,17 @@ mod tests {
         );
         assert!(!wrong_verification, "Should fail with wrong elements");
 
+        // Verify with out of range element
+        let wrong_verification = multi_proof.verify_multi_inclusion(
+            &mut hasher,
+            &[(elements[0], 0), (elements[5], 5), (elements[10], 1000)],
+            &root,
+        );
+        assert!(
+            !wrong_verification,
+            "Should fail with out of range elements"
+        );
+
         // Verify with wrong root should fail
         let wrong_root = test_digest(99);
         assert!(!multi_proof.verify_multi_inclusion(
