@@ -642,7 +642,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// Panics if there are unprocessed updates.
     pub async fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
-        self.range_proof(loc..(loc + 1)).await
+        self.range_proof(loc..loc + 1).await
     }
 
     /// Return an inclusion proof for the elements within the specified location range, or

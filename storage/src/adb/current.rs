@@ -672,7 +672,7 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = verification::range_proof(&grafted_mmr, loc..(loc + 1)).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk(loc.as_u64());
 
         let last_chunk = self.status.last_chunk();
