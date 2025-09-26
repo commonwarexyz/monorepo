@@ -115,3 +115,10 @@ path = "fuzz_targets/verify_multi_inclusion.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "metadata_init"
+path = "fuzz_targets/metadata_init.rs"
+test = false
+doc = false
+bench = false
