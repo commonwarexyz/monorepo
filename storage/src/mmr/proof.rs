@@ -34,6 +34,8 @@ pub enum ReconstructionError {
     InvalidEndLoc,
     #[error("missing elements")]
     MissingElements,
+    #[error("invalid size")]
+    InvalidSize,
 }
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of
@@ -123,7 +125,8 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Return true if this proof proves that the `elements` appear consecutively starting at
-    /// position `start_loc` within the MMR with root digest `root`.
+    /// position `start_loc` within the MMR with root digest `root`. A malformed proof will return
+    /// false.
     pub fn verify_range_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
@@ -136,6 +139,12 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
+        if !PeakIterator::check_validity(self.size) {
+            #[cfg(feature = "std")]
+            debug!(size = self.size, "invalid proof size");
+            return false;
+        }
+
         match self.reconstruct_root(hasher, elements, start_loc) {
             Ok(reconstructed_root) => *root == reconstructed_root,
             Err(_error) => {
@@ -147,7 +156,7 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Return true if this proof proves that the elements at the specified locations are included
-    /// in the MMR with the root digest `root`.
+    /// in the MMR with the root digest `root`. A malformed proof will return false.
     ///
     /// The order of the elements does not affect the output.
     pub fn verify_multi_inclusion<I, H, E>(
@@ -165,11 +174,20 @@ impl<D: Digest> Proof<D> {
         if elements.is_empty() {
             return self.size == 0 && *root == hasher.root(0, core::iter::empty());
         }
+        if !PeakIterator::check_validity(self.size) {
+            return false;
+        }
 
         // Single pass to collect all required positions with deduplication
         let mut node_positions = BTreeSet::new();
         let mut nodes_required = BTreeMap::new();
+
         for (_, loc) in elements {
+            if leaf_loc_to_pos(*loc) >= self.size {
+                // Since `elements` may be untrusted input, verify they are not malformed before
+                // using them.
+                return false;
+            }
             let required = nodes_required_for_range_proof(self.size, *loc..(*loc + 1));
             for req_pos in &required {
                 node_positions.insert(*req_pos);
@@ -327,6 +345,10 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
+        if !PeakIterator::check_validity(self.size) {
+            return Err(ReconstructionError::InvalidSize);
+        }
+
         let peak_digests = self.reconstruct_peak_digests(hasher, elements, start_loc, None)?;
 
         Ok(hasher.root(self.size, peak_digests.iter()))
@@ -419,7 +441,7 @@ impl<D: Digest> Proof<D> {
 ///
 /// # Panics
 ///
-/// Panics if the range is invalid for an MMR of the provided `size`.
+/// Panics if `size` is invalid or the range is invalid for an MMR of the provided `size`.
 pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<u64>) -> Vec<u64> {
     let mut positions = Vec::new();
     if range.is_empty() {
@@ -661,13 +683,23 @@ mod tests {
             );
         }
 
-        // confirm mangling the proof or proof args results in failed validation
+        // Create a valid proof, then confirm various mangling of the proof or proof args results in
+        // verification failure.
         const LEAF: u64 = 10;
         let proof = mmr.proof(LEAF).unwrap();
         assert!(
             proof.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
             "proof verification should be successful"
         );
+        let wrong_sizes = [0, 16, 17, 18, 20, u64::MAX - 100];
+        for sz in wrong_sizes {
+            let mut wrong_size_proof = proof.clone();
+            wrong_size_proof.size = sz;
+            assert!(
+                !wrong_size_proof.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
+                "proof with wrong size should fail verification"
+            );
+        }
         assert!(
             !proof.verify_element_inclusion(&mut hasher, &element, LEAF + 1, &root),
             "proof verification should fail with incorrect element position"
@@ -1249,6 +1281,19 @@ mod tests {
             &root
         ));
 
+        // Verify mangling the size to something invalid should fail. Test three cases: valid MMR
+        // size but wrong value, invalid MMR size, and overflowing MMR size.
+        let wrong_sizes = [16, 17, u64::MAX - 100];
+        for sz in wrong_sizes {
+            let mut wrong_size_proof = multi_proof.clone();
+            wrong_size_proof.size = sz;
+            assert!(!wrong_size_proof.verify_multi_inclusion(
+                &mut hasher,
+                &[(elements[0], 0), (elements[5], 5), (elements[10], 10),],
+                &root,
+            ));
+        }
+
         // Verify with wrong positions
         assert!(!multi_proof.verify_multi_inclusion(
             &mut hasher,
@@ -1272,6 +1317,17 @@ mod tests {
             &root,
         );
         assert!(!wrong_verification, "Should fail with wrong elements");
+
+        // Verify with out of range element
+        let wrong_verification = multi_proof.verify_multi_inclusion(
+            &mut hasher,
+            &[(elements[0], 0), (elements[5], 5), (elements[10], 1000)],
+            &root,
+        );
+        assert!(
+            !wrong_verification,
+            "Should fail with out of range elements"
+        );
 
         // Verify with wrong root should fail
         let wrong_root = test_digest(99);
