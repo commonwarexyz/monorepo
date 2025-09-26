@@ -53,6 +53,7 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 pub(crate) enum Message<V: Variant, B: Block> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve the (height, commitment) of a block by its identifier.
+    /// The block must be finalized; returns `None` if the block is not finalized.
     GetInfo {
         /// The identifier of the block to get the information of.
         identifier: Identifier<B::Commitment>,

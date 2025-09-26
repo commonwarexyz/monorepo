@@ -718,7 +718,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_get_info_empty_and_after_finalize() {
+    fn test_get_info_basic_queries_present_and_missing() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
@@ -736,176 +736,50 @@ mod tests {
             .await;
 
             // Initially, no latest
-            let latest = actor.get_info(Identifier::Latest).await;
-            assert!(latest.is_none());
+            assert!(actor.get_info(Identifier::Latest).await.is_none());
+
+            // Before finalization, specific height returns None
+            assert!(actor.get_info(Identifier::Height(1)).await.is_none());
 
             // Create and verify a block, then finalize it
             let parent = Sha256::hash(b"");
             let block = B::new::<Sha256>(parent, 1, 1);
-            let commitment = block.digest();
+            let digest = block.digest();
             let round = Round::new(0, 1);
             actor.verified(round, block.clone()).await;
 
             let proposal = Proposal {
                 round,
                 parent: 0,
-                payload: commitment,
+                payload: digest,
             };
             let finalization = make_finalization(proposal, &shares, QUORUM);
             actor.report(Activity::Finalization(finalization)).await;
 
             // Latest should now be the finalized block
-            let latest = actor.get_info(Identifier::Latest).await;
-            assert!(latest.is_some());
-            let (height, digest) = latest.unwrap();
-            assert_eq!(height, 1);
-            assert_eq!(digest, commitment);
-        })
-    }
-
-    #[test_traced("WARN")]
-    fn test_get_block_by_height_and_latest() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
-
-            let secret = schemes[0].clone();
-            let (_application, mut actor) = setup_validator(
-                context.with_label("validator-0"),
-                &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
-                secret,
-                identity,
-            )
-            .await;
-
-            // Before any finalization, GetBlock::Latest should be None
-            let latest_block = actor.get_block(Identifier::Latest).await;
-            assert!(latest_block.is_none());
-
-            // Finalize a block at height 1
-            let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
-            let commitment = block.digest();
-            let round = Round::new(0, 1);
-            actor.verified(round, block.clone()).await;
-            let proposal = Proposal {
-                round,
-                parent: 0,
-                payload: commitment,
-            };
-            let finalization = make_finalization(proposal, &shares, QUORUM);
-            actor.report(Activity::Finalization(finalization)).await;
-
-            // Get by height
-            let by_height = actor
-                .get_block(Identifier::Height(1))
-                .await
-                .expect("missing block by height");
-            assert_eq!(by_height.height(), 1);
-            assert_eq!(by_height.digest(), commitment);
-
-            // Get by latest
-            let by_latest = actor
-                .get_block(Identifier::Latest)
-                .await
-                .expect("missing block by latest");
-            assert_eq!(by_latest.height(), 1);
-            assert_eq!(by_latest.digest(), commitment);
-
-            // Missing height
-            let by_height = actor.get_block(Identifier::Height(2)).await;
-            assert!(by_height.is_none());
-        })
-    }
-
-    #[test_traced("WARN")]
-    fn test_get_info_by_height_present_and_missing() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
-
-            // Single validator actor
-            let secret = schemes[0].clone();
-            let (_application, mut actor) = setup_validator(
-                context.with_label("validator-0"),
-                &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
-                secret,
-                identity,
-            )
-            .await;
-
-            // Before finalization, height returns None
-            let info = actor.get_info(Identifier::Height(1)).await;
-            assert!(info.is_none());
-
-            // Finalize a block at height 1
-            let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
-            let digest = block.digest();
-            let round = Round::new(0, 1);
-            actor.verified(round, block.clone()).await;
-            let proposal = Proposal {
-                round,
-                parent: 0,
-                payload: digest,
-            };
-            let finalization = make_finalization(proposal, &shares, QUORUM);
-            actor.report(Activity::Finalization(finalization)).await;
+            assert_eq!(actor.get_info(Identifier::Latest).await, Some((1, digest)));
 
             // Height 1 now present
-            let info = actor.get_info(Identifier::Height(1)).await;
-            assert_eq!(info, Some((1, digest)));
+            assert_eq!(
+                actor.get_info(Identifier::Height(1)).await,
+                Some((1, digest))
+            );
 
-            // Missing height returns None
-            let info = actor.get_info(Identifier::Height(2)).await;
-            assert!(info.is_none());
-        })
-    }
+            // Commitment should map to its height
+            assert_eq!(
+                actor.get_info(Identifier::Commitment(digest)).await,
+                Some((1, digest))
+            );
 
-    #[test_traced("WARN")]
-    fn test_get_info_by_commitment_present_and_missing() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
-            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
+            // Missing height
+            assert!(actor.get_info(Identifier::Height(2)).await.is_none());
 
-            // Single validator actor
-            let secret = schemes[0].clone();
-            let (_application, mut actor) = setup_validator(
-                context.with_label("validator-0"),
-                &mut oracle,
-                p2p::mocks::Coordinator::new(vec![]),
-                secret,
-                identity,
-            )
-            .await;
-
-            // Create and finalize a block at height 1
-            let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
-            let digest = block.digest();
-            let round = Round::new(0, 1);
-            actor.verified(round, block.clone()).await;
-            let proposal = Proposal {
-                round,
-                parent: 0,
-                payload: digest,
-            };
-            let finalization = make_finalization(proposal, &shares, QUORUM);
-            actor.report(Activity::Finalization(finalization)).await;
-
-            // By commitment should map to its height
-            let info = actor.get_info(Identifier::Commitment(digest)).await;
-            assert_eq!(info, Some((1, digest)));
-
-            // Missing commitment returns None
+            // Missing commitment
             let missing = Sha256::hash(b"missing");
-            let info = actor.get_info(Identifier::Commitment(missing)).await;
-            assert!(info.is_none());
+            assert!(actor
+                .get_info(Identifier::Commitment(missing))
+                .await
+                .is_none());
         })
     }
 
@@ -979,6 +853,63 @@ mod tests {
             actor.report(Activity::Finalization(f3)).await;
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((3, d3)));
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_block_by_height_and_latest() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone());
+            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
+
+            let secret = schemes[0].clone();
+            let (_application, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                p2p::mocks::Coordinator::new(vec![]),
+                secret,
+                identity,
+            )
+            .await;
+
+            // Before any finalization, GetBlock::Latest should be None
+            let latest_block = actor.get_block(Identifier::Latest).await;
+            assert!(latest_block.is_none());
+
+            // Finalize a block at height 1
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
+            let commitment = block.digest();
+            let round = Round::new(0, 1);
+            actor.verified(round, block.clone()).await;
+            let proposal = Proposal {
+                round,
+                parent: 0,
+                payload: commitment,
+            };
+            let finalization = make_finalization(proposal, &shares, QUORUM);
+            actor.report(Activity::Finalization(finalization)).await;
+
+            // Get by height
+            let by_height = actor
+                .get_block(Identifier::Height(1))
+                .await
+                .expect("missing block by height");
+            assert_eq!(by_height.height(), 1);
+            assert_eq!(by_height.digest(), commitment);
+
+            // Get by latest
+            let by_latest = actor
+                .get_block(Identifier::Latest)
+                .await
+                .expect("missing block by latest");
+            assert_eq!(by_latest.height(), 1);
+            assert_eq!(by_latest.digest(), commitment);
+
+            // Missing height
+            let by_height = actor.get_block(Identifier::Height(2)).await;
+            assert!(by_height.is_none());
         })
     }
 
