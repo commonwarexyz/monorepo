@@ -23,12 +23,18 @@ where
 }
 
 /// Extract pinned nodes from the [Proof] starting at `start_loc`.
+///
+/// # Panics
+///
+/// Panics if `start_loc + operations_len` overflows u64.
 pub fn extract_pinned_nodes<D: Digest>(
     proof: &Proof<D>,
     start_loc: u64,
     operations_len: u64,
 ) -> Result<Vec<D>, Error> {
-    let end_loc = start_loc + operations_len;
+    let end_loc = start_loc
+        .checked_add(operations_len)
+        .expect("end_loc overflow");
     proof.extract_pinned_nodes(start_loc..end_loc)
 }
 

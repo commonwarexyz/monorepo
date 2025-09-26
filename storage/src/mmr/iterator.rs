@@ -20,6 +20,10 @@ pub struct PeakIterator {
 
 impl PeakIterator {
     /// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if size is too large (specifically, the topmost bit should be 0).
     pub fn new(size: u64) -> PeakIterator {
         if size == 0 {
             return PeakIterator::default();
@@ -28,6 +32,7 @@ impl PeakIterator {
         // not be in the MMR unless it happens to be a single perfect binary tree, but that's OK as
         // we will descend leftward until we find the first peak.
         let start = u64::MAX >> size.leading_zeros();
+        assert_ne!(start, u64::MAX, "size overflow");
         let two_h = 1 << start.trailing_ones();
         PeakIterator {
             size,
@@ -39,6 +44,10 @@ impl PeakIterator {
     /// Return the position of the last leaf in an MMR of the given size.
     ///
     /// This is an O(log2(n)) operation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if size is too large (specifically, the topmost bit should be 0).
     pub fn last_leaf_pos(size: u64) -> u64 {
         if size == 0 {
             return 0;
@@ -54,11 +63,16 @@ impl PeakIterator {
     ///
     /// The implementation verifies that peaks in the MMR of the given size have strictly decreasing
     /// height, which is a necessary condition for MMR validity.
-    pub const fn check_validity(size: u64) -> bool {
+    ///
+    /// # Panics
+    ///
+    /// Panics if size is too large (specifically, the topmost bit should be 0).
+    pub fn check_validity(size: u64) -> bool {
         if size == 0 {
             return true;
         }
         let start = u64::MAX >> size.leading_zeros();
+        assert_ne!(start, u64::MAX, "size overflow");
         let mut two_h = 1 << start.trailing_ones();
         let mut node_pos = start - 1;
         while two_h > 1 {
@@ -145,13 +159,18 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
 /// if this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
+///
+/// # Panics
+///
+/// Panics if leaf_pos is too large (top 2 bits should be 0).
 pub(crate) const fn leaf_pos_to_loc(leaf_pos: u64) -> Option<u64> {
     if leaf_pos == 0 {
         return Some(0);
     }
 
-    let start = u64::MAX >> (leaf_pos + 1).leading_zeros();
+    let start = u64::MAX >> (leaf_pos.checked_add(1).expect("leaf_pos overflow")).leading_zeros();
     let height = start.trailing_ones();
+    assert!(height > 1, "leaf_pos overflow");
     let mut two_h = 1 << (height - 1);
     let mut cur_node = start - 1;
     let mut leaf_loc_floor = 0u64;
@@ -177,8 +196,12 @@ pub(crate) const fn leaf_pos_to_loc(leaf_pos: u64) -> Option<u64> {
 }
 
 /// Returns the position of the leaf with location `leaf_loc` in an MMR.
+///
+/// # Panics
+///
+/// Panics if leaf_loc is too large (must fit in 64 bits after multiplication by 2).
 pub(crate) const fn leaf_loc_to_pos(leaf_loc: u64) -> u64 {
-    // This will never underflow since 2*n >= count_ones(n).
+    // The subtraction will never underflow since 2*n >= count_ones(n).
     leaf_loc.checked_mul(2).expect("leaf_loc overflow") - leaf_loc.count_ones() as u64
 }
 
