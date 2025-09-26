@@ -223,6 +223,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         self.metadata.put(key, Record::Ordinal(Some(bits)));
         debug!(section, "initialized section");
     }
+
+    /// Return the index for a given key if present.
+    pub async fn index_of_key(&self, key: &K) -> Result<Option<u64>, Error> {
+        // Find the cursor of the key via freezer
+        let Some(cursor) = self.freezer.cursor_for_key(key).await? else {
+            return Ok(None);
+        };
+        // Map cursor to index via ordinal's layout
+        let index = self
+            .ordinal
+            .index_of_cursor(cursor.section(), cursor.offset());
+        Ok(Some(index))
+    }
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive

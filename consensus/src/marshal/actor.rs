@@ -296,9 +296,23 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                         return;
                     };
                     match message {
-                        Message::GetLatest { response } => {
-                            let latest = self.get_latest().await;
-                            let _ = response.send(latest);
+                        Message::GetInfo { identifier, response } => {
+                            let info = match identifier {
+                                BlockID::Commitment(commitment) => {
+                                    match self.finalized_blocks.index_of_key(&commitment).await {
+                                        Ok(Some(index)) => Some((index, commitment)),
+                                        _ => None,
+                                    }
+                                }
+                                BlockID::Height(height) => {
+                                    match self.finalizations_by_height.get(ArchiveID::Index(height)).await {
+                                        Ok(Some(f)) => Some((height, f.proposal.payload)),
+                                        _ => None,
+                                    }
+                                }
+                                BlockID::Latest => self.get_latest().await,
+                            };
+                            let _ = response.send(info);
                         }
                         Message::Broadcast { block } => {
                             let _peers = buffer.broadcast(Recipients::All, block).await;

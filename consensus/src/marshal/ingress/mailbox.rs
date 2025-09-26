@@ -52,8 +52,11 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 /// system to drive the state of the marshal.
 pub(crate) enum Message<V: Variant, B: Block> {
     // -------------------- Application Messages --------------------
-    /// A request to retrieve the information about the highest finalized block.
-    GetLatest {
+    /// A request to retrieve the (height, commitment) of a block by its identifier.
+    GetInfo {
+        /// The identifier of the block to get the information of.
+        identifier: Identifier<B::Commitment>,
+        /// A channel to send the retrieved (height, commitment).
         response: oneshot::Sender<Option<(u64, B::Commitment)>>,
     },
     /// A request to retrieve a block by its identifier.
@@ -115,17 +118,29 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 
     /// A request to retrieve the information about the highest finalized block.
-    pub async fn get_latest(&mut self) -> Option<(u64, B::Commitment)> {
+    pub async fn get_info(
+        &mut self,
+        identifier: impl Into<Identifier<B::Commitment>>,
+    ) -> Option<(u64, B::Commitment)> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
-            .send(Message::GetLatest { response: tx })
+            .send(Message::GetInfo {
+                identifier: identifier.into(),
+                response: tx,
+            })
             .await
             .is_err()
         {
-            error!("failed to send get latest message to actor: receiver dropped");
+            error!("failed to send get info message to actor: receiver dropped");
         }
-        rx.await.unwrap_or(None)
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                error!("failed to get info: receiver dropped");
+                None
+            }
+        }
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -144,9 +159,15 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
             .await
             .is_err()
         {
-            error!("failed to send get message to actor: receiver dropped");
+            error!("failed to send get block message to actor: receiver dropped");
         }
-        rx.await.unwrap_or(None)
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                error!("failed to get block: receiver dropped");
+                None
+            }
+        }
     }
 
     /// A request to retrieve a block by its commitment.

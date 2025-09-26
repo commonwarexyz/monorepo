@@ -292,6 +292,12 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         }
     }
 
+    /// Compute the index for a cursor that points into this ordinal's value space.
+    pub fn index_of_cursor(&self, section: u64, offset: u32) -> u64 {
+        let items_per_blob = self.config.items_per_blob.get();
+        section * items_per_blob + (offset as u64 / Record::<V>::SIZE as u64)
+    }
+
     /// Check if an index exists.
     pub fn has(&self, index: u64) -> bool {
         self.has.inc();

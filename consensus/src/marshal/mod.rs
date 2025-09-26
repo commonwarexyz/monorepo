@@ -76,6 +76,7 @@ mod tests {
         resolver::p2p as resolver,
     };
     use crate::{
+        marshal::ingress::mailbox::Identifier,
         threshold_simplex::types::{
             finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
             Notarization, Proposal,
@@ -717,7 +718,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_get_latest_empty_and_after_finalize() {
+    fn test_get_info_empty_and_after_finalize() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
@@ -735,7 +736,7 @@ mod tests {
             .await;
 
             // Initially, no latest
-            let latest = actor.get_latest().await;
+            let latest = actor.get_info(Identifier::Latest).await;
             assert!(latest.is_none());
 
             // Create and verify a block, then finalize it
@@ -754,7 +755,7 @@ mod tests {
             actor.report(Activity::Finalization(finalization)).await;
 
             // Latest should now be the finalized block
-            let latest = actor.get_latest().await;
+            let latest = actor.get_info(Identifier::Latest).await;
             assert!(latest.is_some());
             let (height, digest) = latest.unwrap();
             assert_eq!(height, 1);
@@ -780,8 +781,7 @@ mod tests {
             .await;
 
             // Before any finalization, GetBlock::Latest should be None
-            use crate::marshal::ingress::mailbox::Identifier as BlockID;
-            let latest_block = actor.get_block(BlockID::Latest).await;
+            let latest_block = actor.get_block(Identifier::Latest).await;
             assert!(latest_block.is_none());
 
             // Finalize a block at height 1
@@ -800,7 +800,7 @@ mod tests {
 
             // Get by height
             let by_height = actor
-                .get_block(BlockID::Height(1))
+                .get_block(Identifier::Height(1))
                 .await
                 .expect("missing block by height");
             assert_eq!(by_height.height(), 1);
@@ -808,14 +808,14 @@ mod tests {
 
             // Get by latest
             let by_latest = actor
-                .get_block(BlockID::Latest)
+                .get_block(Identifier::Latest)
                 .await
                 .expect("missing block by latest");
             assert_eq!(by_latest.height(), 1);
             assert_eq!(by_latest.digest(), commitment);
 
             // Missing height
-            let by_height = actor.get_block(BlockID::Height(2)).await;
+            let by_height = actor.get_block(Identifier::Height(2)).await;
             assert!(by_height.is_none());
         })
     }
@@ -837,8 +837,6 @@ mod tests {
             )
             .await;
 
-            use crate::marshal::ingress::mailbox::Identifier as BlockID;
-
             // 1) From cache via verified
             let parent = Sha256::hash(b"");
             let ver_block = B::new::<Sha256>(parent, 1, 1);
@@ -846,7 +844,7 @@ mod tests {
             let round1 = Round::new(0, 1);
             actor.verified(round1, ver_block.clone()).await;
             let got = actor
-                .get_block(BlockID::Commitment(ver_commitment))
+                .get_block(Identifier::Commitment(ver_commitment))
                 .await
                 .expect("missing block from cache");
             assert_eq!(got.digest(), ver_commitment);
@@ -864,7 +862,7 @@ mod tests {
             let finalization = make_finalization(proposal, &shares, QUORUM);
             actor.report(Activity::Finalization(finalization)).await;
             let got = actor
-                .get_block(BlockID::Commitment(fin_commitment))
+                .get_block(Identifier::Commitment(fin_commitment))
                 .await
                 .expect("missing block from finalized archive");
             assert_eq!(got.digest(), fin_commitment);
@@ -872,7 +870,7 @@ mod tests {
 
             // 3) Missing commitment
             let missing = Sha256::hash(b"definitely-missing");
-            let missing_block = actor.get_block(BlockID::Commitment(missing)).await;
+            let missing_block = actor.get_block(Identifier::Commitment(missing)).await;
             assert!(missing_block.is_none());
         })
     }
