@@ -257,9 +257,7 @@ fn fuzz(input: FuzzInput) {
                     mmr.process_updates(&mut hasher);
 
                     let range = start_pos..end_pos;
-                    let _ = mmr
-                        .historical_range_proof(valid_size, range)
-                        .await;
+                    let _ = mmr.historical_range_proof(valid_size, range).await;
                 }
 
                 MmrJournaledOperation::Sync => {
