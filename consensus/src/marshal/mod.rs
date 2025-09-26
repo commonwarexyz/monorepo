@@ -739,7 +739,7 @@ mod tests {
             assert!(actor.get_info(Identifier::Latest).await.is_none());
 
             // Before finalization, specific height returns None
-            assert!(actor.get_info(Identifier::Height(1)).await.is_none());
+            assert!(actor.get_info(1).await.is_none());
 
             // Create and verify a block, then finalize it
             let parent = Sha256::hash(b"");
@@ -760,26 +760,17 @@ mod tests {
             assert_eq!(actor.get_info(Identifier::Latest).await, Some((1, digest)));
 
             // Height 1 now present
-            assert_eq!(
-                actor.get_info(Identifier::Height(1)).await,
-                Some((1, digest))
-            );
+            assert_eq!(actor.get_info(1).await, Some((1, digest)));
 
             // Commitment should map to its height
-            assert_eq!(
-                actor.get_info(Identifier::Commitment(digest)).await,
-                Some((1, digest))
-            );
+            assert_eq!(actor.get_info(&digest).await, Some((1, digest)));
 
             // Missing height
-            assert!(actor.get_info(Identifier::Height(2)).await.is_none());
+            assert!(actor.get_info(2).await.is_none());
 
             // Missing commitment
             let missing = Sha256::hash(b"missing");
-            assert!(actor
-                .get_info(Identifier::Commitment(missing))
-                .await
-                .is_none());
+            assert!(actor.get_info(&missing).await.is_none());
         })
     }
 
@@ -892,10 +883,7 @@ mod tests {
             actor.report(Activity::Finalization(finalization)).await;
 
             // Get by height
-            let by_height = actor
-                .get_block(Identifier::Height(1))
-                .await
-                .expect("missing block by height");
+            let by_height = actor.get_block(1).await.expect("missing block by height");
             assert_eq!(by_height.height(), 1);
             assert_eq!(by_height.digest(), commitment);
 
@@ -908,7 +896,7 @@ mod tests {
             assert_eq!(by_latest.digest(), commitment);
 
             // Missing height
-            let by_height = actor.get_block(Identifier::Height(2)).await;
+            let by_height = actor.get_block(2).await;
             assert!(by_height.is_none());
         })
     }
@@ -937,7 +925,7 @@ mod tests {
             let round1 = Round::new(0, 1);
             actor.verified(round1, ver_block.clone()).await;
             let got = actor
-                .get_block(Identifier::Commitment(ver_commitment))
+                .get_block(&ver_commitment)
                 .await
                 .expect("missing block from cache");
             assert_eq!(got.digest(), ver_commitment);
@@ -955,7 +943,7 @@ mod tests {
             let finalization = make_finalization(proposal, &shares, QUORUM);
             actor.report(Activity::Finalization(finalization)).await;
             let got = actor
-                .get_block(Identifier::Commitment(fin_commitment))
+                .get_block(&fin_commitment)
                 .await
                 .expect("missing block from finalized archive");
             assert_eq!(got.digest(), fin_commitment);
@@ -963,7 +951,7 @@ mod tests {
 
             // 3) Missing commitment
             let missing = Sha256::hash(b"definitely-missing");
-            let missing_block = actor.get_block(Identifier::Commitment(missing)).await;
+            let missing_block = actor.get_block(&missing).await;
             assert!(missing_block.is_none());
         })
     }
