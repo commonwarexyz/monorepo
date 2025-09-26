@@ -4,9 +4,11 @@
 //! These lower level functions are kept outside of the [Proof] structure and not re-exported by the
 //! parent module.
 
+#[cfg(any(feature = "std", test))]
+use crate::mmr::iterator::nodes_to_pin;
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{nodes_to_pin, PathIterator, PeakIterator},
+    iterator::{PathIterator, PeakIterator},
     Error, Location, Position,
 };
 use alloc::{
@@ -229,6 +231,7 @@ impl<D: Digest> Proof<D> {
     /// # Returns
     /// A Vec of digests for all nodes in `nodes_to_pin(pruning_boundary)`, in the same order as
     /// returned by `nodes_to_pin` (decreasing height order)
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn extract_pinned_nodes(
         &self,
         range: std::ops::Range<Location>,
@@ -504,6 +507,7 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<Location>) 
 /// inclusion of the elements at the specified `locations`.
 ///
 /// The order of positions does not affect the output (sorted internally).
+#[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
     size: u64,
     locations: &[Location],

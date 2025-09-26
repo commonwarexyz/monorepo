@@ -93,6 +93,11 @@ impl From<Position> for u64 {
     }
 }
 
+/// Returns the position of the leaf at the given location in an MMR.
+///
+/// # Panics
+///
+/// Panics if `loc` is too large (must fit in 64 bits after multiplication by 2).
 impl From<Location> for Position {
     #[inline]
     fn from(loc: Location) -> Self {

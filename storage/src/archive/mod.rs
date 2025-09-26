@@ -86,6 +86,12 @@ pub trait Archive {
     /// This is useful for driving backfill operations over the archive.
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>);
 
+    /// Retrieve the first index in the [Archive].
+    fn first_index(&self) -> Option<u64>;
+
+    /// Retrieve the last index in the [Archive].
+    fn last_index(&self) -> Option<u64>;
+
     /// Sync all pending writes.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
 

@@ -169,6 +169,10 @@ impl TryFrom<Position> for Location {
     /// Returns an error if the position does not correspond to an MMR leaf.
     ///
     /// This computation is O(log2(n)) in the given position.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pos` is too large (top 2 bits should be 0).
     #[inline]
     fn try_from(pos: Position) -> Result<Self, Self::Error> {
         let pos_u64 = pos.as_u64();
@@ -176,8 +180,10 @@ impl TryFrom<Position> for Location {
             return Ok(Self(0));
         }
 
-        let start = u64::MAX >> (pos_u64 + 1).leading_zeros();
+        let start =
+            u64::MAX >> (pos_u64.checked_add(1).expect("leaf pos overflow")).leading_zeros();
         let height = start.trailing_ones();
+        assert!(height > 1, "leaf pos overflow");
         let mut two_h = 1 << (height - 1);
         let mut cur_node = start - 1;
         let mut leaf_loc_floor = 0u64;

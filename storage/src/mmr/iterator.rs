@@ -21,6 +21,10 @@ pub struct PeakIterator {
 
 impl PeakIterator {
     /// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if size is too large (specifically, the topmost bit should be 0).
     pub fn new(size: u64) -> PeakIterator {
         if size == 0 {
             return PeakIterator::default();
@@ -29,6 +33,7 @@ impl PeakIterator {
         // not be in the MMR unless it happens to be a single perfect binary tree, but that's OK as
         // we will descend leftward until we find the first peak.
         let start = u64::MAX >> size.leading_zeros();
+        assert_ne!(start, u64::MAX, "size overflow");
         let two_h = 1 << start.trailing_ones();
         PeakIterator {
             size,
@@ -40,6 +45,10 @@ impl PeakIterator {
     /// Return the position of the last leaf in an MMR of the given size.
     ///
     /// This is an O(log2(n)) operation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if size is too large (specifically, the topmost bit should be 0).
     pub fn last_leaf_pos(size: u64) -> Position {
         if size == 0 {
             return Position::new(0);
@@ -55,11 +64,16 @@ impl PeakIterator {
     ///
     /// The implementation verifies that peaks in the MMR of the given size have strictly decreasing
     /// height, which is a necessary condition for MMR validity.
-    pub const fn check_validity(size: u64) -> bool {
+    ///
+    /// # Panics
+    ///
+    /// Panics if size is too large (specifically, the topmost bit should be 0).
+    pub fn check_validity(size: u64) -> bool {
         if size == 0 {
             return true;
         }
         let start = u64::MAX >> size.leading_zeros();
+        assert_ne!(start, u64::MAX, "size overflow");
         let mut two_h = 1 << start.trailing_ones();
         let mut node_pos = start - 1;
         while two_h > 1 {
