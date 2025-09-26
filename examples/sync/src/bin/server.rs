@@ -208,7 +208,7 @@ where
     debug!(
         request_id = request.request_id,
         max_ops,
-        start_loc = request.start_loc.as_u64(),
+        start_loc = ?request.start_loc,
         db_size,
         "operations request"
     );

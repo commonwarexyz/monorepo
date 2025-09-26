@@ -273,10 +273,7 @@ impl<D: Digest> Proof<D> {
         for pinned_pos in pinned_positions {
             let Some(&digest) = position_to_digest.get(&pinned_pos) else {
                 #[cfg(feature = "std")]
-                debug!(
-                    pinned_pos = pinned_pos.as_u64(),
-                    "Pinned node not found in proof"
-                );
+                debug!(?pinned_pos, "Pinned node not found in proof");
                 return Err(Error::MissingDigest(pinned_pos));
             };
             result.push(digest);

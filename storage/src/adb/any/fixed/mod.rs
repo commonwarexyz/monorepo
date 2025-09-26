@@ -672,7 +672,7 @@ impl<
 
         debug!(
             log_size = self.op_count(),
-            target_prune_loc = target_prune_loc.as_u64(),
+            ?target_prune_loc,
             "pruned inactive ops"
         );
 

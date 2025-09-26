@@ -784,7 +784,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         debug!(
             log_size = self.log_size,
-            oldest_retained_loc = self.oldest_retained_loc.as_u64(),
+            oldest_retained_loc = ?self.oldest_retained_loc,
             "pruned inactive ops"
         );
 

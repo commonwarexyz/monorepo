@@ -156,20 +156,12 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let mut pinned_nodes = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
-                error!(
-                    size = mmr_size.as_u64(),
-                    pos = pos.as_u64(),
-                    "missing pinned node"
-                );
+                error!(?mmr_size, ?pos, "missing pinned node");
                 return Err(MissingNode(pos));
             };
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
-                error!(
-                    size = mmr_size.as_u64(),
-                    pos = pos.as_u64(),
-                    "could not convert node bytes to digest"
-                );
+                error!(?mmr_size, ?pos, "could not convert node bytes to digest");
                 return Err(MissingNode(pos));
             };
             pinned_nodes.push(digest);
