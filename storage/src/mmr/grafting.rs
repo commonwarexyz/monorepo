@@ -672,7 +672,7 @@ mod tests {
                 // Since we're grafting 1-1, the destination position computation should be the
                 // identity function.
                 assert_eq!(hasher.destination_pos(Position::new(0)), Position::new(0));
-                let rand_leaf_pos = Position::from(1234234);
+                let rand_leaf_pos = Position::new(1234234);
                 assert_eq!(hasher.destination_pos(rand_leaf_pos), rand_leaf_pos);
 
                 let mut peak_mmr = Mmr::new();

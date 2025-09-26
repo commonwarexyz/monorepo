@@ -79,6 +79,13 @@ impl From<u64> for Position {
     }
 }
 
+impl From<usize> for Position {
+    #[inline]
+    fn from(value: usize) -> Self {
+        Self::new(value as u64)
+    }
+}
+
 impl From<Position> for u64 {
     #[inline]
     fn from(position: Position) -> Self {
