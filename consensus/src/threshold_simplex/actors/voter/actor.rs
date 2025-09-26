@@ -16,7 +16,7 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::{threshold_signature_recover, threshold_signature_recover_pair},
+        ops::threshold_signature_recover_pair,
         variant::Variant,
     },
     Digest, PublicKey, Signer,
@@ -369,24 +369,6 @@ impl<
             return None;
         }
         let proposal = self.proposal.as_ref().unwrap().clone();
-
-        // Ensure we have a notarization
-        let Some(notarization) = &self.notarization else {
-            return None;
-        };
-        let seed_signature = notarization.seed_signature;
-
-        // Check notarization and finalization proposal match
-        if notarization.proposal != proposal {
-            warn!(
-                ?proposal,
-                ?notarization.proposal,
-                "finalization proposal does not match notarization"
-            );
-        }
-
-        // There should never exist enough finalizes for multiple proposals, so it doesn't
-        // matter which one we choose.
         debug!(
             ?proposal,
             verified = self.verified_proposal,
@@ -394,15 +376,17 @@ impl<
         );
 
         // Only select verified finalizes
-        let proposals = self
+        let (proposals, seeds): (Vec<_>, Vec<_>) = self
             .finalizes
             .iter()
-            .map(|finalize| &finalize.proposal_signature);
+            .map(|finalize| (&finalize.proposal_signature, &finalize.seed_signature))
+            .unzip();
 
         // Recover threshold signature
         let mut timer = self.recover_latency.timer();
-        let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
-            .expect("failed to recover threshold signature");
+        let (proposal_signature, seed_signature) =
+            threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
+                .expect("failed to recover threshold signature");
         timer.observe();
 
         // Construct finalization
