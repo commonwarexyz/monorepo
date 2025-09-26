@@ -17,7 +17,7 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                 extra_shards: (chunks - min) as u16,
             };
             c.bench_function(
-                &format!("{}/msg_len={} chunks={}", name, data_length, chunks),
+                &format!("{name}/msg_len={data_length} chunks={chunks}"),
                 |b| {
                     b.iter_batched(
                         || {
@@ -46,7 +46,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                 extra_shards: (chunks - min) as u16,
             };
             c.bench_function(
-                &format!("{}/msg_len={} chunks={}", name, data_length, chunks),
+                &format!("{name}/msg_len={data_length} chunks={chunks}"),
                 |b| {
                     b.iter_batched(
                         || {

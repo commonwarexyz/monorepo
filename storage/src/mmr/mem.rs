@@ -693,6 +693,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Utility used by stores that build on the mem MMR to pin extra nodes if needed. It's up to
     /// the caller to ensure that this set of pinned nodes is valid for their use case.
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<u64, H::Digest>) {
         for (pos, node) in pinned_nodes.into_iter() {
             self.pinned_nodes.insert(pos, node);

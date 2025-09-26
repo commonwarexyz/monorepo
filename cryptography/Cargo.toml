@@ -27,7 +27,7 @@ p256 = { workspace = true, features = ["ecdsa"] }
 rand_chacha = { workspace = true }
 cfg-if = { workspace = true }
 x25519-dalek = { workspace = true, features = ["zeroize"] }
-chacha20poly1305 = { workspace = true }
+chacha20poly1305 = { workspace = true, default-features = false, features = ["alloc"] }
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
@@ -44,7 +44,18 @@ crate-type = ["rlib", "cdylib"]
 [features]
 parallel = ["blake3/rayon", "rayon"]
 default = ["std"]
-std = ["commonware-codec/std", "commonware-utils/std", "rand/std", "rand/std_rng", "thiserror/std", "rayon", "ed25519-consensus/std", "p256/std"]
+std = [
+    "commonware-codec/std",
+    "commonware-utils/std",
+    "rand/std",
+    "rand/std_rng",
+    "thiserror/std",
+    "rayon",
+    "ed25519-consensus/std",
+    "p256/std",
+    "chacha20poly1305/std",
+    "chacha20poly1305/getrandom",
+]
 
 [[bench]]
 name = "bls12381"
