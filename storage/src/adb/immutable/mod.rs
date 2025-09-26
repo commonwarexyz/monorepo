@@ -612,7 +612,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size.into(), start_loc..end_loc)
+            .historical_range_proof(mmr_size.as_u64(), start_loc..end_loc)
             .await?;
         let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
         for loc in start_loc.as_u64()..end_loc.as_u64() {
