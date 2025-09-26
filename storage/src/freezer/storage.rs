@@ -33,12 +33,12 @@ impl Cursor {
     }
 
     /// Get the section of the cursor.
-    pub fn section(&self) -> u64 {
+    fn section(&self) -> u64 {
         u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap())
     }
 
     /// Get the offset of the cursor.
-    pub fn offset(&self) -> u32 {
+    fn offset(&self) -> u32 {
         u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
     }
 }
@@ -810,39 +810,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // Check if this key matches
             if entry.key.as_ref() == key.as_ref() {
                 return Ok(Some(entry.value));
-            }
-
-            // Increment unnecessary reads
-            self.unnecessary_reads.inc();
-
-            // Follow the chain
-            let Some(next) = entry.next else {
-                break; // End of chain
-            };
-            section = next.0;
-            offset = next.1;
-        }
-
-        Ok(None)
-    }
-
-    /// Return the journal cursor for a given key, if present.
-    pub async fn cursor_for_key(&self, key: &K) -> Result<Option<Cursor>, Error> {
-        // Get head of the chain from table
-        let table_index = self.table_index(key);
-        let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
-        let Some((mut section, mut offset, _)) = Self::read_latest_entry(&entry1, &entry2) else {
-            return Ok(None);
-        };
-
-        // Follow the linked list chain to find the first matching key
-        loop {
-            // Get the entry from the variable journal
-            let entry = self.journal.get(section, offset).await?;
-
-            // Check if this key matches
-            if entry.key.as_ref() == key.as_ref() {
-                return Ok(Some(Cursor::new(section, offset)));
             }
 
             // Increment unnecessary reads

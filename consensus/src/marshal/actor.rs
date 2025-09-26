@@ -298,18 +298,23 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                     match message {
                         Message::GetInfo { identifier, response } => {
                             let info = match identifier {
-                                BlockID::Commitment(commitment) => {
-                                    match self.finalized_blocks.index_of_key(&commitment).await {
-                                        Ok(Some(index)) => Some((index, commitment)),
-                                        _ => None,
-                                    }
-                                }
-                                BlockID::Height(height) => {
-                                    match self.finalizations_by_height.get(ArchiveID::Index(height)).await {
-                                        Ok(Some(f)) => Some((height, f.proposal.payload)),
-                                        _ => None,
-                                    }
-                                }
+                                // TODO: Instead of pulling out the entire block, determine the
+                                // height directly from the archive by mapping the commitment to
+                                // the index, which is the same as the height.
+                                BlockID::Commitment(commitment) => self
+                                    .finalized_blocks
+                                    .get(ArchiveID::Key(&commitment))
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|b| (b.height(), commitment)),
+                                BlockID::Height(height) => self
+                                    .finalizations_by_height
+                                    .get(ArchiveID::Index(height))
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|f| (height, f.proposal.payload)),
                                 BlockID::Latest => self.get_latest().await,
                             };
                             let _ = response.send(info);
