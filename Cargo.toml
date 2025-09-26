@@ -103,7 +103,7 @@ zeroize = "1.5.7"
 blst = { version = "0.3.13", default-features = false }
 p256 = { version = "0.13.2", default-features = false }
 test-case = "3.3.1"
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = { version = "0.10.1", default-features = false }
 x25519-dalek = "2.0.1"
 num-bigint = "0.4.6"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
