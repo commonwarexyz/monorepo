@@ -1209,10 +1209,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
-            assert_eq!(
-                pruned_mmr.oldest_retained_pos().map(|p| p.as_u64()),
-                Some(size)
-            );
+            assert_eq!(pruned_mmr.oldest_retained_pos(), Some(Position::new(size)));
             assert_eq!(pruned_mmr.pruned_to_pos(), size);
 
             // Make sure pruning to older location is a no-op.
@@ -1456,7 +1453,7 @@ mod tests {
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
 
-            let range = 30..61;
+            let range = Location::new(30)..Location::new(61);
 
             // Only apply elements up to end_loc to the reference MMR.
             let mut ref_mmr = Mmr::init(
@@ -1475,7 +1472,7 @@ mod tests {
             .unwrap();
 
             // Add elements up to the end of the range to verify historical root
-            for elt in elements.iter().take(range.end) {
+            for elt in elements.iter().take(range.end.as_u64() as usize) {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
             let historical_size = ref_mmr.size();
@@ -1483,18 +1480,14 @@ mod tests {
 
             // Generate proof from full MMR
             let proof = mmr
-                .historical_range_proof(
-                    historical_size,
-                    Location::new(range.start as u64)..Location::new(range.end as u64),
-                )
+                .historical_range_proof(historical_size, range.clone())
                 .await
                 .unwrap();
 
-            let loc = Location::new(range.start as u64);
             assert!(proof.verify_range_inclusion(
                 &mut hasher,
-                &elements[range],
-                loc,
+                &elements[range.to_usize_range()],
+                range.start,
                 &expected_root // Compare to historical (reference) root
             ));
 
@@ -1634,8 +1627,8 @@ mod tests {
             assert_eq!(new_mmr.size(), original_size + 1); // +1 for element we just added
             assert_eq!(new_mmr.pruned_to_pos(), original_size);
             assert_eq!(
-                new_mmr.oldest_retained_pos().map(|p| p.as_u64()),
-                Some(original_size)
+                new_mmr.oldest_retained_pos(),
+                Some(Position::new(original_size))
             ); // Element we just added is the oldest retained
 
             // Proofs generated from the journaled MMR should be the same as the proofs generated from the original MMR
@@ -1799,8 +1792,8 @@ mod tests {
             assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
             assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
             assert_eq!(sync_mmr.root(&mut hasher), original_root);
-            for i in lower_bound_pos.as_u64()..=upper_bound_pos.as_u64() {
-                let pos = Position::new(i);
+            for pos in lower_bound_pos.as_u64()..=upper_bound_pos.as_u64() {
+                let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
                     expected_nodes.get(&pos).cloned()
@@ -1839,8 +1832,8 @@ mod tests {
             let upper_bound_pos = Position::new(original_size + 10); // Extend beyond existing data
 
             let mut expected_nodes = BTreeMap::new();
-            for i in lower_bound_pos.as_u64()..original_size {
-                let pos = Position::new(i);
+            for pos in lower_bound_pos.as_u64()..original_size {
+                let pos = Position::new(pos);
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
             }
 
@@ -1864,8 +1857,8 @@ mod tests {
             assert_eq!(sync_mmr.root(&mut hasher), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
-            for i in lower_bound_pos.as_u64()..original_size {
-                let pos = Position::new(i);
+            for pos in lower_bound_pos.as_u64()..original_size {
+                let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
                     expected_nodes.get(&pos).cloned()
