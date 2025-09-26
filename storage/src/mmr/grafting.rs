@@ -800,7 +800,7 @@ mod tests {
                 // the grafted MMR.
                 {
                     let loc = Location::new(0);
-                    let proof = verification::range_proof(&grafted_mmr, loc..loc + 1)
+                    let proof = verification::range_proof(&grafted_mmr, loc..(loc + 1))
                         .await
                         .unwrap();
 
@@ -814,7 +814,7 @@ mod tests {
                     ));
 
                     let loc = Location::new(1);
-                    let proof = verification::range_proof(&grafted_mmr, loc..loc + 1)
+                    let proof = verification::range_proof(&grafted_mmr, loc..(loc + 1))
                         .await
                         .unwrap();
                     assert!(proof.verify_element_inclusion(
@@ -825,7 +825,7 @@ mod tests {
                     ));
 
                     let loc = Location::new(2);
-                    let proof = verification::range_proof(&grafted_mmr, loc..loc + 1)
+                    let proof = verification::range_proof(&grafted_mmr, loc..(loc + 1))
                         .await
                         .unwrap();
                     let mut verifier =
@@ -838,7 +838,7 @@ mod tests {
                     ));
 
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&grafted_mmr, loc..loc + 1)
+                    let proof = verification::range_proof(&grafted_mmr, loc..(loc + 1))
                         .await
                         .unwrap();
                     assert!(proof.verify_element_inclusion(
@@ -853,7 +853,7 @@ mod tests {
                 {
                     // Valid proof of the last element.
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&grafted_mmr, loc..loc + 1)
+                    let proof = verification::range_proof(&grafted_mmr, loc..(loc + 1))
                         .await
                         .unwrap();
                     let mut verifier =
@@ -946,7 +946,7 @@ mod tests {
             // as an existing one.
             let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
             let loc = Location::new(0);
-            let proof = verification::range_proof(&grafted_mmr, loc..loc + 1)
+            let proof = verification::range_proof(&grafted_mmr, loc..(loc + 1))
                 .await
                 .unwrap();
 
@@ -955,7 +955,7 @@ mod tests {
 
             let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, loc, vec![]);
             let loc = Location::new(4);
-            let proof = verification::range_proof(&grafted_mmr, loc..loc + 1)
+            let proof = verification::range_proof(&grafted_mmr, loc..(loc + 1))
                 .await
                 .unwrap();
             assert!(proof.verify_element_inclusion(&mut verifier, &b5, loc, &grafted_storage_root));
