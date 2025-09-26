@@ -494,12 +494,8 @@ impl<H: CHasher> Mmr<H> {
         nodes.sort_by(|a, b| a.1.cmp(&b.1));
 
         for (pos, height) in nodes {
-            let left = pos
-                .checked_sub(1 << height)
-                .expect("left child underflow in sync_serial");
-            let right = pos
-                .checked_sub(1)
-                .expect("right child underflow in sync_serial");
+            let left = pos - (1 << height);
+            let right = pos - 1;
             let digest = hasher.node_digest(
                 pos,
                 self.get_node_unchecked(left),
@@ -583,12 +579,8 @@ impl<H: CHasher> Mmr<H> {
                 .map_init(
                     || hasher.fork(),
                     |hasher, &pos| {
-                        let left = pos
-                            .checked_sub(two_h)
-                            .expect("left child underflow in update_node_digests");
-                        let right = pos
-                            .checked_sub(1)
-                            .expect("right child underflow in update_node_digests");
+                        let left = pos - two_h;
+                        let right = pos - 1;
                         let digest = hasher.node_digest(
                             pos,
                             self.get_node_unchecked(left),
