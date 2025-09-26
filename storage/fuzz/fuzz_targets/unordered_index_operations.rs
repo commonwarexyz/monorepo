@@ -73,7 +73,6 @@ struct FuzzInput {
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
-        // TODO: Test index::Ordered too.
         let mut index = Index::init(context.clone(), TwoCap);
 
         for op in input.operations.iter() {
