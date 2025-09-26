@@ -1,7 +1,7 @@
 //! Implementation of [Index] that uses an ordered map internally to map translated keys to
 //! arbitrary values. Beyond the standard [IndexTrait] implementation, this variant adds the
 //! capability to retrieve values associated with both next and previous translated keys of a given
-//! key. There is no ordering guarantees provided over the values associated with each key. Ordering
+//! key. There is no ordering guarantee provided over the values associated with each key. Ordering
 //! applies only to the _translated_ key space.
 
 use crate::{
@@ -142,7 +142,10 @@ impl<T: Translator, V: Eq> Index<T, V> {
     /// For example, if the translator is looking only at the first byte of a key, and the index
     /// contains values for translated keys 0b, 1c, and 2d, then `get_next([0b, 01, 02, ...])` would
     /// return the values associated with 1c, `get_next([2a, 01, 02, ...])` would return the values
-    /// associated with 2d, and `get_next([2d])` would return `None`.
+    /// associated with 2d, and `get_next([2d])` would return `None`. Because values associated with
+    /// the same translated key can appear in any order, keys with the same first byte in this
+    /// example would need to be ordered by the caller if a full ordering over the untranslated
+    /// keyspace is desired.
     pub fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
         let k = self.translator.transform(key);
         self.map
