@@ -26,6 +26,10 @@ tracing = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
 either = { workspace = true }
+num-bigint = { workspace = true }
+num-integer = { workspace = true }
+num-rational = { workspace = true }
+num-traits = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

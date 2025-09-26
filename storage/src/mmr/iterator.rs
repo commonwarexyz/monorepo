@@ -20,6 +20,10 @@ pub struct PeakIterator {
 
 impl PeakIterator {
     /// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if size is too large (specifically, the topmost bit should be 0).
     pub fn new(size: u64) -> PeakIterator {
         if size == 0 {
             return PeakIterator::default();
@@ -28,6 +32,7 @@ impl PeakIterator {
         // not be in the MMR unless it happens to be a single perfect binary tree, but that's OK as
         // we will descend leftward until we find the first peak.
         let start = u64::MAX >> size.leading_zeros();
+        assert_ne!(start, u64::MAX, "size overflow");
         let two_h = 1 << start.trailing_ones();
         PeakIterator {
             size,
@@ -39,6 +44,10 @@ impl PeakIterator {
     /// Return the position of the last leaf in an MMR of the given size.
     ///
     /// This is an O(log2(n)) operation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if size is too large (specifically, the topmost bit should be 0).
     pub fn last_leaf_pos(size: u64) -> u64 {
         if size == 0 {
             return 0;
@@ -54,11 +63,16 @@ impl PeakIterator {
     ///
     /// The implementation verifies that peaks in the MMR of the given size have strictly decreasing
     /// height, which is a necessary condition for MMR validity.
-    pub const fn check_validity(size: u64) -> bool {
+    ///
+    /// # Panics
+    ///
+    /// Panics if size is too large (specifically, the topmost bit should be 0).
+    pub fn check_validity(size: u64) -> bool {
         if size == 0 {
             return true;
         }
         let start = u64::MAX >> size.leading_zeros();
+        assert_ne!(start, u64::MAX, "size overflow");
         let mut two_h = 1 << start.trailing_ones();
         let mut node_pos = start - 1;
         while two_h > 1 {
@@ -141,20 +155,25 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     peaks
 }
 
-/// Returns the number of the leaf at position `leaf_pos` in an MMR, or None if
-/// this is not a leaf.
+/// Returns the location of the leaf at position `leaf_pos` in an MMR, or None
+/// if this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
-pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
+///
+/// # Panics
+///
+/// Panics if leaf_pos is too large (top 2 bits should be 0).
+pub(crate) const fn leaf_pos_to_loc(leaf_pos: u64) -> Option<u64> {
     if leaf_pos == 0 {
         return Some(0);
     }
 
-    let start = u64::MAX >> (leaf_pos + 1).leading_zeros();
+    let start = u64::MAX >> (leaf_pos.checked_add(1).expect("leaf_pos overflow")).leading_zeros();
     let height = start.trailing_ones();
+    assert!(height > 1, "leaf_pos overflow");
     let mut two_h = 1 << (height - 1);
     let mut cur_node = start - 1;
-    let mut leaf_num_floor = 0u64;
+    let mut leaf_loc_floor = 0u64;
 
     while two_h > 1 {
         if cur_node == leaf_pos {
@@ -165,7 +184,7 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
         if leaf_pos > left_pos {
             // The leaf is in the right subtree, so we must account for the leaves in the left
             // subtree all of which precede it.
-            leaf_num_floor += two_h;
+            leaf_loc_floor += two_h;
             cur_node -= 1; // move to the right child
         } else {
             // The node is in the left subtree
@@ -173,16 +192,21 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
         }
     }
 
-    Some(leaf_num_floor)
+    Some(leaf_loc_floor)
 }
 
-/// Returns the position of the leaf with number `leaf_num` in an MMR.
-pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
-    // This will never underflow since 2*n >= count_ones(n).
-    leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
+/// Returns the position of the leaf with location `leaf_loc` in an MMR.
+///
+/// # Panics
+///
+/// Panics if leaf_loc is too large (must fit in 64 bits after multiplication by 2).
+pub(crate) const fn leaf_loc_to_pos(leaf_loc: u64) -> u64 {
+    // The subtraction will never underflow since 2*n >= count_ones(n).
+    leaf_loc.checked_mul(2).expect("leaf_loc overflow") - leaf_loc.count_ones() as u64
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
+#[cfg(any(feature = "std", test))]
 pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
     if pos == 0 {
         return 0;
@@ -282,25 +306,25 @@ mod tests {
     use commonware_cryptography::Sha256;
 
     #[test]
-    fn test_leaf_num_calculation() {
+    fn test_leaf_loc_calculation() {
         // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
         // its number and back again.
         let mut mmr: Mmr<Sha256> = Mmr::new();
         let mut hasher = Standard::<Sha256>::new();
-        let mut num_to_pos = Vec::new();
+        let mut loc_to_pos = Vec::new();
         let digest = [1u8; 32];
         for _ in 0u64..1000 {
-            num_to_pos.push(mmr.add(&mut hasher, &digest));
+            loc_to_pos.push(mmr.add(&mut hasher, &digest));
         }
 
         let mut last_leaf_pos = 0;
-        for (leaf_num_expected, leaf_pos) in num_to_pos.iter().enumerate() {
-            let leaf_num_got = leaf_pos_to_num(*leaf_pos).unwrap();
-            assert_eq!(leaf_num_got, leaf_num_expected as u64);
-            let leaf_pos_got = leaf_num_to_pos(leaf_num_got);
+        for (leaf_loc_expected, leaf_pos) in loc_to_pos.iter().enumerate() {
+            let leaf_loc_got = leaf_pos_to_loc(*leaf_pos).unwrap();
+            assert_eq!(leaf_loc_got, leaf_loc_expected as u64);
+            let leaf_pos_got = leaf_loc_to_pos(leaf_loc_got);
             assert_eq!(leaf_pos_got, *leaf_pos);
             for i in last_leaf_pos + 1..*leaf_pos {
-                assert!(leaf_pos_to_num(i).is_none());
+                assert!(leaf_pos_to_loc(i).is_none());
             }
             last_leaf_pos = *leaf_pos;
         }

@@ -74,11 +74,8 @@ impl<P: PublicKey, V: Variant, D: Digest> Supervisor<P, V, D> {
             }
             validators.sort();
             let view_identity = public::<V>(&polynomial);
-            if identity.is_none() {
-                identity = Some(*view_identity);
-            } else if identity.as_ref().unwrap() != view_identity {
-                panic!("public keys do not match");
-            }
+            let identity_ref = identity.get_or_insert(*view_identity);
+            assert_eq!(identity_ref, view_identity, "public keys do not match");
             parsed_participants.insert(view, (evaluations, map, validators, my_share));
         }
         Self {

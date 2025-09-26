@@ -16,7 +16,7 @@ use crate::{
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{
-        iterator::leaf_num_to_pos,
+        iterator::leaf_loc_to_pos,
         journaled::{Config as MmrConfig, Mmr},
         Proof, StandardHasher as Standard,
     },
@@ -450,7 +450,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         // Prune locations and the MMR to the corresponding positions.
         try_join!(
             self.mmr
-                .prune_to_pos(&mut self.hasher, leaf_num_to_pos(prune_loc))
+                .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(prune_loc))
                 .map_err(Error::Mmr),
             self.locations.prune(prune_loc).map_err(Error::Journal),
         )?;
@@ -595,24 +595,22 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         self.historical_proof(self.size, start_loc, max_ops).await
     }
 
-    /// Analogous to proof, but with respect to the state of the MMR when it had `size` elements.
+    /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
+    /// operations.
     pub async fn historical_proof(
         &self,
-        size: u64,
+        op_count: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_index = std::cmp::min(size - 1, start_loc + max_ops.get() - 1);
-        let end_pos = leaf_num_to_pos(end_index);
-        let mmr_size = leaf_num_to_pos(size);
-
+        let end_loc = std::cmp::min(op_count, start_loc + max_ops.get());
+        let mmr_size = leaf_loc_to_pos(op_count);
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_pos, end_pos)
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_index - start_loc + 1) as usize);
-        for loc in start_loc..=end_index {
+        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
+        for loc in start_loc..end_loc {
             let offset = self.locations.read(loc).await?;
             let section = loc / self.log_items_per_section;
             let value = self.log.get(section, offset).await?;

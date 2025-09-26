@@ -13,7 +13,7 @@ use crate::{
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
         journaled::{Config as MmrConfig, Mmr},
         Proof, StandardHasher as Standard,
     },
@@ -194,52 +194,52 @@ impl<
 
         // Back up over / discard any uncommitted operations in the log.
         let mut log_size = log.size().await?;
-        let mut rewind_leaf_num = log_size;
+        let mut rewind_leaf_loc = log_size;
         let mut inactivity_floor_loc = 0;
-        while rewind_leaf_num > 0 {
-            if let Operation::CommitFloor(loc) = log.read(rewind_leaf_num - 1).await? {
+        while rewind_leaf_loc > 0 {
+            if let Operation::CommitFloor(loc) = log.read(rewind_leaf_loc - 1).await? {
                 inactivity_floor_loc = loc;
                 break;
             }
-            rewind_leaf_num -= 1;
+            rewind_leaf_loc -= 1;
         }
-        if rewind_leaf_num != log_size {
-            let op_count = log_size - rewind_leaf_num;
+        if rewind_leaf_loc != log_size {
+            let op_count = log_size - rewind_leaf_loc;
             warn!(
                 log_size,
                 op_count, "rewinding over uncommitted log operations"
             );
-            log.rewind(rewind_leaf_num).await?;
+            log.rewind(rewind_leaf_loc).await?;
             log.sync().await?;
-            log_size = rewind_leaf_num;
+            log_size = rewind_leaf_loc;
         }
 
         // Pop any MMR elements that are ahead of the last log commit point.
-        let mut next_mmr_leaf_num = leaf_pos_to_num(mmr.size()).unwrap();
-        if next_mmr_leaf_num > log_size {
-            let op_count = next_mmr_leaf_num - log_size;
+        let mut next_mmr_leaf_loc = leaf_pos_to_loc(mmr.size()).unwrap();
+        if next_mmr_leaf_loc > log_size {
+            let op_count = next_mmr_leaf_loc - log_size;
             warn!(log_size, op_count, "popping uncommitted MMR operations");
             mmr.pop(op_count as usize).await?;
-            next_mmr_leaf_num = log_size;
+            next_mmr_leaf_loc = log_size;
         }
 
         // If the MMR is behind, replay log operations to catch up.
-        if next_mmr_leaf_num < log_size {
-            let op_count = log_size - next_mmr_leaf_num;
+        if next_mmr_leaf_loc < log_size {
+            let op_count = log_size - next_mmr_leaf_loc;
             warn!(
                 log_size,
                 op_count, "MMR lags behind log, replaying log to catch up"
             );
-            while next_mmr_leaf_num < log_size {
-                let op = log.read(next_mmr_leaf_num).await?;
+            while next_mmr_leaf_loc < log_size {
+                let op = log.read(next_mmr_leaf_loc).await?;
                 mmr.add_batched(hasher, &op.encode()).await?;
-                next_mmr_leaf_num += 1;
+                next_mmr_leaf_loc += 1;
             }
             mmr.sync(hasher).await.map_err(Error::Mmr)?;
         }
 
         // At this point the MMR and log should be consistent.
-        assert_eq!(log.size().await?, leaf_pos_to_num(mmr.size()).unwrap());
+        assert_eq!(log.size().await?, leaf_pos_to_loc(mmr.size()).unwrap());
 
         Ok((inactivity_floor_loc, mmr, log))
     }
@@ -387,7 +387,7 @@ impl<
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> u64 {
-        leaf_pos_to_num(self.mmr.size()).unwrap()
+        leaf_pos_to_loc(self.mmr.size()).unwrap()
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -509,27 +509,23 @@ impl<
             .await
     }
 
-    /// Analogous to proof, but with respect to the state of the MMR when it had `size` elements.
+    /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
+    /// operations.
     pub async fn historical_proof(
         &self,
-        size: u64,
+        op_count: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_loc = std::cmp::min(
-            size.saturating_sub(1),
-            start_loc.saturating_add(max_ops.get()) - 1,
-        );
-        let end_pos = leaf_num_to_pos(end_loc);
-        let mmr_size = leaf_num_to_pos(size);
+        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
 
+        let mmr_size = leaf_loc_to_pos(op_count);
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_pos, end_pos)
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
-        let futures = (start_loc..=end_loc)
+        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
+        let futures = (start_loc..end_loc)
             .map(|i| self.log.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -659,7 +655,7 @@ impl<
         );
 
         self.mmr
-            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(target_prune_loc))
+            .prune_to_pos(&mut self.hasher, leaf_loc_to_pos(target_prune_loc))
             .await?;
 
         Ok(())
@@ -1070,7 +1066,7 @@ pub(super) mod test {
             let max_ops = NZU64!(4);
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
-            let start_loc = leaf_pos_to_num(start_pos).unwrap();
+            let start_loc = leaf_pos_to_loc(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(100).await.unwrap();
             db.sync().await.unwrap();
@@ -1455,7 +1451,7 @@ pub(super) mod test {
                 .historical_proof(original_op_count, 5, NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(historical_proof.size, leaf_num_to_pos(original_op_count));
+            assert_eq!(historical_proof.size, leaf_loc_to_pos(original_op_count));
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -1485,7 +1481,7 @@ pub(super) mod test {
 
             // Test singleton database
             let (single_proof, single_ops) = db.historical_proof(1, 0, NZU64!(1)).await.unwrap();
-            assert_eq!(single_proof.size, leaf_num_to_pos(1));
+            assert_eq!(single_proof.size, leaf_loc_to_pos(1));
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
@@ -1511,7 +1507,7 @@ pub(super) mod test {
 
             // Test proof at minimum historical position
             let (min_proof, min_ops) = db.historical_proof(3, 0, NZU64!(3)).await.unwrap();
-            assert_eq!(min_proof.size, leaf_num_to_pos(3));
+            assert_eq!(min_proof.size, leaf_loc_to_pos(3));
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
@@ -1540,7 +1536,7 @@ pub(super) mod test {
                     .await
                     .unwrap();
 
-                assert_eq!(historical_proof.size, leaf_num_to_pos(end_loc));
+                assert_eq!(historical_proof.size, leaf_loc_to_pos(end_loc));
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
@@ -1582,7 +1578,7 @@ pub(super) mod test {
             db.commit().await.unwrap();
 
             let (proof, ops) = db.historical_proof(5, 1, NZU64!(10)).await.unwrap();
-            assert_eq!(proof.size, leaf_num_to_pos(5));
+            assert_eq!(proof.size, leaf_loc_to_pos(5));
             assert_eq!(ops.len(), 4);
 
             let mut hasher = Standard::<Sha256>::new();
