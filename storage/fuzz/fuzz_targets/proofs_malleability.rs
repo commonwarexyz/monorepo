@@ -157,7 +157,7 @@ fn fuzz(input: FuzzInput) {
                 let tree = builder.build();
                 let root = tree.root();
 
-                for idx in 0..digests.len() {
+                for (idx, _) in digests.iter().enumerate() {
                     let original_proof = tree.proof(idx as u32).unwrap();
 
                     let mut hasher = Sha256::default();
