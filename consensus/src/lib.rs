@@ -56,6 +56,8 @@ cfg_if::cfg_if! {
         use commonware_cryptography::{Digest, PublicKey};
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
+        use rand::Rng;
+        use commonware_runtime::{Clock, Metrics, Spawner};
 
         pub mod marshal;
         mod reporter;
@@ -100,6 +102,38 @@ cfg_if::cfg_if! {
                 context: Self::Context,
                 payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+        }
+
+        /// Application is the interface responsible for building new blocks on top of consensus-provided parent
+        /// commitments as well as receiving finalized blocks from marshal.
+        pub trait Application<E>: Clone + Send + 'static
+        where
+            E: Rng + Spawner + Metrics + Clock
+        {
+            /// Context is metadata provided by the consensus engine associated with a given payload.
+            ///
+            /// This often includes things like the proposer, view number, the height, or the epoch.
+            type Context: Epochable;
+
+            /// The block type produced by the application's builder.
+            type Block: Block;
+
+            /// Payload used to initialize the consensus engine.
+            fn genesis(
+                &mut self,
+                epoch: <Self::Context as Epochable>::Epoch
+            ) -> impl Future<Output = Self::Block> + Send;
+
+            /// Build a new block on top of the provided parent commitment / block.
+            fn build(
+                &mut self,
+                context: E,
+                parent_commitment: <Self::Block as Committable>::Commitment,
+                parent_block: Self::Block,
+            ) -> impl Future<Output = Self::Block> + Send;
+
+            /// Receive a finalized block from marshal.
+            fn finalize(&mut self, block: Self::Block) -> impl Future<Output = ()> + Send;
         }
 
         /// Relay is the interface responsible for broadcasting payloads to the network.
