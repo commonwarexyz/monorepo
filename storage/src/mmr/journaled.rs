@@ -483,8 +483,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// # Warning
     ///
     /// Panics if there are unprocessed updates.
-    pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
-        Ok(self.mem_mmr.add(h, element).into())
+    pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<Position, Error> {
+        Ok(self.mem_mmr.add(h, element))
     }
 
     /// Add an element to the MMR, delaying the computation of ancestor digests
@@ -493,8 +493,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         &mut self,
         h: &mut impl Hasher<H>,
         element: &[u8],
-    ) -> Result<u64, Error> {
-        Ok(self.mem_mmr.add_batched(h, element).into())
+    ) -> Result<Position, Error> {
+        Ok(self.mem_mmr.add_batched(h, element))
     }
 
     /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
@@ -772,7 +772,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     pub async fn simulate_pruning_failure(
         mut self,
         h: &mut impl Hasher<H>,
-        prune_to_pos: u64,
+        prune_to_pos: Position,
     ) -> Result<(), Error> {
         assert!(prune_to_pos <= self.size());
 
@@ -781,7 +781,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.
-        self.update_metadata(Position::new(prune_to_pos)).await?;
+        self.update_metadata(prune_to_pos).await?;
 
         // Don't actually prune the journal to simulate failure
         Ok(())
@@ -1267,15 +1267,14 @@ mod tests {
                     .unwrap();
                 let start_size = mmr.size();
                 let prune_pos = std::cmp::min(i as u64 * 50, start_size);
+                let prune_pos = Position::new(prune_pos);
                 if i % 5 == 0 {
                     mmr.simulate_pruning_failure(&mut hasher, prune_pos)
                         .await
                         .unwrap();
                     continue;
                 }
-                mmr.prune_to_pos(&mut hasher, Position::new(prune_pos))
-                    .await
-                    .unwrap();
+                mmr.prune_to_pos(&mut hasher, prune_pos).await.unwrap();
 
                 // add 25 new elements, simulating a partial write after each.
                 for j in 0..10 {
@@ -1379,10 +1378,8 @@ mod tests {
             }
 
             // Prune to position 30
-            let prune_pos = 30;
-            mmr.prune_to_pos(&mut hasher, Position::new(prune_pos))
-                .await
-                .unwrap();
+            let prune_pos = Position::new(30);
+            mmr.prune_to_pos(&mut hasher, prune_pos).await.unwrap();
 
             // Create reference MMR for verification to get correct size
             let mut ref_mmr = Mmr::init(
