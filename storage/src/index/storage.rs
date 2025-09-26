@@ -270,20 +270,16 @@ impl<K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> CursorTrait for Cursor<'_
             }
         }
     }
-}
 
-/// Removes anything in the cursor that satisfies the predicate.
-#[inline]
-pub(super) fn prune_with_cursor<C>(cursor: &mut C, predicate: impl Fn(&C::Value) -> bool)
-where
-    C: CursorTrait,
-{
-    loop {
-        let Some(old) = cursor.next() else {
-            break;
-        };
-        if predicate(old) {
-            cursor.delete();
+    /// Removes anything in the cursor that satisfies the predicate.
+    fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
+        loop {
+            let Some(old) = self.next() else {
+                break;
+            };
+            if predicate(old) {
+                self.delete();
+            }
         }
     }
 }

@@ -4,7 +4,7 @@
 
 use crate::{
     index::{
-        storage::{prune_with_cursor, Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
+        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
         Cursor as CursorTrait, Index as IndexTrait,
     },
     translator::Translator,
@@ -72,6 +72,10 @@ impl<T: Translator, V: Eq> CursorTrait for Cursor<'_, T, V> {
 
     fn update(&mut self, value: V) {
         self.inner.update(value)
+    }
+
+    fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
+        self.inner.prune(predicate)
     }
 }
 
@@ -190,7 +194,7 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
                 let mut cursor =
                     Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                prune_with_cursor(&mut cursor, &predicate);
+                cursor.prune(&predicate);
 
                 // Add our new value (if not prunable).
                 if !predicate(&value) {
@@ -211,7 +215,7 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
                 let mut cursor =
                     Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                prune_with_cursor(&mut cursor, predicate);
+                cursor.prune(&predicate);
             }
             Entry::Vacant(_) => {}
         }

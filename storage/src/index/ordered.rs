@@ -6,7 +6,7 @@
 
 use crate::{
     index::{
-        storage::{prune_with_cursor, Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
+        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
         Cursor as CursorTrait, Index as IndexTrait,
     },
     translator::Translator,
@@ -60,17 +60,25 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
 
 impl<T: Translator, V: Eq> CursorTrait for Cursor<'_, T, V> {
     type Value = V;
+
     fn update(&mut self, v: V) {
         self.inner.update(v)
     }
+
     fn next(&mut self) -> Option<&V> {
         self.inner.next()
     }
+
     fn insert(&mut self, v: V) {
         self.inner.insert(v)
     }
+
     fn delete(&mut self) {
         self.inner.delete()
+    }
+
+    fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
+        self.inner.prune(predicate)
     }
 }
 
@@ -237,7 +245,7 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
                     Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 // Remove anything that is prunable.
-                prune_with_cursor(&mut cursor, &predicate);
+                cursor.prune(&predicate);
 
                 // Add our new value (if not prunable).
                 if !predicate(&value) {
@@ -259,7 +267,7 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
                     Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 // Remove anything that is prunable.
-                prune_with_cursor(&mut cursor, predicate);
+                cursor.prune(&predicate);
             }
             BTreeEntry::Vacant(_) => {}
         }

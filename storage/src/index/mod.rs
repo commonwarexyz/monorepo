@@ -66,8 +66,10 @@ pub trait Cursor {
     ///
     /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
     fn update(&mut self, value: Self::Value);
-}
 
+    /// Removes anything in the cursor that satisfies the predicate.
+    fn prune(&mut self, predicate: &impl Fn(&Self::Value) -> bool);
+}
 /// A memory-efficient index that maps translated keys to arbitrary values.
 pub trait Index {
     /// The type of values the index stores.
