@@ -249,7 +249,8 @@ where
             };
 
             // Calculate batch size for this gap
-            let gap_size = NZU64!(end_loc.checked_sub(start_loc.as_u64()).unwrap().as_u64() + 1);
+            let diff = end_loc.checked_sub(start_loc.into()).unwrap();
+            let gap_size = NZU64!(diff.as_u64() + 1);
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
