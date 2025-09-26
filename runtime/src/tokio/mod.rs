@@ -11,7 +11,7 @@
 //! This module provides two main ways to use tokio:
 //!
 //! - [`Runner`]: Creates and manages its own tokio runtime instance (default behavior)
-//! - [`use_current_tokio_runtime`]: Configures the runtime to use an existing tokio instance
+//! - [`Config::with_external_tokio`]: Configures the runtime to use an existing tokio instance
 //!
 //! # Example with Runner (creates own runtime)
 //!
@@ -37,10 +37,10 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     // Enable external tokio mode - this makes Context use tokio::spawn
-//!     tokio::use_current_tokio_runtime();
+//!     // Configure to use external tokio runtime
+//!     let config = tokio::Config::default().with_external_tokio(true);
+//!     let executor = tokio::Runner::new(config);
 //!     
-//!     let executor = tokio::Runner::default();
 //!     tokio::task::spawn_blocking(move || {
 //!         executor.start(|context| async move {
 //!             println!("Parent started");

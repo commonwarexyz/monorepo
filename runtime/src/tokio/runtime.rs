@@ -115,6 +115,11 @@ pub struct Config {
 
     /// Network configuration.
     network_cfg: NetworkConfig,
+
+    /// Whether to use an external tokio runtime instead of creating a new one.
+    ///
+    /// When true, Context will use `tokio::spawn` instead of `executor.runtime.spawn`.
+    use_external_tokio: bool,
 }
 
 impl Config {
@@ -129,6 +134,7 @@ impl Config {
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
+            use_external_tokio: false,
         }
     }
 
@@ -168,6 +174,11 @@ impl Config {
         self.maximum_buffer_size = n;
         self
     }
+    /// See [Config]
+    pub fn with_external_tokio(mut self, use_external: bool) -> Self {
+        self.use_external_tokio = use_external;
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -197,6 +208,10 @@ impl Config {
     /// See [Config]
     pub fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
+    }
+    /// See [Config]
+    pub fn use_external_tokio(&self) -> bool {
+        self.use_external_tokio
     }
 }
 
@@ -343,14 +358,6 @@ impl crate::Runner for Runner {
     }
 }
 
-/// A simple helper function to use the current tokio runtime instead of creating a new one.
-/// 
-/// This sets an environment variable that causes the Context to use `tokio::spawn` 
-/// instead of `executor.runtime.spawn`.
-pub fn use_current_tokio_runtime() {
-    std::env::set_var("COMMONWARE_USE_EXTERNAL_TOKIO", "1");
-}
-
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
         type Storage = MeteredStorage<IoUringStorage>;
@@ -414,6 +421,7 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let catch_panics = self.executor.cfg.catch_panics;
+        let use_external_tokio = self.executor.cfg.use_external_tokio;
         let executor = self.executor.clone();
 
         // Give spawned task its own empty children list
@@ -424,7 +432,7 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init_future(future, gauge, catch_panics, children);
 
         // Spawn the task
-        if std::env::var("COMMONWARE_USE_EXTERNAL_TOKIO").is_ok() {
+        if use_external_tokio {
             tokio::spawn(f);
         } else {
             executor.runtime.spawn(f);
@@ -457,7 +465,7 @@ impl crate::Spawner for Context {
             );
 
             // Spawn the task
-            if std::env::var("COMMONWARE_USE_EXTERNAL_TOKIO").is_ok() {
+            if executor.cfg.use_external_tokio {
                 tokio::spawn(f);
             } else {
                 executor.runtime.spawn(f);
@@ -499,12 +507,14 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
-        let (f, handle) = Handle::init_blocking(|| f(self), gauge, executor.cfg.catch_panics);
+        let catch_panics = self.executor.cfg.catch_panics;
+        let use_external_tokio = self.executor.cfg.use_external_tokio;
+        let (f, handle) = Handle::init_blocking(|| f(self), gauge, catch_panics);
 
         // Spawn the blocking task
         if dedicated {
             std::thread::spawn(f);
-        } else if std::env::var("COMMONWARE_USE_EXTERNAL_TOKIO").is_ok() {
+        } else if use_external_tokio {
             tokio::task::spawn_blocking(f);
         } else {
             executor.runtime.spawn_blocking(f);
@@ -526,13 +536,14 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
+        let use_external_tokio = self.executor.cfg.use_external_tokio;
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, gauge, executor.cfg.catch_panics);
 
             // Spawn the blocking task
             if dedicated {
                 std::thread::spawn(f);
-            } else if std::env::var("COMMONWARE_USE_EXTERNAL_TOKIO").is_ok() {
+            } else if use_external_tokio {
                 tokio::task::spawn_blocking(f);
             } else {
                 executor.runtime.spawn_blocking(f);
