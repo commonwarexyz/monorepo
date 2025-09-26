@@ -118,10 +118,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
 
     /// Get the values associated with the translated key that lexicographically precedes the result
     /// of translating `key`.
-    pub fn prev_translated_key_values<'a>(
-        &'a self,
-        key: &[u8],
-    ) -> impl Iterator<Item = &'a V> + 'a {
+    pub fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
         let k = self.translator.transform(key);
         self.map
             .range(..k)
@@ -138,10 +135,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
     /// contains values for translated keys 0b, 1c, and 2d, then `get_next([0b, 01, 02, ...])` would
     /// return the values associated with 1c, `get_next([2a, 01, 02, ...])` would return the values
     /// associated with 2d, and `get_next([2d])` would return `None`.
-    pub fn next_translated_key_values<'a>(
-        &'a self,
-        key: &[u8],
-    ) -> impl Iterator<Item = &'a V> + 'a {
+    pub fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
         let k = self.translator.transform(key);
         self.map
             .range((Excluded(k), Unbounded))
@@ -152,7 +146,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 
     /// Get the values associated with the lexicographically first translated key.
-    pub fn first_translated_key_values<'a>(&'a self) -> impl Iterator<Item = &'a V> + 'a {
+    pub fn first_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a V> + 'a {
         self.map
             .first_key_value()
             .map(|(_, record)| ImmutableCursor::new(record))
@@ -161,7 +155,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 
     /// Get the values associated with the lexicographically last translated key.
-    pub fn last_translated_key_values<'a>(&'a self) -> impl Iterator<Item = &'a V> + 'a {
+    pub fn last_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a V> + 'a {
         self.map
             .last_key_value()
             .map(|(_, record)| ImmutableCursor::new(record))
@@ -317,7 +311,7 @@ mod tests {
 
             let k1 = &[0x0b, 0x02, 0xAA]; // translated key 0b
             let k2 = &[0x1c, 0x04, 0xCC]; // translated key 1c
-            let k2_collides = &[0x1c, 0xBB, 0x11];
+            let k2_collides = &[0x1c, 0x03, 0x11];
             let k3 = &[0x2d, 0x06, 0xEE]; // translated key 2d
             index.insert(k1, 1);
             index.insert(k2, 21);
@@ -326,61 +320,61 @@ mod tests {
             assert_eq!(index.keys(), 3);
 
             // First translated key is 0b.
-            let mut next = index.first_translated_key_values();
+            let mut next = index.first_translated_key();
             assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x00 is 0b.
-            let mut next = index.next_translated_key_values(&[0x00]);
+            let mut next = index.next_translated_key(&[0x00]);
             assert_eq!(next.next().unwrap(), &1);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x0b is 1c.
-            let mut next = index.next_translated_key_values(&[0x0b, 0x01, 0x02]);
+            let mut next = index.next_translated_key(&[0x0b, 0x01, 0x02]);
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x1b is 1c.
-            let mut next = index.next_translated_key_values(&[0x1b, 0x01, 0x02, 0x03]);
+            let mut next = index.next_translated_key(&[0x1b, 0x01, 0x02, 0x03]);
             assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x2a is 2d.
-            let mut next = index.next_translated_key_values(&[0x2a, 0x01, 0x02, 0x03, 0x04]);
+            let mut next = index.next_translated_key(&[0x2a, 0x01, 0x02, 0x03, 0x04]);
             assert_eq!(next.next().unwrap(), &3);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x2d is None.
-            let mut next = index.next_translated_key_values(k3);
+            let mut next = index.next_translated_key(k3);
             assert_eq!(next.next(), None);
 
-            let mut next = index.next_translated_key_values(&[0x2e, 0xFF]);
+            let mut next = index.next_translated_key(&[0x2e, 0xFF]);
             assert_eq!(next.next(), None);
 
             // Previous translated key is None.
-            let mut prev = index.prev_translated_key_values(k1);
+            let mut prev = index.prev_translated_key(k1);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 0b.
-            let mut prev = index.prev_translated_key_values(&[0x0c, 0x01, 0x02]);
+            let mut prev = index.prev_translated_key(&[0x0c, 0x01, 0x02]);
             assert_eq!(prev.next().unwrap(), &1);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 1c.
-            let mut prev = index.prev_translated_key_values(&[0x1d, 0x01, 0x02]);
+            let mut prev = index.prev_translated_key(&[0x1d, 0x01, 0x02]);
             assert_eq!(prev.next().unwrap(), &21);
             assert_eq!(prev.next().unwrap(), &22);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 2d.
-            let mut prev = index.prev_translated_key_values(&[0xCC, 0x01, 0x02]);
+            let mut prev = index.prev_translated_key(&[0xCC, 0x01, 0x02]);
             assert_eq!(prev.next().unwrap(), &3);
             assert_eq!(prev.next(), None);
 
             // Last translated key is 2d.
-            let mut last = index.last_translated_key_values();
+            let mut last = index.last_translated_key();
             assert_eq!(last.next().unwrap(), &3);
             assert_eq!(last.next(), None);
         });

@@ -51,7 +51,7 @@ fn bench_insert(c: &mut Criterion) {
                         // Shuffle items and setup Index
                         kvs.shuffle(&mut rng);
                         let start = Instant::now();
-                        if index == "ordered" {
+                        if variant == "ordered" {
                             let mut index = Ordered::init(DummyMetrics, TwoCap);
                             run_benchmark(&mut index, &kvs);
                         } else {

@@ -41,6 +41,7 @@ pub use unordered::Index as Unordered;
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or
 /// `remove()` from [Index] instead._
 pub trait Cursor {
+    /// The type of values the cursor iterates over.
     type Value: Eq;
 
     /// Advances the cursor to the next value in the chain, returning a reference to it.
@@ -69,7 +70,10 @@ pub trait Cursor {
 
 /// A memory-efficient index that maps translated keys to arbitrary values.
 pub trait Index {
+    /// The type of values the index stores.
     type Value: Eq;
+
+    /// The type of cursor returned by this index to iterate over values with conflicting keys.
     type Cursor<'a>: Cursor<Value = Self::Value>
     where
         Self: 'a;
