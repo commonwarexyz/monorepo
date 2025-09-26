@@ -552,7 +552,7 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
-        let mut proof = verification::range_proof(&grafted_mmr, loc..(loc + 1)).await?;
+        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
         let chunk = *self.status.get_chunk(loc.as_u64());
 
         let last_chunk = self.status.last_chunk();
@@ -994,20 +994,14 @@ pub mod test {
             let end_loc = Location::new(db.op_count());
             let start_loc = db.any.inactivity_floor_loc();
 
-            for i in start_loc.as_u64()..end_loc.as_u64() {
+            for loc in start_loc.as_u64()..end_loc.as_u64() {
+                let loc = Location::new(loc);
                 let (proof, ops, chunks) = db
-                    .range_proof(hasher.inner(), Location::new(i), NZU64!(max_ops))
+                    .range_proof(hasher.inner(), loc, NZU64!(max_ops))
                     .await
                     .unwrap();
                 assert!(
-                    CurrentTest::verify_range_proof(
-                        &mut hasher,
-                        &proof,
-                        Location::new(i),
-                        &ops,
-                        &chunks,
-                        &root
-                    ),
+                    CurrentTest::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
             }
