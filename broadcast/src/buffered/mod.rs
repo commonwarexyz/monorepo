@@ -389,7 +389,7 @@ mod tests {
                 .await;
             match context.timeout(A_JIFFY, receiver).await {
                 Ok(_) => panic!("receiver should have failed"),
-                Err(Error::Timeout) => {}, // Expected timeout
+                Err(Error::Timeout) => {} // Expected timeout
                 Err(e) => panic!("unexpected error: {:?}", e),
             }
         });
@@ -454,7 +454,7 @@ mod tests {
             let receiver = mailbox_b.subscribe(None, commitment_m1, None).await;
             match context.timeout(A_JIFFY, receiver).await {
                 Ok(_) => panic!("M1 should not be retrievable"),
-                Err(Error::Timeout) => {}, // Expected timeout
+                Err(Error::Timeout) => {} // Expected timeout
                 Err(e) => panic!("unexpected error: {:?}", e),
             }
         });
