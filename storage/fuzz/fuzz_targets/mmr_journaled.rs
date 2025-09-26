@@ -226,10 +226,11 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     mmr.process_updates(&mut hasher);
-                    if let Ok(proof) = mmr.range_proof(start_pos, end_pos).await {
+                    let range = start_pos..end_pos;
+                    if let Ok(proof) = mmr.range_proof(range.clone()).await {
                         let original_size = mmr.size();
                         let historical_proof = mmr
-                            .historical_range_proof(original_size, start_pos, end_pos)
+                            .historical_range_proof(original_size, range)
                             .await
                             .unwrap();
                         assert_eq!(proof.size, historical_proof.size);
@@ -254,8 +255,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     mmr.process_updates(&mut hasher);
+
+                    let range = start_pos..end_pos;
                     let _ = mmr
-                        .historical_range_proof(valid_size, start_pos, end_pos)
+                        .historical_range_proof(valid_size, range)
                         .await;
                 }
 
@@ -399,8 +402,8 @@ fn fuzz(input: FuzzInput) {
 
                     let sync_config = SyncConfig {
                         config: test_config("sync"),
-                        lower_bound: safe_lower,
-                        upper_bound: safe_upper,
+                        lower_bound_pos: safe_lower,
+                        upper_bound_pos: safe_upper,
                         pinned_nodes: None,
                     };
 
