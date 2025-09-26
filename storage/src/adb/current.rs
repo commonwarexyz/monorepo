@@ -666,7 +666,7 @@ impl<
         &self,
         hasher: &mut H,
         loc: Location,
-    ) -> Result<(Proof<H::Digest>, Fixed<K, V>, u64, [u8; N]), Error> {
+    ) -> Result<(Proof<H::Digest>, Fixed<K, V>, Location, [u8; N]), Error> {
         let op = self.any.log.read(loc.as_u64()).await?;
 
         let height = Self::grafting_height();
@@ -681,7 +681,7 @@ impl<
             proof.digests.push(hasher.finalize());
         }
 
-        Ok((proof, op, loc.as_u64(), chunk))
+        Ok((proof, op, loc, chunk))
     }
 
     #[cfg(test)]
@@ -884,7 +884,7 @@ pub mod test {
             let proof_inactive_info = KeyValueProofInfo {
                 key: k,
                 value: v1,
-                loc: Location::new(proof_inactive.2),
+                loc: proof_inactive.2,
                 chunk: proof_inactive.3,
             };
             assert!(!CurrentTest::verify_key_value_proof(
@@ -918,7 +918,7 @@ pub mod test {
             // fool the verifier if we are correctly incorporating the partial chunk information
             // into the root computation.
             let mut modified_chunk = proof_inactive.3;
-            let bit_pos = proof_inactive.2;
+            let bit_pos = proof_inactive.2.as_u64();
             let byte_idx = bit_pos / 8;
             let bit_idx = bit_pos % 8;
             modified_chunk[byte_idx as usize] |= 1 << bit_idx;
