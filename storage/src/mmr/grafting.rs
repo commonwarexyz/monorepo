@@ -242,7 +242,7 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
         right_digest: &H::Digest,
     ) -> H::Digest {
         self.hasher
-            .node_digest(destination_pos(pos, self.height), left_digest, right_digest)
+            .node_digest(self.destination_pos(pos), left_digest, right_digest)
     }
 
     fn root<'a>(
@@ -250,7 +250,7 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        let dest_pos = destination_pos(Position::new(size), self.height);
+        let dest_pos = self.destination_pos(Position::new(size));
         self.hasher.root(dest_pos.as_u64(), peak_digests)
     }
 
