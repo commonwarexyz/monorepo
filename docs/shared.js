@@ -126,11 +126,11 @@ function insertFooter() {
     const footerHTML = `
     <div class="footer">
         <div class="socials">
-            <a href="/hiring.html">Hiring</a>
-            <a href="/benchmarks.html">Benchmarks</a>
-            <a href="/podcasts.html">Podcasts</a>
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
+            <a href="/benchmarks.html">Benchmarks</a>
+            <a href="/hiring.html">Hiring</a>
             <a href="https://x.com/commonwarexyz">X</a>
+            <a href="/podcast.html">Podcasts</a>
         </div>
         &copy; ${currentYear} Commonware, Inc. All rights reserved.
     </div>
