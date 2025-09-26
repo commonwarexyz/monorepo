@@ -21,6 +21,7 @@ arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
+bytes = { workspace = true }
 
 [[bin]]
 name = "adb_operations"
@@ -158,6 +159,13 @@ bench = false
 [[bin]]
 name = "adb_immutable"
 path = "fuzz_targets/adb_immutable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proofs_malleability"
+path = "fuzz_targets/proofs_malleability.rs"
 test = false
 doc = false
 bench = false
