@@ -197,7 +197,7 @@ impl<
         let mut inactivity_floor_loc = Location::new(0);
         while rewind_leaf_loc > 0 {
             if let Operation::CommitFloor(loc) = log.read(rewind_leaf_loc - 1).await? {
-                inactivity_floor_loc = Location::new(loc);
+                inactivity_floor_loc = loc;
                 break;
             }
             rewind_leaf_loc -= 1;
@@ -642,7 +642,7 @@ impl<
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc.as_u64()))
+        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
             .await?;
 
         Ok(())

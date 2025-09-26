@@ -58,12 +58,12 @@ where
             operations.push(Operation::Update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(i as u64 + 1));
+                operations.push(Operation::CommitFloor(Location::from(i + 1)));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(count as u64));
+        operations.push(Operation::CommitFloor(Location::from(count)));
         operations
     }
 

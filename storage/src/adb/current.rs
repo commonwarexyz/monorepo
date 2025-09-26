@@ -314,7 +314,7 @@ impl<
         }
 
         self.any
-            .apply_op(Fixed::CommitFloor(self.any.inactivity_floor_loc.as_u64()))
+            .apply_op(Fixed::CommitFloor(self.any.inactivity_floor_loc))
             .await?;
         self.status.append(false);
 
