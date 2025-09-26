@@ -815,7 +815,7 @@ mod tests {
         // used to generate the proof.
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
-                if i == range.start.as_u64() as usize && j == range.end.as_u64() as usize {
+                if Location::from(i) == range.start && Location::from(j) == range.end {
                     // skip the valid range
                     continue;
                 }

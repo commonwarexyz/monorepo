@@ -68,6 +68,13 @@ impl From<u64> for Location {
     }
 }
 
+impl From<usize> for Location {
+    #[inline]
+    fn from(value: usize) -> Self {
+        Self::new(value as u64)
+    }
+}
+
 impl From<Location> for u64 {
     #[inline]
     fn from(loc: Location) -> Self {
