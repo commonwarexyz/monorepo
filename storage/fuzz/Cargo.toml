@@ -17,6 +17,8 @@ commonware-utils = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
 futures = { workspace = true }
+bytes = { workspace = true }
+crc32fast = { workspace = true }
 
 [[bin]]
 name = "adb_operations"
