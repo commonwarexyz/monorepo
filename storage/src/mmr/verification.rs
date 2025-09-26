@@ -101,7 +101,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 
     // Fetch the digest of each.
     let mut digests: Vec<D> = Vec::new();
-    let node_futures = positions.iter().map(|&pos| mmr.get_node(pos));
+    let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
     let hash_results = try_join_all(node_futures).await?;
 
     for (i, hash_result) in hash_results.into_iter().enumerate() {
@@ -207,7 +207,7 @@ mod tests {
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
                         &elements[sub_range.to_usize_range()],
-                        subrange_start,
+                        sub_range.start,
                         &root
                     ));
                     subrange_start += 1;
