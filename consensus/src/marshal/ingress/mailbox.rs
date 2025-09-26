@@ -22,6 +22,20 @@ pub enum Identifier<D: Digest> {
     Latest,
 }
 
+// Allows using u64 directly for convenience.
+impl<D: Digest> From<u64> for Identifier<D> {
+    fn from(src: u64) -> Self {
+        Self::Height(src)
+    }
+}
+
+// Allows using &Digest directly for convenience.
+impl<D: Digest> From<&D> for Identifier<D> {
+    fn from(src: &D) -> Self {
+        Self::Commitment(*src)
+    }
+}
+
 // Allows using archive identifiers directly for convenience.
 impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
     fn from(src: archive::Identifier<'_, D>) -> Self {
@@ -101,7 +115,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 
     /// A request to retrieve the information about the highest finalized block.
-    pub async fn get_latest(&mut self) -> oneshot::Receiver<Option<(u64, B::Commitment)>> {
+    pub async fn get_latest(&mut self) -> Option<(u64, B::Commitment)> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
@@ -111,7 +125,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         {
             error!("failed to send get latest message to actor: receiver dropped");
         }
-        rx
+        rx.await.unwrap_or(None)
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -119,7 +133,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn get_block(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> oneshot::Receiver<Option<B>> {
+    ) -> Option<B> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
@@ -132,7 +146,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         {
             error!("failed to send get message to actor: receiver dropped");
         }
-        rx
+        rx.await.unwrap_or(None)
     }
 
     /// A request to retrieve a block by its commitment.
