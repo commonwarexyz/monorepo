@@ -1,4 +1,6 @@
 use crate::{marshal::ingress::orchestrator::Orchestrator, Block, Reporter};
+use commonware_coding::Scheme;
+use commonware_cryptography::Committable;
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::FixedBytes;
@@ -13,12 +15,18 @@ const LATEST_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 ///
 /// Stores the highest height for which the application has processed. This allows resuming
 /// processing from the last processed height after a restart.
-pub struct Finalizer<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>> {
+pub struct Finalizer<B, R, S, Z>
+where
+    B: Block,
+    R: Spawner + Clock + Metrics + Storage,
+    S: Scheme,
+    Z: Reporter<Activity = B>,
+{
     // Application that processes the finalized blocks.
     application: Z,
 
     // Orchestrator that stores the finalized blocks.
-    orchestrator: Orchestrator<B>,
+    orchestrator: Orchestrator<B, S>,
 
     // Notifier to indicate that the finalized blocks have been updated and should be re-queried.
     notifier_rx: mpsc::Receiver<()>,
@@ -27,15 +35,19 @@ pub struct Finalizer<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Report
     metadata: Metadata<R, FixedBytes<1>, u64>,
 }
 
-impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>>
-    Finalizer<B, R, Z>
+impl<B, R, S, Z> Finalizer<B, R, S, Z>
+where
+    B: Block<Commitment = S::Commitment>,
+    R: Spawner + Clock + Metrics + Storage,
+    S: Scheme,
+    Z: Reporter<Activity = B>,
 {
     /// Initialize the finalizer.
     pub async fn new(
         context: R,
         partition_prefix: String,
         application: Z,
-        orchestrator: Orchestrator<B>,
+        orchestrator: Orchestrator<B, S>,
         notifier_rx: mpsc::Receiver<()>,
     ) -> Self {
         // Initialize metadata
@@ -81,7 +93,7 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
                 // height is processed by the application), it is possible that the application may
                 // be asked to process a block it has already seen (which it can simply ignore).
                 let commitment = block.commitment();
-                self.application.report(block).await;
+                self.application.report(block.into_inner()).await;
 
                 // Record that we have processed up through this height.
                 latest = height;

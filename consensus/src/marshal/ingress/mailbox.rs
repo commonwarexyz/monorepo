@@ -1,9 +1,11 @@
 use crate::{
-    threshold_simplex::types::{Activity, Finalization, Notarization},
+    marshal::ingress::coding::types::CodedBlock,
+    threshold_simplex::types::{Activity, Finalization, Notarization, Notarize},
     types::Round,
     Block, Reporter,
 };
-use commonware_cryptography::bls12381::primitives::variant::Variant;
+use commonware_coding::Scheme;
+use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -14,7 +16,7 @@ use tracing::error;
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<V: Variant, B: Block> {
+pub(crate) enum Message<V: Variant, B: Block, S: Scheme, P: PublicKey> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve a block by its digest.
     Get {
@@ -35,18 +37,18 @@ pub(crate) enum Message<V: Variant, B: Block> {
     },
     /// A request to broadcast a block to all peers.
     Broadcast {
-        /// The block to broadcast.
-        block: B,
-    },
-    /// A notification that a block has been verified by the application.
-    Verified {
-        /// The round in which the block was verified.
-        round: Round,
-        /// The verified block.
-        block: B,
+        /// The erasure coded block to broadcast.
+        block: CodedBlock<B, S>,
+        /// The peers to broadcast the shards to.
+        peers: Vec<P>,
     },
 
     // -------------------- Consensus Engine Messages --------------------
+    /// An individual notarization vote from the consensus engine.
+    Notarize {
+        /// The notarization vote.
+        notarization_vote: Notarize<V, B::Commitment>,
+    },
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
@@ -61,13 +63,13 @@ pub(crate) enum Message<V: Variant, B: Block> {
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, B: Block> {
-    sender: mpsc::Sender<Message<V, B>>,
+pub struct Mailbox<V: Variant, B: Block, S: Scheme, P: PublicKey> {
+    sender: mpsc::Sender<Message<V, B, S, P>>,
 }
 
-impl<V: Variant, B: Block> Mailbox<V, B> {
+impl<V: Variant, B: Block, S: Scheme, P: PublicKey> Mailbox<V, B, S, P> {
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<V, B>>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Message<V, B, S, P>>) -> Self {
         Self { sender }
     }
 
@@ -119,36 +121,25 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         rx
     }
 
-    /// Broadcast indicates that a block should be sent to all peers.
-    pub async fn broadcast(&mut self, block: B) {
+    /// Broadcast indicates that an erasure coded block should be sent to a given set of peers.
+    pub async fn broadcast(&mut self, block: CodedBlock<B, S>, peers: Vec<P>) {
         if self
             .sender
-            .send(Message::Broadcast { block })
+            .send(Message::Broadcast { block, peers })
             .await
             .is_err()
         {
             error!("failed to send broadcast message to actor: receiver dropped");
         }
     }
-
-    /// Notifies the actor that a block has been verified.
-    pub async fn verified(&mut self, round: Round, block: B) {
-        if self
-            .sender
-            .send(Message::Verified { round, block })
-            .await
-            .is_err()
-        {
-            error!("failed to send verified message to actor: receiver dropped");
-        }
-    }
 }
 
-impl<V: Variant, B: Block> Reporter for Mailbox<V, B> {
+impl<V: Variant, B: Block, S: Scheme, P: PublicKey> Reporter for Mailbox<V, B, S, P> {
     type Activity = Activity<V, B::Commitment>;
 
     async fn report(&mut self, activity: Self::Activity) {
         let message = match activity {
+            Activity::Notarize(notarization_vote) => Message::Notarize { notarization_vote },
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
             _ => {
