@@ -336,7 +336,8 @@ mod tests {
 
     #[test]
     fn test_check_validity() {
-        // Now check the values are correct.
+        // Build an MMR one node at a time and check that the validity check is correct for all
+        // sizes up to the current size.
         let mut mmr = Mmr::new();
         let mut size_to_check = 0;
         let mut hasher = Standard::<Sha256>::new();
