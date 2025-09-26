@@ -8,10 +8,7 @@ use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
     Storage, StreamOf,
 };
-use commonware_storage::{
-    adb::sync::Target,
-    mmr::{Location, StandardHasher as Standard},
-};
+use commonware_storage::{adb::sync::Target, mmr::StandardHasher as Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{self},
@@ -161,7 +158,7 @@ where
         (
             database.root(&mut hasher),
             database.lower_bound(),
-            Location::new(database.op_count().saturating_sub(1)),
+            database.op_count().checked_sub(1).unwrap(),
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
@@ -200,7 +197,10 @@ where
     }
 
     // Calculate how many operations to return
-    let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc.as_u64());
+    let max_ops = std::cmp::min(
+        request.max_ops.get(),
+        (db_size - request.start_loc).as_u64(),
+    );
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
     let max_ops =
         NonZeroU64::new(max_ops).expect("max_ops cannot be zero since start_loc < db_size");
@@ -209,7 +209,7 @@ where
         request_id = request.request_id,
         max_ops,
         start_loc = ?request.start_loc,
-        db_size,
+        ?db_size,
         "operations request"
     );
 
@@ -391,7 +391,7 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = database.op_count(),
+        op_count = ?database.op_count(),
         root = %root_hex,
         "{} database ready",
         DB::name()

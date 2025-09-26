@@ -8,7 +8,7 @@ use commonware_storage::{
         any::fixed::{Any, Config},
         sync,
     },
-    mmr::{Location, StandardHasher as Standard},
+    mmr::StandardHasher as Standard,
     store::operation::Fixed,
     translator::TwoCap,
 };
@@ -141,7 +141,7 @@ fn fuzz(input: FuzzInput) {
                     let target = sync::Target {
                         root: src.root(&mut hasher),
                         lower_bound: src.inactivity_floor_loc(),
-                        upper_bound: Location::new(src.op_count() - 1),
+                        upper_bound: src.op_count() - 1,
                     };
 
                     let wrapped_src = Arc::new(RwLock::new(src));

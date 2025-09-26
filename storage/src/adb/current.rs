@@ -209,7 +209,7 @@ impl<
 
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
-    pub fn op_count(&self) -> u64 {
+    pub fn op_count(&self) -> Location {
         self.any.op_count()
     }
 
@@ -805,7 +805,7 @@ pub mod test {
             assert_eq!(db.root(&mut hasher).await.unwrap(), root2);
 
             // Confirm all activity bits are false
-            for i in 0..db.op_count() {
+            for i in 0..db.op_count().as_u64() {
                 assert!(!db.status.get_bit(i));
             }
 
@@ -991,7 +991,7 @@ pub mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = Location::new(db.op_count());
+            let end_loc = db.op_count();
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in start_loc.as_u64()..end_loc.as_u64() {

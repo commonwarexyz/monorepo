@@ -395,8 +395,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Get the number of operations (appends + commits) that have been applied to the db since
     /// inception.
-    pub fn op_count(&self) -> u64 {
-        self.size
+    pub fn op_count(&self) -> Location {
+        Location::new(self.size)
     }
 
     /// Returns the location of the last commit, if any.
@@ -965,7 +965,7 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.last_commit_loc(), Some(Location::new(op_count - 1)));
+            assert_eq!(db.last_commit_loc(), Some(op_count - 1));
             db.close().await.unwrap();
 
             async fn apply_more_ops(db: &mut Db) {
@@ -1027,7 +1027,7 @@ mod test {
                 assert_eq!(db.last_commit_loc(), Some(Location::new(op_count - 1)));
             }
 
-            recover_from_failure(context.clone(), root, &mut hasher, op_count).await;
+            recover_from_failure(context.clone(), root, &mut hasher, op_count.as_u64()).await;
 
             // Simulate a failure during pruning and ensure we recover.
             let db = open_db(context.clone()).await;
@@ -1045,7 +1045,7 @@ mod test {
             assert_eq!(db.root(&mut hasher), root);
             db.close().await.unwrap();
 
-            recover_from_failure(context.clone(), root, &mut hasher, op_count).await;
+            recover_from_failure(context.clone(), root, &mut hasher, op_count.as_u64()).await;
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             let mut db = open_db(context.clone()).await;
@@ -1054,7 +1054,7 @@ mod test {
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > op_count);
             assert_ne!(db.root(&mut hasher), root);
-            assert_eq!(db.last_commit_loc(), Some(Location::new(db.op_count() - 1)));
+            assert_eq!(db.last_commit_loc(), Some(db.op_count() - 1));
 
             db.destroy().await.unwrap();
         });
@@ -1185,7 +1185,7 @@ mod test {
                 );
 
                 // Check that we got the expected number of operations
-                let expected_ops = std::cmp::min(max_ops, db.op_count() - start_loc);
+                let expected_ops = std::cmp::min(max_ops, (db.op_count() - start_loc).as_u64());
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
@@ -1319,7 +1319,7 @@ mod test {
                 );
 
                 // Check that we got operations
-                let expected_ops = std::cmp::min(max_ops, db.op_count() - start_loc.as_u64());
+                let expected_ops = std::cmp::min(max_ops, (db.op_count() - start_loc.as_u64()).as_u64());
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
@@ -1343,7 +1343,7 @@ mod test {
             );
 
             // Test edge case: prune everything except the last few operations
-            let almost_all = Location::new(db.op_count() - 5);
+            let almost_all = db.op_count() - 5;
             db.prune(almost_all).await.unwrap();
 
             let final_oldest = db.oldest_retained_loc().await.unwrap().unwrap();
@@ -1402,7 +1402,7 @@ mod test {
             );
             assert_eq!(
                 db.last_commit_loc(),
-                Some(Location::new(committed_size - 1)),
+                Some(committed_size - 1),
                 "Last commit location should be correct"
             );
 
@@ -1446,7 +1446,7 @@ mod test {
             );
             assert_eq!(
                 db.last_commit_loc(),
-                Some(Location::new(new_committed_size - 1)),
+                Some(new_committed_size - 1),
                 "Last commit location should be correct after multiple appends"
             );
 

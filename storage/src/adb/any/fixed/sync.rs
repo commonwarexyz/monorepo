@@ -393,7 +393,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     lower_bound,
-                    upper_bound: Location::new(target_op_count - 1), // target_op_count is the count, operations are 0-indexed
+                    upper_bound: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -551,7 +551,7 @@ mod tests {
             target_db.commit().await.unwrap();
 
             let mut hasher = test_hasher();
-            let upper_bound = Location::new(target_db.op_count() - 1);
+            let upper_bound = target_db.op_count() - 1;
             let root = target_db.root(&mut hasher);
             let lower_bound = target_db.inactivity_floor_loc;
 
@@ -628,7 +628,7 @@ mod tests {
             let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
             let lower_bound = target_db.inactivity_floor_loc;
-            let upper_bound = Location::new(target_db.op_count() - 1); // Up to the last operation
+            let upper_bound = target_db.op_count() - 1; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
             let target_db = Arc::new(RwLock::new(target_db));
@@ -663,7 +663,7 @@ mod tests {
             assert_eq!(sync_db.root(&mut hasher), root);
 
             // Verify that the operations in the overlapping range are present and correct
-            for i in lower_bound.as_u64()..original_db_op_count {
+            for i in lower_bound.as_u64()..original_db_op_count.as_u64() {
                 let expected_op = target_db.read().await.log.read(i).await.unwrap();
                 let synced_op = sync_db.log.read(i).await.unwrap();
                 assert_eq!(expected_op, synced_op);
@@ -727,7 +727,7 @@ mod tests {
             let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
             let lower_bound = target_db.inactivity_floor_loc;
-            let upper_bound = Location::new(target_db.op_count() - 1);
+            let upper_bound = target_db.op_count() - 1;
 
             // sync_db should never ask the resolver for operations
             // because it is already complete. Use a resolver that always fails
@@ -789,7 +789,7 @@ mod tests {
             // Capture initial target state
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
@@ -852,7 +852,7 @@ mod tests {
             // Capture initial target state
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
@@ -915,7 +915,7 @@ mod tests {
             // Capture initial target state
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Apply more operations to the target database
@@ -953,7 +953,7 @@ mod tests {
                 .send(Target {
                     root: final_root,
                     lower_bound: final_lower_bound,
-                    upper_bound: Location::new(final_upper_bound),
+                    upper_bound: final_upper_bound,
                 })
                 .await
                 .unwrap();
@@ -993,7 +993,7 @@ mod tests {
             // Capture initial target state
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
@@ -1054,7 +1054,7 @@ mod tests {
             // Capture target state
             let mut hasher = test_hasher();
             let lower_bound = target_db.inactivity_floor_loc;
-            let upper_bound = Location::new(target_db.op_count() - 1);
+            let upper_bound = target_db.op_count() - 1;
             let root = target_db.root(&mut hasher);
 
             // Create client with target that will complete immediately
@@ -1132,7 +1132,7 @@ mod tests {
             // Capture initial target state
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Wrap target database for shared mutable access
@@ -1180,7 +1180,7 @@ mod tests {
                 // Capture new target state
                 let mut hasher = test_hasher();
                 let new_lower_bound = db.inactivity_floor_loc;
-                let new_upper_bound = Location::new(db.op_count() - 1);
+                let new_upper_bound = db.op_count() - 1;
                 let new_root = db.root(&mut hasher);
 
                 // Send target update with new target
@@ -1222,7 +1222,7 @@ mod tests {
             }
 
             // Verify the expected operations are present in the synced database.
-            for i in synced_db.inactivity_floor_loc.as_u64()..synced_db.op_count() {
+            for i in synced_db.inactivity_floor_loc.as_u64()..synced_db.op_count().as_u64() {
                 let got = synced_db.log.read(i).await.unwrap();
                 let expected = target_db.log.read(i).await.unwrap();
                 assert_eq!(got, expected);
@@ -1266,7 +1266,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     lower_bound,
-                    upper_bound: Location::new(upper_bound),
+                    upper_bound,
                 },
                 context,
                 resolver: target_db.clone(),
@@ -1416,7 +1416,7 @@ mod tests {
                 .unwrap();
 
             let lower_bound = source_db.inactivity_floor_loc;
-            let upper_bound = Location::new(source_db.op_count() - 1);
+            let upper_bound = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
             let pinned_nodes_pos = nodes_to_pin(Position::from(lower_bound));
@@ -1517,7 +1517,7 @@ mod tests {
 
             // Test different pruning boundaries
             for lower_bound in [0, 50, 100, 150] {
-                let upper_bound = std::cmp::min(lower_bound + 49, total_ops - 1);
+                let upper_bound = std::cmp::min(lower_bound + 49, (total_ops - 1).as_u64());
 
                 // Create log with operations
                 let mut log = init_journal(
@@ -1622,7 +1622,7 @@ mod tests {
 
             // Get pinned nodes before closing the database
             let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
-            let pinned_nodes = nodes_to_pin(Position::from(Location::new(sync_db_original_size)))
+            let pinned_nodes = nodes_to_pin(Position::from(sync_db_original_size))
                 .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect::<Vec<_>>();
 
@@ -1656,7 +1656,7 @@ mod tests {
                     log,
                     Some(pinned_nodes),
                     sync_lower_bound,
-                    Location::new(sync_upper_bound),
+                    sync_upper_bound,
                     1024,
                 )
                 .await
@@ -1738,7 +1738,7 @@ mod tests {
                     log,
                     Some(pinned_nodes),
                     sync_lower_bound,
-                    Location::new(sync_upper_bound),
+                    sync_upper_bound,
                     1024,
                 )
                 .await

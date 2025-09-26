@@ -476,8 +476,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
-    pub fn op_count(&self) -> u64 {
-        self.log_size
+    pub fn op_count(&self) -> Location {
+        Location::new(self.log_size)
     }
 
     /// Returns the section of the log where we are currently writing new items.
@@ -505,9 +505,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
         if let Some(old_loc) = self.get_key_loc(&key).await? {
-            Self::update_loc(&mut self.snapshot, &key, old_loc, Location::new(new_loc));
+            Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
         } else {
-            self.snapshot.insert(&key, new_loc);
+            self.snapshot.insert(&key, new_loc.as_u64());
         };
 
         let op = Operation::Update(key, value);
@@ -587,7 +587,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         start_loc: Location,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        self.historical_proof(self.op_count(), start_loc, max_ops)
+        self.historical_proof(self.op_count().as_u64(), start_loc, max_ops)
             .await
     }
 
@@ -657,7 +657,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
     pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let mut last_commit = self.op_count() - self.uncommitted_ops;
+        let mut last_commit = self.op_count().as_u64() - self.uncommitted_ops;
         if last_commit == 0 {
             return Ok(None);
         }
@@ -698,7 +698,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             // `op` is not a key-related operation, so it is not active.
             return Ok(None);
         };
-        let new_loc = self.op_count();
+        let new_loc = self.op_count().as_u64();
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
@@ -1020,7 +1020,7 @@ pub(super) mod test {
             // Since this db no longer has any active keys, we should be able to raise the
             // inactivity floor to the tip (only the inactive commit op remains).
             db.raise_inactivity_floor(None, 100).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc, Location::new(db.op_count() - 1));
+            assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
 
             // Make sure we can still get the metadata.
             assert_eq!(
@@ -1162,7 +1162,7 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
-            for i in start_loc..end_loc {
+            for i in start_loc..end_loc.as_u64() {
                 let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
                 assert!(verify_proof(
                     &mut hasher,

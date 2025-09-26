@@ -62,7 +62,7 @@ pub trait Syncable {
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;
 
     /// Get the operation count of the database.
-    fn op_count(&self) -> u64;
+    fn op_count(&self) -> Location;
 
     /// Get the lower bound for operations (inactivity floor or oldest retained location).
     fn lower_bound(&self) -> Location;

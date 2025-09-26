@@ -95,7 +95,7 @@ where
         self.root(hasher)
     }
 
-    fn op_count(&self) -> u64 {
+    fn op_count(&self) -> Location {
         self.op_count()
     }
 

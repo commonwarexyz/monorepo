@@ -401,8 +401,8 @@ impl<
 
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
-    pub fn op_count(&self) -> u64 {
-        self.mmr.leaves()
+    pub fn op_count(&self) -> Location {
+        Location::new(self.mmr.leaves())
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -427,13 +427,8 @@ impl<
         value: V,
     ) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
-        let res = Any::<_, _, _, H, T>::update_loc(
-            &mut self.snapshot,
-            &self.log,
-            &key,
-            Location::new(new_loc),
-        )
-        .await?;
+        let res =
+            Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
         let op = Operation::Update(key, value);
         self.apply_op(op).await?;
@@ -446,7 +441,7 @@ impl<
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
         let loc = self.op_count();
-        let r = Self::delete_key(&mut self.snapshot, &self.log, &key, Location::new(loc)).await?;
+        let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
         if r.is_some() {
             self.apply_op(Operation::Delete(key)).await?;
         };
@@ -525,7 +520,7 @@ impl<
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        self.historical_proof(self.op_count(), start_loc, max_ops)
+        self.historical_proof(self.op_count().as_u64(), start_loc, max_ops)
             .await
     }
 
@@ -603,7 +598,7 @@ impl<
         let Some(key) = op.key() else {
             return Ok(None); // operations without keys cannot be active
         };
-        let new_loc = Location::new(self.op_count());
+        let new_loc = self.op_count();
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
@@ -671,7 +666,7 @@ impl<
         }
 
         debug!(
-            log_size = self.op_count(),
+            log_size = self.op_count().as_u64(),
             ?target_prune_loc,
             "pruned inactive ops"
         );
@@ -966,7 +961,7 @@ pub(super) mod test {
             // Since this db no longer has any active keys, we should be able to raise the
             // inactivity floor to the tip (only the inactive commit op remains).
             db.raise_inactivity_floor(100).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc, Location::new(db.op_count() - 1));
+            assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
 
             // Re-activate the keys by updating them.
             db.update(d1, d1).await.unwrap();
@@ -1095,7 +1090,7 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
-            for i in start_loc..end_loc {
+            for i in start_loc..end_loc.as_u64() {
                 let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
                 assert!(verify_proof(
                     &mut hasher,
@@ -1452,7 +1447,7 @@ pub(super) mod test {
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new(5), max_ops)
+                .historical_proof(original_op_count.as_u64(), Location::new(5), max_ops)
                 .await
                 .unwrap();
             let (regular_proof, regular_ops) = db.proof(Location::new(5), max_ops).await.unwrap();
@@ -1476,13 +1471,10 @@ pub(super) mod test {
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, Location::new(5), NZU64!(10))
+                .historical_proof(original_op_count.as_u64(), Location::new(5), NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(
-                historical_proof.size,
-                Position::from(Location::from(original_op_count))
-            );
+            assert_eq!(historical_proof.size, Position::from(original_op_count));
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);

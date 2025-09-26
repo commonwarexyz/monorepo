@@ -512,8 +512,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
-    pub fn op_count(&self) -> u64 {
-        self.log_size
+    pub fn op_count(&self) -> Location {
+        Location::new(self.log_size)
     }
 
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
@@ -587,7 +587,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         start_index: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
-        self.historical_proof(self.op_count(), start_index, max_ops)
+        self.historical_proof(self.op_count().as_u64(), start_index, max_ops)
             .await
     }
 
@@ -769,7 +769,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         self.log.close().await?;
         self.mmr.close(&mut self.hasher).await?;
-        self.locations.rewind(op_count - operations_to_trim).await?;
+        self.locations
+            .rewind((op_count - operations_to_trim).as_u64())
+            .await?;
         self.locations.close().await?;
 
         Ok(())
@@ -967,7 +969,7 @@ pub(super) mod test {
             // Make sure all ranges of 5 operations are provable, including truncated ranges at the
             // end.
             let max_ops = NZU64!(5);
-            for i in 0..db.op_count() {
+            for i in 0..db.op_count().as_u64() {
                 let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
                 assert!(verify_proof(
                     &mut hasher,
