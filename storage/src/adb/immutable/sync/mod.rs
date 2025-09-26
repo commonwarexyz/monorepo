@@ -862,7 +862,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    lower_bound: initial_lower_bound - 1,
+                    lower_bound: initial_lower_bound.checked_sub(1).unwrap(),
                     upper_bound: initial_upper_bound,
                 })
                 .await

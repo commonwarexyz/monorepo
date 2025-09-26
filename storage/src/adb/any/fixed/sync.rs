@@ -817,8 +817,8 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    lower_bound: initial_lower_bound - 1,
-                    upper_bound: initial_upper_bound + 1,
+                    lower_bound: initial_lower_bound.checked_sub(1).unwrap(),
+                    upper_bound: initial_upper_bound.checked_add(1).unwrap(),
                 })
                 .await
                 .unwrap();
@@ -881,7 +881,7 @@ mod tests {
                 .send(Target {
                     root: initial_root,
                     lower_bound: initial_lower_bound,
-                    upper_bound: initial_upper_bound - 1,
+                    upper_bound: initial_upper_bound.checked_sub(1).unwrap(),
                 })
                 .await
                 .unwrap();
