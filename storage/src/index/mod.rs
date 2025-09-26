@@ -70,6 +70,7 @@ pub trait Cursor {
     /// Removes anything in the cursor that satisfies the predicate.
     fn prune(&mut self, predicate: &impl Fn(&Self::Value) -> bool);
 }
+
 /// A memory-efficient index that maps translated keys to arbitrary values.
 pub trait Index {
     /// The type of values the index stores.
