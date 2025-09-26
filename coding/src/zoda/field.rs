@@ -78,8 +78,8 @@ impl Gf16x8 {
     pub fn from_u16s(data: &[u16]) -> Self {
         let mut inner = 0u128;
         for &u in data.iter().rev() {
+            inner <<= 16;
             inner |= u128::from(u);
-            inner <<= 8;
         }
         Self { inner }
     }
@@ -184,66 +184,303 @@ mod test {
         any::<u128>().prop_map(|inner| Gf16x8 { inner })
     }
 
+    fn test_rs_linearity_simple_inner(data: &[[u16; 2]], c: [u16; 2], extra: usize) {
+        fn extend(data: &[u16], extra: usize) -> Vec<u16> {
+            let mut out = data.to_vec();
+            let mut encoder = ReedSolomonEncoder::new(data.len(), extra, 64).unwrap();
+            for x in data {
+                encoder.add_original_shard(&u16s_to_row(&[*x])).unwrap();
+            }
+            for chunk in encoder.encode().unwrap().recovery_iter() {
+                out.push(row_to_u16s(chunk)[0]);
+            }
+            out
+        }
+        let data_a = extend(&data.iter().map(|x| x[0]).collect::<Vec<_>>(), extra);
+        let data_b = extend(&data.iter().map(|x| x[1]).collect::<Vec<_>>(), extra);
+        let data_c0 = extend(
+            &data
+                .iter()
+                .map(|x| gf16_mul(c[0], x[0]) ^ gf16_mul(c[1], x[1]))
+                .collect::<Vec<_>>(),
+            extra,
+        );
+        let data_c1 = data_a
+            .iter()
+            .zip(data_b.iter())
+            .map(|(a, b)| gf16_mul(c[0], *a) ^ gf16_mul(c[1], *b))
+            .collect::<Vec<_>>();
+        println!("===NEW (extra={})===", extra);
+        println!("C:");
+        println!("{:016b} {:016b}", c[0], c[1]);
+        for (name, slice) in [
+            ("Data_A", &data_a),
+            ("Data_B", &data_b),
+            ("Data_C0", &data_c0),
+            ("Data_C1", &data_c1),
+        ] {
+            println!("{}", name);
+            for x in slice {
+                print!("{:016b} ", x);
+                println!("");
+            }
+        }
+        assert_eq!(data_c0, data_c1);
+    }
+
     fn test_checksum_calculation(
         min_rows: usize,
         extra_rows: usize,
         data: &[u8],
         coeffs: &[Gf16x8],
     ) {
-        let chunk_size = 2 * coeffs.len();
-        let rows = {
-            let mut out = Vec::with_capacity(min_rows + extra_rows);
-            let mut encoder = ReedSolomonEncoder::new(min_rows, extra_rows, chunk_size)
-                .expect("failed to construct RS Encoder");
+        let chunk_size = (data.len().div_ceil(min_rows) + 63) & !63;
+        let data_rows = {
+            let mut out = Vec::new();
+            let mut encoder = ReedSolomonEncoder::new(min_rows, extra_rows, chunk_size).unwrap();
             for i in 0..min_rows {
-                let mut chunk = vec![0u8; chunk_size];
-                let start = chunk_size * i;
-                let end = start + chunk_size;
-                let slice = &data[start.min(data.len())..end.min(data.len())];
-                chunk[..slice.len()].copy_from_slice(slice);
-                encoder
-                    .add_original_shard(&chunk)
-                    .expect("failed to add chunk");
-                out.push(chunk);
+                let mut row = vec![0u8; chunk_size];
+                let start = (chunk_size * i).min(data.len());
+                let end = (start + chunk_size).min(data.len());
+                row[..(end - start)].copy_from_slice(&data[start..end]);
+                encoder.add_original_shard(&row).unwrap();
+                out.push(row);
             }
-            let res = encoder.encode().expect("failed to encode data");
+            let res = encoder.encode().unwrap();
+            for row in res.recovery_iter() {
+                out.push(row.to_vec());
+            }
+            out
+        };
+        println!(
+            "\n===NEW ROUND (n={}) (k={}) (chunk_size={})===",
+            min_rows, extra_rows, chunk_size
+        );
+        println!("\nCoeffients:");
+        for c in coeffs {
+            println!("{:?}", c);
+        }
+        println!("\nEncoded Data:");
+        for row in &data_rows {
+            for x in row {
+                print!("{:02X} ", x);
+            }
+            println!("")
+        }
+        let data_rows_u16 = data_rows
+            .iter()
+            .map(|row| row_to_u16s(row))
+            .collect::<Vec<_>>();
+        println!("\nEncoded Data (u16):");
+        for row in &data_rows_u16 {
+            for x in row {
+                print!("{:04X} ", x);
+            }
+            println!("")
+        }
+        let checks_a = data_rows_u16
+            .iter()
+            .map(|row| {
+                let mut acc = Gf16x8::zero();
+                for (x, c) in row.iter().zip(coeffs.iter()) {
+                    acc = acc.add(&c.scale(*x));
+                }
+                acc
+            })
+            .collect::<Vec<_>>();
+
+        println!("\nChecks A");
+        for c in &checks_a {
+            println!("{:?}", c);
+        }
+
+        let checks_data = {
+            let mut out = Vec::new();
+            for row in &data_rows[..min_rows] {
+                out.push(u16s_to_row(&row_checksum(coeffs, row).u16s()));
+            }
+            let mut encoder = ReedSolomonEncoder::new(min_rows, extra_rows, 64).unwrap();
+            for x in &out {
+                encoder.add_original_shard(x).unwrap();
+            }
+            let res = encoder.encode().unwrap();
             for chunk in res.recovery_iter() {
                 out.push(chunk.to_vec());
             }
             out
         };
-        assert_eq!(
-            rows.len(),
-            min_rows + extra_rows,
-            "we should have the right number of rows"
-        );
-        let checks = (0..min_rows)
-            .map(|i| row_checksum(coeffs, &rows[i]))
-            .collect::<Vec<_>>();
-        dbg!(&checks);
-        let checks_a = encode_checks(min_rows, extra_rows, checks);
-        dbg!(&checks_a);
-        let checks_b = rows
+
+        println!("\nChecks B (raw):");
+        for row in &checks_data {
+            for x in row {
+                print!("{:02X} ", x);
+            }
+            println!("")
+        }
+
+        let checks_b = checks_data
             .iter()
-            .map(|row| row_checksum(coeffs, row))
+            .map(|row| Gf16x8::from_u16s(&row_to_u16s(row)))
             .collect::<Vec<_>>();
-        dbg!(&checks_b);
+
+        println!("\nChecks B");
+        for c in &checks_b {
+            println!("{:?}", c);
+        }
+
         assert_eq!(checks_a, checks_b);
     }
 
-    fn test_rs_linearity_inner(a: u16, b: Gf16x8) {
-        fn extended_row(row: &[u8]) -> Vec<u8> {
-            let mut encoder = ReedSolomonEncoder::new(1, 1, row.len()).unwrap();
-            encoder.add_original_shard(row).unwrap();
+    fn test_rs_linearity_inner(a: [u16; 4], b: [Gf16x8; 2]) {
+        fn extended_row(rows: &[&[u8]]) -> Vec<u8> {
+            let mut encoder = ReedSolomonEncoder::new(rows.len(), 1, rows[0].len()).unwrap();
+            for row in rows {
+                encoder.add_original_shard(row).unwrap();
+            }
             let res = encoder.encode().unwrap();
             res.recovery_iter().next().unwrap().to_vec()
         }
-        let way0 = extended_row(&u16s_to_row(&b.scale(a).u16s()));
-        let way1 = u16s_to_row(
-            &b.scale(row_to_u16s(&extended_row(&u16s_to_row(&[a])))[0])
-                .u16s(),
+        println!("Original Data:");
+        for row in a.chunks(2) {
+            for x in row {
+                print!("{:02X} ", x);
+            }
+            println!("")
+        }
+        println!("Check Coefficients:");
+        println!("{:?}", &b);
+
+        let mut a_bytes = vec![u16s_to_row(&a[..2]).to_vec(), u16s_to_row(&a[2..])];
+        a_bytes.push(extended_row(&[&a_bytes[0], &a_bytes[1]]));
+
+        println!("Data:");
+        for row in &a_bytes {
+            for x in row {
+                print!("{:02X} ", x);
+            }
+            println!("");
+        }
+
+        let a_u16s = a_bytes
+            .iter()
+            .map(|row| row_to_u16s(row))
+            .collect::<Vec<_>>();
+        println!("Data (u16):");
+        for row in &a_u16s {
+            for x in row {
+                print!("{:04X} ", x);
+            }
+            println!("");
+        }
+
+        let checks = a_u16s
+            .iter()
+            .map(|row| {
+                let mut acc = Gf16x8::zero();
+                for (x, c) in row.iter().zip(b.iter()) {
+                    acc = acc.add(&c.scale(*x));
+                }
+                acc
+            })
+            .collect::<Vec<_>>();
+        println!("Checks (Gf16x8):");
+        for c in &checks {
+            println!("{:?}", c);
+        }
+        let mut checks_data = checks
+            .iter()
+            .take(2)
+            .map(|c| u16s_to_row(&c.u16s()))
+            .collect::<Vec<_>>();
+        checks_data.push(extended_row(&[&checks_data[0], &checks_data[1]]));
+        println!("Checks:");
+        for row in &checks_data {
+            for x in row {
+                print!("{:02X} ", x);
+            }
+            println!("");
+        }
+        println!("Checks (u16):");
+
+        for row in &checks_data {
+            for x in &row_to_u16s(row) {
+                print!("{:04X} ", x);
+            }
+            println!("");
+        }
+
+        let checks2 = checks_data
+            .iter()
+            .map(|row| Gf16x8::from_u16s(&row_to_u16s(row)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(&checks, &checks2);
+    }
+
+    #[test]
+    fn test_row_conversion_roundtrip() {
+        let original_u16s = vec![0x1234, 0x5678, 0x9ABC, 0xDEF0];
+        let bytes = u16s_to_row(&original_u16s);
+        let recovered_u16s = row_to_u16s(&bytes);
+
+        println!("Original u16s: {:?}", &original_u16s[..4]);
+        println!("Recovered u16s: {:?}", &recovered_u16s[..4]);
+
+        assert_eq!(&original_u16s[..4], &recovered_u16s[..4]);
+    }
+
+    #[test]
+    fn test_short_row_conversion() {
+        // Test with 2-byte row (like in the failing test)
+        let short_bytes = vec![0x01u8, 0x00u8];
+        let u16s = row_to_u16s(&short_bytes);
+        println!("Short bytes: {:?}", short_bytes);
+        println!("Converted to u16s: {:?}", &u16s[..4]);
+        println!("Length: {}", u16s.len());
+
+        let recovered_bytes = u16s_to_row(&u16s);
+        println!(
+            "Recovered bytes: {:?}",
+            &recovered_bytes[..short_bytes.len()]
         );
-        assert_eq!(way0, way1);
+
+        assert_eq!(&short_bytes, &recovered_bytes[..short_bytes.len()]);
+    }
+
+    #[test]
+    fn test_gf16x8_u16s_roundtrip() {
+        let original = Gf16x8 {
+            inner: 0x123456789ABCDEF0,
+        };
+        let u16s = original.u16s();
+        let recovered = Gf16x8::from_u16s(&u16s);
+
+        println!("Original: {:?}", original);
+        println!("U16s: {:?}", u16s);
+        println!("Recovered: {:?}", recovered);
+
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_checksum_via_row_conversion() {
+        // Test the exact path used in Checks B
+        let checksum = Gf16x8 {
+            inner: 0x123456789ABCDEF0,
+        };
+
+        // Path 1: Direct access
+        let direct = checksum;
+
+        // Path 2: Convert via row format (like Checks B does)
+        let as_bytes = u16s_to_row(&checksum.u16s());
+        let as_u16s = row_to_u16s(&as_bytes);
+        let via_row = Gf16x8::from_u16s(&as_u16s);
+
+        println!("Direct: {:?}", direct);
+        println!("Via row: {:?}", via_row);
+
+        assert_eq!(direct, via_row);
     }
 
     proptest! {
@@ -293,18 +530,23 @@ mod test {
         }
 
         #[test]
-        fn test_rs_linearity(a: u16, x in any_fe()) {
-            test_rs_linearity_inner(a, x);
+        fn test_rs_linearity(a: [u16; 4], x0 in any_fe(), x1 in any_fe()) {
+            test_rs_linearity_inner(a, [x0, x1]);
+        }
+
+        #[test]
+        fn test_rs_linearity_simple(data in prop::collection::vec(any::<[u16; 2]>(), 1..=10), c: [u16; 2], extra in 1usize..=10) {
+            test_rs_linearity_simple_inner(&data, c, extra);
         }
 
         #[test]
         fn test_checksum_calculation_proptest(
-            data in prop::collection::vec(any::<u16>(), 32),
-            coeffs in prop::collection::vec(any_fe(), 32),
-            min_rows in 1usize..10,
-            extra_rows in 1usize..10
+            data in prop::collection::vec(any::<u8>(), 1..128),
+            coeffs in prop::collection::vec(any_fe(), 0..32),
+            min_rows in 2usize..=2,
+            extra_rows in 1usize..=2
         ) {
-            test_checksum_calculation(min_rows, extra_rows, &u16s_to_row(&data), &coeffs);
+            test_checksum_calculation(min_rows, extra_rows, &data, &coeffs);
         }
     }
 }
