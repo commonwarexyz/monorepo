@@ -540,18 +540,18 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.journal.rewind(new_size).await?;
         self.journal.sync().await?;
         self.journal_size = new_size;
+        let new_size = Position::new(new_size);
 
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
-        for pos in nodes_to_pin(Position::new(new_size)) {
+        for pos in nodes_to_pin(new_size) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
                     .await?;
             pinned_nodes.push(digest);
         }
 
-        self.mem_mmr
-            .re_init(vec![], Position::new(new_size), pinned_nodes);
+        self.mem_mmr.re_init(vec![], new_size, pinned_nodes);
         Self::add_extra_pinned_nodes(
             &mut self.mem_mmr,
             &self.metadata,
@@ -583,8 +583,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.process_updates(h);
 
         // Write the nodes cached in the memory-resident MMR to the journal.
-        for i in self.journal_size..self.size() {
-            let node = *self.mem_mmr.get_node_unchecked(Position::new(i));
+        for pos in self.journal_size..self.size() {
+            let pos = Position::new(pos);
+            let node = *self.mem_mmr.get_node_unchecked(pos);
             self.journal.append(node).await?;
         }
         self.journal_size = self.size();
@@ -955,7 +956,7 @@ mod tests {
                     mmr.sync(&mut hasher).await.unwrap();
                 }
             }
-            let leaf_pos = Position::from(50);
+            let leaf_pos = Position::from(Location::new(50));
             mmr.prune_to_pos(&mut hasher, leaf_pos).await.unwrap();
             // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
             mmr.pop(80).await.unwrap();
