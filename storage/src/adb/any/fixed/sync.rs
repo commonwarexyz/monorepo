@@ -1,6 +1,6 @@
 use crate::{
     adb::{self, any},
-    index::Index,
+    index::Unordered as Index,
     journal::fixed,
     mmr::{
         iterator::{leaf_loc_to_pos, leaf_pos_to_loc},
