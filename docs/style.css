@@ -373,37 +373,18 @@ details.podcast-episode summary.podcast-title {
     color: blue;
 }
 
-.subscribe-links {
-    display: flex;
-    gap: 15px;
-    margin-top: 10px;
-    flex-wrap: wrap;
-}
-
-.subscribe-links a {
-    color: -webkit-link;
-    text-decoration: underline;
-    font-weight: bold;
-}
-
-.subscribe-links a:hover {
-    color: blue;
-}
-
 /* Mobile-specific podcast improvements */
 @media (max-width: 600px) {
     .podcast-episode {
         margin-bottom: 30px;
         padding-bottom: 20px;
     }
-    
-    .podcast-links,
-    .subscribe-links {
+
+    .podcast-links {
         gap: 10px;
     }
-    
-    .podcast-links a,
-    .subscribe-links a {
+
+    .podcast-links a {
         font-size: 0.85em;
     }
 }
