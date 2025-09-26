@@ -159,9 +159,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.put(pruning_boundary_key, mmr_size.to_be_bytes().into());
 
         // Store the pinned nodes in metadata
-        let nodes_to_pin_positions = nodes_to_pin(mmr_size.into());
+        let nodes_to_pin_positions = nodes_to_pin(Position::new(mmr_size));
         for (pos, digest) in nodes_to_pin_positions.zip(pinned_nodes.iter()) {
-            metadata.put(U64::new(NODE_PREFIX, pos.into()), digest.to_vec());
+            metadata.put(U64::new(NODE_PREFIX, pos.as_u64()), digest.to_vec());
         }
 
         // Sync metadata to disk
@@ -170,7 +170,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Create in-memory MMR in fully pruned state
         let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: mmr_size.into(),
+            pruned_to_pos: Position::new(mmr_size),
             pinned_nodes,
             pool: config.thread_pool,
         });
@@ -373,7 +373,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             let nodes_to_pin_persisted = nodes_to_pin(cfg.lower_bound_pos);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
-                metadata.put(U64::new(NODE_PREFIX, pos.into()), digest.to_vec());
+                metadata.put(U64::new(NODE_PREFIX, pos.as_u64()), digest.to_vec());
             }
         }
 
@@ -612,7 +612,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     async fn update_metadata(
         &mut self,
         prune_to_pos: Position,
-    ) -> Result<BTreeMap<u64, H::Digest>, Error> {
+    ) -> Result<BTreeMap<Position, H::Digest>, Error> {
         assert!(prune_to_pos >= self.pruned_to_pos);
 
         let mut pinned_nodes = BTreeMap::new();
@@ -621,8 +621,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
             );
             self.metadata
-                .put(U64::new(NODE_PREFIX, pos.into()), digest.to_vec());
-            pinned_nodes.insert(pos.into(), digest);
+                .put(U64::new(NODE_PREFIX, pos.as_u64()), digest.to_vec());
+            pinned_nodes.insert(pos, digest);
         }
 
         let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
@@ -698,11 +698,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let pinned_nodes = self.update_metadata(pos).await?;
 
         self.journal.prune(pos.as_u64()).await?;
-        let pinned_nodes_converted: BTreeMap<Position, H::Digest> = pinned_nodes
-            .into_iter()
-            .map(|(pos, digest)| (Position::new(pos), digest))
-            .collect();
-        self.mem_mmr.add_pinned_nodes(pinned_nodes_converted);
+        self.mem_mmr.add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
         Ok(())
