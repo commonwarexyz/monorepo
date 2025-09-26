@@ -854,10 +854,11 @@ mod tests {
             let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
             assert_eq!(
                 peaks,
-                vec![(14, 3), (17, 1), (18, 0)]
-                    .into_iter()
-                    .map(|(pos, height)| (Position::new(pos), height))
-                    .collect::<Vec<_>>(),
+                vec![
+                    (Position::new(14), 3),
+                    (Position::new(17), 1),
+                    (Position::new(18), 0)
+                ],
                 "mmr peaks not as expected"
             );
 
@@ -866,10 +867,7 @@ mod tests {
             let peaks_needing_parents = nodes_needing_parents(mmr.peak_iterator());
             assert_eq!(
                 peaks_needing_parents,
-                vec![17, 18]
-                    .into_iter()
-                    .map(Position::new)
-                    .collect::<Vec<_>>(),
+                vec![Position::new(17), Position::new(18)],
                 "mmr nodes needing parents not as expected"
             );
 
