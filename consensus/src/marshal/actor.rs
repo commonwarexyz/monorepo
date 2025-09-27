@@ -10,7 +10,10 @@ use super::{
 };
 use crate::{
     marshal::ingress::{
-        coding::{mailbox::ShardMailbox, types::CodedBlock},
+        coding::{
+            mailbox::ShardMailbox,
+            types::{CodedBlock, CodingCommitment},
+        },
         mailbox::Identifier as BlockID,
     },
     threshold_simplex::types::{Finalization, Notarization},
@@ -71,7 +74,7 @@ struct ShardValiditySubscription {
 /// behind.
 pub struct Actor<B, E, V, S, P>
 where
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     E: Rng + Spawner + Metrics + Clock + GClock + Storage,
     V: Variant,
     S: Scheme,
@@ -125,7 +128,7 @@ where
 
 impl<B, E, V, S, P> Actor<B, E, V, S, P>
 where
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     E: Rng + Spawner + Metrics + Clock + GClock + Storage,
     V: Variant,
     S: Scheme,

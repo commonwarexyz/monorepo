@@ -2,7 +2,10 @@
 //! hiding details of erasure coded broadcast and shard verification.
 
 use crate::{
-    marshal::{self, ingress::coding::types::CodedBlock},
+    marshal::{
+        self,
+        ingress::coding::types::{CodedBlock, CodingCommitment},
+    },
     threshold_simplex::types::Context,
     types::{Round, View},
     Application, Automaton, Block, Epochable, Relay, Reporter, Supervisor, Viewable,
@@ -23,7 +26,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
     V: Variant,
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     S: Scheme,
     P: PublicKey,
     Z: Supervisor<Index = View, PublicKey = P>,
@@ -41,7 +44,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E, Block = B, Context = Context<B::Commitment>>,
     V: Variant,
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     S: Scheme,
     P: PublicKey,
     Z: Supervisor<Index = View, PublicKey = P>,
@@ -69,7 +72,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E, Block = B, Context = Context<B::Commitment>>,
     V: Variant,
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     S: Scheme,
     P: PublicKey,
     Z: Supervisor<Index = View, PublicKey = P>,
@@ -98,15 +101,7 @@ where
         // Currently, `CodingAdapter` mandates the use of `threshold_simplex`,
         // which requires at least `3f + 1` participants to tolerate `f` faults.
         let n_participants = participants.len() as u16;
-        assert!(
-            n_participants >= 4,
-            "Need at least 4 participants to maintain fault tolerance with threshold_simplex"
-        );
-        let max_faults = (n_participants - 1) / 3;
-        let coding_config = CodingConfig {
-            minimum_shards: max_faults + 1,
-            extra_shards: n_participants - (max_faults + 1),
-        };
+        let coding_config = coding_config_for_participants(n_participants);
 
         let (tx, rx) = oneshot::channel();
         self.context
@@ -157,6 +152,26 @@ where
         context: Context<Self::Digest>,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
+        let participants = self
+            .supervisor
+            .participants(context.view())
+            .expect("failed to get participants for round");
+
+        let coding_config = coding_config_for_participants(participants.len() as u16);
+        let config_matches = payload.config() == coding_config;
+        if !config_matches {
+            warn!(
+                round = %context.round,
+                got = ?payload.config(),
+                expected = ?coding_config,
+                "rejected proposal with unexpected coding configuration"
+            );
+
+            let (tx, rx) = oneshot::channel();
+            tx.send(false).expect("failed to send verify result");
+            return rx;
+        }
+
         let mut marshal = self.marshal.clone();
         let self_index = self
             .supervisor
@@ -177,7 +192,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E, Block = B, Context = Context<B::Commitment>>,
     V: Variant,
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     S: Scheme,
     P: PublicKey,
     Z: Supervisor<Index = View, PublicKey = P>,
@@ -211,7 +226,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E, Block = B, Context = Context<B::Commitment>>,
     V: Variant,
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     S: Scheme,
     P: PublicKey,
     Z: Supervisor<Index = View, PublicKey = P>,
@@ -220,5 +235,23 @@ where
 
     async fn report(&mut self, block: Self::Activity) {
         self.application.finalize(block).await
+    }
+}
+
+/// Compute the [CodingConfig] for a given number of participants.
+///
+/// Currently, [CodingAdapter] mandates the use of `threshold_simplex`,
+/// which requires at least `3f + 1` participants to tolerate `f` faults.
+///
+/// The generated coding configuration facilitates any `f + 1` parts to reconstruct the data.
+fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
+    assert!(
+        n_participants >= 4,
+        "Need at least 4 participants to maintain fault tolerance with threshold_simplex"
+    );
+    let max_faults = (n_participants - 1) / 3;
+    CodingConfig {
+        minimum_shards: max_faults + 1,
+        extra_shards: n_participants - (max_faults + 1),
     }
 }
