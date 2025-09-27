@@ -10,7 +10,6 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use crate::types::View;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible};
 
@@ -118,13 +117,13 @@ cfg_if::cfg_if! {
             fn genesis(
                 &mut self,
                 epoch: <Self::Context as Epochable>::Epoch
-            ) -> impl Future<Output = <Self::Block as Committable>::Commitment> + Send;
+            ) -> impl Future<Output = Self::Block> + Send;
 
-            /// Build a new block on top of the provided parent commitment.
+            /// Build a new block on top of the provided parent commitment / block.
             fn build(
                 &mut self,
-                parent_view: View,
-                parent_commitment: <Self::Block as Committable>::Commitment
+                parent_commitment: <Self::Block as Committable>::Commitment,
+                parent_block: Self::Block,
             ) -> impl Future<Output = Self::Block> + Send;
 
             /// Receive a finalized block from marshal.
