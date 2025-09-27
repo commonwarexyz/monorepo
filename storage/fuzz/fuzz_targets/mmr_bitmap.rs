@@ -199,7 +199,7 @@ fn fuzz(input: FuzzInput) {
                                     bit_offset,
                                     &root
                                 ),
-                                "failed to prove bit {bit_offset}",
+                                "failed to verify bit {bit_offset}",
                             );
                         }
                     }
