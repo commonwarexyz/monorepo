@@ -79,7 +79,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::AppendChunk { chunk_data } => {
-                    if chunk_data.len() >= CHUNK_SIZE && bit_count.is_multiple_of(CHUNK_SIZE as u64 * 8) {
+                    if chunk_data.len() >= CHUNK_SIZE
+                        && bit_count.is_multiple_of(CHUNK_SIZE as u64 * 8)
+                    {
                         let mut chunk = [0u8; CHUNK_SIZE];
                         chunk.copy_from_slice(&chunk_data[0..CHUNK_SIZE]);
                         bitmap.append_chunk_unchecked(&chunk);
