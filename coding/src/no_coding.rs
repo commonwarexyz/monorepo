@@ -15,8 +15,15 @@ pub enum NoCodingError {
 ///
 /// The commitment is simply a hash of that data. This struct is generic
 /// over the choice of [commonware_cryptography::Hasher].
+#[derive(Clone, Copy)]
 pub struct NoCoding<H> {
     _marker: PhantomData<H>,
+}
+
+impl<H> std::fmt::Debug for NoCoding<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoCoding").finish()
+    }
 }
 
 impl<H: Hasher> crate::Scheme for NoCoding<H> {

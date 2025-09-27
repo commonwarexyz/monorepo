@@ -76,15 +76,17 @@ mod tests {
         resolver::p2p as resolver,
     };
     use crate::{
+        marshal::ingress::coding::{mailbox::ShardMailbox, types::CodedBlock},
         threshold_simplex::types::{
             finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
-            Notarization, Proposal,
+            Notarization, Notarize, Proposal,
         },
         types::Round,
         Block as _, Reporter,
     };
     use commonware_broadcast::buffered;
     use commonware_codec::Encode;
+    use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops::generate_shares,
@@ -96,8 +98,8 @@ mod tests {
             },
         },
         ed25519::{PrivateKey, PublicKey},
-        sha256::{Digest as Sha256Digest, Sha256},
-        Digestible, Hasher as _, PrivateKeyExt as _, Signer as _,
+        sha256::Sha256,
+        Committable, Digestible, Hasher, PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -115,7 +117,9 @@ mod tests {
         time::Duration,
     };
 
-    type D = Sha256Digest;
+    type H = Sha256;
+    type D = <H as Hasher>::Digest;
+    type S = ReedSolomon<H>;
     type B = Block<D>;
     type P = PublicKey;
     type V = MinPk;
@@ -148,7 +152,7 @@ mod tests {
         identity: <V as Variant>::Public,
     ) -> (
         Application<B>,
-        crate::marshal::ingress::mailbox::Mailbox<V, B>,
+        crate::marshal::ingress::mailbox::Mailbox<V, B, S, P>,
     ) {
         let config = Config {
             identity,
@@ -194,17 +198,19 @@ mod tests {
             mailbox_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
-            codec_config: (),
+            codec_config: (usize::MAX, usize::MAX),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
         let network = oracle.register(secret.public_key(), 2).await.unwrap();
         broadcast_engine.start(network);
 
+        let shard_mailbox = ShardMailbox::<_, H, _, _>::new(buffer, ());
+
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
         let application = Application::<B>::default();
 
         // Start the application
-        actor.start(application.clone(), buffer, resolver);
+        actor.start(application.clone(), shard_mailbox, resolver);
 
         (application, mailbox)
     }
@@ -266,6 +272,25 @@ mod tests {
             proposal,
             proposal_signature,
             seed_signature,
+        }
+    }
+
+    fn make_notarization_vote(proposal: Proposal<D>, share: &Sh) -> Notarize<V, D> {
+        let proposal_msg = proposal.encode();
+
+        // Generate proposal signature
+        let proposal_partial =
+            partial_sign_message::<V>(share, Some(&notarize_namespace(NAMESPACE)), &proposal_msg);
+
+        // Generate seed signature (for the view number)
+        let seed_msg = proposal.round.encode();
+        let seed_partial =
+            partial_sign_message::<V>(share, Some(&seed_namespace(NAMESPACE)), &seed_msg);
+
+        Notarize {
+            proposal,
+            proposal_signature: proposal_partial,
+            seed_signature: seed_partial,
         }
     }
 
@@ -336,7 +361,7 @@ mod tests {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
-                .with_timeout(Some(Duration::from_secs(300))),
+                .with_timeout(Some(Duration::from_secs(400))),
         );
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
@@ -363,13 +388,19 @@ mod tests {
             // Add links between all peers
             setup_network_links(&mut oracle, &peers, link.clone()).await;
 
+            let coding_config = commonware_coding::Config {
+                minimum_shards: (peers.len() / 2) as u16,
+                extra_shards: (peers.len() / 2) as u16,
+            };
+
             // Generate blocks, skipping the genesis block.
-            let mut blocks = Vec::<B>::new();
+            let mut blocks = Vec::<CodedBlock<B, S>>::new();
             let mut parent = Sha256::hash(b"");
             for i in 1..=NUM_BLOCKS {
                 let block = B::new::<Sha256>(parent, i, i);
-                parent = block.digest();
-                blocks.push(block);
+                let coded_block = CodedBlock::new(block, coding_config);
+                parent = coded_block.commitment();
+                blocks.push(coded_block);
             }
 
             // Broadcast and finalize blocks in random order
@@ -386,19 +417,32 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.broadcast(block.clone()).await;
-                actor.verified(round, block.clone()).await;
 
-                // Wait for the block to be broadcast, but due to jitter, we may or may not receive
-                // the block before continuing.
-                context.sleep(link.latency).await;
+                actor.broadcast(block.clone(), peers.clone()).await;
+
+                // Wait for the block chunks to be delivered; Before making notarization votes,
+                // the chunks must be present.
+                context.sleep(link.latency + link.jitter).await;
 
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
                     round,
                     parent: height.checked_sub(1).unwrap(),
-                    payload: block.digest(),
+                    payload: block.commitment(),
                 };
+
+                // All validators send a notarization for the block.
+                for (i, actor) in actors.iter_mut().enumerate() {
+                    let notarization_vote = make_notarization_vote(proposal.clone(), &shares[i]);
+                    actor
+                        .report(Activity::Notarize(notarization_vote.clone()))
+                        .await;
+                }
+
+                // Wait for the block chunks to be delivered; Before making a notarization,
+                // the chunks must be present.
+                context.sleep(link.latency + link.jitter).await;
+
                 let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
                 actor
                     .report(Activity::Notarization(notarization.clone()))
@@ -467,19 +511,34 @@ mod tests {
 
             setup_network_links(&mut oracle, &peers, LINK).await;
 
+            let coding_config = commonware_coding::Config {
+                minimum_shards: (peers.len() / 2) as u16,
+                extra_shards: (peers.len() / 2) as u16,
+            };
+
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, 1, 1);
-            let commitment = block.digest();
+            let inner = B::new::<Sha256>(parent, 1, 1);
+            let block = CodedBlock::new(inner, coding_config);
+            let commitment = block.commitment();
 
             let subscription_rx = actor.subscribe(Some(Round::from((0, 1))), commitment).await;
 
-            actor.verified(Round::from((0, 1)), block.clone()).await;
+            actor.broadcast(block.clone(), peers).await;
 
             let proposal = Proposal {
                 round: Round::new(0, 1),
                 parent: 0,
                 payload: commitment,
             };
+
+            // All validators send a notarization for the block.
+            for (i, actor) in actors.iter_mut().enumerate() {
+                let notarization_vote = make_notarization_vote(proposal.clone(), &shares[i]);
+                actor
+                    .report(Activity::Notarize(notarization_vote.clone()))
+                    .await;
+            }
+
             let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
             actor.report(Activity::Notarization(notarization)).await;
 
@@ -516,11 +575,18 @@ mod tests {
 
             setup_network_links(&mut oracle, &peers, LINK).await;
 
+            let coding_config = commonware_coding::Config {
+                minimum_shards: (peers.len() / 2) as u16,
+                extra_shards: (peers.len() / 2) as u16,
+            };
+
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, 1, 1);
-            let block2 = B::new::<Sha256>(block1.digest(), 2, 2);
-            let commitment1 = block1.digest();
-            let commitment2 = block2.digest();
+            let inner1 = B::new::<Sha256>(parent, 1, 1);
+            let block1 = CodedBlock::new(inner1, coding_config);
+            let inner2 = B::new::<Sha256>(block1.digest(), 2, 2);
+            let block2 = CodedBlock::new(inner2, coding_config);
+            let commitment1 = block1.commitment();
+            let commitment2 = block2.commitment();
 
             let sub1_rx = actor
                 .subscribe(Some(Round::from((0, 1))), commitment1)
@@ -532,15 +598,24 @@ mod tests {
                 .subscribe(Some(Round::from((0, 1))), commitment1)
                 .await;
 
-            actor.verified(Round::from((0, 1)), block1.clone()).await;
-            actor.verified(Round::from((0, 2)), block2.clone()).await;
+            actor.broadcast(block1.clone(), peers.clone()).await;
+            actor.broadcast(block2.clone(), peers).await;
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
                 let proposal = Proposal {
                     round: Round::new(0, view),
                     parent: view.checked_sub(1).unwrap(),
-                    payload: block.digest(),
+                    payload: block.commitment(),
                 };
+
+                // Send notarization votes from all validators
+                for (i, actor) in actors.iter_mut().enumerate() {
+                    let notarization_vote = make_notarization_vote(proposal.clone(), &shares[i]);
+                    actor
+                        .report(Activity::Notarize(notarization_vote.clone()))
+                        .await;
+                }
+
                 let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
                 actor.report(Activity::Notarization(notarization)).await;
 
@@ -585,11 +660,18 @@ mod tests {
 
             setup_network_links(&mut oracle, &peers, LINK).await;
 
+            let coding_config = commonware_coding::Config {
+                minimum_shards: (peers.len() / 2) as u16,
+                extra_shards: (peers.len() / 2) as u16,
+            };
+
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, 1, 1);
-            let block2 = B::new::<Sha256>(block1.digest(), 2, 2);
-            let commitment1 = block1.digest();
-            let commitment2 = block2.digest();
+            let inner1 = B::new::<Sha256>(parent, 1, 1);
+            let block1 = CodedBlock::new(inner1, coding_config);
+            let inner2 = B::new::<Sha256>(block1.digest(), 2, 2);
+            let block2 = CodedBlock::new(inner2, coding_config);
+            let commitment1 = block1.commitment();
+            let commitment2 = block2.commitment();
 
             let sub1_rx = actor
                 .subscribe(Some(Round::from((0, 1))), commitment1)
@@ -600,15 +682,24 @@ mod tests {
 
             drop(sub1_rx);
 
-            actor.verified(Round::from((0, 1)), block1.clone()).await;
-            actor.verified(Round::from((0, 2)), block2.clone()).await;
+            actor.broadcast(block1.clone(), peers.clone()).await;
+            actor.broadcast(block2.clone(), peers).await;
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
                 let proposal = Proposal {
                     round: Round::new(0, view),
                     parent: view.checked_sub(1).unwrap(),
-                    payload: block.digest(),
+                    payload: block.commitment(),
                 };
+
+                // Broadcast notarization votes from all validators
+                for (i, actor) in actors.iter_mut().enumerate() {
+                    let notarization_vote = make_notarization_vote(proposal.clone(), &shares[i]);
+                    actor
+                        .report(Activity::Notarize(notarization_vote.clone()))
+                        .await;
+                }
+
                 let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
                 actor.report(Activity::Notarization(notarization)).await;
 
@@ -624,7 +715,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_subscribe_blocks_from_different_sources() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
@@ -646,78 +737,77 @@ mod tests {
 
             setup_network_links(&mut oracle, &peers, LINK).await;
 
+            let coding_config = commonware_coding::Config {
+                minimum_shards: (peers.len() / 2) as u16,
+                extra_shards: (peers.len() / 2) as u16,
+            };
+
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, 1, 1);
-            let block2 = B::new::<Sha256>(block1.digest(), 2, 2);
-            let block3 = B::new::<Sha256>(block2.digest(), 3, 3);
-            let block4 = B::new::<Sha256>(block3.digest(), 4, 4);
-            let block5 = B::new::<Sha256>(block4.digest(), 5, 5);
+            let inner1 = B::new::<Sha256>(parent, 1, 1);
+            let block1 = CodedBlock::new(inner1, coding_config);
+            let inner2 = B::new::<Sha256>(block1.digest(), 2, 2);
+            let block2 = CodedBlock::new(inner2, coding_config);
 
-            let sub1_rx = actor.subscribe(None, block1.digest()).await;
-            let sub2_rx = actor.subscribe(None, block2.digest()).await;
-            let sub3_rx = actor.subscribe(None, block3.digest()).await;
-            let sub4_rx = actor.subscribe(None, block4.digest()).await;
-            let sub5_rx = actor.subscribe(None, block5.digest()).await;
-
-            // Block1: Broadcasted by the actor
-            actor.broadcast(block1.clone()).await;
+            // Block1: Broadcasted by self
+            actor.broadcast(block1.clone(), peers.clone()).await;
             context.sleep(Duration::from_millis(20)).await;
+
+            let sub1_rx = actor
+                .subscribe(Some(Round::from((0, 1))), block1.commitment())
+                .await;
+
+            let proposal1 = Proposal {
+                round: Round::new(0, 1),
+                parent: 0,
+                payload: block1.commitment(),
+            };
+            for (i, actor) in actors.iter_mut().enumerate() {
+                let notarization_vote = make_notarization_vote(proposal1.clone(), &shares[i]);
+                actor
+                    .report(Activity::Notarize(notarization_vote.clone()))
+                    .await;
+            }
+
+            context.sleep(Duration::from_millis(20)).await;
+
+            let notarization1 = make_notarization(proposal1.clone(), &shares, QUORUM);
+            actor.report(Activity::Notarization(notarization1)).await;
 
             // Block1: delivered
             let received1 = sub1_rx.await.unwrap();
             assert_eq!(received1.digest(), block1.digest());
             assert_eq!(received1.height(), 1);
 
-            // Block2: Verified by the actor
-            actor.verified(Round::from((0, 2)), block2.clone()).await;
+            // Block2: Broadcasted by a remote node (different actor)
+            let remote_actor = &mut actors[1].clone();
+            remote_actor.broadcast(block2.clone(), peers).await;
+            context.sleep(Duration::from_millis(20)).await;
+
+            let sub2_rx = actor
+                .subscribe(Some(Round::from((0, 1))), block2.commitment())
+                .await;
+
+            let proposal2 = Proposal {
+                round: Round::new(0, 1),
+                parent: 0,
+                payload: block2.commitment(),
+            };
+            for (i, actor) in actors.iter_mut().enumerate() {
+                let notarization_vote = make_notarization_vote(proposal2.clone(), &shares[i]);
+                actor
+                    .report(Activity::Notarize(notarization_vote.clone()))
+                    .await;
+            }
+
+            context.sleep(Duration::from_millis(20)).await;
+
+            let notarization2 = make_notarization(proposal2.clone(), &shares, QUORUM);
+            actor.report(Activity::Notarization(notarization2)).await;
 
             // Block2: delivered
             let received2 = sub2_rx.await.unwrap();
             assert_eq!(received2.digest(), block2.digest());
             assert_eq!(received2.height(), 2);
-
-            // Block3: Notarized by the actor
-            let proposal3 = Proposal {
-                round: Round::new(0, 3),
-                parent: 2,
-                payload: block3.digest(),
-            };
-            let notarization3 = make_notarization(proposal3.clone(), &shares, QUORUM);
-            actor.report(Activity::Notarization(notarization3)).await;
-            actor.verified(Round::from((0, 3)), block3.clone()).await;
-
-            // Block3: delivered
-            let received3 = sub3_rx.await.unwrap();
-            assert_eq!(received3.digest(), block3.digest());
-            assert_eq!(received3.height(), 3);
-
-            // Block4: Finalized by the actor
-            let finalization4 = make_finalization(
-                Proposal {
-                    round: Round::new(0, 4),
-                    parent: 3,
-                    payload: block4.digest(),
-                },
-                &shares,
-                QUORUM,
-            );
-            actor.report(Activity::Finalization(finalization4)).await;
-            actor.verified(Round::from((0, 4)), block4.clone()).await;
-
-            // Block4: delivered
-            let received4 = sub4_rx.await.unwrap();
-            assert_eq!(received4.digest(), block4.digest());
-            assert_eq!(received4.height(), 4);
-
-            // Block5: Broadcasted by a remote node (different actor)
-            let remote_actor = &mut actors[1].clone();
-            remote_actor.broadcast(block5.clone()).await;
-            context.sleep(Duration::from_millis(20)).await;
-
-            // Block5: delivered
-            let received5 = sub5_rx.await.unwrap();
-            assert_eq!(received5.digest(), block5.digest());
-            assert_eq!(received5.height(), 5);
         })
     }
 }

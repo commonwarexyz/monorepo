@@ -29,7 +29,7 @@ pub enum Error {
 }
 
 /// A piece of data from a Reed-Solomon encoded object.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Chunk<H: Hasher> {
     /// The shard of encoded data.
     shard: Vec<u8>,
@@ -99,6 +99,14 @@ impl<H: Hasher> EncodeSize for Chunk<H> {
         self.shard.encode_size() + self.index.encode_size() + self.proof.encode_size()
     }
 }
+
+impl<H: Hasher> PartialEq for Chunk<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.shard == other.shard && self.index == other.index && self.proof == other.proof
+    }
+}
+
+impl<H: Hasher> Eq for Chunk<H> {}
 
 /// Prepare data for encoding.
 fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
@@ -421,8 +429,15 @@ fn decode<H: Hasher>(
 ///    generated. This new root MUST match the original [bmt] root. This prevents attacks where
 ///    an adversary provides a valid set of chunks that decode to different data.
 /// 4. If the roots match, the original data is extracted from the reconstructed data shards.
+#[derive(Clone, Copy)]
 pub struct ReedSolomon<H> {
     _marker: PhantomData<H>,
+}
+
+impl<H> std::fmt::Debug for ReedSolomon<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReedSolomon").finish()
+    }
 }
 
 impl<H: Hasher> Scheme for ReedSolomon<H> {

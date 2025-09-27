@@ -1,4 +1,5 @@
-use crate::Block;
+use crate::{marshal::ingress::coding::types::CodedBlock, Block};
+use commonware_coding::Scheme;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -9,20 +10,20 @@ use tracing::error;
 ///
 /// We break this into a separate enum to establish a separate priority for
 /// finalizer messages over consensus messages.
-pub enum Orchestration<B: Block> {
+pub enum Orchestration<B: Block, S: Scheme> {
     /// A request to get the next finalized block.
     Get {
         /// The height of the block to get.
         height: u64,
         /// A channel to send the block, if found.
-        result: oneshot::Sender<Option<B>>,
+        result: oneshot::Sender<Option<CodedBlock<B, S>>>,
     },
     /// A notification that a block has been processed by the application.
     Processed {
         /// The height of the processed block.
         height: u64,
-        /// The digest of the processed block.
-        digest: B::Commitment,
+        /// The commitment of the processed block.
+        commitment: B::Commitment,
     },
     /// A request to repair a gap in the finalized block sequence.
     Repair {
@@ -33,18 +34,18 @@ pub enum Orchestration<B: Block> {
 
 /// A handle for the finalizer to communicate with the main actor loop.
 #[derive(Clone)]
-pub struct Orchestrator<B: Block> {
-    sender: mpsc::Sender<Orchestration<B>>,
+pub struct Orchestrator<B: Block, S: Scheme> {
+    sender: mpsc::Sender<Orchestration<B, S>>,
 }
 
-impl<B: Block> Orchestrator<B> {
+impl<B: Block, S: Scheme> Orchestrator<B, S> {
     /// Creates a new orchestrator.
-    pub fn new(sender: mpsc::Sender<Orchestration<B>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Orchestration<B, S>>) -> Self {
         Self { sender }
     }
 
     /// Gets the finalized block at the given height.
-    pub async fn get(&mut self, height: u64) -> Option<B> {
+    pub async fn get(&mut self, height: u64) -> Option<CodedBlock<B, S>> {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
@@ -62,10 +63,10 @@ impl<B: Block> Orchestrator<B> {
     }
 
     /// Notifies the actor that a block has been processed.
-    pub async fn processed(&mut self, height: u64, digest: B::Commitment) {
+    pub async fn processed(&mut self, height: u64, commitment: B::Commitment) {
         if self
             .sender
-            .send(Orchestration::Processed { height, digest })
+            .send(Orchestration::Processed { height, commitment })
             .await
             .is_err()
         {
