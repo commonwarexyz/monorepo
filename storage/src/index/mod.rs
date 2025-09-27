@@ -1,4 +1,4 @@
-//! A memory-efficient index for mapping translated keys to values.
+//! Memory-efficient index structures for mapping translated keys to values.
 //!
 //! # Multiple Values for a Key
 //!
@@ -14,14 +14,125 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 mod storage;
-pub use storage::{Cursor, Index};
+
+pub mod ordered;
+pub mod unordered;
+pub use ordered::Index as Ordered;
+pub use unordered::Index as Unordered;
+
+/// A mutable iterator over the values associated with a translated key, allowing in-place
+/// modifications.
+///
+/// The [Cursor] provides a way to traverse and modify the linked list of values associated with a
+/// translated key by an [Index] while maintaining its structure. It supports:
+///
+/// - Iteration via `next()` to access values.
+/// - Modification via `update()` to change the current value.
+/// - Insertion via `insert()` to add new values.
+/// - Deletion via `delete()` to remove values.
+///
+/// # Safety
+///
+/// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
+/// - Once `next()` returns `None`, only `insert()` can be called.
+/// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached
+///   `next` nodes.
+///
+/// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or
+/// `remove()` from [Index] instead._
+pub trait Cursor {
+    /// The type of values the cursor iterates over.
+    type Value: Eq;
+
+    /// Advances the cursor to the next value in the chain, returning a reference to it.
+    ///
+    /// This method must be called before any other operations (`insert()`, `delete()`, etc.). If
+    /// either `insert()` or `delete()` is called, `next()` must be called to set a new active item.
+    /// If after `insert()`, the next active item is the item after the inserted item. If after
+    /// `delete()`, the next active item is the item after the deleted item.
+    ///
+    /// Handles transitions between phases and adjusts for deletions. Returns `None` when the list
+    /// is exhausted. It is safe to call `next()` even after it returns `None`.
+    #[allow(clippy::should_implement_trait)]
+    fn next(&mut self) -> Option<&Self::Value>;
+
+    /// Inserts a new value at the current position.
+    fn insert(&mut self, value: Self::Value);
+
+    /// Deletes the current value, adjusting the list structure.
+    fn delete(&mut self);
+
+    /// Updates the value at the current position in the iteration.
+    ///
+    /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
+    fn update(&mut self, value: Self::Value);
+
+    /// Removes anything in the cursor that satisfies the predicate.
+    fn prune(&mut self, predicate: &impl Fn(&Self::Value) -> bool);
+}
+
+/// A memory-efficient index that maps translated keys to arbitrary values.
+pub trait Index {
+    /// The type of values the index stores.
+    type Value: Eq;
+
+    /// The type of cursor returned by this index to iterate over values with conflicting keys.
+    type Cursor<'a>: Cursor<Value = Self::Value>
+    where
+        Self: 'a;
+
+    /// Returns the number of translated keys in the index.
+    fn keys(&self) -> usize;
+
+    /// Returns an iterator over all values associated with a translated key.
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a;
+
+    /// Provides mutable access to the values associated with a translated key, if the key exists.
+    fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>>;
+
+    /// Provides mutable access to the values associated with a translated key (if the key exists),
+    /// otherwise inserts a new value and returns `None`.
+    fn get_mut_or_insert<'a>(
+        &'a mut self,
+        key: &[u8],
+        value: Self::Value,
+    ) -> Option<Self::Cursor<'a>>;
+
+    /// Inserts a new value at the current position.
+    fn insert(&mut self, key: &[u8], value: Self::Value);
+
+    /// Insert a value at the given translated key, and prune any values that are no longer valid.
+    ///
+    /// If the value is prunable, it will not be inserted.
+    fn insert_and_prune(
+        &mut self,
+        key: &[u8],
+        value: Self::Value,
+        predicate: impl Fn(&Self::Value) -> bool,
+    );
+
+    /// Remove all values associated with a translated key that match `predicate`.
+    fn prune(&mut self, key: &[u8], predicate: impl Fn(&Self::Value) -> bool);
+
+    /// Remove all values associated with a translated key.
+    fn remove(&mut self, key: &[u8]);
+
+    /// Returns the number of items in the index, for use in testing. The number of items is always
+    /// at least as large as the number of keys, but may be larger in the case of collisions.
+    #[cfg(test)]
+    fn items(&self) -> usize;
+
+    /// Returns the total number of items pruned from the index, for use in testing.
+    #[cfg(test)]
+    fn pruned(&self) -> usize;
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::translator::TwoCap;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{deterministic, Runner};
     use rand::Rng;
     use std::{
         collections::HashMap,
@@ -29,1049 +140,1373 @@ mod tests {
         thread,
     };
 
+    fn run_index_basic<I: Index<Value = u64>>(index: &mut I) {
+        // Generate a collision and check metrics to make sure it's captured
+        let key = b"duplicate".as_slice();
+        index.insert(key, 1);
+        index.insert(key, 2);
+        index.insert(key, 3);
+        assert_eq!(index.keys(), 1);
+
+        // Check that the values are in the correct order
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 3, 2]);
+
+        // Ensure cursor terminates
+        {
+            let mut cursor = index.get_mut(key).unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            assert_eq!(*cursor.next().unwrap(), 2);
+            assert!(cursor.next().is_none());
+        }
+
+        // Make sure we can remove keys with a predicate
+        index.insert(key, 3);
+        index.insert(key, 4);
+        index.prune(key, |i| *i == 3);
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
+        index.prune(key, |_| true);
+        // Try removing all of a keys values.
+        assert_eq!(
+            index.get(key).copied().collect::<Vec<_>>(),
+            Vec::<u64>::new()
+        );
+        assert_eq!(index.keys(), 0);
+
+        assert!(index.get_mut(key).is_none());
+
+        // Removing a key that doesn't exist should be a no-op.
+        index.prune(key, |_| true);
+    }
+
+    fn new_unordered(context: deterministic::Context) -> Unordered<TwoCap, u64> {
+        Unordered::<_, u64>::init(context.clone(), TwoCap)
+    }
+
+    fn new_ordered(context: deterministic::Context) -> Ordered<TwoCap, u64> {
+        Ordered::<_, u64>::init(context, TwoCap)
+    }
+
     #[test_traced]
-    fn test_index_basic() {
+    fn test_hash_index_basic() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-            assert!(context.encode().contains("keys 0"));
-            assert!(context.encode().contains("items 0"));
-
-            // Generate a collision and check metrics to make sure it's captured
-            let key = b"duplicate".as_slice();
-            index.insert(key, 1);
-            index.insert(key, 2);
-            index.insert(key, 3);
-            assert!(context.encode().contains("keys 1"));
-            assert!(context.encode().contains("items 3"));
-
-            // Check that the values are in the correct order
-            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 3, 2]);
-
-            // Ensure cursor terminates
-            {
-                let mut cursor = index.get_mut(key).unwrap();
-                assert_eq!(*cursor.next().unwrap(), 1);
-                assert_eq!(*cursor.next().unwrap(), 3);
-                assert_eq!(*cursor.next().unwrap(), 2);
-                assert!(cursor.next().is_none());
-            }
-
-            // Make sure we can remove keys with a predicate
-            index.insert(key, 3);
-            index.insert(key, 4);
-            index.prune(key, |i| *i == 3);
-            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
-            index.prune(key, |_| true);
-            // Try removing all of a keys values.
-            assert_eq!(
-                index.get(key).copied().collect::<Vec<_>>(),
-                Vec::<u64>::new()
-            );
-            assert!(context.encode().contains("keys 0"));
-            assert!(context.encode().contains("items 0"));
-
-            // Removing a key that doesn't exist should be a no-op.
-            index.prune(key, |_| true);
-            assert!(context.encode().contains("keys 0"));
-            assert!(context.encode().contains("items 0"));
+            let mut index = new_unordered(context);
+            assert_eq!(index.keys(), 0);
+            run_index_basic(&mut index);
+            assert_eq!(index.keys(), 0);
         });
     }
 
     #[test_traced]
-    fn test_index_many_keys() {
+    fn test_ordered_index_basic() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            assert_eq!(index.keys(), 0);
+            run_index_basic(&mut index);
+            assert_eq!(index.keys(), 0);
+        });
+    }
+
+    fn run_index_many_keys<I: Index<Value = u64>>(index: &mut I, mut fill: impl FnMut(&mut [u8])) {
+        let mut expected = HashMap::new();
+        const NUM_KEYS: usize = 2000;
+        while expected.len() < NUM_KEYS {
+            let mut key_array = [0u8; 32];
+            fill(&mut key_array);
+            let key = key_array.to_vec();
+
+            let loc = expected.len() as u64;
+            index.insert(&key, loc);
+            expected.insert(key, loc);
+        }
+        assert_eq!(index.keys(), 1975);
+        assert_eq!(index.items(), 2000);
+
+        for (key, loc) in expected.iter() {
+            let mut values = index.get(key);
+            let res = values.find(|i| *i == loc);
+            assert!(res.is_some());
+        }
+    }
+
+    #[test_traced]
+    fn test_hash_index_many_keys() {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            // Insert enough keys to generate some collisions, then confirm each value we inserted
-            // remains retrievable.
-            let mut expected = HashMap::new();
-            const NUM_KEYS: usize = 2000; // enough to generate some collisions
-            while expected.len() < NUM_KEYS {
-                let mut key_array = [0u8; 32];
-                context.fill(&mut key_array);
-                let key = key_array.to_vec();
-
-                let loc = expected.len() as u64;
-                index.insert(&key, loc);
-                expected.insert(key, loc);
-            }
-            assert!(context.encode().contains("keys 1975"));
-            assert!(context.encode().contains("items 2000"));
-
-            for (key, loc) in expected.iter() {
-                let mut values = index.get(key);
-                let res = values.find(|i| *i == loc);
-                assert!(res.is_some());
-            }
+            let mut index = new_unordered(context.clone());
+            run_index_many_keys(&mut index, |bytes| context.fill(bytes));
         });
     }
 
     #[test_traced]
-    fn test_index_key_lengths_and_key_item_metrics() {
+    fn test_ordered_index_many_keys() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let mut index = new_ordered(context.clone());
+            run_index_many_keys(&mut index, |bytes| context.fill(bytes));
+        });
+    }
+
+    fn run_index_key_lengths_and_metrics<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"a", 1);
+        index.insert(b"ab", 2);
+        index.insert(b"abc", 3);
+
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(index.get(b"abc").copied().collect::<Vec<_>>(), vec![2, 3]);
+
+        index.insert(b"ab", 4);
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 4, 3]);
+        assert_eq!(index.keys(), 2);
+        assert_eq!(index.items(), 4);
+
+        index.prune(b"ab", |v| *v == 4);
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(index.keys(), 2);
+        assert_eq!(index.items(), 3);
+
+        index.prune(b"ab", |_| true);
+        assert_eq!(
+            index.get(b"ab").copied().collect::<Vec<_>>(),
+            Vec::<u64>::new()
+        );
+        assert_eq!(index.keys(), 1);
+        assert_eq!(index.items(), 1);
+        assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test_traced]
+    fn test_hash_index_key_lengths_and_key_item_metrics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            // Insert keys of different lengths
-            index.insert(b"a", 1); // Shorter than cap (1 byte -> "a\0")
-            index.insert(b"ab", 2); // Equal to cap (2 bytes -> "ab")
-            index.insert(b"abc", 3); // Longer than cap (3 bytes -> "ab")
-            assert!(context.encode().contains("keys 2"));
-            assert!(context.encode().contains("items 3"));
-
-            // Check that "a" maps to "a\0"
-            assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
-
-            // Check that "ab" and "abc" map to "ab" due to TwoCap truncation
-            let values = index.get(b"ab").copied().collect::<Vec<_>>();
-            assert_eq!(values, vec![2, 3]);
-
-            let values = index.get(b"abc").copied().collect::<Vec<_>>();
-            assert_eq!(values, vec![2, 3]);
-
-            // Insert another value for "ab"
-            index.insert(b"ab", 4);
-            assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 4, 3]);
-            assert!(context.encode().contains("keys 2"));
-            assert!(context.encode().contains("items 4"));
-
-            // Remove a specific value
-            index.prune(b"ab", |v| *v == 4);
-            assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
-            assert!(context.encode().contains("keys 2"));
-            assert!(context.encode().contains("items 3"));
-
-            // Remove all values for "ab"
-            index.prune(b"ab", |_| true);
-            assert_eq!(
-                index.get(b"ab").copied().collect::<Vec<_>>(),
-                Vec::<u64>::new()
-            );
-            assert!(context.encode().contains("keys 1"));
-            assert!(context.encode().contains("items 1"));
-
-            // Check that "a" is still present
-            assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
+            let mut index = new_unordered(context);
+            run_index_key_lengths_and_metrics(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_value_order() {
+    fn test_ordered_index_key_lengths_and_key_item_metrics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
+            run_index_key_lengths_and_metrics(&mut index);
+        });
+    }
 
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
-            index.insert(b"key", 3);
+    fn run_index_value_order<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![1, 3, 2]
+        );
+    }
 
-            // Values should be in stack order (last in first).
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![1, 3, 2]
-            );
+    #[test_traced]
+    fn test_hash_index_value_order() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_value_order(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_remove_specific() {
+    fn test_ordered_index_value_order() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
+            run_index_value_order(&mut index);
+        });
+    }
 
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
-            index.insert(b"key", 3);
+    fn run_index_remove_specific<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+        index.prune(b"key", |v| *v == 2);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
+        index.prune(b"key", |v| *v == 1);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3]);
+    }
 
-            // Remove value 2
-            index.prune(b"key", |v| *v == 2);
-            assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
-
-            // Remove head value 1
-            index.prune(b"key", |v| *v == 1);
-            assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3]);
+    #[test_traced]
+    fn test_hash_index_remove_specific() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_remove_specific(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_empty_key() {
+    fn test_ordered_index_remove_specific() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
+            run_index_remove_specific(&mut index);
+        });
+    }
 
-            index.insert(b"", 0); // Maps to [0, 0]
-            index.insert(b"\0", 1); // Maps to [0, 0]
-            index.insert(b"\0\0", 2); // Maps to [0, 0]
+    fn run_index_empty_key<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"", 0);
+        index.insert(b"\0", 1);
+        index.insert(b"\0\0", 2);
 
-            // All keys map to [0, 0], so all values should be returned
-            let mut values = index.get(b"").copied().collect::<Vec<_>>();
-            values.sort();
-            assert_eq!(values, vec![0, 1, 2]);
+        let mut values = index.get(b"").copied().collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![0, 1, 2]);
+        let mut values = index.get(b"\0").copied().collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![0, 1, 2]);
+        let mut values = index.get(b"\0\0").copied().collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![0, 1, 2]);
 
-            let mut values = index.get(b"\0").copied().collect::<Vec<_>>();
-            values.sort();
-            assert_eq!(values, vec![0, 1, 2]);
+        index.prune(b"", |v| *v == 1);
+        let mut values = index.get(b"").copied().collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![0, 2]);
+    }
 
-            let mut values = index.get(b"\0\0").copied().collect::<Vec<_>>();
-            values.sort();
-            assert_eq!(values, vec![0, 1, 2]);
-
-            // Remove a specific value
-            index.prune(b"", |v| *v == 1);
-            let mut values = index.get(b"").copied().collect::<Vec<_>>();
-            values.sort();
-            assert_eq!(values, vec![0, 2]);
+    #[test_traced]
+    fn test_hash_index_empty_key() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_empty_key(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_mutate_through_iterator() {
+    fn test_ordered_index_empty_key() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
+            run_index_empty_key(&mut index);
+        });
+    }
 
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
-            index.insert(b"key", 3);
-
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                loop {
-                    let Some(old) = cursor.next() else {
-                        break;
-                    };
-                    // Mutate the value
-                    let new = *old + 10;
-                    cursor.update(new);
-                }
+    fn run_index_mutate_through_iterator<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            while let Some(old) = cursor.next().copied() {
+                cursor.update(old + 10);
             }
+        }
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![11, 13, 12]
+        );
+    }
 
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![11, 13, 12]
-            );
+    #[test_traced]
+    fn test_hash_index_mutate_through_iterator() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_mutate_through_iterator(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_mutate_middle_of_four_through_iterator() {
+    fn test_ordered_index_mutate_through_index() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
+            let mut index = new_ordered(context);
+            run_index_mutate_through_iterator(&mut index);
+        });
+    }
 
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
-            index.insert(b"key", 3);
-            index.insert(b"key", 4);
+    fn run_index_mutate_middle_of_four<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+        index.insert(b"key", 4);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![1, 4, 3, 2]
+        );
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 4);
+            let _ = cursor.next().unwrap();
+            cursor.update(99);
+        }
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![1, 4, 99, 2]
+        );
+    }
 
-            let values = index.get(b"key").copied().collect::<Vec<_>>();
-            assert_eq!(values, vec![1, 4, 3, 2]);
-
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 1);
-                assert_eq!(*cursor.next().unwrap(), 4);
-                let old = *cursor.next().unwrap();
-                assert_eq!(old, 3);
-                cursor.update(99);
-            }
-
-            let values = index.get(b"key").copied().collect::<Vec<_>>();
-            assert_eq!(values, vec![1, 4, 99, 2]);
+    #[test_traced]
+    fn test_hash_index_mutate_middle_of_four() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_mutate_middle_of_four(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_remove_through_iterator() {
+    fn test_ordered_index_mutate_middle_of_four() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
+            run_index_mutate_middle_of_four(&mut index);
+        });
+    }
 
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
-            index.insert(b"key", 3);
-            index.insert(b"key", 4);
+    fn run_index_remove_through_iterator<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+        index.insert(b"key", 4);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![1, 4, 3, 2]
+        );
+        assert_eq!(index.pruned(), 0);
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.delete();
+        }
+        assert_eq!(index.pruned(), 1);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 3, 2]
+        );
+        index.insert(b"key", 1);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 1, 3, 2]
+        );
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 4);
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            cursor.delete();
+        }
+        assert_eq!(index.pruned(), 2);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 1, 2]
+        );
+        index.insert(b"key", 3);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 3, 1, 2]
+        );
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 4);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 2);
+            cursor.delete();
+        }
+        assert_eq!(index.pruned(), 3);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 3, 1]
+        );
+        index.remove(b"key");
+        assert_eq!(index.keys(), 0);
+        assert_eq!(index.items(), 0);
+        assert_eq!(index.pruned(), 6);
+    }
 
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![1, 4, 3, 2]
-            );
-            assert!(context.encode().contains("pruned_total 0"));
-
-            // Test removing first value from the list.
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 1);
-                cursor.delete();
-                assert!(context.encode().contains("pruned_total 1"));
-            }
-
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![4, 3, 2]
-            );
-
-            index.insert(b"key", 1);
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![4, 1, 3, 2]
-            );
-
-            // Test removing from the middle.
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 4);
-                assert_eq!(*cursor.next().unwrap(), 1);
-                assert_eq!(*cursor.next().unwrap(), 3);
-                cursor.delete();
-                assert!(context.encode().contains("pruned_total 2"));
-            }
-
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![4, 1, 2]
-            );
-            index.insert(b"key", 3);
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![4, 3, 1, 2]
-            );
-
-            // Test removing last value.
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 4);
-                assert_eq!(*cursor.next().unwrap(), 3);
-                assert_eq!(*cursor.next().unwrap(), 1);
-                assert_eq!(*cursor.next().unwrap(), 2);
-                cursor.delete();
-                assert!(context.encode().contains("pruned_total 3"));
-            }
-
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![4, 3, 1]
-            );
-
-            // Test removing all values.
-            index.remove(b"key");
-            assert!(context.encode().contains("keys 0"));
-            assert!(context.encode().contains("items 0"));
-            assert!(context.encode().contains("pruned_total 6"));
+    #[test_traced]
+    fn test_hash_index_remove_through_iterator() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_remove_through_iterator(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_insert_through_iterator() {
+    fn test_ordered_index_remove_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
+            run_index_remove_through_iterator(&mut index);
+        });
+    }
 
-            // Add values to the index
-            index.insert(b"key", 1);
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 1);
-                cursor.insert(3);
-            }
-            assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
-            assert!(context.encode().contains("keys 1"));
-            assert!(context.encode().contains("items 2"));
-
-            // Try inserting into an iterator while iterating.
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 1);
-                cursor.insert(42);
-            }
-            assert!(context.encode().contains("keys 1"));
-            assert!(context.encode().contains("items 3"));
-
-            // Verify second value is new one
-            {
-                let mut iter = index.get(b"key");
-                assert_eq!(*iter.next().unwrap(), 1);
-                assert_eq!(*iter.next().unwrap(), 42);
-            }
-
-            // Insert a new value
-            index.insert(b"key", 100);
-
-            // Iterate to end
+    fn run_index_insert_through_iterator<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.insert(3);
+        }
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(index.keys(), 1);
+        assert_eq!(index.items(), 2);
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.insert(42);
+        }
+        assert_eq!(index.keys(), 1);
+        assert_eq!(index.items(), 3);
+        {
             let mut iter = index.get(b"key");
             assert_eq!(*iter.next().unwrap(), 1);
-            assert_eq!(*iter.next().unwrap(), 100);
             assert_eq!(*iter.next().unwrap(), 42);
-            assert_eq!(*iter.next().unwrap(), 3);
-            assert!(iter.next().is_none());
+        }
+        index.insert(b"key", 100);
+        let mut iter = index.get(b"key");
+        assert_eq!(*iter.next().unwrap(), 1);
+        assert_eq!(*iter.next().unwrap(), 100);
+        assert_eq!(*iter.next().unwrap(), 42);
+        assert_eq!(*iter.next().unwrap(), 3);
+        assert!(iter.next().is_none());
+    }
+
+    #[test_traced]
+    fn test_hash_index_insert_through_iterator() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_through_iterator(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_remove_middle_then_next() {
+    fn test_ordered_index_insert_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            // Build list: [0, 3, 2, 1]
-            for i in 0..4 {
-                index.insert(b"key", i);
-            }
-
-            // Remove middle: [0, 1]
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 0); // head
-                assert_eq!(*cursor.next().unwrap(), 3); // middle
-                cursor.delete();
-                assert_eq!(*cursor.next().unwrap(), 2); // middle
-                cursor.delete();
-            }
-            assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![0, 1]);
+            let mut index = new_ordered(context);
+            run_index_insert_through_iterator(&mut index);
         });
     }
 
-    #[test_traced]
-    fn test_index_remove_to_nothing() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            // Build list: [0, 3, 2, 1]
-            for i in 0..4 {
-                index.insert(b"key", i);
-            }
-
-            // Remove middle: []
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 0);
-                cursor.delete();
-                assert_eq!(*cursor.next().unwrap(), 3);
-                cursor.delete();
-                assert_eq!(*cursor.next().unwrap(), 2);
-                cursor.delete();
-                assert_eq!(*cursor.next().unwrap(), 1);
-                cursor.delete();
-                assert_eq!(cursor.next(), None);
-            }
-
-            // Ensure item is deleted from index
-            assert!(context.encode().contains("keys 0"));
-            assert!(context.encode().contains("items 0"));
-        });
-    }
-
-    #[test_traced]
-    fn test_index_remove_to_nothing_then_add() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            // Build list: [0, 3, 2, 1]
-            for i in 0..4 {
-                index.insert(b"key", i);
-            }
-
-            // Remove middle: [4, 5]
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 0);
-                cursor.delete();
-                assert_eq!(*cursor.next().unwrap(), 3);
-                cursor.delete();
-                assert_eq!(*cursor.next().unwrap(), 2);
-                cursor.delete();
-                assert_eq!(*cursor.next().unwrap(), 1);
-                cursor.delete();
-                assert_eq!(cursor.next(), None);
-                cursor.insert(4);
-                assert_eq!(cursor.next(), None);
-                cursor.insert(5);
-            }
-
-            // Ensure remaining values are correct
-            assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![4, 5]);
-        });
-    }
-
-    #[test_traced]
-    fn test_index_insert_and_remove_cursor() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            // Build list: [0]
-            index.insert(b"key", 0);
-
-            // Remove item: []
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 0); // head
-                cursor.delete();
-            }
-            index.remove(b"key");
-            assert!(index.get(b"key").copied().collect::<Vec<i32>>().is_empty());
-        });
-    }
-
-    #[test_traced]
-    fn test_index_insert_and_prune_vacant() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            // Inserting into a *vacant* key behaves just like `insert`: 1 key, 1 item, nothing pruned.
-            index.insert_and_prune(b"key", 1u64, |_| false);
-
-            assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1]);
-            assert!(context.encode().contains("items 1"));
-            assert!(context.encode().contains("keys 1"));
-            assert!(context.encode().contains("pruned_total 0"));
-        });
-    }
-
-    #[test_traced]
-    fn test_index_insert_and_prune_replace_one() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            // Add a value to the index
-            index.insert(b"key", 1u64); // 0 collisions
-            index.insert_and_prune(b"key", 2u64, |v| *v == 1); // replace
-
-            assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
-            assert!(context.encode().contains("items 1"));
-            assert!(context.encode().contains("keys 1"));
-            assert!(context.encode().contains("pruned_total 1"));
-        });
-    }
-
-    #[test_traced]
-    fn test_index_insert_and_prune_dead_insert() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            // Add multiple values to the same key
-            index.insert(b"key", 10u64); // 0 collisions
-            index.insert(b"key", 20u64); // +1 collision
-
-            // Update an item if it matches the predicate
-            index.insert_and_prune(b"key", 30u64, |_| true); // +2 pruned (and last value not added)
-
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<u64>>(),
-                Vec::<u64>::new()
-            );
-            assert!(context.encode().contains("items 0"));
-            assert!(context.encode().contains("keys 0"));
-            assert!(context.encode().contains("pruned_total 2"));
-        });
-    }
-
-    #[test_traced]
-    fn test_index_cursor_delete_then_next_returns_next() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-
-            // Build list: [1, 2]
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
-
+    fn run_index_cursor_insert_after_done_appends<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 10);
+        {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 1); // Phase::Current
+            assert_eq!(*cursor.next().unwrap(), 10);
+            assert!(cursor.next().is_none());
+            cursor.insert(20);
+        }
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![10, 20]);
+    }
 
-            // After deleting the current element, `next` should yield the element that was
-            // copied in from the old `next` node (the iterator does not advance).
-            cursor.delete(); // remove 1, copy 2 into place
-            assert_eq!(*cursor.next().unwrap(), 2); // should yield 2
-            assert!(cursor.next().is_none()); // now exhausted
+    #[test_traced]
+    fn test_hash_index_cursor_insert_after_done_appends() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_insert_after_done_appends(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_cursor_insert_after_done_appends() {
+    fn test_ordered_index_cursor_insert_after_done_appends() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-
-            index.insert(b"key", 10);
-
-            {
-                let mut cursor = index.get_mut(b"key").unwrap();
-                assert_eq!(*cursor.next().unwrap(), 10);
-                assert!(cursor.next().is_none()); // Phase::Done
-
-                // Inserting after we've already iterated to the end should append a new node.
-                cursor.insert(20); // append while Done
-            }
-
-            assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![10, 20]);
+            let mut index = new_ordered(context);
+            run_index_cursor_insert_after_done_appends(&mut index);
         });
     }
 
-    #[test_traced]
-    #[should_panic(expected = "must call Cursor::next()")]
-    fn test_index_cursor_update_before_next_panics() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-            index.insert(b"key", 123);
-
+    fn run_index_remove_to_nothing_then_add<I: Index<Value = u64>>(index: &mut I) {
+        for i in 0..4 {
+            index.insert(b"key", i);
+        }
+        {
             let mut cursor = index.get_mut(b"key").unwrap();
-            // Calling `update` before `next` is a logic error and should panic.
-            cursor.update(321); // triggers unreachable! branch
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "must call Cursor::next()")]
-    fn test_index_cursor_delete_before_next_panics() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-            index.insert(b"key", 123);
-
-            let mut cursor = index.get_mut(b"key").unwrap();
-            // Calling `delete` before `next` is a logic error and should panic.
-            cursor.delete(); // triggers unreachable! branch
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "no active item in Cursor")]
-    fn test_index_cursor_update_after_done() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-            index.insert(b"key", 123);
-
-            let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 123);
-            assert!(cursor.next().is_none()); // Phase::Done
-
-            // Calling `update` after `next` is a logic error and should panic.
-            cursor.update(321); // triggers unreachable! branch
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "must call Cursor::next()")]
-    fn test_index_cursor_insert_before_next() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-            index.insert(b"key", 123);
-
-            let mut cursor = index.get_mut(b"key").unwrap();
-
-            // Calling `insert` after `next` is a logic error and should panic.
-            cursor.insert(321); // triggers unreachable! branch
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "no active item in Cursor")]
-    fn test_index_cursor_delete_after_done() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-            index.insert(b"key", 123);
-
-            let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 123);
-            assert!(cursor.next().is_none()); // Phase::Done
-
-            // Calling `delete` after `next` is a logic error and should panic.
-            cursor.delete(); // triggers unreachable! branch
-        });
-    }
-
-    #[test_traced]
-    fn test_index_cursor_insert_with_next() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-            index.insert(b"key", 123);
-            index.insert(b"key", 456);
-
-            let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 123);
-            assert_eq!(*cursor.next().unwrap(), 456);
-
-            // Insert while in Phase::Next
-            cursor.insert(789);
-
-            // Call next to advance to Phase::Done
+            assert_eq!(*cursor.next().unwrap(), 0);
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 3);
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2);
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.delete();
             assert_eq!(cursor.next(), None);
+            cursor.insert(4);
+            assert_eq!(cursor.next(), None);
+            cursor.insert(5);
+        }
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![4, 5]);
+    }
 
-            // Add another value while in Phase::Done
-            cursor.insert(999);
-
-            // Check that everything worked
-            drop(cursor);
-            let mut values = index.get(b"key").copied().collect::<Vec<_>>();
-            values.sort();
-            assert_eq!(values, vec![123, 456, 789, 999]);
+    #[test_traced]
+    fn test_hash_index_remove_to_nothing_then_add() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_remove_to_nothing_then_add(&mut index);
         });
     }
 
     #[test_traced]
-    #[should_panic(expected = "must call Cursor::next()")]
-    fn test_index_cursor_double_delete() {
+    fn test_ordered_index_remove_to_nothing_then_add() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-            index.insert(b"key", 123);
-            index.insert(b"key", 456);
+            let mut index = new_ordered(context);
+            run_index_remove_to_nothing_then_add(&mut index);
+        });
+    }
 
+    fn run_index_insert_and_remove_cursor<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 0);
+        {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 123);
+            assert_eq!(*cursor.next().unwrap(), 0);
             cursor.delete();
+        }
+        index.remove(b"key");
+        assert!(index.get(b"key").copied().collect::<Vec<_>>().is_empty());
+    }
 
-            // Attempt to delete again (will panic)
-            cursor.delete();
+    #[test_traced]
+    fn test_hash_index_insert_and_remove_cursor() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_and_remove_cursor(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_cursor_delete_last_then_next() {
+    fn test_ordered_index_insert_and_remove_cursor() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
+            let mut index = new_ordered(context);
+            run_index_insert_and_remove_cursor(&mut index);
+        });
+    }
 
-            // Insert two values
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
+    fn run_index_insert_and_prune_vacant<I: Index<Value = u64>>(index: &mut I) {
+        index.insert_and_prune(b"key", 1u64, |_| false);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(index.items(), 1);
+        assert_eq!(index.keys(), 1);
+        assert_eq!(index.pruned(), 0);
+    }
 
-            // Get mutable cursor
-            let mut cursor = index.get_mut(b"key").unwrap();
-
-            // Iterate to the second value
-            assert_eq!(*cursor.next().unwrap(), 1); // Phase::Entry
-            assert_eq!(*cursor.next().unwrap(), 2); // Phase::Next
-
-            // Delete the second value
-            cursor.delete();
-
-            // Call next() once, should return None
-            assert!(cursor.next().is_none());
-
-            // Call next() again, should keep returning None
-            assert!(cursor.next().is_none());
-
-            assert!(context.encode().contains("keys 1"));
-            assert!(context.encode().contains("items 1"));
+    #[test_traced]
+    fn test_hash_index_insert_and_prune_vacant() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_and_prune_vacant(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_delete_in_middle_then_continue() {
+    fn test_ordered_index_insert_and_prune_vacant() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
+            let mut index = new_ordered(context);
+            run_index_insert_and_prune_vacant(&mut index);
+        });
+    }
 
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
-            index.insert(b"key", 3);
+    fn run_index_insert_and_prune_replace_one<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1u64);
+        index.insert_and_prune(b"key", 2u64, |v| *v == 1);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(index.items(), 1);
+        assert_eq!(index.keys(), 1);
+        assert_eq!(index.pruned(), 1);
+    }
 
-            let mut cur = index.get_mut(b"key").unwrap();
-            assert_eq!(*cur.next().unwrap(), 1); // Entry
-            assert_eq!(*cur.next().unwrap(), 3); // Next
-            cur.delete(); // remove 3
-                          // iterator must yield 2, then None, then keep returning None
-            assert_eq!(*cur.next().unwrap(), 2);
-            assert!(cur.next().is_none());
-            assert!(cur.next().is_none());
+    #[test_traced]
+    fn test_hash_index_insert_and_prune_replace_one() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_and_prune_replace_one(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_delete_first() {
+    fn test_ordered_index_insert_and_prune_replace_one() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
+            let mut index = new_ordered(context);
+            run_index_insert_and_prune_replace_one(&mut index);
+        });
+    }
 
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
-            index.insert(b"key", 3);
+    fn run_index_insert_and_prune_dead_insert<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 10u64);
+        index.insert(b"key", 20u64);
+        index.insert_and_prune(b"key", 30u64, |_| true);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<u64>>(),
+            Vec::<u64>::new()
+        );
+        assert_eq!(index.items(), 0);
+        assert_eq!(index.keys(), 0);
+        assert_eq!(index.pruned(), 2);
+    }
 
-            {
-                let mut cur = index.get_mut(b"key").unwrap();
-                assert_eq!(*cur.next().unwrap(), 1); // Entry
-                cur.delete(); // remove 1
-                assert_eq!(*cur.next().unwrap(), 3); // Next
-                assert_eq!(*cur.next().unwrap(), 2);
-                assert!(cur.next().is_none());
-                assert!(cur.next().is_none());
-            }
-
-            // Check that the values are still in the index
-            assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3, 2]);
+    #[test_traced]
+    fn test_hash_index_insert_and_prune_dead_insert() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_and_prune_dead_insert(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_index_delete_first_and_insert() {
+    fn test_ordered_index_insert_and_prune_dead_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-
-            index.insert(b"key", 1);
-            index.insert(b"key", 2);
-            index.insert(b"key", 3);
-
-            // Ensure the values are in the index
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![1, 3, 2]
-            );
-
-            {
-                let mut cur = index.get_mut(b"key").unwrap();
-                assert_eq!(*cur.next().unwrap(), 1); // Entry
-                cur.delete(); // remove 1
-                assert_eq!(*cur.next().unwrap(), 3); // Next
-                cur.insert(4); // insert 4
-                assert_eq!(*cur.next().unwrap(), 2);
-                assert!(cur.next().is_none());
-                assert!(cur.next().is_none());
-            }
-
-            // Check that new values are around
-            assert_eq!(
-                index.get(b"key").copied().collect::<Vec<_>>(),
-                vec![3, 4, 2]
-            );
+            let mut index = new_ordered(context);
+            run_index_insert_and_prune_dead_insert(&mut index);
         });
     }
 
-    #[test_traced]
-    fn test_index_insert_at_entry_then_next() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
+    fn run_index_cursor_across_threads<I>(index: Arc<Mutex<I>>)
+    where
+        I: Index<Value = u64> + Send + 'static,
+    {
+        // Insert some initial data
+        {
+            let mut index = index.lock().unwrap();
+            index.insert(b"test_key1", 100);
+            index.insert(b"test_key2", 200);
+        }
 
-            index.insert(b"key", 1);
-            index.insert(b"key", 2); // [1, 2]
-
-            let mut cur = index.get_mut(b"key").unwrap();
-            assert_eq!(*cur.next().unwrap(), 1); // Entry
-            cur.insert(99); // [1, 99, 2]  (move from Phase::Entry to Phase::Next)
-
-            // cursor must now iterate 99 to 2 to None
-            assert_eq!(*cur.next().unwrap(), 2); // Next
-            assert!(cur.next().is_none());
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "must call Cursor::next()")]
-    fn test_index_insert_at_entry_then_delete_head() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            index.insert(b"key", 10);
-            index.insert(b"key", 20); // [10, 20]
-
-            {
-                let mut cur = index.get_mut(b"key").unwrap();
-                assert_eq!(*cur.next().unwrap(), 10);
-                cur.insert(15);
-                cur.delete();
-            }
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "must call Cursor::next()")]
-    fn test_index_delete_then_insert_without_next() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            index.insert(b"key", 10);
-            index.insert(b"key", 20);
-
-            {
-                let mut cur = index.get_mut(b"key").unwrap();
-                assert_eq!(*cur.next().unwrap(), 10);
-                assert_eq!(*cur.next().unwrap(), 20);
-                cur.delete();
-                cur.insert(15);
-            }
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "must call Cursor::next()")]
-    fn test_index_inserts_without_next() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            index.insert(b"key", 10);
-            index.insert(b"key", 20);
-
-            {
-                let mut cur = index.get_mut(b"key").unwrap();
-                assert_eq!(*cur.next().unwrap(), 10);
-                cur.insert(15);
-                cur.insert(25);
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_index_delete_last_then_insert_while_done() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            index.insert(b"k", 7);
-
-            {
-                let mut cur = index.get_mut(b"k").unwrap();
-                assert_eq!(*cur.next().unwrap(), 7); // Entry
-                cur.delete(); // list emptied, Done
-                assert!(cur.next().is_none()); // Done
-
-                cur.insert(8); // append while Done
-                assert!(cur.next().is_none()); // still Done
-                cur.insert(9); // another append while Done
-                assert!(cur.next().is_none()); // still Done
-            }
-
-            assert!(context.encode().contains("keys 1"));
-            assert!(context.encode().contains("items 2"));
-            assert_eq!(index.get(b"k").copied().collect::<Vec<_>>(), vec![8, 9]);
-        });
-    }
-
-    #[test_traced]
-    fn test_index_drop_mid_iteration_relinks() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-            for i in 0..5 {
-                index.insert(b"z", i);
-            }
-
-            {
-                let mut cur = index.get_mut(b"z").unwrap();
-                cur.next(); // Entry (0)
-                cur.next(); // Next (4)
-                            // cursor is dropped here after visiting two nodes
-            }
-
-            // All five values must still be visible and in stack order
-            assert_eq!(
-                index.get(b"z").copied().collect::<Vec<_>>(),
-                vec![0, 4, 3, 2, 1]
-            );
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "must call Cursor::next()")]
-    fn test_index_update_before_next_panics() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-            index.insert(b"p", 1);
-            let mut cur = index.get_mut(b"p").unwrap();
-            cur.update(2); // still illegal
-        });
-    }
-
-    #[test_traced]
-    fn test_index_entry_replacement_not_a_collision() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context.clone(), TwoCap);
-
-            index.insert(b"a", 1); // collisions = 0
-            let mut cur = index.get_mut(b"a").unwrap();
-            cur.next(); // Entry
-            cur.delete(); // list empty, pruned = 1
-            cur.next(); // Done
-            cur.insert(2); // replacement, *not* collision
-
-            assert!(context.encode().contains("keys 1"));
-            assert!(context.encode().contains("items 1"));
-        });
-    }
-
-    #[test_traced]
-    fn test_index_large_collision_chain_stack_overflow() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::init(context, TwoCap);
-
-            // Create a large collision chain with 50,000 items on the same key
-            for i in 0..50000 {
-                index.insert(b"", i as u64);
-            }
-
-            // Should not stack overflow (using default Rust drop, it will)
-        });
-    }
-
-    #[test_traced]
-    fn test_cursor_across_threads() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let index = Arc::new(Mutex::new(Index::init(context, TwoCap)));
-
-            // Insert some initial data
-            {
-                let mut index = index.lock().unwrap();
-                index.insert(b"test_key1", 100);
-                index.insert(b"test_key2", 200);
-            }
-
-            // Spawn a thread that will get a cursor and modify values
-            let index_clone = Arc::clone(&index);
-            let handle = thread::spawn(move || {
-                // Get a cursor for test_key and use it within the same scope
+        // Spawn a thread that will get a cursor and modify values
+        let index_clone = Arc::clone(&index);
+        let handle = thread::spawn(move || {
+            // Limit the lifetime of the lock and the cursor so they drop before returning
+            let result = {
                 let mut index = index_clone.lock().unwrap();
-                let result = if let Some(mut cursor) = index.get_mut(b"test_key2") {
-                    // Find and update the value 200
-                    let mut found = false;
+                let mut updated = false;
+                if let Some(mut cursor) = index.get_mut(b"test_key2") {
                     while let Some(value) = cursor.next() {
                         if *value == 200 {
                             cursor.update(250);
-                            found = true;
+                            updated = true;
                             break;
                         }
                     }
-                    found
-                } else {
-                    false
-                };
+                }
+                updated
+            };
+            result
+        });
 
-                // Return the result after cursor is dropped
-                result
-            });
+        // Wait for the thread to complete
+        let result = handle.join().unwrap();
+        assert!(result);
 
-            // Wait for the thread to complete
-            let result = handle.join().unwrap();
-            assert!(result);
+        // Verify the update was applied (and collision retained)
+        {
+            let index = index.lock().unwrap();
+            let values: Vec<u64> = index.get(b"test_key2").copied().collect();
+            assert!(values.contains(&100));
+            assert!(values.contains(&250));
+            assert!(!values.contains(&200));
+        }
+    }
 
-            // Verify the update was applied
-            {
-                let index = index.lock().unwrap();
-                let values: Vec<u64> = index.get(b"test_key2").copied().collect();
-                assert!(values.contains(&100)); // Colliding value
-                assert!(values.contains(&250)); // Updated value
-                assert!(!values.contains(&200)); // Old value should be gone
-            }
+    #[test_traced]
+    fn test_hash_index_cursor_across_threads() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let index = Arc::new(Mutex::new(new_unordered(context)));
+            run_index_cursor_across_threads(index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_cursor_across_threads() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let index = Arc::new(Mutex::new(new_ordered(context)));
+            run_index_cursor_across_threads(index);
+        });
+    }
+
+    fn run_index_remove_middle_then_next<I: Index<Value = u64>>(index: &mut I) {
+        for i in 0..4 {
+            index.insert(b"key", i);
+        }
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2);
+            cursor.delete();
+        }
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    #[test_traced]
+    fn test_hash_index_remove_middle_then_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_remove_middle_then_next(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_remove_middle_then_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_remove_middle_then_next(&mut index);
+        });
+    }
+
+    fn run_index_remove_to_nothing<I: Index<Value = u64>>(index: &mut I) {
+        for i in 0..4 {
+            index.insert(b"key", i);
+        }
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0);
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 3);
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2);
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.delete();
+            assert_eq!(cursor.next(), None);
+        }
+        assert_eq!(index.keys(), 0);
+        assert_eq!(index.items(), 0);
+    }
+
+    #[test_traced]
+    fn test_hash_index_remove_to_nothing() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_remove_to_nothing(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_remove_to_nothing() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_remove_to_nothing(&mut index);
+        });
+    }
+
+    fn run_index_cursor_update_before_next_panics<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 123);
+        let mut cursor = index.get_mut(b"key").unwrap();
+        cursor.update(321);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_hash_index_cursor_update_before_next_panics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_update_before_next_panics(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_ordered_index_cursor_update_before_next_panics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_cursor_update_before_next_panics(&mut index);
+        });
+    }
+
+    fn run_index_cursor_delete_before_next_panics<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 123);
+        let mut cursor = index.get_mut(b"key").unwrap();
+        cursor.delete();
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_hash_index_cursor_delete_before_next_panics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_delete_before_next_panics(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_ordered_index_cursor_delete_before_next_panics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_cursor_delete_before_next_panics(&mut index);
+        });
+    }
+
+    fn run_index_cursor_update_after_done<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 123);
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 123);
+        assert!(cursor.next().is_none());
+        cursor.update(321);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "no active item in Cursor")]
+    fn test_hash_index_cursor_update_after_done() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_update_after_done(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "no active item in Cursor")]
+    fn test_ordered_index_cursor_update_after_done() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_cursor_update_after_done(&mut index);
+        });
+    }
+
+    fn run_index_cursor_insert_before_next<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 123);
+        let mut cursor = index.get_mut(b"key").unwrap();
+        cursor.insert(321);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_hash_index_cursor_insert_before_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_insert_before_next(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_ordered_index_cursor_insert_before_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_cursor_insert_before_next(&mut index);
+        });
+    }
+
+    fn run_index_cursor_delete_after_done<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 123);
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 123);
+        assert!(cursor.next().is_none());
+        cursor.delete();
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "no active item in Cursor")]
+    fn test_hash_index_cursor_delete_after_done() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_delete_after_done(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "no active item in Cursor")]
+    fn test_ordered_index_cursor_delete_after_done() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_cursor_delete_after_done(&mut index);
+        });
+    }
+
+    fn run_index_cursor_insert_with_next<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 123);
+        index.insert(b"key", 456);
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 123);
+        assert_eq!(*cursor.next().unwrap(), 456);
+        cursor.insert(789);
+        assert_eq!(cursor.next(), None);
+        cursor.insert(999);
+        drop(cursor);
+        let mut values = index.get(b"key").copied().collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![123, 456, 789, 999]);
+    }
+
+    #[test_traced]
+    fn test_hash_index_cursor_insert_with_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_insert_with_next(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_cursor_insert_with_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_cursor_insert_with_next(&mut index);
+        });
+    }
+
+    fn run_index_cursor_double_delete<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 123);
+        index.insert(b"key", 456);
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 123);
+        cursor.delete();
+        cursor.delete();
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_hash_index_cursor_double_delete() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_double_delete(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_ordered_index_cursor_double_delete() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_cursor_double_delete(&mut index);
+        });
+    }
+
+    fn run_index_cursor_delete_last_then_next<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 2);
+            cursor.delete();
+            assert!(cursor.next().is_none());
+            assert!(cursor.next().is_none());
+        }
+        assert_eq!(index.keys(), 1);
+        assert_eq!(index.items(), 1);
+    }
+
+    #[test_traced]
+    fn test_hash_index_cursor_delete_last_then_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_cursor_delete_last_then_next(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_cursor_delete_last_then_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_cursor_delete_last_then_next(&mut index);
+        });
+    }
+
+    fn run_index_delete_in_middle_then_continue<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+        let mut cur = index.get_mut(b"key").unwrap();
+        assert_eq!(*cur.next().unwrap(), 1);
+        assert_eq!(*cur.next().unwrap(), 3);
+        cur.delete();
+        assert_eq!(*cur.next().unwrap(), 2);
+        assert!(cur.next().is_none());
+        assert!(cur.next().is_none());
+    }
+
+    #[test_traced]
+    fn test_hash_index_delete_in_middle_then_continue() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_delete_in_middle_then_continue(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_delete_in_middle_then_continue() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_delete_in_middle_then_continue(&mut index);
+        });
+    }
+
+    fn run_index_delete_first<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+        {
+            let mut cur = index.get_mut(b"key").unwrap();
+            assert_eq!(*cur.next().unwrap(), 1);
+            cur.delete();
+            assert_eq!(*cur.next().unwrap(), 3);
+            assert_eq!(*cur.next().unwrap(), 2);
+            assert!(cur.next().is_none());
+            assert!(cur.next().is_none());
+        }
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3, 2]);
+    }
+
+    #[test_traced]
+    fn test_hash_index_delete_first() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_delete_first(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_delete_first() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_delete_first(&mut index);
+        });
+    }
+
+    fn run_index_delete_first_and_insert<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![1, 3, 2]
+        );
+        {
+            let mut cur = index.get_mut(b"key").unwrap();
+            assert_eq!(*cur.next().unwrap(), 1);
+            cur.delete();
+            assert_eq!(*cur.next().unwrap(), 3);
+            cur.insert(4);
+            assert_eq!(*cur.next().unwrap(), 2);
+            assert!(cur.next().is_none());
+            assert!(cur.next().is_none());
+        }
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![3, 4, 2]
+        );
+    }
+
+    #[test_traced]
+    fn test_hash_index_delete_first_and_insert() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_delete_first_and_insert(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_delete_first_and_insert() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_delete_first_and_insert(&mut index);
+        });
+    }
+
+    fn run_index_insert_at_entry_then_next<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        let mut cur = index.get_mut(b"key").unwrap();
+        assert_eq!(*cur.next().unwrap(), 1);
+        cur.insert(99);
+        assert_eq!(*cur.next().unwrap(), 2);
+        assert!(cur.next().is_none());
+    }
+
+    #[test_traced]
+    fn test_hash_index_insert_at_entry_then_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_at_entry_then_next(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_insert_at_entry_then_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_insert_at_entry_then_next(&mut index);
+        });
+    }
+
+    fn run_index_insert_at_entry_then_delete_head<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 10);
+        index.insert(b"key", 20);
+        let mut cur = index.get_mut(b"key").unwrap();
+        assert_eq!(*cur.next().unwrap(), 10);
+        cur.insert(15);
+        cur.delete();
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_hash_index_insert_at_entry_then_delete_head() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_at_entry_then_delete_head(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_ordered_index_insert_at_entry_then_delete_head() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_insert_at_entry_then_delete_head(&mut index);
+        });
+    }
+
+    fn run_index_delete_then_insert_without_next<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 10);
+        index.insert(b"key", 20);
+        let mut cur = index.get_mut(b"key").unwrap();
+        assert_eq!(*cur.next().unwrap(), 10);
+        assert_eq!(*cur.next().unwrap(), 20);
+        cur.delete();
+        cur.insert(15);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_hash_index_delete_then_insert_without_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_delete_then_insert_without_next(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_ordered_index_delete_then_insert_without_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_delete_then_insert_without_next(&mut index);
+        });
+    }
+
+    fn run_index_inserts_without_next<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"key", 10);
+        index.insert(b"key", 20);
+        let mut cur = index.get_mut(b"key").unwrap();
+        assert_eq!(*cur.next().unwrap(), 10);
+        cur.insert(15);
+        cur.insert(25);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_hash_index_inserts_without_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_inserts_without_next(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_ordered_index_inserts_without_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_inserts_without_next(&mut index);
+        });
+    }
+
+    fn run_index_delete_last_then_insert_while_done<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"k", 7);
+        {
+            let mut cur = index.get_mut(b"k").unwrap();
+            assert_eq!(*cur.next().unwrap(), 7);
+            cur.delete();
+            assert!(cur.next().is_none());
+            cur.insert(8);
+            assert!(cur.next().is_none());
+            cur.insert(9);
+            assert!(cur.next().is_none());
+        }
+        assert_eq!(index.keys(), 1);
+        assert_eq!(index.items(), 2);
+        assert_eq!(index.get(b"k").copied().collect::<Vec<_>>(), vec![8, 9]);
+    }
+
+    #[test_traced]
+    fn test_hash_index_delete_last_then_insert_while_done() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_delete_last_then_insert_while_done(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_delete_last_then_insert_while_done() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_delete_last_then_insert_while_done(&mut index);
+        });
+    }
+
+    fn run_index_drop_mid_iteration_relinks<I: Index<Value = u64>>(index: &mut I) {
+        for i in 0..5 {
+            index.insert(b"z", i);
+        }
+        {
+            let mut cur = index.get_mut(b"z").unwrap();
+            cur.next();
+            cur.next();
+        }
+        assert_eq!(
+            index.get(b"z").copied().collect::<Vec<_>>(),
+            vec![0, 4, 3, 2, 1]
+        );
+    }
+
+    #[test_traced]
+    fn test_hash_index_drop_mid_iteration_relinks() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_drop_mid_iteration_relinks(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_drop_mid_iteration_relinks() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_drop_mid_iteration_relinks(&mut index);
+        });
+    }
+
+    fn run_index_update_before_next_panics<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"p", 1);
+        let mut cur = index.get_mut(b"p").unwrap();
+        cur.update(2);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_hash_index_update_before_next_panics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_update_before_next_panics(&mut index);
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_ordered_index_update_before_next_panics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_update_before_next_panics(&mut index);
+        });
+    }
+
+    fn run_index_entry_replacement_not_a_collision<I: Index<Value = u64>>(index: &mut I) {
+        index.insert(b"a", 1);
+        {
+            let mut cur = index.get_mut(b"a").unwrap();
+            cur.next();
+            cur.delete();
+            cur.next();
+            cur.insert(2);
+        }
+        assert_eq!(index.keys(), 1);
+        assert_eq!(index.items(), 1);
+    }
+
+    #[test_traced]
+    fn test_hash_index_entry_replacement_not_a_collision() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_entry_replacement_not_a_collision(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_entry_replacement_not_a_collision() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_entry_replacement_not_a_collision(&mut index);
+        });
+    }
+
+    fn run_index_large_collision_chain_stack_overflow<I: Index<Value = u64>>(index: &mut I) {
+        for i in 0..50000 {
+            index.insert(b"", i as u64);
+        }
+    }
+
+    #[test_traced]
+    fn test_hash_index_large_collision_chain_stack_overflow() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_large_collision_chain_stack_overflow(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_large_collision_chain_stack_overflow() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_large_collision_chain_stack_overflow(&mut index);
         });
     }
 }

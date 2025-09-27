@@ -155,7 +155,7 @@
 
         function setupBenchmark() {
             // Set Chart.js default font family
-            Chart.defaults.global.defaultFontFamily = 'Consolas, monospace';
+            Chart.defaults.global.defaultFontFamily = 'monospace';
             Chart.defaults.global.defaultFontColor = "#000";
 
             // Build cases
@@ -214,7 +214,7 @@
                 function renderGraph(parent, name, dataset) {
                     // Create a <details> wrapper for each individual graph.
                     const graphDetails = document.createElement('details');
-                    graphDetails.className = 'benchmark-graph-details';
+                    graphDetails.className = 'benchmark-graph-details collapsible';
                     parent.appendChild(graphDetails);
 
                     // Listen for "toggle" events on each details to update button state
@@ -351,7 +351,7 @@
                 function renderBenchSet(testName, benchSet, main) {
                     // Setup the <details> element for the benchmark set
                     const detailsElem = document.createElement('details');
-                    detailsElem.className = 'benchmark-set';
+                    detailsElem.className = 'benchmark-set collapsible';
                     main.appendChild(detailsElem);
 
                     // Listen to "toggle" so button updates if a single set is opened/closed
@@ -372,7 +372,7 @@
                     Array.from(benchSet.keys()).sort().forEach(moduleName => {
                         const functionMap = benchSet.get(moduleName);
                         const moduleDetails = document.createElement('details');
-                        moduleDetails.className = 'benchmark-module';
+                        moduleDetails.className = 'benchmark-module collapsible';
                         moduleContainer.appendChild(moduleDetails);
                         moduleDetails.addEventListener('toggle', updateExpandButton);
 
@@ -389,7 +389,7 @@
                         Array.from(functionMap.keys()).sort().forEach(funcName => {
                             const paramsMap = functionMap.get(funcName);
                             const functionDetails = document.createElement('details');
-                            functionDetails.className = 'benchmark-function';
+                            functionDetails.className = 'benchmark-function collapsible';
                             functionContainer.appendChild(functionDetails);
                             functionDetails.addEventListener('toggle', updateExpandButton);
 

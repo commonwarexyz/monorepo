@@ -3,7 +3,7 @@
 
 use crate::{
     adb::{any::fixed::sync::init_journal, Error},
-    index::Index,
+    index::{Index as _, Unordered as Index},
     journal::{fixed, variable},
     mmr::{
         iterator::{leaf_loc_to_pos, leaf_pos_to_loc},

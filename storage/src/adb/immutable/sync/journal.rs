@@ -82,10 +82,12 @@ where
         let section = self.size / self.items_per_section;
         self.inner.append(section, op).await?;
         self.size += 1;
+        if self.size > 0 && self.size % self.items_per_section == 0 {
+            // Sync this full section before appending to the next section.
+            // TODO(#1718): Migrate to the new contiguous variable journal type, which will handle section
+            // calculation and syncing internally.
+            self.inner.sync(section).await?;
+        }
         Ok(())
-    }
-
-    async fn close(self) -> Result<(), Self::Error> {
-        self.inner.close().await
     }
 }
