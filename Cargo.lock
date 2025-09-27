@@ -1429,6 +1429,7 @@ name = "commonware-storage-fuzz"
 version = "0.0.62"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",
@@ -1436,6 +1437,7 @@ dependencies = [
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
+ "rand 0.8.5",
 ]
 
 [[package]]
