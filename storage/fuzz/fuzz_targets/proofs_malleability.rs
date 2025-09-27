@@ -128,11 +128,6 @@ fn fuzz(input: FuzzInput) {
                         let mut mutated_proof = original_proof.clone();
                         mutate_proof_bytes(&mut mutated_proof, mutation, &256);
 
-                        // TODO: Validate this condition
-                        if mutated_proof.size != mmr.size() {
-                            continue;
-                        }
-
                         if mutated_proof != original_proof {
                             let is_valid = mutated_proof.verify_element_inclusion(
                                 &mut hasher,
