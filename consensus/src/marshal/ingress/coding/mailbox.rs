@@ -103,8 +103,8 @@ where
             .cloned();
 
         if let Some(shard) = shard {
-            let (config, index) = (shard.config(), shard.index());
-            let DistributionShard::Strong(shard) = shard.into_inner() else {
+            let index = shard.index();
+            let DistributionShard::Strong { shard, config } = shard.into_inner() else {
                 // If the shard is already weak, it's been broadcasted to us already;
                 // no need to re-broadcast.
                 return;
@@ -120,7 +120,7 @@ where
             // reconstruct, same with the checking data.
 
             // Broadcast the weak shard to all peers for reconstruction.
-            let reshard = Shard::new(commitment, config, index, DistributionShard::Weak(reshard));
+            let reshard = Shard::new(commitment, index, DistributionShard::Weak(reshard));
             let _peers = self.mailbox.broadcast(Recipients::All, reshard).await;
 
             debug!(%commitment, index, "broadcasted local shard to all peers");
@@ -139,19 +139,17 @@ where
     ) -> Result<Option<CodedBlock<B, S>>, ReconstructionError<S>> {
         let shards = self.mailbox.get(None, commitment, None).await;
 
-        let Some(config) = shards.first().map(|s| s.config()) else {
-            debug!(%commitment, "No shards present to reconstruct block");
-            return Ok(None);
-        };
-
         // Search for a strong shard to form the checking data. We must have at least one strong shard
         // sent to us by the proposer. In the case of the proposer, all shards in the mailbox will be strong,
-        // buyt any can be used for forming the checking data.
-        let Some(checking_data) = shards.iter().find_map(|s| {
-            let index = s.index() as u16;
-            if let DistributionShard::Strong(shard) = s.deref() {
-                S::reshard(&config, &commitment, index, shard.clone())
-                    .map(|(checking_data, _, _)| checking_data)
+        // but any can be used for forming the checking data.
+        //
+        // We take the config from a strong shard because it was sent by the proposer. While the proposer could
+        // have lied, it gives us a single source of truth for the config to use. If the config is invalid
+        // per the original encoding, then reconstruction will fail later.
+        let Some((config, checking_data)) = shards.iter().find_map(|s| {
+            if let DistributionShard::Strong { shard, config } = s.deref() {
+                S::reshard(config, &commitment, s.index() as u16, shard.clone())
+                    .map(|(checking_data, _, _)| (*config, checking_data))
                     .ok()
             } else {
                 None
@@ -166,7 +164,7 @@ where
             .filter_map(|s| {
                 let index = s.index() as u16;
                 match s.into_inner() {
-                    DistributionShard::Strong(shard) => {
+                    DistributionShard::Strong { shard, config } => {
                         // Any strong shards, at this point, were sent from the proposer.
                         // We use the reshard interface to produce our checked shard rather
                         // than taking two hops.

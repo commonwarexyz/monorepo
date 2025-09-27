@@ -389,7 +389,7 @@ mod tests {
             setup_network_links(&mut oracle, &peers, link.clone()).await;
 
             let coding_config = commonware_coding::Config {
-                minimum_shards: (peers.len() / 2) as u16,
+                minimum_shards: peers.len().div_ceil(2) as u16,
                 extra_shards: (peers.len() / 2) as u16,
             };
 
@@ -512,7 +512,7 @@ mod tests {
             setup_network_links(&mut oracle, &peers, LINK).await;
 
             let coding_config = commonware_coding::Config {
-                minimum_shards: (peers.len() / 2) as u16,
+                minimum_shards: peers.len().div_ceil(2) as u16,
                 extra_shards: (peers.len() / 2) as u16,
             };
 
@@ -576,7 +576,7 @@ mod tests {
             setup_network_links(&mut oracle, &peers, LINK).await;
 
             let coding_config = commonware_coding::Config {
-                minimum_shards: (peers.len() / 2) as u16,
+                minimum_shards: peers.len().div_ceil(2) as u16,
                 extra_shards: (peers.len() / 2) as u16,
             };
 
@@ -661,7 +661,7 @@ mod tests {
             setup_network_links(&mut oracle, &peers, LINK).await;
 
             let coding_config = commonware_coding::Config {
-                minimum_shards: (peers.len() / 2) as u16,
+                minimum_shards: peers.len().div_ceil(2) as u16,
                 extra_shards: (peers.len() / 2) as u16,
             };
 
@@ -738,7 +738,7 @@ mod tests {
             setup_network_links(&mut oracle, &peers, LINK).await;
 
             let coding_config = commonware_coding::Config {
-                minimum_shards: (peers.len() / 2) as u16,
+                minimum_shards: peers.len().div_ceil(2) as u16,
                 extra_shards: (peers.len() / 2) as u16,
             };
 

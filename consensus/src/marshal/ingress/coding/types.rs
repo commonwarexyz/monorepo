@@ -16,7 +16,12 @@ const WEAK_SHARD_TAG: u8 = 1;
 pub enum DistributionShard<S: Scheme> {
     /// A shard that is broadcasted by the proposer, containing extra information for generating
     /// checking data.
-    Strong(S::Shard),
+    Strong {
+        /// The inner strong shard.
+        shard: S::Shard,
+        /// The claimed encoding configuration for the data that the shard belongs to.
+        config: CodingConfig,
+    },
     /// A shard that is broadcasted by a non-proposer, containing only the shard data.
     Weak(S::ReShard),
 }
@@ -24,7 +29,10 @@ pub enum DistributionShard<S: Scheme> {
 impl<S: Scheme> Clone for DistributionShard<S> {
     fn clone(&self) -> Self {
         match self {
-            DistributionShard::Strong(shard) => DistributionShard::Strong(shard.clone()),
+            DistributionShard::Strong { shard, config } => DistributionShard::Strong {
+                shard: shard.clone(),
+                config: *config,
+            },
             DistributionShard::Weak(reshard) => DistributionShard::Weak(reshard.clone()),
         }
     }
@@ -33,9 +41,10 @@ impl<S: Scheme> Clone for DistributionShard<S> {
 impl<S: Scheme> Write for DistributionShard<S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
-            DistributionShard::Strong(shard) => {
+            DistributionShard::Strong { shard, config } => {
                 buf.put_u8(STRONG_SHARD_TAG);
                 shard.write(buf);
+                config.write(buf);
             }
             DistributionShard::Weak(reshard) => {
                 buf.put_u8(WEAK_SHARD_TAG);
@@ -48,7 +57,9 @@ impl<S: Scheme> Write for DistributionShard<S> {
 impl<S: Scheme> EncodeSize for DistributionShard<S> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            DistributionShard::Strong(shard) => shard.encode_size(),
+            DistributionShard::Strong { shard, config } => {
+                shard.encode_size() + config.encode_size()
+            }
             DistributionShard::Weak(reshard) => reshard.encode_size(),
         }
     }
@@ -64,7 +75,8 @@ impl<S: Scheme> Read for DistributionShard<S> {
         match buf.get_u8() {
             STRONG_SHARD_TAG => {
                 let shard = S::Shard::read_cfg(buf, shard_cfg)?;
-                Ok(DistributionShard::Strong(shard))
+                let config = CodingConfig::read(buf)?;
+                Ok(DistributionShard::Strong { shard, config })
             }
             WEAK_SHARD_TAG => {
                 let reshard = S::ReShard::read_cfg(buf, reshard_cfg)?;
@@ -81,7 +93,16 @@ impl<S: Scheme> Read for DistributionShard<S> {
 impl<S: Scheme> PartialEq for DistributionShard<S> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (DistributionShard::Strong(a), DistributionShard::Strong(b)) => a == b,
+            (
+                DistributionShard::Strong {
+                    shard: shard_a,
+                    config: config_a,
+                },
+                DistributionShard::Strong {
+                    shard: shard_b,
+                    config: config_b,
+                },
+            ) => shard_a == shard_b && config_a == config_b,
             (DistributionShard::Weak(a), DistributionShard::Weak(b)) => a == b,
             _ => false,
         }
@@ -95,8 +116,6 @@ impl<S: Scheme> Eq for DistributionShard<S> {}
 pub struct Shard<S: Scheme, H: Hasher> {
     /// The coding commitment
     commitment: S::Commitment,
-    /// The coding configuration for the data committed.
-    config: CodingConfig,
     /// The index of this shard within the commitment.
     index: usize,
     /// An individual shard within the commitment.
@@ -106,24 +125,13 @@ pub struct Shard<S: Scheme, H: Hasher> {
 }
 
 impl<S: Scheme, H: Hasher> Shard<S, H> {
-    pub fn new(
-        commitment: S::Commitment,
-        config: CodingConfig,
-        index: usize,
-        inner: DistributionShard<S>,
-    ) -> Self {
+    pub fn new(commitment: S::Commitment, index: usize, inner: DistributionShard<S>) -> Self {
         Self {
             commitment,
-            config,
             index,
             inner,
             _hasher: std::marker::PhantomData,
         }
-    }
-
-    /// Returns the coding configuration for the data committed.
-    pub fn config(&self) -> CodingConfig {
-        self.config
     }
 
     /// Returns the index of this shard within the commitment.
@@ -141,14 +149,10 @@ impl<S: Scheme, H: Hasher> Shard<S, H> {
     /// NOTE: If the inner shard is a weak shard, this will always return false, as weak shards
     /// cannot be verified in isolation.
     pub fn verify(&self) -> bool {
-        match self.inner {
-            DistributionShard::Strong(ref shard) => S::reshard(
-                &self.config,
-                &self.commitment,
-                self.index as u16,
-                shard.clone(),
-            )
-            .is_ok(),
+        match &self.inner {
+            DistributionShard::Strong { shard, config } => {
+                S::reshard(config, &self.commitment, self.index as u16, shard.clone()).is_ok()
+            }
             DistributionShard::Weak(_) => false,
         }
     }
@@ -166,7 +170,6 @@ impl<S: Scheme, H: Hasher> Clone for Shard<S, H> {
     fn clone(&self) -> Self {
         Self {
             commitment: self.commitment,
-            config: self.config,
             index: self.index,
             inner: self.inner.clone(),
             _hasher: std::marker::PhantomData,
@@ -201,7 +204,6 @@ impl<S: Scheme, H: Hasher> Digestible for Shard<S, H> {
 impl<S: Scheme, H: Hasher> Write for Shard<S, H> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.commitment.write(buf);
-        self.config.write(buf);
         self.index.write(buf);
         self.inner.write(buf);
     }
@@ -209,10 +211,7 @@ impl<S: Scheme, H: Hasher> Write for Shard<S, H> {
 
 impl<S: Scheme, H: Hasher> EncodeSize for Shard<S, H> {
     fn encode_size(&self) -> usize {
-        self.commitment.encode_size()
-            + self.config.encode_size()
-            + self.index.encode_size()
-            + self.inner.encode_size()
+        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_size()
     }
 }
 
@@ -224,13 +223,11 @@ impl<S: Scheme, H: Hasher> Read for Shard<S, H> {
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let commitment = S::Commitment::read(buf)?;
-        let config = CodingConfig::read(buf)?;
         let index = usize::read_cfg(buf, &RangeCfg::from(0..=usize::MAX))?;
         let inner = DistributionShard::read_cfg(buf, cfg)?;
 
         Ok(Self {
             commitment,
-            config,
             index,
             inner,
             _hasher: std::marker::PhantomData,
@@ -241,7 +238,6 @@ impl<S: Scheme, H: Hasher> Read for Shard<S, H> {
 impl<S: Scheme, H: Hasher> PartialEq for Shard<S, H> {
     fn eq(&self, other: &Self) -> bool {
         self.commitment == other.commitment
-            && self.config == other.config
             && self.index == other.index
             && self.inner == other.inner
     }
@@ -297,9 +293,11 @@ impl<B: Block, S: Scheme> CodedBlock<B, S> {
     pub fn shard<H: Hasher>(&self, index: usize) -> Option<Shard<S, H>> {
         Some(Shard::new(
             self.commitment,
-            self.config,
             index,
-            DistributionShard::Strong(self.shards.get(index)?.clone()),
+            DistributionShard::Strong {
+                shard: self.shards.get(index)?.clone(),
+                config: self.config,
+            },
         ))
     }
 
@@ -436,7 +434,10 @@ mod test {
         let (_, shards) = RS::encode(&CONFIG, MOCK_BLOCK_DATA).unwrap();
         let raw_shard = shards.first().cloned().unwrap();
 
-        let strong_shard = DistributionShard::<RS>::Strong(raw_shard.clone());
+        let strong_shard = DistributionShard::<RS>::Strong {
+            shard: raw_shard.clone(),
+            config: CONFIG,
+        };
         let encoded = strong_shard.encode();
         let decoded = DistributionShard::<RS>::decode_cfg(
             &mut encoded.as_ref(),
@@ -468,16 +469,18 @@ mod test {
 
         let shard = RShard::new(
             commitment,
-            CONFIG,
             0,
-            DistributionShard::Strong(raw_shard.clone()),
+            DistributionShard::Strong {
+                shard: raw_shard.clone(),
+                config: CONFIG,
+            },
         );
         let encoded = shard.encode();
         let decoded =
             RShard::decode_cfg(&mut encoded.as_ref(), &(MAX_SHARD_SIZE, MAX_SHARD_SIZE)).unwrap();
         assert!(shard == decoded);
 
-        let shard = RShard::new(commitment, CONFIG, 0, DistributionShard::Weak(raw_shard));
+        let shard = RShard::new(commitment, 0, DistributionShard::Weak(raw_shard));
         let encoded = shard.encode();
         let decoded =
             RShard::decode_cfg(&mut encoded.as_ref(), &(MAX_SHARD_SIZE, MAX_SHARD_SIZE)).unwrap();
