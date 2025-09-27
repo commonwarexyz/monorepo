@@ -1,6 +1,6 @@
 use crate::{
     adb::{self, any},
-    index::Index,
+    index::Unordered as Index,
     journal::fixed,
     mmr::{Location, Position, StandardHasher},
     store::operation::Fixed,

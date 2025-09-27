@@ -3,7 +3,7 @@
 
 use crate::{
     adb::{any::fixed::sync::init_journal, Error},
-    index::Index,
+    index::{Index as _, Unordered as Index},
     journal::{fixed, variable},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
