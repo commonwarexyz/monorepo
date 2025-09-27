@@ -1261,38 +1261,57 @@ impl<V: Variant> Seedable<V> for Nullification<V> {
 
 /// Finalize represents a validator's vote to finalize a proposal.
 /// This happens after a proposal has been notarized, confirming it as the canonical block for this view.
-/// It contains a partial signature on the proposal.
+/// It contains a partial signature on the proposal and a partial signature for the seed.
+/// The seed is used for leader election and as a source of randomness.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Finalize<V: Variant, D: Digest> {
     /// The proposal to be finalized
     pub proposal: Proposal<D>,
     /// The validator's partial signature on the proposal
     pub proposal_signature: PartialSignature<V>,
+    /// The validator's partial signature on the seed (for leader election/randomness)
+    pub seed_signature: PartialSignature<V>,
 }
 
 impl<V: Variant, D: Digest> Finalize<V, D> {
-    /// Creates a new finalize with the given proposal and signature.
-    pub fn new(proposal: Proposal<D>, proposal_signature: PartialSignature<V>) -> Self {
+    /// Creates a new finalize with the given proposal and signatures.
+    pub fn new(
+        proposal: Proposal<D>,
+        proposal_signature: PartialSignature<V>,
+        seed_signature: PartialSignature<V>,
+    ) -> Self {
         Finalize {
             proposal,
             proposal_signature,
+            seed_signature,
         }
     }
 
-    /// Verifies the [PartialSignature] on this [Finalize].
+    /// Verifies the [PartialSignature]s on this [Finalize].
     ///
-    /// This ensures that the signature is valid for the given proposal.
+    /// This ensures that:
+    /// 1. The finalize signature is valid for the claimed proposal
+    /// 2. The seed signature is valid for the view
+    /// 3. Both signatures are from the same signer
     pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
-        let message = self.proposal.encode();
+        let finalize_message = self.proposal.encode();
+        let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = self.proposal.round.encode();
+        let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         let Some(evaluated) = polynomial.get(self.signer() as usize) else {
             return false;
         };
-        verify_message::<V>(
+        let signature = aggregate_signatures::<V, _>(&[
+            self.proposal_signature.value,
+            self.seed_signature.value,
+        ]);
+        aggregate_verify_multiple_messages::<V, _>(
             evaluated,
-            Some(finalize_namespace.as_ref()),
-            &message,
-            &self.proposal_signature.value,
+            &[finalize_message, seed_message],
+            &signature,
+            1,
         )
         .is_ok()
     }
@@ -1337,6 +1356,24 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
             }
         }
 
+        // Verify seed signatures
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = proposal.round.encode();
+        let seed_signatures = finalizes
+            .iter()
+            .filter(|n| !invalid.contains(&n.seed_signature.index))
+            .map(|n| &n.seed_signature);
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
+            polynomial,
+            Some(&seed_namespace),
+            &seed_message,
+            seed_signatures,
+        ) {
+            for signature in err.iter() {
+                invalid.insert(signature.index);
+            }
+        }
+
         // Return valid finalizes and invalid signers
         (
             finalizes
@@ -1350,10 +1387,14 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
     /// Creates a [PartialSignature] over this [Finalize].
     pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
         let finalize_namespace = finalize_namespace(namespace);
-        let message = proposal.encode();
+        let proposal_message = proposal.encode();
         let proposal_signature =
-            partial_sign_message::<V>(share, Some(finalize_namespace.as_ref()), &message);
-        Finalize::new(proposal, proposal_signature)
+            partial_sign_message::<V>(share, Some(finalize_namespace.as_ref()), &proposal_message);
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = proposal.round.encode();
+        let seed_signature =
+            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &seed_message);
+        Finalize::new(proposal, proposal_signature, seed_signature)
     }
 }
 
@@ -1383,6 +1424,7 @@ impl<V: Variant, D: Digest> Write for Finalize<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.proposal_signature.write(writer);
+        self.seed_signature.write(writer);
     }
 }
 
@@ -1392,16 +1434,26 @@ impl<V: Variant, D: Digest> Read for Finalize<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = PartialSignature::<V>::read(reader)?;
+        let seed_signature = PartialSignature::<V>::read(reader)?;
+        if proposal_signature.index != seed_signature.index {
+            return Err(Error::Invalid(
+                "consensus::threshold_simplex::Finalize",
+                "mismatched signatures",
+            ));
+        }
         Ok(Finalize {
             proposal,
             proposal_signature,
+            seed_signature,
         })
     }
 }
 
 impl<V: Variant, D: Digest> EncodeSize for Finalize<V, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.proposal_signature.encode_size()
+        self.proposal.encode_size()
+            + self.proposal_signature.encode_size()
+            + self.seed_signature.encode_size()
     }
 }
 
