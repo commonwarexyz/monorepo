@@ -95,7 +95,7 @@ module tests {
 
             .expect(all_invariants)
 
-            // n0-n2 recieve 2 votes each for b0
+            // n0-n2 receive 2 votes each for b0
             .then(replica_receives_notarize_vote("n0", "val_b0", 1, "n0"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 1, "n1"))
 
@@ -108,7 +108,7 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b0", 1, "n1"))
 
 
-            // n0 recieves 2 other votes for b1 and 1 nullify
+            // n0 receives 2 other votes for b1 and 1 nullify
             .then(replica_receives_nullify_vote("n0", 1, "n3"))
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n4"))
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n5"))
