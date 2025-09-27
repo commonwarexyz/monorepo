@@ -1,4 +1,7 @@
-use crate::{marshal::ingress::orchestrator::Orchestrator, Block, Reporter};
+use crate::{
+    marshal::ingress::{coding::types::CodingCommitment, orchestrator::Orchestrator},
+    Block, Reporter,
+};
 use commonware_coding::Scheme;
 use commonware_cryptography::Committable;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
@@ -39,7 +42,7 @@ where
 
 impl<B, R, S, Z> Finalizer<B, R, S, Z>
 where
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     R: Spawner + Clock + Metrics + Storage,
     S: Scheme,
     Z: Reporter<Activity = B>,

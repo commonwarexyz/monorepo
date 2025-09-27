@@ -22,7 +22,7 @@ mod no_coding;
 pub use no_coding::{NoCoding, NoCodingError};
 
 /// Configuration common to all encoding schemes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Config {
     /// The minimum number of shards needed to encode the data.
     pub minimum_shards: u16,

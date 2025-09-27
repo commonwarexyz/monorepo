@@ -89,16 +89,6 @@ pub(crate) enum Message<V: Variant, B: Block, S: Scheme, P: PublicKey> {
         /// The peers to broadcast the shards to.
         peers: Vec<P>,
     },
-    /// A request to retrieve a block by its digest.
-    Subscribe {
-        /// The view in which the block was notarized. This is an optimization
-        /// to help locate the block.
-        round: Option<Round>,
-        /// The digest of the block to retrieve.
-        commitment: B::Commitment,
-        /// A channel to send the retrieved block.
-        response: oneshot::Sender<B>,
-    },
     /// A request to verify a a shard's inclusion within a commitment.
     VerifyShard {
         /// The commitment to verify against.
