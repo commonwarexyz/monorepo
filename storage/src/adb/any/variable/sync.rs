@@ -1,6 +1,7 @@
 use crate::{
     adb,
     journal::variable::{Config as VConfig, Journal as VJournal},
+    mmr::Location,
 };
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
@@ -102,12 +103,12 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     // Check if data exceeds the sync range
     if last_section > upper_section {
         let loc = last_section * items_per_section;
-        return Err(adb::Error::UnexpectedData(loc));
+        return Err(adb::Error::UnexpectedData(Location::new(loc)));
     }
 
     let size = get_size(&journal, items_per_section).await?;
     if size > upper_bound + 1 {
-        return Err(adb::Error::UnexpectedData(size));
+        return Err(adb::Error::UnexpectedData(Location::new(size)));
     }
 
     Ok((journal, size))

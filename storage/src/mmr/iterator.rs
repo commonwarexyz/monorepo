@@ -2,6 +2,7 @@
 //! properties from their output. These are lower levels methods that are useful for implementing
 //! new MMR variants or extensions.
 
+use super::Position;
 use alloc::vec::Vec;
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
@@ -49,15 +50,15 @@ impl PeakIterator {
     /// # Panics
     ///
     /// Panics if size is too large (specifically, the topmost bit should be 0).
-    pub fn last_leaf_pos(size: u64) -> u64 {
+    pub fn last_leaf_pos(size: u64) -> Position {
         if size == 0 {
-            return 0;
+            return Position::new(0);
         }
 
         let last_peak = PeakIterator::new(size)
             .last()
             .expect("PeakIterator has at least one peak when size > 0");
-        last_peak.0 - last_peak.1 as u64
+        last_peak.0.checked_sub(last_peak.1 as u64).unwrap()
     }
 
     /// Return if an MMR of the given `size` has a valid structure.
@@ -115,13 +116,16 @@ impl PeakIterator {
 }
 
 impl Iterator for PeakIterator {
-    type Item = (u64, u32); // (peak, height)
+    type Item = (Position, u32); // (peak, height)
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.two_h > 1 {
             if self.node_pos < self.size {
                 // found a peak
-                let peak_item = (self.node_pos, self.two_h.trailing_zeros() - 1);
+                let peak_item = (
+                    Position::new(self.node_pos),
+                    self.two_h.trailing_zeros() - 1,
+                );
                 // move to the right sibling
                 self.node_pos += self.two_h - 1;
                 assert!(self.node_pos >= self.size); // sibling shouldn't be in the MMR if MMR is valid
@@ -139,7 +143,7 @@ impl Iterator for PeakIterator {
 /// with the given peaks. This set is non-empty only if there is a height-0 (leaf) peak in the MMR.
 /// The result will contain this leaf peak plus the other MMR peaks with contiguously increasing
 /// height. Nodes in the result are ordered by decreasing height.
-pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
+pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<Position> {
     let mut peaks = Vec::new();
     let mut last_height = u32::MAX;
 
@@ -159,59 +163,11 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     peaks
 }
 
-/// Returns the location of the leaf at position `leaf_pos` in an MMR, or None
-/// if this is not a leaf.
-///
-/// This computation is O(log2(n)) in the given position.
-///
-/// # Panics
-///
-/// Panics if leaf_pos is too large (top 2 bits should be 0).
-pub(crate) const fn leaf_pos_to_loc(leaf_pos: u64) -> Option<u64> {
-    if leaf_pos == 0 {
-        return Some(0);
-    }
-
-    let start = u64::MAX >> (leaf_pos.checked_add(1).expect("leaf_pos overflow")).leading_zeros();
-    let height = start.trailing_ones();
-    assert!(height > 1, "leaf_pos overflow");
-    let mut two_h = 1 << (height - 1);
-    let mut cur_node = start - 1;
-    let mut leaf_loc_floor = 0u64;
-
-    while two_h > 1 {
-        if cur_node == leaf_pos {
-            return None;
-        }
-        let left_pos = cur_node - two_h;
-        two_h >>= 1;
-        if leaf_pos > left_pos {
-            // The leaf is in the right subtree, so we must account for the leaves in the left
-            // subtree all of which precede it.
-            leaf_loc_floor += two_h;
-            cur_node -= 1; // move to the right child
-        } else {
-            // The node is in the left subtree
-            cur_node = left_pos;
-        }
-    }
-
-    Some(leaf_loc_floor)
-}
-
-/// Returns the position of the leaf with location `leaf_loc` in an MMR.
-///
-/// # Panics
-///
-/// Panics if leaf_loc is too large (must fit in 64 bits after multiplication by 2).
-pub(crate) const fn leaf_loc_to_pos(leaf_loc: u64) -> u64 {
-    // The subtraction will never underflow since 2*n >= count_ones(n).
-    leaf_loc.checked_mul(2).expect("leaf_loc overflow") - leaf_loc.count_ones() as u64
-}
-
 /// Returns the height of the node at position `pos` in an MMR.
 #[cfg(any(feature = "std", test))]
-pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
+pub(crate) const fn pos_to_height(pos: Position) -> u32 {
+    let mut pos = pos.as_u64();
+
     if pos == 0 {
         return 0;
     }
@@ -246,16 +202,16 @@ pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
 /// ```
 #[derive(Debug)]
 pub struct PathIterator {
-    leaf_pos: u64, // position of the leaf node in the path
-    node_pos: u64, // current node position in the path from peak to leaf
-    two_h: u64,    // 2^height of the current node
+    leaf_pos: Position, // position of the leaf node in the path
+    node_pos: Position, // current node position in the path from peak to leaf
+    two_h: u64,         // 2^height of the current node
 }
 
 impl PathIterator {
     /// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the
     /// perfect binary tree with peak `peak_pos` and having height `height`, not including the peak
     /// itself.
-    pub fn new(leaf_pos: u64, peak_pos: u64, height: u32) -> PathIterator {
+    pub fn new(leaf_pos: Position, peak_pos: Position, height: u32) -> PathIterator {
         PathIterator {
             leaf_pos,
             node_pos: peak_pos,
@@ -265,7 +221,7 @@ impl PathIterator {
 }
 
 impl Iterator for PathIterator {
-    type Item = (u64, u64); // (parent_pos, sibling_pos)
+    type Item = (Position, Position); // (parent_pos, sibling_pos)
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.two_h <= 1 {
@@ -299,14 +255,14 @@ impl Iterator for PathIterator {
 /// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
 /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
 /// whose size is less than the pruning boundary.
-pub(crate) fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
-    PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
+pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position> {
+    PeakIterator::new(PeakIterator::to_nearest_size(start_pos.as_u64())).map(|(pos, _)| pos)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, mem::Mmr};
+    use crate::mmr::{hasher::Standard, mem::Mmr, Location};
     use commonware_cryptography::Sha256;
 
     #[test]
@@ -323,14 +279,14 @@ mod tests {
 
         let mut last_leaf_pos = 0;
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.iter().enumerate() {
-            let leaf_loc_got = leaf_pos_to_loc(*leaf_pos).unwrap();
-            assert_eq!(leaf_loc_got, leaf_loc_expected as u64);
-            let leaf_pos_got = leaf_loc_to_pos(leaf_loc_got);
+            let leaf_loc_got = Location::try_from(*leaf_pos).unwrap();
+            assert_eq!(leaf_loc_got, Location::new(leaf_loc_expected as u64));
+            let leaf_pos_got = Position::from(leaf_loc_got);
             assert_eq!(leaf_pos_got, *leaf_pos);
-            for i in last_leaf_pos + 1..*leaf_pos {
-                assert!(leaf_pos_to_loc(i).is_none());
+            for i in last_leaf_pos + 1..leaf_pos.as_u64() {
+                assert!(Location::try_from(Position::new(i)).is_err());
             }
-            last_leaf_pos = *leaf_pos;
+            last_leaf_pos = leaf_pos.as_u64();
         }
     }
 

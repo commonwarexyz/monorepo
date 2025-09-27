@@ -8,7 +8,7 @@ use commonware_storage::{
         any::fixed::{Any, Config},
         verify_proof,
     },
-    mmr::StandardHasher as Standard,
+    mmr::{Location, StandardHasher as Standard},
     translator::EightCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -130,7 +130,7 @@ fn fuzz(data: FuzzInput) {
                         let current_root = adb.root(&mut hasher);
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
-                        let adjusted_start = *start_loc % actual_op_count;
+                        let adjusted_start = Location::new(*start_loc % actual_op_count);
                         let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 
                         let (proof, log) = adb

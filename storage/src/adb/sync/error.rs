@@ -1,6 +1,6 @@
 //! Shared sync error types that can be used across different database implementations.
 
-use crate::adb::sync::Target;
+use crate::{adb::sync::Target, mmr::Location};
 use commonware_cryptography::Digest;
 
 #[derive(Debug, thiserror::Error)]
@@ -11,8 +11,8 @@ pub enum EngineError<D: Digest> {
     /// Invalid target parameters
     #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
     InvalidTarget {
-        lower_bound_pos: u64,
-        upper_bound_pos: u64,
+        lower_bound_pos: Location,
+        upper_bound_pos: Location,
     },
     /// Invalid client state
     #[error("invalid client state")]
