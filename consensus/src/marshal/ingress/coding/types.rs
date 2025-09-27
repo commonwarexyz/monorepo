@@ -136,6 +136,23 @@ impl<S: Scheme, H: Hasher> Shard<S, H> {
         self.inner
     }
 
+    /// Verifies that this shard is valid for the given commitment and index.
+    ///
+    /// NOTE: If the inner shard is a weak shard, this will always return false, as weak shards
+    /// cannot be verified in isolation.
+    pub fn verify(&self) -> bool {
+        match self.inner {
+            DistributionShard::Strong(ref shard) => S::reshard(
+                &self.config,
+                &self.commitment,
+                self.index as u16,
+                shard.clone(),
+            )
+            .is_ok(),
+            DistributionShard::Weak(_) => false,
+        }
+    }
+
     /// Returns the UUID of a shard with the given commitment and index.
     pub fn uuid(commitment: S::Commitment, index: usize) -> H::Digest {
         let mut buf = vec![0u8; S::Commitment::SIZE + u32::SIZE];

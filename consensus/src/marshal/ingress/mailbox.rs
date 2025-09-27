@@ -89,6 +89,25 @@ pub(crate) enum Message<V: Variant, B: Block, S: Scheme, P: PublicKey> {
         /// The peers to broadcast the shards to.
         peers: Vec<P>,
     },
+    /// A request to retrieve a block by its digest.
+    Subscribe {
+        /// The view in which the block was notarized. This is an optimization
+        /// to help locate the block.
+        round: Option<Round>,
+        /// The digest of the block to retrieve.
+        commitment: B::Commitment,
+        /// A channel to send the retrieved block.
+        response: oneshot::Sender<B>,
+    },
+    /// A request to verify a a shard's inclusion within a commitment.
+    VerifyShard {
+        /// The commitment to verify against.
+        commitment: B::Commitment,
+        /// The index of the shard to verify.
+        index: usize,
+        /// The response channel to send the result to.
+        response: oneshot::Sender<bool>,
+    },
 
     // -------------------- Consensus Engine Messages --------------------
     /// An individual notarization vote from the consensus engine.
@@ -173,7 +192,19 @@ impl<V: Variant, B: Block, S: Scheme, P: PublicKey> Mailbox<V, B, S, P> {
         }
     }
 
-    /// A request to retrieve a block by its commitment.
+    /// Broadcast indicates that an erasure coded block should be sent to a given set of peers.
+    pub async fn broadcast(&mut self, block: CodedBlock<B, S>, peers: Vec<P>) {
+        if self
+            .sender
+            .send(Message::Broadcast { block, peers })
+            .await
+            .is_err()
+        {
+            error!("failed to send broadcast message to actor: receiver dropped");
+        }
+    }
+
+    /// Subscribe is a request to retrieve a block by its commitment.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
@@ -203,16 +234,33 @@ impl<V: Variant, B: Block, S: Scheme, P: PublicKey> Mailbox<V, B, S, P> {
         rx
     }
 
-    /// Broadcast indicates that an erasure coded block should be sent to a given set of peers.
-    pub async fn broadcast(&mut self, block: CodedBlock<B, S>, peers: Vec<P>) {
+    /// Verify a shard's inclusion within a commitment.
+    ///
+    /// If the shard is available locally, the result will be returned immediately.
+    ///
+    /// If the shard is not available locally, the request will be registered and the caller will
+    /// be notified when the shard is available.
+    ///
+    /// The oneshot receiver should be dropped to cancel the request.
+    pub async fn verify_shard(
+        &mut self,
+        commitment: B::Commitment,
+        index: usize,
+    ) -> oneshot::Receiver<bool> {
+        let (tx, rx) = oneshot::channel();
         if self
             .sender
-            .send(Message::Broadcast { block, peers })
+            .send(Message::VerifyShard {
+                commitment,
+                index,
+                response: tx,
+            })
             .await
             .is_err()
         {
-            error!("failed to send broadcast message to actor: receiver dropped");
+            error!("failed to send verify shard message to actor: receiver dropped");
         }
+        rx
     }
 }
 
