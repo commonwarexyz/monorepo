@@ -16,7 +16,7 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::threshold_signature_recover_pair,
+        ops::{threshold_signature_recover, threshold_signature_recover_pair},
         variant::Variant,
     },
     Digest, PublicKey, Signer,
@@ -369,6 +369,7 @@ impl<
             return None;
         }
         let proposal = self.proposal.as_ref().unwrap().clone();
+
         debug!(
             ?proposal,
             verified = self.verified_proposal,
@@ -376,17 +377,37 @@ impl<
         );
 
         // Only select verified finalizes
-        let (proposals, seeds): (Vec<_>, Vec<_>) = self
+        let finalizes = self
             .finalizes
             .iter()
-            .map(|finalize| (&finalize.proposal_signature, &finalize.seed_signature))
-            .unzip();
+            .map(|finalize| (&finalize.proposal_signature, &finalize.seed_signature));
 
         // Recover threshold signature
         let mut timer = self.recover_latency.timer();
-        let (proposal_signature, seed_signature) =
+        // If we have a notarization we'll extract the recovered seed signature from it
+        let (proposal_signature, seed_signature) = if let Some(notarization) = &self.notarization {
+            // Check notarization and finalization proposal match
+            if notarization.proposal != proposal {
+                // There should never exist enough finalizes for multiple proposals, so it doesn't
+                // matter which one we choose.
+                warn!(
+                    ?proposal,
+                    ?notarization.proposal,
+                    "finalization proposal does not match notarization"
+                )
+            }
+
+            let proposal_signature =
+                threshold_signature_recover::<V, _>(threshold, finalizes.map(|f| f.0))
+                    .expect("failed to recover threshold signature");
+
+            (proposal_signature, notarization.seed_signature)
+        } else {
+            let (proposals, seeds): (Vec<_>, Vec<_>) = finalizes.unzip();
+
             threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
-                .expect("failed to recover threshold signature");
+                .expect("failed to recover threshold signature")
+        };
         timer.observe();
 
         // Construct finalization
