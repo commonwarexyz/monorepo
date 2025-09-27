@@ -585,7 +585,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn proof(
         &self,
         start_loc: Location,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_loc, max_ops)
             .await
@@ -603,13 +603,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         &self,
         op_count: u64,
         start_loc: Location,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         assert!(op_count <= self.op_count());
         assert!(start_loc < op_count);
 
         let op_count = Location::new(op_count);
-        let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops).unwrap());
+        let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops.get()).unwrap());
         let mmr_size = Position::from(op_count).as_u64();
 
         let proof = self
@@ -912,25 +912,46 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
-            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            let empty_root = db.root(&mut hasher);
+            assert_eq!(empty_root, MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = Sha256::fill(1u8);
             let v1 = vec![1u8; 8];
-            let root = db.root(&mut hasher);
             db.update(d1, v1).await.unwrap();
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(&mut hasher), empty_root);
             assert_eq!(db.op_count(), 0);
+
+            let empty_proof = Proof::default();
+            assert!(verify_proof(
+                &mut hasher,
+                &empty_proof,
+                Location::new(0),
+                &[] as &[Operation<Digest, Digest>],
+                &empty_root
+            ));
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1); // floor op added
             let root = db.root(&mut hasher);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+
+            // Re-opening the DB without a clean shutdown should still recover the correct state.
             let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(&mut hasher), root);
+
+            // Empty proof should no longer verify.
+            assert!(!verify_proof(
+                &mut hasher,
+                &empty_proof,
+                Location::new(0),
+                &[] as &[Operation<Digest, Digest>],
+                &root
+            ));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
@@ -1152,7 +1173,7 @@ pub(super) mod test {
 
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
-            let max_ops = 4;
+            let max_ops = NZU64!(4);
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
             let start_loc = Location::try_from(start_pos).unwrap().as_u64();
