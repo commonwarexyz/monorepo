@@ -46,6 +46,14 @@ struct BlockSubscription<B: Block> {
     _aborter: Aborter,
 }
 
+/// A struct that holds multiple subscriptions for a shard's validity check.
+struct ShardValiditySubscription {
+    /// The subscribers that are waiting for the chunk
+    subscribers: Vec<oneshot::Sender<bool>>,
+    /// Aborter that aborts the waiter future when dropped
+    _aborter: Aborter,
+}
+
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
 /// of blocks.
@@ -95,6 +103,8 @@ where
 
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
+    // Outstanding subscriptions for shard validity checks
+    shard_validity_subscriptions: BTreeMap<(B::Commitment, usize), ShardValiditySubscription>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -235,6 +245,7 @@ where
                 codec_config: config.codec_config,
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
+                shard_validity_subscriptions: BTreeMap::new(),
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
@@ -287,7 +298,8 @@ where
             .spawn(|_| finalizer.run());
 
         // Create a local pool for waiter futures
-        let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
+        let mut block_waiters = AbortablePool::<(B::Commitment, B)>::default();
+        let mut shard_validity_waiters = AbortablePool::<((B::Commitment, usize), bool)>::default();
 
         // Handle messages
         loop {
@@ -296,15 +308,25 @@ where
                 bs.subscribers.retain(|tx| !tx.is_canceled());
                 !bs.subscribers.is_empty()
             });
+            self.shard_validity_subscriptions.retain(|_, cs| {
+                cs.subscribers.retain(|tx| !tx.is_canceled());
+                !cs.subscribers.is_empty()
+            });
 
             // Select messages
             select! {
                 // Handle waiter completions first
-                result = waiters.next_completed() => {
+                result = block_waiters.next_completed() => {
                     let Ok((commitment, block)) = result else {
                         continue; // Aborted future
                     };
-                    self.notify_subscribers(commitment, &block).await;
+                    self.notify_block_subscribers(commitment, &block).await;
+                },
+                result = shard_validity_waiters.next_completed() => {
+                    let Ok(((commitment, index), valid)) = result else {
+                        continue; // Aborted future
+                    };
+                    self.notify_shard_validity_subscribers(commitment, index, valid).await;
                 },
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
@@ -313,8 +335,85 @@ where
                         return;
                     };
                     match message {
+                        Message::Get { commitment, response } => {
+                            // Check for block locally
+                            let result = self.find_block(&mut shards, commitment).await;
+                            let _ = response.send(result.map(CodedBlock::into_inner));
+                        }
                         Message::Broadcast { block, peers } => {
                             shards.broadcast_shards(block, peers).await;
+                        }
+                        Message::Subscribe { round, commitment, response } => {
+                            // Check for block locally
+                            if let Some(block) = self.find_block(&mut shards, commitment).await {
+                                let _ = response.send(block.into_inner());
+                                continue;
+                            }
+
+                            // We don't have the block locally, so fetch the block from the network
+                            // if we have an associated view. If we only have the digest, don't make
+                            // the request as we wouldn't know when to drop it, and the request may
+                            // never complete if the block is not finalized.
+                            if let Some(round) = round {
+                                if round < self.last_processed_round {
+                                    // At this point, we have failed to find the block locally, and
+                                    // we know that its round is less than the last processed round.
+                                    // This means that something else was finalized in that round,
+                                    // so we drop the response to indicate that the block may never
+                                    // be available.
+                                    continue;
+                                }
+                                // Attempt to fetch the block (with notarization) from the resolver.
+                                // If this is a valid view, this request should be fine to keep open
+                                // until resolution or pruning (even if the oneshot is canceled).
+                                debug!(?round, ?commitment, "requested block missing");
+                                resolver.fetch(Request::<CodedBlock<B, S>>::Notarized { round }).await;
+                            }
+
+                            // Register subscriber
+                            debug!(?round, ?commitment, "registering subscriber");
+                            match self.block_subscriptions.entry(commitment) {
+                                Entry::Occupied(mut entry) => {
+                                    entry.get_mut().subscribers.push(response);
+                                }
+                                Entry::Vacant(entry) => {
+                                    let (tx, rx) = oneshot::channel();
+                                    shards.subscribe_block(commitment, tx).await.expect("Reconstruction error not yet handled");
+                                    let aborter = block_waiters.push(async move {
+                                        (commitment, rx.await.expect("buffer subscriber closed").into_inner())
+                                    });
+                                    entry.insert(BlockSubscription {
+                                        subscribers: vec![response],
+                                        _aborter: aborter,
+                                    });
+                                }
+                            }
+                        }
+                        Message::VerifyShard { commitment, index, response } => {
+                            // Check for shard locally
+                            if let Some(shard) = shards.get_shard(commitment, index).await {
+                                let _ = response.send(shard.verify());
+                                continue;
+                            }
+
+                            match self.shard_validity_subscriptions.entry((commitment, index)) {
+                                Entry::Occupied(mut entry) => {
+                                    entry.get_mut().subscribers.push(response);
+                                }
+                                Entry::Vacant(entry) => {
+                                    let (tx, rx) = oneshot::channel();
+                                    shards.subscribe_shard(commitment, index, tx).await;
+                                    let aborter = shard_validity_waiters.push(async move {
+                                        let shard = rx.await.expect("shard subscriber closed");
+                                        let valid = shard.verify();
+                                        ((commitment, index), valid)
+                                    });
+                                    entry.insert(ShardValiditySubscription {
+                                        subscribers: vec![response],
+                                        _aborter: aborter,
+                                    });
+                                }
+                            }
                         }
                         Message::Notarize { notarization_vote } => {
                             let commitment = notarization_vote.proposal.payload;
@@ -353,57 +452,6 @@ where
                                 // Otherwise, fetch the block from the network.
                                 debug!(?round, ?commitment, "finalized block missing");
                                 resolver.fetch(Request::<CodedBlock<B, S>>::Block(commitment)).await;
-                            }
-                        }
-                        Message::Get { commitment, response } => {
-                            // Check for block locally
-                            let result = self.find_block(&mut shards, commitment).await;
-                            let _ = response.send(result.map(CodedBlock::into_inner));
-                        }
-                        Message::Subscribe { round, commitment, response } => {
-                            // Check for block locally
-                            if let Some(block) = self.find_block(&mut shards, commitment).await {
-                                let _ = response.send(block.into_inner());
-                                continue;
-                            }
-
-                            // We don't have the block locally, so fetch the block from the network
-                            // if we have an associated view. If we only have the digest, don't make
-                            // the request as we wouldn't know when to drop it, and the request may
-                            // never complete if the block is not finalized.
-                            if let Some(round) = round {
-                                if round < self.last_processed_round {
-                                    // At this point, we have failed to find the block locally, and
-                                    // we know that its round is less than the last processed round.
-                                    // This means that something else was finalized in that round,
-                                    // so we drop the response to indicate that the block may never
-                                    // be available.
-                                    continue;
-                                }
-                                // Attempt to fetch the block (with notarization) from the resolver.
-                                // If this is a valid view, this request should be fine to keep open
-                                // until resolution or pruning (even if the oneshot is canceled).
-                                debug!(?round, ?commitment, "requested block missing");
-                                resolver.fetch(Request::<CodedBlock<B, S>>::Notarized { round }).await;
-                            }
-
-                            // Register subscriber
-                            debug!(?round, ?commitment, "registering subscriber");
-                            match self.block_subscriptions.entry(commitment) {
-                                Entry::Occupied(mut entry) => {
-                                    entry.get_mut().subscribers.push(response);
-                                }
-                                Entry::Vacant(entry) => {
-                                    let (tx, rx) = oneshot::channel();
-                                    shards.subscribe_block(commitment, tx).await.expect("Reconstruction error not yet handled");
-                                    let aborter = waiters.push(async move {
-                                        (commitment, rx.await.expect("buffer subscriber closed").into_inner())
-                                    });
-                                    entry.insert(BlockSubscription {
-                                        subscribers: vec![response],
-                                        _aborter: aborter,
-                                    });
-                                }
                             }
                         }
                     }
@@ -627,10 +675,27 @@ where
     // -------------------- Waiters --------------------
 
     /// Notify any subscribers for the given commitment with the provided block.
-    async fn notify_subscribers(&mut self, commitment: B::Commitment, block: &B) {
+    async fn notify_block_subscribers(&mut self, commitment: B::Commitment, block: &B) {
         if let Some(mut bs) = self.block_subscriptions.remove(&commitment) {
             for subscriber in bs.subscribers.drain(..) {
                 let _ = subscriber.send(block.clone());
+            }
+        }
+    }
+
+    // Notify any subscribers waiting for shard validity.
+    async fn notify_shard_validity_subscribers(
+        &mut self,
+        commitment: B::Commitment,
+        index: usize,
+        valid: bool,
+    ) {
+        if let Some(mut cs) = self
+            .shard_validity_subscriptions
+            .remove(&(commitment, index))
+        {
+            for subscriber in cs.subscribers.drain(..) {
+                let _ = subscriber.send(valid);
             }
         }
     }
@@ -644,7 +709,8 @@ where
         commitment: B::Commitment,
         block: CodedBlock<B, S>,
     ) {
-        self.notify_subscribers(commitment, block.inner()).await;
+        self.notify_block_subscribers(commitment, block.inner())
+            .await;
         self.cache.put_block(round, commitment, block).await;
     }
 
@@ -685,7 +751,8 @@ where
         finalization: Option<Finalization<V, B::Commitment>>,
         notifier: &mut mpsc::Sender<()>,
     ) {
-        self.notify_subscribers(commitment, block.inner()).await;
+        self.notify_block_subscribers(commitment, block.inner())
+            .await;
 
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
