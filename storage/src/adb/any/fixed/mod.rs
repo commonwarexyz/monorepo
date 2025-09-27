@@ -854,17 +854,26 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
-            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            let empty_root = db.root(&mut hasher);
+            assert_eq!(empty_root, MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an
             // uncommitted op, and even without a clean shutdown.
             let d1 = Sha256::fill(1u8);
             let d2 = Sha256::fill(2u8);
-            let root = db.root(&mut hasher);
             db.update(d1, d2).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(&mut hasher), empty_root);
             assert_eq!(db.op_count(), 0);
+
+            let empty_proof = Proof::default();
+            assert!(verify_proof(
+                &mut hasher,
+                &empty_proof,
+                Location::new(0),
+                &[] as &[Operation<Digest, Digest>],
+                &empty_root
+            ));
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit().await.unwrap();
@@ -876,6 +885,15 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(&mut hasher), root);
+
+            // Empty proof should no longer verify.
+            assert!(!verify_proof(
+                &mut hasher,
+                &empty_proof,
+                Location::new(0),
+                &[] as &[Operation<Digest, Digest>],
+                &root
+            ));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {

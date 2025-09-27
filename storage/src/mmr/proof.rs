@@ -526,6 +526,10 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<Location>) 
 /// inclusion of the elements at the specified `locations`.
 ///
 /// The order of positions does not affect the output (sorted internally).
+///
+/// # Panics
+///
+/// Panics if locations is empty.
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
     size: u64,
@@ -534,6 +538,7 @@ pub(crate) fn nodes_required_for_multi_proof(
     // Collect all required node positions
     //
     // TODO(#1472): Optimize this loop
+    assert!(!locations.is_empty(), "empty locations");
     locations
         .iter()
         .flat_map(|loc| nodes_required_for_range_proof(size, *loc..(*loc + 1)))
@@ -1408,16 +1413,9 @@ mod tests {
         ));
 
         // Empty multi-proof
-        let empty_multi = nodes_required_for_multi_proof(0, &[]);
-        assert_eq!(empty_multi.len(), 0);
-        assert!(empty_multi.is_empty());
-
         let empty_mmr = Mmr::new();
         let empty_root = empty_mmr.root(&mut hasher);
-        let empty_proof = Proof {
-            size: 0,
-            digests: vec![],
-        };
+        let empty_proof = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
             &mut hasher,
             &[] as &[(Digest, Location)],

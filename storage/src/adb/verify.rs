@@ -5,7 +5,7 @@ use crate::mmr::{
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 
-/// Verify that a [Proof] is valid for a range of operations and a target root
+/// Verify that a [Proof] is valid for a range of operations and a target root.
 pub fn verify_proof<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
@@ -621,35 +621,22 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-
-            // Test with empty MMR (which is the correct case for empty proof)
             let empty_mmr = Mmr::new();
             let empty_root = empty_mmr.root(&mut hasher);
-            let empty_proof = verification::multi_proof(&empty_mmr, &[]).await.unwrap();
-            assert!(empty_proof.verify_multi_inclusion(
-                &mut hasher,
-                &[] as &[(&[u8], Location)],
-                &empty_root,
-            ));
 
-            // Also test that empty proof with non-empty MMR
-            let mut mmr = Mmr::new();
-            for i in 0..5 {
-                let data = vec![i];
-                mmr.add(&mut hasher, &data);
-            }
-            let multi_proof = verification::multi_proof(&mmr, &[]).await.unwrap();
-
-            // Empty multi-proof should have the right size but no digests
-            assert_eq!(multi_proof.size, mmr.size());
-            assert!(multi_proof.digests.is_empty());
-
-            // Verify the empty proof
+            // Empty proof should verify against an empty MMR/database.
+            let empty_proof = Proof::default();
             assert!(verify_multi_proof(
                 &mut hasher,
                 &empty_proof,
                 &[] as &[(Location, u64)],
                 &empty_root,
+            ));
+
+            // Proofs over empty locations should otherwise not be allowed.
+            assert!(matches!(
+                verification::multi_proof(&empty_mmr, &[]).await,
+                Err(Error::Empty)
             ));
         });
     }
