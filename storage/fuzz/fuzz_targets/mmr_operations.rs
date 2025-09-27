@@ -303,7 +303,7 @@ fn fuzz(input: FuzzInput) {
                         let root = mmr.root(&mut hasher);
                         assert!(proof.verify_element_inclusion(
                             &mut hasher,
-                            &reference.leaf_data[location].as_slice(),
+                            reference.leaf_data[location].as_slice(),
                             location as u64,
                             &root,
                         ));
@@ -344,7 +344,7 @@ fn fuzz(input: FuzzInput) {
                 MmrOperation::PruneToPos { pos_idx } => {
                     if mmr.size() > 0 {
                         // Only prune to positions within the current size (0 to size inclusive)
-                        let pos = (*pos_idx as u64) % (mmr.size() + 1);
+                        let pos = (*pos_idx) % (mmr.size() + 1);
 
                         // Skip if trying to prune to a position before or equal to what's already pruned
                         if pos <= mmr.pruned_to_pos() {

@@ -1511,4 +1511,43 @@ pub(super) mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    #[test_traced("WARN")]
+    pub fn test_any_db_empty_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            // Add some operations
+            for i in 0u64..5 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = vec![i as u8; 10];
+                db.update(k, v).await.unwrap();
+            }
+            db.commit(None).await.unwrap();
+
+            // Test that empty proof (max_ops = 0) generates an empty operations list
+            let (proof, ops) = db.proof(0, 0).await.unwrap();
+            assert!(ops.is_empty(), "Empty proof should return no operations");
+
+            let root = db.root(&mut hasher);
+            assert!(
+                verify_proof(&mut hasher, &proof, 0, &ops, &root),
+                "Empty proof should verify correctly"
+            );
+
+            // Test that non-empty proofs work correctly
+            let (proof, ops) = db.proof(0, 1).await.unwrap();
+            assert_eq!(ops.len(), 1, "Should return exactly one operation");
+
+            let root = db.root(&mut hasher);
+            assert!(
+                verify_proof(&mut hasher, &proof, 0, &ops, &root),
+                "Non-empty proof should verify correctly"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
 }
