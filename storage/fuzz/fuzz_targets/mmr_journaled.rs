@@ -212,14 +212,6 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    //println!("-----");
-
-                    //println!("leaves {:?}", leaves);
-
-                    //println!("locations {:?}", locations);
-
-                    //println!("positions {:?}", positions);
-
                     if let Ok(proof) = mmr.proof(location as u64).await {
                         let root = mmr.root(&mut hasher);
                         assert!(proof.verify_element_inclusion(
