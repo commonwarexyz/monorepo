@@ -44,8 +44,9 @@ pub struct Actor<
     in_flight_handshakes: Arc<AtomicU32>,
     ip_rate_limiter:
         Arc<RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>>,
-    peer_rate_limiter:
-        Arc<RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>>,
+    peer_rate_limiter: Arc<
+        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
+    >,
 
     handshakes_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -304,9 +305,9 @@ mod tests {
             });
 
             let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
-            let supervisor_task = context.clone().spawn(|_| async move {
-                while supervisor_rx.next().await.is_some() {}
-            });
+            let supervisor_task = context
+                .clone()
+                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
 
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
@@ -332,7 +333,11 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
             let metrics = context.encode();
-            assert!(metrics.contains("handshake_ip_rate_limited_total 3"), "{}", metrics);
+            assert!(
+                metrics.contains("handshake_ip_rate_limited_total 3"),
+                "{}",
+                metrics
+            );
 
             listener_handle.abort();
             tracker_task.abort();

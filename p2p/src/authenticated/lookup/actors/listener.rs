@@ -44,8 +44,9 @@ pub struct Actor<
     in_flight_handshakes: Arc<AtomicU32>,
     ip_rate_limiter:
         Arc<RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>>,
-    peer_rate_limiter:
-        Arc<RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>>,
+    peer_rate_limiter: Arc<
+        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
+    >,
 
     handshakes_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -247,5 +248,97 @@ impl InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _};
+    use commonware_runtime::{deterministic, Error as RuntimeError, Runner as _};
+    use futures::StreamExt as _;
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        time::Duration,
+    };
+
+    #[test]
+    fn increments_ip_rate_limit_metric() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
+            let stream_cfg = StreamConfig {
+                signing_key: PrivateKey::from_seed(1),
+                namespace: b"test-rate-limit".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_millis(5),
+            };
+
+            let actor = Actor::new(
+                context.clone(),
+                Config {
+                    address,
+                    stream_cfg,
+                    max_concurrent_handshakes: NonZeroU32::new(8).expect("non-zero"),
+                    allowed_handshake_rate_per_ip: Quota::per_hour(NonZeroU32::new(1).unwrap()),
+                    allowed_handshake_rate_per_peer: Quota::per_hour(NonZeroU32::new(16).unwrap()),
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) = Mailbox::test();
+            let tracker_task = context.clone().spawn(|_| async move {
+                while let Some(message) = tracker_rx.next().await {
+                    match message {
+                        tracker::Message::Listenable { responder, .. } => {
+                            let _ = responder.send(true);
+                        }
+                        tracker::Message::Listen { reservation, .. } => {
+                            let _ = reservation.send(None);
+                        }
+                        tracker::Message::Release { .. } => {}
+                        _ => panic!("unexpected tracker message"),
+                    }
+                }
+            });
+
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
+            let supervisor_task = context
+                .clone()
+                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
+
+            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+
+            let (sink, stream) = loop {
+                match context.dial(address).await {
+                    Ok(pair) => break pair,
+                    Err(RuntimeError::ConnectionFailed) => {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(err) => panic!("unexpected dial error: {err:?}"),
+                }
+            };
+            drop((sink, stream));
+            context.sleep(Duration::from_millis(10)).await;
+
+            for _ in 0..3 {
+                let (sink, stream) = context.dial(address).await.expect("dial");
+                drop((sink, stream));
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            context.sleep(Duration::from_millis(10)).await;
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("handshake_ip_rate_limited_total 3"),
+                "{}",
+                metrics
+            );
+
+            listener_handle.abort();
+            tracker_task.abort();
+            supervisor_task.abort();
+        });
     }
 }
