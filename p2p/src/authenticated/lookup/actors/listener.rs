@@ -7,6 +7,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
+use futures::channel::mpsc;
 use governor::{
     clock::ReasonablyRealtime,
     middleware::NoOpMiddleware,
@@ -15,11 +16,7 @@ use governor::{
 };
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
-use std::{
-    collections::HashSet,
-    net::{IpAddr, SocketAddr},
-    sync::{Arc, RwLock},
-};
+use std::{collections::HashSet, net::IpAddr, net::SocketAddr};
 use tracing::debug;
 
 /// Configuration for the listener actor.
@@ -27,7 +24,7 @@ pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
     pub allowed_incoming_connection_rate: Quota,
-    pub registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>>,
+    pub registered_ips: Option<HashSet<IpAddr>>,
 }
 
 pub struct Actor<
@@ -39,15 +36,22 @@ pub struct Actor<
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
-    registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>>,
+    registered_ips: Option<HashSet<IpAddr>>,
+    updates: mpsc::Receiver<Message>,
 
     handshakes_rate_limited: Counter,
+}
+
+/// Control messages for the listener actor.
+#[derive(Debug)]
+pub enum Message {
+    UpdateRegisteredIps(Option<HashSet<IpAddr>>),
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config<C>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, updates: mpsc::Receiver<Message>) -> Self {
         // Create metrics
         let handshakes_rate_limited = Counter::default();
         context.register(
@@ -66,6 +70,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 &context,
             ),
             registered_ips: cfg.registered_ips,
+            updates,
 
             handshakes_rate_limited,
         }
@@ -127,20 +132,33 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
+        let Self {
+            context,
+            address,
+            stream_cfg,
+            rate_limiter,
+            mut registered_ips,
+            mut updates,
+            handshakes_rate_limited,
+        } = self;
+
         // Start listening for incoming connections
-        let mut listener = self
-            .context
-            .bind(self.address)
+        let mut listener = context
+            .bind(address)
             .await
             .expect("failed to bind listener");
 
         // Loop over incoming connections as fast as our rate limiter allows
         loop {
+            while let Ok(Some(Message::UpdateRegisteredIps(set))) = updates.try_next() {
+                registered_ips = set;
+            }
+
             // Ensure we don't attempt to perform too many handshakes at once
-            if let Err(wait_until) = self.rate_limiter.check() {
-                self.handshakes_rate_limited.inc();
-                let wait = wait_until.wait_time_from(self.context.now());
-                self.context.sleep(wait).await;
+            if let Err(wait_until) = rate_limiter.check() {
+                handshakes_rate_limited.inc();
+                let wait = wait_until.wait_time_from(context.now());
+                context.sleep(wait).await;
             }
 
             // Accept a new connection
@@ -153,21 +171,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             };
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
-            if let Some(allowed_ips) = &self.registered_ips {
-                let ip = address.ip();
-                let allowed = allowed_ips
-                    .read()
-                    .map(|set| set.contains(&ip))
-                    .unwrap_or(false);
-                if !allowed {
+            if let Some(allowed_ips) = &registered_ips {
+                if !allowed_ips.contains(&address.ip()) {
                     debug!(?address, "rejecting unregistered address");
                     continue;
                 }
             }
 
             // Spawn a new handshaker to upgrade connection
-            self.context.with_label("handshaker").spawn({
-                let stream_cfg = self.stream_cfg.clone();
+            context.with_label("handshaker").spawn({
+                let stream_cfg = stream_cfg.clone();
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();
                 move |context| {

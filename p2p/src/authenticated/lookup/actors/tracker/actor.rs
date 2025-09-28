@@ -165,9 +165,7 @@ mod tests {
     use commonware_utils::NZU32;
     use governor::Quota;
     use std::{
-        collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        sync::{Arc, RwLock},
         time::Duration,
     };
 
@@ -180,7 +178,7 @@ mod tests {
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
             allow_private_ips: true,
-            registered_ips: Some(Arc::new(RwLock::new(HashSet::new()))),
+            registered_ips: None,
         }
     }
 

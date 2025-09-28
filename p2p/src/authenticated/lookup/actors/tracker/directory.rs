@@ -1,5 +1,8 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
-use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
+use crate::authenticated::{
+    lookup::{actors::listener, actors::tracker::ingress::Releaser, metrics},
+    Mailbox,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use governor::{
@@ -9,8 +12,7 @@ use governor::{
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    net::{IpAddr, SocketAddr},
-    sync::{Arc, RwLock},
+    net::SocketAddr,
 };
 use tracing::debug;
 
@@ -19,9 +21,9 @@ pub struct Config {
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
 
-    /// Shared set of registered IP addresses for pre-handshake filtering. When `None`, the
-    /// pre-handshake filter is disabled.
-    pub registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>>,
+    /// Mailbox to publish registered IP addresses for pre-handshake filtering.
+    /// When `None`, the pre-handshake filter is disabled.
+    pub registered_ips: Option<Mailbox<listener::Message>>,
 
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
@@ -41,8 +43,8 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
 
-    /// Shared set of registered IP addresses for pre-handshake filtering.
-    registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>>,
+    /// Mailbox to publish registered IP addresses for pre-handshake filtering.
+    registered_ips: Option<Mailbox<listener::Message>>,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -284,7 +286,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     fn refresh_registered_ips(&self) {
-        let Some(registration) = &self.registered_ips else {
+        let Some(mailbox) = &self.registered_ips else {
             return;
         };
         let mut ips = HashSet::new();
@@ -295,9 +297,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
                 }
             }
         }
-        if let Ok(mut guard) = registration.write() {
-            *guard = ips;
-        }
+        let mut mailbox = mailbox.clone();
+        self.context.clone().spawn_ref()(async move {
+            let _ = mailbox
+                .send(listener::Message::UpdateRegisteredIps(Some(ips)))
+                .await;
+        });
     }
 }
 
@@ -308,11 +313,7 @@ mod tests {
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
     use futures::channel::mpsc;
-    use std::{
-        collections::HashSet,
-        net::{IpAddr, Ipv4Addr, SocketAddr},
-        sync::{Arc, RwLock},
-    };
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
     fn test_add_set_return_value() {
@@ -323,7 +324,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
-            registered_ips: Some(Arc::new(RwLock::new(HashSet::new()))),
+            registered_ips: None,
             max_sets: 1,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
