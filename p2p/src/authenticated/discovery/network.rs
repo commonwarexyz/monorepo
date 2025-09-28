@@ -159,7 +159,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
-                allowed_incoming_connection_rate: self.cfg.allowed_incoming_connection_rate,
+                max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
+                allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
+                allowed_handshake_rate_per_peer: self.cfg.allowed_handshake_rate_per_peer,
             },
         );
         let mut listener_task =
