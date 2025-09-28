@@ -208,6 +208,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             if self.ip_rate_limiter.check_key(&address.ip()).is_err() {
                 self.handshakes_ip_rate_limited.inc();
                 debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
+                self.prioritized_ips.write().await.remove(&address.ip());
                 continue;
             }
 
@@ -225,6 +226,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                     Err(_) => {
                         self.handshakes_rate_limited.inc();
                         debug!(?address, "maximum concurrent handshakes reached");
+                        self.prioritized_ips.write().await.remove(&address.ip());
                         continue 'accept;
                     }
                 }
