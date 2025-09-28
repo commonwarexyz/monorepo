@@ -13,13 +13,10 @@ use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
-    context: E,
-
+pub struct Actor<C: PublicKey> {
     ping_frequency: Duration,
     allowed_ping_rate: Quota,
 
@@ -33,16 +30,13 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     _phantom: std::marker::PhantomData<C>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
-    Actor<E, C>
-{
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<Data>) {
+impl<C: PublicKey> Actor<C> {
+    pub fn new(cfg: Config) -> (Self, Mailbox<Message>, Relay<Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context,
                 ping_frequency: cfg.ping_frequency,
                 allowed_ping_rate: cfg.allowed_ping_rate,
                 control: control_receiver,
@@ -87,8 +81,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         Ok(())
     }
 
-    pub async fn run<Si: Sink, St: Stream>(
+    pub async fn run<E: Spawner + Clock + ReasonablyRealtime + Metrics, Si: Sink, St: Stream>(
         mut self,
+        context: E,
         peer: C,
         (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
         channels: Channels<C>,
@@ -97,16 +92,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
+            let rate_limiter = RateLimiter::direct_with_clock(rate, &context);
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
-        let ping_rate_limiter =
-            RateLimiter::direct_with_clock(self.allowed_ping_rate, &self.context);
+        let ping_rate_limiter = RateLimiter::direct_with_clock(self.allowed_ping_rate, &context);
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
+        let mut send_handler: Handle<Result<(), Error>> = context.with_label("sender").spawn( {
             let peer = peer.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
@@ -153,8 +147,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 }
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self
-            .context
+        let mut receive_handler: Handle<Result<(), Error>> = context
             .with_label("receiver")
             .spawn(move |context| async move {
                 loop {

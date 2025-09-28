@@ -8,17 +8,14 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{Handle, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
-use rand::Rng;
 use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: Option<E>,
-
+pub struct Actor<E: Spawner + GClock + RuntimeMetrics, C: Signer> {
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
@@ -32,8 +29,8 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
-    /// Create a new tracker [Actor] from the given `context` and `cfg`.
+impl<E: Spawner + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
+    /// Create a new tracker [Actor] from the given `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(
         context: E,
@@ -62,7 +59,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context: Some(context),
                 receiver,
                 directory,
                 mailboxes: HashMap::new(),
@@ -73,11 +69,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     /// Start the actor and run it in the background.
-    pub fn start(mut self) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|_| self.run())
+    pub fn start(self, spawner: impl Spawner) -> Handle<()> {
+        spawner.spawn(|_| self.run())
     }
 
     async fn run(mut self) {

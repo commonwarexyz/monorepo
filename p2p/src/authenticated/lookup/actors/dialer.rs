@@ -40,9 +40,7 @@ pub struct Config<C: Signer> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Signer> {
-    context: E,
-
+pub struct Actor<C: Signer> {
     // ---------- State ----------
     /// The list of peers to dial.
     queue: Vec<C::PublicKey>,
@@ -57,16 +55,15 @@ pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Signer> {
     attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>) -> Self {
+impl<C: Signer> Actor<C> {
+    pub fn new(metrics: impl Metrics, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
-        context.register(
+        metrics.register(
             "attempts",
             "The number of dial attempts made to each peer",
             attempts.clone(),
         );
         Self {
-            context: context.clone(),
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
@@ -77,8 +74,9 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
 
     /// Dial a peer for which we have a reservation.
     #[allow(clippy::type_complexity)]
-    async fn dial_peer(
+    async fn dial_peer<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics>(
         &mut self,
+        context: &E,
         reservation: Reservation<E, C::PublicKey>,
         supervisor: &mut Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
@@ -93,7 +91,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
             .inc();
 
         // Spawn dialer to connect to peer
-        self.context.with_label("dialer").spawn({
+        context.with_label("dialer").spawn({
             let config = self.stream_cfg.clone();
             let mut supervisor = supervisor.clone();
             move |context| async move {
@@ -125,30 +123,30 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
 
     /// Start the dialer actor.
     #[allow(clippy::type_complexity)]
-    pub fn start(
+    pub fn start<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics>(
         self,
+        context: E,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(tracker, supervisor))
+        context.spawn(|context| self.run(context, tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]
-    async fn run(
+    async fn run<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics>(
         mut self,
+        mut context: E,
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
-        let mut dial_deadline = self.context.current();
-        let mut query_deadline = self.context.current();
+        let mut dial_deadline = context.current();
+        let mut query_deadline = context.current();
         loop {
             select! {
-                _ = self.context.sleep_until(dial_deadline) => {
+                _ = context.sleep_until(dial_deadline) => {
                     // Update the deadline.
                     dial_deadline = dial_deadline.add_jittered(
-                        &mut self.context,
+                        &mut context,
                         self.dial_frequency,
                     );
 
@@ -159,13 +157,13 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                         let Some(reservation) = tracker.dial(peer).await else {
                             continue;
                         };
-                        self.dial_peer(reservation, &mut supervisor).await;
+                        self.dial_peer(&context, reservation, &mut supervisor).await;
                     }
                 },
-                _ = self.context.sleep_until(query_deadline) => {
+                _ = context.sleep_until(query_deadline) => {
                     // Update the deadline.
                     query_deadline = query_deadline.add_jittered(
-                        &mut self.context,
+                        &mut context,
                         self.query_frequency,
                     );
 
@@ -174,7 +172,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                         // Query the tracker for dialable peers and shuffle the list to prevent
                         // starvation.
                         self.queue = tracker.dialable().await;
-                        self.queue.shuffle(&mut self.context);
+                        self.queue.shuffle(&mut context);
                     }
                 }
             }

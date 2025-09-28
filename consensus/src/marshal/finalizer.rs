@@ -1,5 +1,5 @@
 use crate::{marshal::ingress::orchestrator::Orchestrator, Block, Reporter};
-use commonware_runtime::{Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::FixedBytes;
 use futures::{channel::mpsc, StreamExt};
@@ -13,7 +13,7 @@ const LATEST_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 ///
 /// Stores the highest height for which the application has processed. This allows resuming
 /// processing from the last processed height after a restart.
-pub struct Finalizer<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>> {
+pub struct Finalizer<B: Block, R: Clock + Metrics + Storage, Z: Reporter<Activity = B>> {
     // Application that processes the finalized blocks.
     application: Z,
 
@@ -27,9 +27,7 @@ pub struct Finalizer<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Report
     metadata: Metadata<R, FixedBytes<1>, u64>,
 }
 
-impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>>
-    Finalizer<B, R, Z>
-{
+impl<B: Block, R: Clock + Metrics + Storage, Z: Reporter<Activity = B>> Finalizer<B, R, Z> {
     /// Initialize the finalizer.
     pub async fn new(
         context: R,

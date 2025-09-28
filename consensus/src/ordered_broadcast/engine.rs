@@ -55,7 +55,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Storage + Metrics,
+    E: Clock + Storage + Metrics,
     C: Signer,
     V: Variant,
     D: Digest,
@@ -77,7 +77,7 @@ pub struct Engine<
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
-    context: Option<E>,
+    context: E,
     crypto: C,
     automaton: A,
     relay: R,
@@ -203,7 +203,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics,
+        E: Clock + Storage + Metrics,
         C: Signer,
         V: Variant,
         D: Digest,
@@ -228,7 +228,7 @@ impl<
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
-            context: Some(context),
+            context,
             crypto: cfg.crypto,
             automaton: cfg.automaton,
             relay: cfg.relay,
@@ -270,18 +270,25 @@ impl<
     /// - Messages from the network:
     ///   - Nodes
     ///   - Acks
-    pub fn start(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|runtime| self.run(runtime, chunk_network, ack_network))
+    pub fn start(
+        self,
+        spawner: impl Spawner,
+        chunk_network: (NetS, NetR),
+        ack_network: (NetS, NetR),
+    ) -> Handle<()> {
+        spawner.spawn(|spawner| self.run(spawner, chunk_network, ack_network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, runtime: E, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
+    async fn run(
+        mut self,
+        spawner: impl Spawner,
+        chunk_network: (NetS, NetR),
+        ack_network: (NetS, NetR),
+    ) {
         let (mut node_sender, mut node_receiver) = wrap((), chunk_network.0, chunk_network.1);
         let (mut ack_sender, mut ack_receiver) = wrap((), ack_network.0, ack_network.1);
-        let mut shutdown = runtime.stopped();
+        let mut shutdown = spawner.stopped();
 
         // Tracks if there is an outstanding proposal request to the automaton.
         let mut pending: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
@@ -292,9 +299,8 @@ impl<
 
         // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
-        self.journal_prepare(&runtime, &self.crypto.public_key())
-            .await;
-        if let Err(err) = self.rebroadcast(&runtime, &mut node_sender).await {
+        self.journal_prepare(&self.crypto.public_key()).await;
+        if let Err(err) = self.rebroadcast(&mut node_sender).await {
             // Rebroadcasting may return a non-critical error, so log the error and continue.
             info!(?err, "initial rebroadcast failed");
         }
@@ -312,7 +318,7 @@ impl<
             //
             // If the deadline is None, the future will never resolve.
             let rebroadcast = match self.rebroadcast_deadline {
-                Some(deadline) => Either::Left(runtime.sleep_until(deadline)),
+                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
             let propose = match &mut pending {
@@ -346,7 +352,7 @@ impl<
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
                     debug!(epoch = self.epoch, sender=?self.crypto.public_key(), "rebroadcast");
-                    if let Err(err) = self.rebroadcast(&runtime, &mut node_sender).await {
+                    if let Err(err) = self.rebroadcast(&mut node_sender).await {
                         info!(?err, "rebroadcast failed");
                         continue;
                     }
@@ -366,7 +372,7 @@ impl<
 
                     // Propose the chunk
                     if let Err(err) =
-                        self.propose(&runtime, context.clone(), payload, &mut node_sender).await
+                        self.propose(context.clone(), payload, &mut node_sender).await
                     {
                         warn!(?err, ?context, "propose new failed");
                         continue;
@@ -400,7 +406,7 @@ impl<
                     };
 
                     // Initialize journal for sequencer if it does not exist
-                    self.journal_prepare(&runtime, &sender).await;
+                    self.journal_prepare(&sender).await;
 
                     // Handle the parent threshold signature
                     if let Some(parent_chunk) = result {
@@ -686,7 +692,6 @@ impl<
     /// The proposal is only successful if the parent Chunk and threshold signature are known.
     async fn propose(
         &mut self,
-        runtime: &E,
         context: Context<C::PublicKey>,
         payload: D,
         node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
@@ -738,7 +743,7 @@ impl<
         self.propose_timer = Some(self.metrics.e2e_duration.timer());
 
         // Broadcast to network
-        if let Err(err) = self.broadcast(runtime, node, node_sender, self.epoch).await {
+        if let Err(err) = self.broadcast(node, node_sender, self.epoch).await {
             guard.set(Status::Failure);
             return Err(err);
         };
@@ -756,7 +761,6 @@ impl<
     /// - this instance has not yet collected the threshold signature for the chunk.
     async fn rebroadcast(
         &mut self,
-        runtime: &E,
         node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
@@ -786,8 +790,7 @@ impl<
 
         // Broadcast the message, which resets the rebroadcast deadline
         guard.set(Status::Failure);
-        self.broadcast(runtime, tip, node_sender, self.epoch)
-            .await?;
+        self.broadcast(tip, node_sender, self.epoch).await?;
         guard.set(Status::Success);
         Ok(())
     }
@@ -795,7 +798,6 @@ impl<
     /// Send a  `Node` message to all validators in the given epoch.
     async fn broadcast(
         &mut self,
-        runtime: &E,
         node: Node<C::PublicKey, V, D>,
         node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
         epoch: Epoch,
@@ -819,7 +821,7 @@ impl<
             .map_err(|_| Error::BroadcastFailed)?;
 
         // Set the rebroadcast deadline
-        self.rebroadcast_deadline = Some(runtime.current() + self.rebroadcast_timeout);
+        self.rebroadcast_deadline = Some(self.context.current() + self.rebroadcast_timeout);
 
         Ok(())
     }
@@ -967,7 +969,7 @@ impl<
     /// Ensures the journal exists and is initialized for the given sequencer.
     /// If the journal does not exist, it is created and replayed.
     /// Else, no action is taken.
-    async fn journal_prepare(&mut self, runtime: &E, sequencer: &C::PublicKey) {
+    async fn journal_prepare(&mut self, sequencer: &C::PublicKey) {
         // Return early if the journal already exists
         if self.journals.contains_key(sequencer) {
             return;
@@ -982,7 +984,7 @@ impl<
             write_buffer: self.journal_write_buffer,
         };
         let journal =
-            Journal::<_, Node<C::PublicKey, V, D>>::init(runtime.with_label("journal"), cfg)
+            Journal::<_, Node<C::PublicKey, V, D>>::init(self.context.with_label("journal"), cfg)
                 .await
                 .expect("unable to init journal");
 

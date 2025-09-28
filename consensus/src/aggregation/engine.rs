@@ -66,7 +66,7 @@ struct DigestRequest<D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Storage + Metrics,
+    E: Clock + Storage + Metrics,
     P: PublicKey,
     V: Variant,
     D: Digest,
@@ -82,7 +82,7 @@ pub struct Engine<
     >,
 > {
     // ---------- Interfaces ----------
-    context: Option<E>,
+    context: E,
     automaton: A,
     monitor: M,
     validators: TSu,
@@ -158,7 +158,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics,
+        E: Clock + Storage + Metrics,
         P: PublicKey,
         V: Variant,
         D: Digest,
@@ -179,7 +179,7 @@ impl<
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
-            context: Some(context),
+            context,
             automaton: cfg.automaton,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
@@ -219,23 +219,21 @@ impl<
     /// - Messages from the network:
     ///   - Acks from other validators
     pub fn start(
-        mut self,
+        self,
+        spawner: impl Spawner,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, network))
+        spawner.spawn(|spawner| self.run(spawner, network))
     }
 
     /// Inner run loop called by `start`.
     async fn run(
         mut self,
-        context: E,
+        spawner: impl Spawner,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         let (mut sender, mut receiver) = wrap((), network.0, network.1);
-        let mut shutdown = context.stopped();
+        let mut shutdown = spawner.stopped();
 
         // Initialize the epoch
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
@@ -249,10 +247,10 @@ impl<
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::init(context.with_label("journal"), journal_cfg)
+        let journal = Journal::init(self.context.with_label("journal"), journal_cfg)
             .await
             .expect("init failed");
-        let unverified_indices = self.replay(&context, &journal).await;
+        let unverified_indices = self.replay(&journal).await;
         self.journal = Some(journal);
 
         // Request digests for unverified indices
@@ -285,7 +283,7 @@ impl<
 
             // Get the rebroadcast deadline for the next index
             let rebroadcast = match self.rebroadcast_deadlines.peek() {
-                Some((_, &deadline)) => Either::Left(context.sleep_until(deadline)),
+                Some((_, &deadline)) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
 
@@ -340,7 +338,7 @@ impl<
                         }
                         Ok(digest) => {
                             if let Err(err) =
-                                self.handle_digest(&context, index, digest, &mut sender).await
+                                self.handle_digest(index, digest, &mut sender).await
                             {
                                 debug!(?err, ?index, "handle_digest failed");
                                 continue;
@@ -406,7 +404,7 @@ impl<
                     // Get the next index to rebroadcast
                     let (index, _) = self.rebroadcast_deadlines.pop().expect("no rebroadcast deadline");
                     trace!("rebroadcasting: index {}", index);
-                    if let Err(err) = self.handle_rebroadcast(&context, index, &mut sender).await {
+                    if let Err(err) = self.handle_rebroadcast(index, &mut sender).await {
                         warn!(?err, ?index, "rebroadcast failed");
                     };
                 }
@@ -427,7 +425,6 @@ impl<
     /// Handles a digest returned by the automaton.
     async fn handle_digest(
         &mut self,
-        context: &E,
         index: Index,
         digest: D,
         sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
@@ -468,7 +465,7 @@ impl<
 
         // Set the rebroadcast deadline for this index
         self.rebroadcast_deadlines
-            .put(index, context.current() + self.rebroadcast_timeout);
+            .put(index, self.context.current() + self.rebroadcast_timeout);
 
         // Handle ack as if it was received over the network
         let _ = self.handle_ack(&ack).await;
@@ -570,7 +567,6 @@ impl<
     /// Handles a rebroadcast request for the given index.
     async fn handle_rebroadcast(
         &mut self,
-        context: &E,
         index: Index,
         sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
     ) -> Result<(), Error> {
@@ -593,7 +589,7 @@ impl<
 
         // Reinsert the index with a new deadline
         self.rebroadcast_deadlines
-            .put(index, context.current() + self.rebroadcast_timeout);
+            .put(index, self.context.current() + self.rebroadcast_timeout);
 
         // Broadcast the ack to all peers
         self.broadcast(ack, sender).await
@@ -783,7 +779,7 @@ impl<
 
     /// Replays the journal, updating the state of the engine.
     /// Returns a list of unverified pending indices that need digest requests.
-    async fn replay(&mut self, context: &E, journal: &Journal<E, Activity<V, D>>) -> Vec<Index> {
+    async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) -> Vec<Index> {
         let mut tip = Index::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
@@ -868,7 +864,8 @@ impl<
                         .insert(index, Pending::Verified(digest, epoch_map));
 
                     // If we've already generated an ack and it isn't yet confirmed, mark for immediate rebroadcast
-                    self.rebroadcast_deadlines.put(index, context.current());
+                    self.rebroadcast_deadlines
+                        .put(index, self.context.current());
                 }
                 None => {
                     self.pending.insert(index, Pending::Unverified(epoch_map));

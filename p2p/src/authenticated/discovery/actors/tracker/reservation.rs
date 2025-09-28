@@ -1,13 +1,15 @@
 use super::Metadata;
 use crate::authenticated::discovery::actors::tracker::ingress::Releaser;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Metrics, Spawner};
+use commonware_runtime::Spawner;
 
 /// Reservation for a peer in the network. This is used to ensure that the peer is reserved only
 /// once, and that the reservation is released when the peer connection fails or is closed.
-pub struct Reservation<E: Spawner + Metrics, P: PublicKey> {
+pub struct Reservation<E: Spawner, P: PublicKey> {
     /// Context needed to spawn tasks if needed.
-    context: Option<E>,
+    ///
+    /// Stored as an `Option` to avoid unnecessary cloning by `take`ing the value.
+    spawner: Option<E>,
 
     /// Metadata about the reservation.
     metadata: Metadata<P>,
@@ -18,25 +20,25 @@ pub struct Reservation<E: Spawner + Metrics, P: PublicKey> {
     releaser: Option<Releaser<E, P>>,
 }
 
-impl<E: Spawner + Metrics, P: PublicKey> Reservation<E, P> {
+impl<E: Spawner, P: PublicKey> Reservation<E, P> {
     /// Create a new reservation for a peer.
-    pub fn new(context: E, metadata: Metadata<P>, releaser: Releaser<E, P>) -> Self {
+    pub fn new(spawner: E, metadata: Metadata<P>, releaser: Releaser<E, P>) -> Self {
         Self {
-            context: Some(context),
+            spawner: Some(spawner),
             metadata,
             releaser: Some(releaser),
         }
     }
 }
 
-impl<E: Spawner + Metrics, P: PublicKey> Reservation<E, P> {
+impl<E: Spawner, P: PublicKey> Reservation<E, P> {
     /// Returns the metadata associated with this reservation.
     pub fn metadata(&self) -> &Metadata<P> {
         &self.metadata
     }
 }
 
-impl<E: Spawner + Metrics, P: PublicKey> Drop for Reservation<E, P> {
+impl<E: Spawner, P: PublicKey> Drop for Reservation<E, P> {
     fn drop(&mut self) {
         let mut releaser = self
             .releaser
@@ -53,9 +55,9 @@ impl<E: Spawner + Metrics, P: PublicKey> Drop for Reservation<E, P> {
         // While it may not be immediately obvious how a deadlock could occur, we take the
         // conservative approach of avoiding it.
         let metadata = self.metadata.clone();
-        self.context
+        self.spawner
             .take()
-            .expect("context is only consumed on drop")
+            .expect("spawner is only consumed on drop")
             .spawn(move |_| async move {
                 releaser.release(metadata).await;
             });

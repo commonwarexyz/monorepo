@@ -181,7 +181,7 @@ fn main() {
         );
 
         // Start network
-        let network_handler = network.start();
+        let network_handler = network.start(context.with_label("network"));
 
         // Block on GUI
         handler::run(

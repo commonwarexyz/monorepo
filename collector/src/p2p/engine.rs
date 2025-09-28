@@ -10,7 +10,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Metrics, Spawner};
+use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
     channel::{mpsc, oneshot},
@@ -21,9 +21,8 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, error, warn};
 
 /// Engine that will disperse messages and collect responses.
-pub struct Engine<E, B, Rq, Rs, P, M, H>
+pub struct Engine<B, Rq, Rs, P, M, H>
 where
-    E: Clock + Spawner,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
@@ -32,7 +31,6 @@ where
     H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 {
     // Configuration
-    context: Option<E>,
     blocker: B,
     priority_request: bool,
     request_codec: Rq::Cfg,
@@ -53,9 +51,8 @@ where
     responses: Counter,
 }
 
-impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
+impl<B, Rq, Rs, P, M, H> Engine<B, Rq, Rs, P, M, H>
 where
-    E: Clock + Spawner + Metrics,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
@@ -66,7 +63,10 @@ where
     /// Creates a new engine with the given configuration.
     ///
     /// Returns a tuple of the engine and the mailbox for sending messages.
-    pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
+    pub fn new(
+        context: impl Metrics,
+        cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>,
+    ) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
@@ -85,7 +85,6 @@ where
 
         (
             Self {
-                context: Some(context),
                 blocker: cfg.blocker,
                 priority_request: cfg.priority_request,
                 request_codec: cfg.request_codec,
@@ -107,14 +106,12 @@ where
     ///
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
-        mut self,
+        self,
+        context: impl Spawner,
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|_| self.run(requests, responses))
+        context.spawn(|_| self.run(requests, responses))
     }
 
     async fn run(

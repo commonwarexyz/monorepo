@@ -56,9 +56,9 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> {
+pub struct Actor<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> {
     // ---------- Context ----------
-    context: Option<E>,
+    context: E,
 
     // ---------- Message Passing ----------
     // Mailbox
@@ -102,7 +102,7 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
     processed_height: Gauge,
 }
 
-impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
+impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
     /// Create a new application actor.
     pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B>) {
         // Initialize cache
@@ -209,7 +209,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                context: Some(context),
+                context,
                 mailbox,
                 identity: config.identity,
                 mailbox_size: config.mailbox_size,
@@ -232,7 +232,8 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
 
     /// Start the actor.
     pub fn start<R, P>(
-        mut self,
+        self,
+        spawner: impl Spawner + Metrics,
         application: impl Reporter<Activity = B>,
         buffer: buffered::Mailbox<P, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
@@ -241,16 +242,13 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         R: Resolver<Key = handler::Request<B>>,
         P: PublicKey,
     {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, application, buffer, resolver))
+        spawner.spawn(|spawner| self.run(spawner, application, buffer, resolver))
     }
 
     /// Run the application actor.
     async fn run<R, P>(
         mut self,
-        context: E,
+        spawner: impl Spawner + Metrics,
         application: impl Reporter<Activity = B>,
         mut buffer: buffered::Mailbox<P, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
@@ -263,14 +261,14 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
         let finalizer = Finalizer::new(
-            context.with_label("finalizer"),
+            self.context.with_label("finalizer"),
             format!("{}-finalizer", self.partition_prefix.clone()),
             application,
             orchestrator,
             notifier_rx,
         )
         .await;
-        context.with_label("finalizer").spawn(|_| finalizer.run());
+        spawner.with_label("finalizer").spawn(|_| finalizer.run());
 
         // Create a local pool for waiter futures
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();

@@ -251,8 +251,9 @@ fn main() {
         );
 
         // Start consensus
-        network.start();
+        network.start(context.with_label("network"));
         engine.start(
+            context.with_label("engine"),
             (pending_sender, pending_receiver),
             (recovered_sender, recovered_receiver),
             (resolver_sender, resolver_receiver),

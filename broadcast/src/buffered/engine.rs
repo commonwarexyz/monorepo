@@ -9,7 +9,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, Status},
-    Clock, Handle, Metrics, Spawner,
+    Handle, Metrics, Spawner,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -47,12 +47,7 @@ struct Pair<Dc, Dd> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + Codec> {
-    ////////////////////////////////////////
-    // Interfaces
-    ////////////////////////////////////////
-    context: Option<E>,
-
+pub struct Engine<P: PublicKey, M: Committable + Digestible + Codec> {
     ////////////////////////////////////////
     // Configuration
     ////////////////////////////////////////
@@ -108,18 +103,15 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     metrics: metrics::Metrics,
 }
 
-impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + Codec>
-    Engine<E, P, M>
-{
+impl<P: PublicKey, M: Committable + Digestible + Codec> Engine<P, M> {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
+    pub fn new(context: impl Metrics, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
-            context: Some(context),
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
@@ -137,19 +129,17 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
 
     /// Starts the engine with the given network.
     pub fn start(
-        mut self,
+        self,
+        context: impl Spawner,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, network))
+        context.spawn(|context| self.run(context, network))
     }
 
     /// Inner run loop called by `start`.
     async fn run(
         mut self,
-        context: E,
+        context: impl Spawner,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);

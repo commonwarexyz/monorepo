@@ -69,6 +69,6 @@ where
             priority_responses: config.priority_responses,
         },
     );
-    resolver_engine.start(backfill);
+    resolver_engine.start(ctx.with_label("resolver"), backfill);
     (receiver, resolver)
 }

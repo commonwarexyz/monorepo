@@ -7,14 +7,14 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Metrics, Spawner};
+use commonware_runtime::Spawner;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
 /// Messages that can be sent to the tracker actor.
-pub enum Message<E: Spawner + Metrics, C: PublicKey> {
+pub enum Message<E: Spawner, C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
     ///
@@ -124,7 +124,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     },
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
+impl<E: Spawner, C: PublicKey> Mailbox<Message<E, C>> {
     /// Send a `Connect` message to the tracker.
     pub async fn connect(&mut self, public_key: C, dialer: bool, peer: Mailbox<peer::Message<C>>) {
         self.send(Message::Connect {
@@ -201,11 +201,11 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
 
 /// Allows releasing reservations
 #[derive(Clone)]
-pub struct Releaser<E: Spawner + Metrics, C: PublicKey> {
+pub struct Releaser<E: Spawner, C: PublicKey> {
     sender: mpsc::Sender<Message<E, C>>,
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
+impl<E: Spawner, C: PublicKey> Releaser<E, C> {
     /// Create a new releaser.
     pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
         Self { sender }
@@ -236,11 +236,11 @@ impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
-pub struct Oracle<E: Spawner + Metrics, C: PublicKey> {
+pub struct Oracle<E: Spawner, C: PublicKey> {
     sender: mpsc::Sender<Message<E, C>>,
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> Oracle<E, C> {
+impl<E: Spawner, C: PublicKey> Oracle<E, C> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
         Self { sender }
     }
@@ -261,7 +261,7 @@ impl<E: Spawner + Metrics, C: PublicKey> Oracle<E, C> {
     }
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> crate::Blocker for Oracle<E, C> {
+impl<E: Spawner, C: PublicKey> crate::Blocker for Oracle<E, C> {
     type PublicKey = C;
 
     async fn block(&mut self, public_key: Self::PublicKey) {

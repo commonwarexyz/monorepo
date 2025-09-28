@@ -416,6 +416,7 @@ fn fuzz(input: FuzzInput) {
                     let (_tx, _rx) = mpsc::unbounded();
                     let mock_receiver = MockReceiver { rx: _rx };
                     engine.start(
+                        context.clone(),
                         (MockSender, mock_receiver),
                         (
                             MockSender,

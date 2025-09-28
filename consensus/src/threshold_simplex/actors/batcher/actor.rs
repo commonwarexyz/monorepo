@@ -317,7 +317,7 @@ impl<
 }
 
 pub struct Actor<
-    E: Spawner + Metrics + Clock,
+    E: Metrics + Clock,
     C: PublicKey,
     B: Blocker<PublicKey = C>,
     V: Variant,
@@ -330,7 +330,6 @@ pub struct Actor<
         Polynomial = Vec<V::Public>,
     >,
 > {
-    context: Option<E>,
     blocker: B,
     reporter: R,
     supervisor: S,
@@ -352,7 +351,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + Metrics + Clock,
+        E: Metrics + Clock,
         C: PublicKey,
         B: Blocker<PublicKey = C>,
         V: Variant,
@@ -397,7 +396,6 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context: Some(context.clone()),
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
@@ -421,14 +419,12 @@ impl<
     }
 
     pub fn start(
-        mut self,
+        self,
+        spawner: impl Spawner,
         consensus: voter::Mailbox<V, D>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|_| self.run(consensus, receiver))
+        spawner.spawn(|_| self.run(consensus, receiver))
     }
 
     pub async fn run(

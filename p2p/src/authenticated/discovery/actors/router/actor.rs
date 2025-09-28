@@ -20,19 +20,17 @@ use std::collections::BTreeMap;
 use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
-pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
-    context: Option<E>,
-
+pub struct Actor<P: PublicKey> {
     control: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<Data>>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
+impl<P: PublicKey> Actor<P> {
     /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
     /// that can be used to send messages to the router.
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<P>>, Messenger<P>) {
+    pub fn new(context: impl Metrics, cfg: Config) -> (Self, Mailbox<Message<P>>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 
@@ -47,7 +45,6 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         // Create actor
         (
             Self {
-                context: Some(context),
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 messages_dropped,
@@ -88,11 +85,8 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Starts a new task that runs the router [Actor].
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed.
-    pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|_| self.run(routing))
+    pub fn start(self, spawner: impl Spawner, routing: Channels<P>) -> Handle<()> {
+        spawner.spawn(|_| self.run(routing))
     }
 
     /// Runs the [Actor] event loop, processing incoming messages control messages

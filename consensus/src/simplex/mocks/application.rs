@@ -122,7 +122,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
 }
 
 pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
-    context: Option<E>,
+    context: E,
     hasher: H,
     participant: P,
 

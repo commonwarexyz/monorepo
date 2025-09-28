@@ -159,7 +159,7 @@ fn fuzz(input: FuzzInput) {
                 disconnect_on_block: false,
             },
         );
-        network.start();
+        network.start(context.with_label("network"));
 
         // Create peers
         let mut peers = Vec::new();
@@ -185,9 +185,9 @@ fn fuzz(input: FuzzInput) {
             // Create engine
             let engine_context = context.with_label(&format!("peer_{i}"));
             let (engine, mailbox) =
-                Engine::<_, PublicKey, FuzzMessage>::new(engine_context, config);
+                Engine::<PublicKey, FuzzMessage>::new(engine_context.clone(), config);
             mailboxes.insert(public_key.clone(), mailbox);
-            engine.start((sender, receiver));
+            engine.start(engine_context, (sender, receiver));
         }
 
         // Add links between peers

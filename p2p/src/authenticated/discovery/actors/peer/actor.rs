@@ -17,9 +17,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
-    context: E,
-
+pub struct Actor<C: PublicKey> {
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
@@ -36,17 +34,14 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
-    Actor<E, C>
-{
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
+impl<C: PublicKey> Actor<C> {
+    pub fn new(cfg: Config) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(control_sender);
         (
             Self {
-                context,
                 mailbox: mailbox.clone(),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -96,8 +91,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         Ok(())
     }
 
-    pub async fn run<O: Sink, I: Stream>(
+    pub async fn run<
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+        O: Sink,
+        I: Stream,
+    >(
         mut self,
+        context: E,
         peer: C,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
         mut tracker: Mailbox<tracker::Message<E, C>>,
@@ -107,14 +107,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
+            let rate_limiter = RateLimiter::direct_with_clock(rate, &context);
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
+        let mut send_handler: Handle<Result<(), Error>> = context.with_label("sender").spawn( {
             let peer = peer.clone();
             let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
@@ -164,8 +164,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 }
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self
-            .context
+        let mut receive_handler: Handle<Result<(), Error>> = context
             .with_label("receiver")
             .spawn(move |context| async move {
                 let bit_vec_rate_limiter =

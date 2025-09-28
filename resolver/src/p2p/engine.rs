@@ -40,7 +40,7 @@ struct Serve<E: Clock, P: PublicKey> {
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<
-    E: Clock + GClock + Spawner + Rng + Metrics,
+    E: Clock + GClock + Rng + Metrics,
     P: PublicKey,
     D: Coordinator<PublicKey = P>,
     Key: Span,
@@ -50,7 +50,7 @@ pub struct Engine<
     NetR: Receiver<PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
-    context: Option<E>,
+    context: E,
 
     /// Consumes data that is fetched from the network
     consumer: Con,
@@ -91,7 +91,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Spawner + Rng + Metrics,
+        E: Clock + GClock + Rng + Metrics,
         P: PublicKey,
         D: Coordinator<PublicKey = P>,
         Key: Span,
@@ -115,7 +115,7 @@ impl<
         );
         (
             Self {
-                context: Some(context),
+                context,
                 consumer: cfg.consumer,
                 producer: cfg.producer,
                 coordinator: cfg.coordinator,
@@ -138,16 +138,13 @@ impl<
     /// The actor will handle:
     /// - Fetching data from other peers and notifying the `Consumer`
     /// - Serving data to other peers by requesting it from the `Producer`
-    pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, network))
+    pub fn start(self, spawner: impl Spawner, network: (NetS, NetR)) -> Handle<()> {
+        spawner.spawn(|spawner| self.run(spawner, network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, context: E, network: (NetS, NetR)) {
-        let mut shutdown = context.stopped();
+    async fn run(mut self, spawner: impl Spawner, network: (NetS, NetR)) {
+        let mut shutdown = spawner.stopped();
 
         // Wrap channel
         let (mut sender, mut receiver) = wrap((), network.0, network.1);
@@ -178,13 +175,13 @@ impl<
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {
-                Some(deadline) => Either::Left(context.sleep_until(deadline)),
+                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
 
             // Get requester timeout (if any)
             let deadline_active = match self.fetcher.get_active_deadline() {
-                Some(deadline) => Either::Left(context.sleep_until(deadline)),
+                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                 None => Either::Right(future::pending()),
             };
 

@@ -134,7 +134,7 @@ fn main() {
         );
 
         // Create network
-        let p2p = network.start();
+        let p2p = network.start(context.with_label("network"));
 
         // Create flood
         let flood_sender = context

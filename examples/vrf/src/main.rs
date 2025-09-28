@@ -274,7 +274,7 @@ fn main() {
                 lazy,
                 forger,
             );
-            contributor.start(contributor_sender, contributor_receiver);
+            contributor.start(context.clone(), contributor_sender, contributor_receiver);
 
             // Create vrf
             let (vrf_sender, vrf_receiver) = network.register(
@@ -289,7 +289,7 @@ fn main() {
                 contributors,
                 requests,
             );
-            signer.start(vrf_sender, vrf_receiver);
+            signer.start(context.clone(), vrf_sender, vrf_receiver);
         } else {
             let (arbiter_sender, arbiter_receiver) = network.register(
                 handlers::DKG_CHANNEL,
@@ -302,8 +302,11 @@ fn main() {
                 DKG_PHASE_TIMEOUT,
                 contributors,
             );
-            arbiter.start(arbiter_sender, arbiter_receiver);
+            arbiter.start(context.clone(), arbiter_sender, arbiter_receiver);
         }
-        network.start().await.expect("Network failed");
+        network
+            .start(context.with_label("network"))
+            .await
+            .expect("Network failed");
     });
 }

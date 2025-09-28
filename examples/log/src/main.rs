@@ -219,9 +219,10 @@ fn main() {
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 
         // Start consensus
-        application.start();
-        network.start();
+        application.start(context.clone());
+        network.start(context.with_label("network"));
         engine.start(
+            context.clone(),
             (voter_sender, voter_receiver),
             (resolver_sender, resolver_receiver),
         );

@@ -8,15 +8,15 @@ use commonware_runtime::{Handle, Spawner};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use std::marker::PhantomData;
+use std::marker::{PhantomData, Send};
 use tracing::info;
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> {
-    context: Option<R>,
+pub struct Application<R: Rng, P: PublicKey, S: Signature, H: Hasher> {
+    context: R,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 
@@ -24,7 +24,7 @@ pub struct Application<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> 
     _phantom_s: PhantomData<S>,
 }
 
-impl<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> Application<R, P, S, H> {
+impl<R: Rng + Send + 'static, P: PublicKey, S: Signature, H: Hasher> Application<R, P, S, H> {
     /// Create a new application actor.
     #[allow(clippy::type_complexity)]
     pub fn new(
@@ -34,7 +34,7 @@ impl<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> Application<R, P, 
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
-                context: Some(context),
+                context,
                 hasher: config.hasher,
                 mailbox,
                 _phantom_s: PhantomData,
@@ -46,14 +46,11 @@ impl<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> Application<R, P, 
     }
 
     /// Run the application actor.
-    pub fn start(mut self) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context))
+    pub fn start(self, spawner: impl Spawner) -> Handle<()> {
+        spawner.spawn(|_| self.run())
     }
 
-    async fn run(mut self, mut context: R) {
+    async fn run(mut self) {
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { epoch, response } => {
@@ -73,7 +70,7 @@ impl<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> Application<R, P, 
                 Message::Propose { response } => {
                     // Generate a random message (secret to us)
                     let mut msg = vec![0; 16];
-                    context.fill(&mut msg[..]);
+                    self.context.fill(&mut msg[..]);
 
                     // Hash the message
                     self.hasher.update(&msg);

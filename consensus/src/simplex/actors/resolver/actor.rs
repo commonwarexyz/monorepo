@@ -99,12 +99,12 @@ impl Inflight {
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng + Metrics + Spawner,
+    E: Clock + GClock + Rng + Metrics,
     C: PublicKey,
     D: Digest,
     S: Supervisor<Index = View, PublicKey = C>,
 > {
-    context: Option<E>,
+    context: E,
     supervisor: S,
 
     epoch: Epoch,
@@ -132,7 +132,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng + Metrics + Spawner,
+        E: Clock + GClock + Rng + Metrics,
         C: PublicKey,
         D: Digest,
         S: Supervisor<Index = View, PublicKey = C>,
@@ -168,7 +168,7 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context: Some(context),
+                context,
                 supervisor: cfg.supervisor,
 
                 epoch: cfg.epoch,
@@ -201,7 +201,6 @@ impl<
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
     async fn send<Sr: Sender<PublicKey = C>>(
         &mut self,
-        context: &mut E,
         shuffle: bool,
         sender: &mut WrappedSender<Sr, Backfiller<C::Signature, D>>,
     ) {
@@ -221,7 +220,7 @@ impl<
                 .required
                 .iter()
                 .filter(|entry| !self.inflight.contains(entry))
-                .choose_multiple(context, self.max_fetch_count);
+                .choose_multiple(&mut self.context, self.max_fetch_count);
             if entries.is_empty() {
                 return;
             }
@@ -257,7 +256,8 @@ impl<
                     // We return instead of waiting to continue serving requests and in case we
                     // learn of new notarizations or nullifications in the meantime.
                     warn!("failed to send request to any validator");
-                    let deadline = context
+                    let deadline = self
+                        .context
                         .current()
                         .checked_add(self.fetch_timeout)
                         .expect("time overflowed");
@@ -297,20 +297,17 @@ impl<
     }
 
     pub fn start(
-        mut self,
+        self,
+        spawner: impl Spawner,
         voter: voter::Mailbox<C::Signature, D>,
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, voter, sender, receiver))
+        spawner.spawn(|_| self.run(voter, sender, receiver))
     }
 
     async fn run(
         mut self,
-        mut context: E,
         mut voter: voter::Mailbox<C::Signature, D>,
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
@@ -332,13 +329,13 @@ impl<
 
             // Set timeout for retry
             let retry = match self.retry {
-                Some(retry) => Either::Left(context.sleep_until(retry)),
+                Some(retry) => Either::Left(self.context.sleep_until(retry)),
                 None => Either::Right(futures::future::pending()),
             };
 
             // Set timeout for next request
             let (request, timeout) = if let Some((request, timeout)) = self.requester.next() {
-                (request, Either::Left(context.sleep_until(timeout)))
+                (request, Either::Left(self.context.sleep_until(timeout)))
             } else {
                 (0, Either::Right(futures::future::pending()))
             };
@@ -347,7 +344,7 @@ impl<
             select! {
                 _ = retry => {
                     // Retry sending after rate limiting
-                    self.send(&mut context, false, &mut sender).await;
+                    self.send(false, &mut sender).await;
                 },
                 _ = timeout => {
                     // Penalize peer for timeout
@@ -356,7 +353,7 @@ impl<
                     self.requester.timeout(request);
 
                     // Send message
-                    self.send(&mut context, true, &mut sender).await;
+                    self.send(true, &mut sender).await;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = match mailbox {
@@ -374,7 +371,7 @@ impl<
                             }
 
                             // Trigger fetch of new notarizations and nullifications as soon as possible
-                            self.send(&mut context, false, &mut sender).await;
+                            self.send(false, &mut sender).await;
                         }
                         Message::Notarized { notarization } => {
                             // Update current view
@@ -586,7 +583,7 @@ impl<
                             }
 
                             // If still work to do, send another request
-                            self.send(&mut context, shuffle, &mut sender).await;
+                            self.send(shuffle, &mut sender).await;
                         },
                     }
                 },

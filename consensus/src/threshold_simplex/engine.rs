@@ -17,7 +17,7 @@ use tracing::debug;
 
 /// Instance of `threshold-simplex` consensus engine.
 pub struct Engine<
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + GClock + Rng + CryptoRng + Storage + Metrics,
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -34,8 +34,6 @@ pub struct Engine<
         Share = group::Share,
     >,
 > {
-    context: E,
-
     voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
 
@@ -47,7 +45,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + GClock + Rng + CryptoRng + Storage + Metrics,
         C: Signer,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
@@ -129,8 +127,6 @@ impl<
 
         // Return the engine
         Self {
-            context,
-
             voter,
             voter_mailbox,
 
@@ -147,6 +143,7 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub fn start(
         self,
+        spawner: impl Spawner,
         pending_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -160,13 +157,19 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(pending_network, recovered_network, resolver_network))
+        spawner.spawn(|spawner| {
+            self.run(
+                spawner,
+                pending_network,
+                recovered_network,
+                resolver_network,
+            )
+        })
     }
 
     async fn run(
         self,
+        spawner: impl Spawner,
         pending_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -182,19 +185,25 @@ impl<
     ) {
         // Start the batcher
         let (pending_sender, pending_receiver) = pending_network;
-        let mut batcher_task = self
-            .batcher
-            .start(self.voter_mailbox.clone(), pending_receiver);
+        let mut batcher_task = self.batcher.start(
+            spawner.clone(),
+            self.voter_mailbox.clone(),
+            pending_receiver,
+        );
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_task =
-            self.resolver
-                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
+        let mut resolver_task = self.resolver.start(
+            spawner.clone(),
+            self.voter_mailbox,
+            resolver_sender,
+            resolver_receiver,
+        );
 
         // Start the voter
         let (recovered_sender, recovered_receiver) = recovered_network;
         let mut voter_task = self.voter.start(
+            spawner,
             self.batcher_mailbox,
             self.resolver_mailbox,
             pending_sender,

@@ -14,14 +14,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge}
 use rand::{CryptoRng, Rng};
 use tracing::debug;
 
-pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-    Si: Sink,
-    St: Stream,
-    C: PublicKey,
-> {
-    context: Option<E>,
-
+pub struct Actor<E: Spawner, Si: Sink, St: Stream, C: PublicKey> {
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
     allowed_ping_rate: Quota,
@@ -66,7 +59,6 @@ impl<
 
         (
             Self {
-                context: Some(context),
                 mailbox_size: cfg.mailbox_size,
                 ping_frequency: cfg.ping_frequency,
                 allowed_ping_rate: cfg.allowed_ping_rate,
@@ -81,14 +73,12 @@ impl<
     }
 
     pub fn start(
-        mut self,
+        self,
+        context: E,
         tracker: Mailbox<tracker::Message<E, C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, tracker, router))
+        context.spawn(|context| self.run(context, tracker, router))
     }
 
     async fn run(
@@ -119,17 +109,15 @@ impl<
                     context.with_label("peer").spawn(move |context| async move {
                         // Create peer
                         debug!(?peer, "peer started");
-                        let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
-                            context,
-                            peer::Config {
+                        let (peer_actor, peer_mailbox, messenger) =
+                            peer::Actor::new(peer::Config {
                                 ping_frequency: self.ping_frequency,
                                 allowed_ping_rate: self.allowed_ping_rate,
                                 sent_messages,
                                 received_messages,
                                 rate_limited,
                                 mailbox_size: self.mailbox_size,
-                            },
-                        );
+                            });
 
                         // Register peer with the router
                         let channels = router.ready(peer.clone(), messenger).await;
@@ -138,7 +126,9 @@ impl<
                         tracker.connect(peer.clone(), peer_mailbox).await;
 
                         // Run peer
-                        let e = peer_actor.run(peer.clone(), connection, channels).await;
+                        let e = peer_actor
+                            .run(context, peer.clone(), connection, channels)
+                            .await;
                         connections.dec();
 
                         // Let the router know the peer has exited

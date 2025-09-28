@@ -299,7 +299,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
             disconnect_on_block: true,
         },
     );
-    network.start();
+    network.start(context.with_label("network"));
 
     let identities = setup_network_identities(&mut oracle, distribution).await;
     setup_network_links(&mut oracle, &identities, latencies).await;

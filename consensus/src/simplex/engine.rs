@@ -14,7 +14,7 @@ use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + GClock + Rng + CryptoRng + Storage + Metrics,
     C: Signer,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
@@ -22,8 +22,6 @@ pub struct Engine<
     F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    context: E,
-
     voter: voter::Actor<E, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<C::Signature, D>,
     resolver: resolver::Actor<E, C::PublicKey, D, S>,
@@ -31,7 +29,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + GClock + Rng + CryptoRng + Storage + Metrics,
         C: Signer,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
@@ -91,8 +89,6 @@ impl<
 
         // Return the engine
         Self {
-            context,
-
             voter,
             voter_mailbox,
             resolver,
@@ -105,6 +101,7 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub fn start(
         self,
+        spawner: impl Spawner,
         voter_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -114,13 +111,12 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(voter_network, resolver_network))
+        spawner.spawn(|spawner| self.run(spawner, voter_network, resolver_network))
     }
 
     async fn run(
         self,
+        spawner: impl Spawner,
         voter_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -132,15 +128,21 @@ impl<
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
-        let mut voter_task = self
-            .voter
-            .start(self.resolver_mailbox, voter_sender, voter_receiver);
+        let mut voter_task = self.voter.start(
+            spawner.clone(),
+            self.resolver_mailbox,
+            voter_sender,
+            voter_receiver,
+        );
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver_task =
-            self.resolver
-                .start(self.voter_mailbox, resolver_sender, resolver_receiver);
+        let mut resolver_task = self.resolver.start(
+            spawner,
+            self.voter_mailbox,
+            resolver_sender,
+            resolver_receiver,
+        );
 
         // Wait for the resolver or voter to finish
         select! {

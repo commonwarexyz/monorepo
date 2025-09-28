@@ -27,13 +27,12 @@ pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
     C: Signer,
 > {
-    context: Option<E>,
     cfg: Config<C>,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
     tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
-    router: router::Actor<E, C::PublicKey>,
+    router: router::Actor<C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
 }
 
@@ -78,7 +77,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
         (
             Self {
-                context: Some(context),
                 cfg,
 
                 channels,
@@ -119,19 +117,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// Starts the network.
     ///
     /// After the network is started, it is not possible to add more channels.
-    pub fn start(mut self) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context))
+    pub fn start(self, context: E) -> Handle<()> {
+        context.spawn(|context| self.run(context))
     }
 
     async fn run(self, context: E) {
         // Start tracker
-        let mut tracker_task = self.tracker.start();
+        let mut tracker_task = self.tracker.start(context.clone());
 
         // Start router
-        let mut router_task = self.router.start(self.channels);
+        let mut router_task = self.router.start(context.clone(), self.channels);
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
@@ -145,8 +140,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
             },
         );
-        let mut spawner_task =
-            spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
+        let mut spawner_task = spawner.start(
+            context.with_label("spawner"),
+            self.tracker_mailbox.clone(),
+            self.router_mailbox.clone(),
+        );
 
         // Start listener
         let stream_cfg = StreamConfig {
@@ -165,8 +163,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 allowed_incoming_connection_rate: self.cfg.allowed_incoming_connection_rate,
             },
         );
-        let mut listener_task =
-            listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());
+        let mut listener_task = listener.start(
+            context.with_label("listener"),
+            self.tracker_mailbox.clone(),
+            spawner_mailbox.clone(),
+        );
 
         // Start dialer
         let dialer = dialer::Actor::new(
@@ -177,7 +178,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 query_frequency: self.cfg.query_frequency,
             },
         );
-        let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
+        let mut dialer_task = dialer.start(
+            context.with_label("dialer"),
+            self.tracker_mailbox,
+            spawner_mailbox,
+        );
 
         // Wait for first actor to exit
         info!("network started");

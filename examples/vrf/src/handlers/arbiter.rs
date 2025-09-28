@@ -19,8 +19,8 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-pub struct Arbiter<E: Clock + Spawner, C: PublicKey> {
-    context: Option<E>,
+pub struct Arbiter<E: Clock, C: PublicKey> {
+    context: E,
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
     contributors: Vec<C>,
@@ -28,7 +28,7 @@ pub struct Arbiter<E: Clock + Spawner, C: PublicKey> {
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
 /// acknowledgements, and complaints during a DKG round.
-impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
+impl<E: Clock, C: PublicKey> Arbiter<E, C> {
     pub fn new(
         context: E,
         dkg_frequency: Duration,
@@ -37,7 +37,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
     ) -> Self {
         contributors.sort();
         Self {
-            context: Some(context),
+            context,
             dkg_frequency,
             dkg_phase_timeout,
             contributors,
@@ -46,14 +46,13 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
 
     async fn run_round(
         &self,
-        context: &E,
         round: u64,
         previous: Option<poly::Public<MinSig>>,
         sender: &mut impl Sender<PublicKey = C>,
         receiver: &mut impl Receiver<PublicKey = C>,
     ) -> (Option<poly::Public<MinSig>>, HashSet<C>) {
         // Create a new round
-        let start = context.current();
+        let start = self.context.current();
         let timeout = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
 
         // Send round start message to contributors
@@ -87,7 +86,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
         );
         loop {
             select! {
-                _ = context.sleep_until(timeout) => {
+                _ = self.context.sleep_until(timeout) => {
                     warn!(round, "timed out waiting for commitments");
                     break
                 },
@@ -216,19 +215,16 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
     }
 
     pub fn start(
-        mut self,
+        self,
+        spawner: impl Spawner,
         sender: impl Sender<PublicKey = C>,
         receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, sender, receiver))
+        spawner.spawn(|_| self.run(sender, receiver))
     }
 
     async fn run(
         self,
-        context: E,
         mut sender: impl Sender<PublicKey = C>,
         mut receiver: impl Receiver<PublicKey = C>,
     ) {
@@ -236,13 +232,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
         let mut previous = None;
         loop {
             let (public, disqualified) = self
-                .run_round(
-                    &context,
-                    round,
-                    previous.clone(),
-                    &mut sender,
-                    &mut receiver,
-                )
+                .run_round(round, previous.clone(), &mut sender, &mut receiver)
                 .await;
 
             // Log round results
@@ -267,7 +257,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
             round += 1;
 
             // Wait for next round
-            context.sleep(self.dkg_frequency).await;
+            self.context.sleep(self.dkg_frequency).await;
         }
     }
 }

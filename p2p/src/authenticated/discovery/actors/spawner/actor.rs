@@ -24,8 +24,6 @@ pub struct Actor<
     I: Stream,
     C: PublicKey,
 > {
-    context: Option<E>,
-
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
@@ -74,7 +72,6 @@ impl<
 
         (
             Self {
-                context: Some(context),
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -92,14 +89,12 @@ impl<
     }
 
     pub fn start(
-        mut self,
+        self,
+        context: E,
         tracker: Mailbox<tracker::Message<E, C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, tracker, router))
+        context.spawn(|context| self.run(context, tracker, router))
     }
 
     async fn run(
@@ -131,9 +126,8 @@ impl<
                     context.with_label("peer").spawn(move |context| async move {
                         // Create peer
                         debug!(?peer, "peer started");
-                        let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
-                            context,
-                            peer::Config {
+                        let (peer_actor, peer_mailbox, messenger) =
+                            peer::Actor::new(peer::Config {
                                 sent_messages,
                                 received_messages,
                                 rate_limited,
@@ -143,8 +137,7 @@ impl<
                                 max_peer_set_size: self.max_peer_set_size,
                                 allowed_peers_rate: self.allowed_peers_rate,
                                 peer_gossip_max_count: self.peer_gossip_max_count,
-                            },
-                        );
+                            });
 
                         // Register peer with the router
                         let channels = router.ready(peer.clone(), messenger).await;
@@ -154,7 +147,7 @@ impl<
 
                         // Run peer
                         let e = peer_actor
-                            .run(peer.clone(), connection, tracker, channels)
+                            .run(context, peer.clone(), connection, tracker, channels)
                             .await;
                         connections.dec();
 

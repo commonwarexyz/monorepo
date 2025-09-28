@@ -21,8 +21,8 @@ use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
-pub struct Contributor<E: Clock + CryptoRngCore + Spawner, C: Signer> {
-    context: Option<E>,
+pub struct Contributor<E: Clock + CryptoRngCore, C: Signer> {
+    context: E,
     crypto: C,
     dkg_phase_timeout: Duration,
     arbiter: C::PublicKey,
@@ -37,7 +37,7 @@ pub struct Contributor<E: Clock + CryptoRngCore + Spawner, C: Signer> {
     signatures: mpsc::Sender<(u64, Output<MinSig>)>,
 }
 
-impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
+impl<E: Clock + CryptoRngCore, C: Signer> Contributor<E, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: E,
@@ -58,7 +58,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         let (sender, receiver) = mpsc::channel(32);
         (
             Self {
-                context: Some(context),
+                context,
                 crypto,
                 dkg_phase_timeout,
                 arbiter,
@@ -78,7 +78,6 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
 
     async fn run_round(
         &mut self,
-        context: &mut E,
         previous: Option<&Output<MinSig>>,
         sender: &mut impl Sender<PublicKey = C::PublicKey>,
         receiver: &mut impl Receiver<PublicKey = C::PublicKey>,
@@ -160,7 +159,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         let mut dealer_obj = if should_deal {
             let previous = previous.map(|previous| previous.share.clone());
             let (dealer, commitment, shares) =
-                Dealer::<_, MinSig>::new(context, previous, self.contributors.clone());
+                Dealer::<_, MinSig>::new(&mut self.context, previous, self.contributors.clone());
             Some((dealer, commitment, shares, HashMap::new()))
         } else {
             None
@@ -205,7 +204,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                     // If we are corrupt, randomly modify the share.
                     share = group::Share {
                         index: share.index,
-                        private: group::Scalar::from_rand(context),
+                        private: group::Scalar::from_rand(&mut self.context),
                     };
                     warn!(round, ?player, "modified share");
                 }
@@ -241,10 +240,10 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         }
 
         // Respond to commitments and wait for acks
-        let t = context.current() + 2 * self.dkg_phase_timeout;
+        let t = self.context.current() + 2 * self.dkg_phase_timeout;
         loop {
             select! {
-                    _ = context.sleep_until(t) => {
+                    _ = self.context.sleep_until(t) => {
                         debug!(round, "ack timeout");
                         break;
                     },
@@ -440,19 +439,16 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
     }
 
     pub fn start(
-        mut self,
+        self,
+        spawner: impl Spawner,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, sender, receiver));
+        spawner.spawn(|_| self.run(sender, receiver));
     }
 
     async fn run(
         mut self,
-        mut context: E,
         mut sender: impl Sender<PublicKey = C::PublicKey>,
         mut receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
@@ -468,7 +464,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         let mut previous = None;
         loop {
             let (round, output) = self
-                .run_round(&mut context, previous.as_ref(), &mut sender, &mut receiver)
+                .run_round(previous.as_ref(), &mut sender, &mut receiver)
                 .await;
             match output {
                 None => {

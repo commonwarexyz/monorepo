@@ -29,8 +29,6 @@ pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
     C: Signer,
 > {
-    context: E,
-
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
@@ -51,8 +49,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         );
 
         Self {
-            context: context.clone(),
-
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
             rate_limiter: RateLimiter::direct_with_clock(
@@ -106,23 +102,22 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     #[allow(clippy::type_complexity)]
     pub fn start(
         self,
+        context: E,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(tracker, supervisor))
+        context.spawn(|context| self.run(context, tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]
     async fn run(
         self,
+        context: E,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Start listening for incoming connections
-        let mut listener = self
-            .context
+        let mut listener = context
             .bind(self.address)
             .await
             .expect("failed to bind listener");
@@ -132,8 +127,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             // Ensure we don't attempt to perform too many handshakes at once
             if let Err(wait_until) = self.rate_limiter.check() {
                 self.handshakes_rate_limited.inc();
-                let wait = wait_until.wait_time_from(self.context.now());
-                self.context.sleep(wait).await;
+                let wait = wait_until.wait_time_from(context.now());
+                context.sleep(wait).await;
             }
 
             // Accept a new connection
@@ -147,7 +142,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
             // Spawn a new handshaker to upgrade connection
-            self.context.with_label("handshaker").spawn({
+            context.with_label("handshaker").spawn({
                 let stream_cfg = self.stream_cfg.clone();
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();
