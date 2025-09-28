@@ -76,7 +76,10 @@ mod tests {
         resolver::p2p as resolver,
     };
     use crate::{
-        marshal::ingress::coding::{mailbox::ShardMailbox, types::CodedBlock},
+        marshal::ingress::coding::{
+            mailbox::ShardMailbox,
+            types::{CodedBlock, CodingCommitment},
+        },
         threshold_simplex::types::{
             finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
             Notarization, Notarize, Proposal,
@@ -118,9 +121,9 @@ mod tests {
     };
 
     type H = Sha256;
-    type D = <H as Hasher>::Digest;
+    type D = CodingCommitment;
     type S = ReedSolomon<H>;
-    type B = Block<D>;
+    type B = Block<<H as Hasher>::Digest>;
     type P = PublicKey;
     type V = MinPk;
     type Sh = Share;
@@ -395,7 +398,7 @@ mod tests {
 
             // Generate blocks, skipping the genesis block.
             let mut blocks = Vec::<CodedBlock<B, S>>::new();
-            let mut parent = Sha256::hash(b"");
+            let mut parent = CodingCommitment::default();
             for i in 1..=NUM_BLOCKS {
                 let block = B::new::<Sha256>(parent, i, i);
                 let coded_block = CodedBlock::new(block, coding_config);
@@ -516,8 +519,7 @@ mod tests {
                 extra_shards: (peers.len() / 2) as u16,
             };
 
-            let parent = Sha256::hash(b"");
-            let inner = B::new::<Sha256>(parent, 1, 1);
+            let inner = B::new::<Sha256>(Default::default(), 1, 1);
             let block = CodedBlock::new(inner, coding_config);
             let commitment = block.commitment();
 
@@ -580,10 +582,10 @@ mod tests {
                 extra_shards: (peers.len() / 2) as u16,
             };
 
-            let parent = Sha256::hash(b"");
+            let parent = CodingCommitment::default();
             let inner1 = B::new::<Sha256>(parent, 1, 1);
             let block1 = CodedBlock::new(inner1, coding_config);
-            let inner2 = B::new::<Sha256>(block1.digest(), 2, 2);
+            let inner2 = B::new::<Sha256>(block1.commitment(), 2, 2);
             let block2 = CodedBlock::new(inner2, coding_config);
             let commitment1 = block1.commitment();
             let commitment2 = block2.commitment();
@@ -665,10 +667,10 @@ mod tests {
                 extra_shards: (peers.len() / 2) as u16,
             };
 
-            let parent = Sha256::hash(b"");
+            let parent = CodingCommitment::default();
             let inner1 = B::new::<Sha256>(parent, 1, 1);
             let block1 = CodedBlock::new(inner1, coding_config);
-            let inner2 = B::new::<Sha256>(block1.digest(), 2, 2);
+            let inner2 = B::new::<Sha256>(block1.commitment(), 2, 2);
             let block2 = CodedBlock::new(inner2, coding_config);
             let commitment1 = block1.commitment();
             let commitment2 = block2.commitment();
@@ -742,10 +744,10 @@ mod tests {
                 extra_shards: (peers.len() / 2) as u16,
             };
 
-            let parent = Sha256::hash(b"");
+            let parent = CodingCommitment::from((Sha256::hash(b""), Default::default()));
             let inner1 = B::new::<Sha256>(parent, 1, 1);
             let block1 = CodedBlock::new(inner1, coding_config);
-            let inner2 = B::new::<Sha256>(block1.digest(), 2, 2);
+            let inner2 = B::new::<Sha256>(block1.commitment(), 2, 2);
             let block2 = CodedBlock::new(inner2, coding_config);
 
             // Block1: Broadcasted by self

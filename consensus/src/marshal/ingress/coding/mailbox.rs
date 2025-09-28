@@ -1,7 +1,7 @@
 //! Erasure coding wrapper for [buffered::Mailbox]
 
 use crate::{
-    marshal::ingress::coding::types::{CodedBlock, DistributionShard, Shard},
+    marshal::ingress::coding::types::{CodedBlock, CodingCommitment, DistributionShard, Shard},
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
@@ -44,7 +44,7 @@ pub struct ShardMailbox<S, H, B, P>
 where
     S: Scheme,
     H: Hasher,
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     P: PublicKey,
 {
     /// Buffered mailbox for broadcasting and receiving [Shard]s to/from peers
@@ -54,14 +54,14 @@ where
     block_codec_cfg: B::Cfg,
 
     /// Open subscriptions for [CodedBlock]s by commitment
-    block_subscriptions: BTreeMap<S::Commitment, BlockSubscription<CodedBlock<B, S>>>,
+    block_subscriptions: BTreeMap<CodingCommitment, BlockSubscription<CodedBlock<B, S>>>,
 }
 
 impl<S, H, B, P> ShardMailbox<S, H, B, P>
 where
     S: Scheme,
     H: Hasher,
-    B: Block<Commitment = S::Commitment>,
+    B: Block<Commitment = CodingCommitment>,
     P: PublicKey,
 {
     pub fn new(mailbox: buffered::Mailbox<P, Shard<S, H>>, block_codec_cfg: B::Cfg) -> Self {
@@ -93,7 +93,7 @@ where
     }
 
     /// Broadcasts a local [Shard] of a block to all peers, if the [Shard] is present
-    pub async fn try_broadcast_shard(&mut self, commitment: S::Commitment, index: usize) {
+    pub async fn try_broadcast_shard(&mut self, commitment: CodingCommitment, index: usize) {
         let shard = self
             .mailbox
             .get(None, commitment, None)
@@ -104,13 +104,18 @@ where
 
         if let Some(shard) = shard {
             let index = shard.index();
-            let DistributionShard::Strong { shard, config } = shard.into_inner() else {
+            let DistributionShard::Strong(shard) = shard.into_inner() else {
                 // If the shard is already weak, it's been broadcasted to us already;
                 // no need to re-broadcast.
                 return;
             };
 
-            let Ok((_, _, reshard)) = S::reshard(&config, &commitment, index as u16, shard) else {
+            let Ok((_, _, reshard)) = S::reshard(
+                &commitment.config(),
+                &commitment.inner(),
+                index as u16,
+                shard,
+            ) else {
                 // If the shard can't be verified locally, don't broadcast anything.
                 return;
             };
@@ -135,22 +140,24 @@ where
     /// reconstruction fails, returns a [ReconstructionError]
     pub async fn try_reconstruct(
         &mut self,
-        commitment: S::Commitment,
+        commitment: CodingCommitment,
     ) -> Result<Option<CodedBlock<B, S>>, ReconstructionError<S>> {
         let shards = self.mailbox.get(None, commitment, None).await;
+        let config = commitment.config();
 
         // Search for a strong shard to form the checking data. We must have at least one strong shard
         // sent to us by the proposer. In the case of the proposer, all shards in the mailbox will be strong,
         // but any can be used for forming the checking data.
-        //
-        // We take the config from a strong shard because it was sent by the proposer. While the proposer could
-        // have lied, it gives us a single source of truth for the config to use. If the config is invalid
-        // per the original encoding, then reconstruction will fail later.
-        let Some((config, checking_data)) = shards.iter().find_map(|s| {
-            if let DistributionShard::Strong { shard, config } = s.deref() {
-                S::reshard(config, &commitment, s.index() as u16, shard.clone())
-                    .map(|(checking_data, _, _)| (*config, checking_data))
-                    .ok()
+        let Some(checking_data) = shards.iter().find_map(|s| {
+            if let DistributionShard::Strong(shard) = s.deref() {
+                S::reshard(
+                    &config,
+                    &commitment.inner(),
+                    s.index() as u16,
+                    shard.clone(),
+                )
+                .map(|(checking_data, _, _)| checking_data)
+                .ok()
             } else {
                 None
             }
@@ -164,17 +171,22 @@ where
             .filter_map(|s| {
                 let index = s.index() as u16;
                 match s.into_inner() {
-                    DistributionShard::Strong { shard, config } => {
+                    DistributionShard::Strong(shard) => {
                         // Any strong shards, at this point, were sent from the proposer.
                         // We use the reshard interface to produce our checked shard rather
                         // than taking two hops.
-                        S::reshard(&config, &commitment, index, shard)
+                        S::reshard(&config, &commitment.inner(), index, shard)
                             .map(|(_, checked, _)| checked)
                             .ok()
                     }
-                    DistributionShard::Weak(re_shard) => {
-                        S::check(&config, &commitment, &checking_data, index, re_shard).ok()
-                    }
+                    DistributionShard::Weak(re_shard) => S::check(
+                        &config,
+                        &commitment.inner(),
+                        &checking_data,
+                        index,
+                        re_shard,
+                    )
+                    .ok(),
                 }
             })
             .collect::<Vec<_>>();
@@ -187,7 +199,7 @@ where
         // Attempt to reconstruct the encoded blob
         let decoded = S::decode(
             &config,
-            &commitment,
+            &commitment.inner(),
             checking_data.clone(),
             checked_shards.as_slice(),
         )
@@ -218,7 +230,7 @@ where
     /// If the mailbox does not have the shard cached, [None] is returned
     pub async fn get_shard(
         &mut self,
-        commitment: S::Commitment,
+        commitment: CodingCommitment,
         index: usize,
     ) -> Option<Shard<S, H>> {
         let index_hash = Shard::<S, H>::uuid(commitment, index);
@@ -236,7 +248,7 @@ where
     /// responder
     pub async fn subscribe_shard(
         &mut self,
-        commitment: S::Commitment,
+        commitment: CodingCommitment,
         index: usize,
         responder: oneshot::Sender<Shard<S, H>>,
     ) {
@@ -253,7 +265,7 @@ where
     /// responder
     pub async fn subscribe_block(
         &mut self,
-        commitment: S::Commitment,
+        commitment: CodingCommitment,
         responder: oneshot::Sender<CodedBlock<B, S>>,
     ) -> Result<(), ReconstructionError<S>> {
         match self.block_subscriptions.entry(commitment) {
@@ -394,7 +406,7 @@ mod test {
                 extra_shards: (NUM_PEERS / 2) as u16,
             };
 
-            let inner = B::new::<Sha256>(Sha256::empty(), 1, 2);
+            let inner = B::new::<Sha256>(Default::default(), 1, 2);
             let coded_block = CodedBlock::<B, ReedSolomon<Sha256>>::new(inner, coding_config);
 
             // Broadcast all shards out (proposer) with too few peers - should panic.
@@ -425,7 +437,7 @@ mod test {
                 extra_shards: (NUM_PEERS / 2) as u16,
             };
 
-            let inner = B::new::<Sha256>(Sha256::empty(), 1, 2);
+            let inner = B::new::<Sha256>(Default::default(), 1, 2);
             let coded_block = CodedBlock::<B, ReedSolomon<Sha256>>::new(inner, coding_config);
 
             // Broadcast all shards out (proposer)
@@ -471,7 +483,7 @@ mod test {
                 extra_shards: (NUM_PEERS / 2) as u16,
             };
 
-            let inner = B::new::<Sha256>(Sha256::empty(), 1, 2);
+            let inner = B::new::<Sha256>(Default::default(), 1, 2);
             let coded_block = CodedBlock::<B, ReedSolomon<Sha256>>::new(inner, coding_config);
 
             // Broadcast all shards out (proposer)
@@ -519,7 +531,7 @@ mod test {
                 extra_shards: (NUM_PEERS / 2) as u16,
             };
 
-            let inner = B::new::<Sha256>(Sha256::empty(), 1, 2);
+            let inner = B::new::<Sha256>(Default::default(), 1, 2);
             let coded_block = CodedBlock::<B, ReedSolomon<Sha256>>::new(inner, coding_config);
 
             // Broadcast all shards out (proposer)

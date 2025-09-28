@@ -1,3 +1,4 @@
+use crate::marshal::ingress::coding::types::CodingCommitment;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
@@ -5,7 +6,7 @@ use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block<D: Digest> {
     /// The parent block's digest.
-    pub parent: D,
+    pub parent: CodingCommitment,
 
     /// The height of the block in the blockchain.
     pub height: u64,
@@ -18,7 +19,11 @@ pub struct Block<D: Digest> {
 }
 
 impl<D: Digest> Block<D> {
-    fn compute_digest<H: Hasher<Digest = D>>(parent: &D, height: u64, timestamp: u64) -> D {
+    fn compute_digest<H: Hasher<Digest = D>>(
+        parent: &CodingCommitment,
+        height: u64,
+        timestamp: u64,
+    ) -> D {
         let mut hasher = H::new();
         hasher.update(parent);
         hasher.update(&height.to_be_bytes());
@@ -26,7 +31,11 @@ impl<D: Digest> Block<D> {
         hasher.finalize()
     }
 
-    pub fn new<H: Hasher<Digest = D>>(parent: D, height: u64, timestamp: u64) -> Self {
+    pub fn new<H: Hasher<Digest = D>>(
+        parent: CodingCommitment,
+        height: u64,
+        timestamp: u64,
+    ) -> Self {
         let digest = Self::compute_digest::<H>(&parent, height, timestamp);
         Self {
             parent,
@@ -50,7 +59,7 @@ impl<D: Digest> Read for Block<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        let parent = D::read(reader)?;
+        let parent = CodingCommitment::read(reader)?;
         let height = UInt::read(reader)?.into();
         let timestamp = UInt::read(reader)?.into();
         let digest = D::read(reader)?;
@@ -77,16 +86,16 @@ impl<D: Digest> EncodeSize for Block<D> {
 impl<D: Digest> Digestible for Block<D> {
     type Digest = D;
 
-    fn digest(&self) -> D {
+    fn digest(&self) -> Self::Digest {
         self.digest
     }
 }
 
 impl<D: Digest> Committable for Block<D> {
-    type Commitment = D;
+    type Commitment = CodingCommitment;
 
-    fn commitment(&self) -> D {
-        self.digest
+    fn commitment(&self) -> Self::Commitment {
+        self.parent
     }
 }
 
