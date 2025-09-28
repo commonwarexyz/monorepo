@@ -5,7 +5,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
+use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, RwLock, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
@@ -14,12 +14,14 @@ use governor::{
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
+    collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
     },
+    time::Duration,
 };
 use tracing::debug;
 
@@ -47,6 +49,7 @@ pub struct Actor<
     peer_rate_limiter: Arc<
         RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
     >,
+    prioritized_ips: Arc<RwLock<HashMap<IpAddr, HashSet<C::PublicKey>>>>,
 
     handshakes_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -92,6 +95,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 cfg.allowed_handshake_rate_per_peer,
                 &context,
             )),
+            prioritized_ips: Arc::new(RwLock::new(HashMap::new())),
 
             handshakes_rate_limited,
             handshakes_ip_rate_limited,
@@ -116,6 +120,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 NoOpMiddleware<E::Instant>,
             >,
         >,
+        prioritized_ips: Arc<RwLock<HashMap<IpAddr, HashSet<C::PublicKey>>>>,
         handshakes_peer_rate_limited: Counter,
         _in_flight: InFlightGuard,
     ) {
@@ -150,6 +155,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         };
         debug!(?peer, ?address, "reserved connection");
 
+        {
+            let mut guard = prioritized_ips.write().await;
+            guard.entry(address.ip()).or_default().insert(peer.clone());
+        }
+
         // Start peer to handle messages
         supervisor.spawn((send, recv), reservation).await;
     }
@@ -179,7 +189,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             .expect("failed to bind listener");
 
         // Loop over incoming connections
-        loop {
+        'accept: loop {
             // Accept a new connection
             let (address, sink, stream) = match listener.accept().await {
                 Ok((address, sink, stream)) => (address, sink, stream),
@@ -190,23 +200,35 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             };
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
+            let prioritized_ip = {
+                let guard = self.prioritized_ips.read().await;
+                guard.get(&address.ip()).is_some_and(|set| !set.is_empty())
+            };
+
             if self.ip_rate_limiter.check_key(&address.ip()).is_err() {
                 self.handshakes_ip_rate_limited.inc();
                 debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
                 continue;
             }
 
-            let Ok(_) = self.in_flight_handshakes.fetch_update(
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-                |current| (current < self.max_concurrent_handshakes).then_some(current + 1),
-            ) else {
-                self.handshakes_rate_limited.inc();
-                debug!(?address, "maximum concurrent handshakes reached");
-                continue;
+            let in_flight = loop {
+                let result = self.in_flight_handshakes.fetch_update(
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                    |current| (current < self.max_concurrent_handshakes).then_some(current + 1),
+                );
+                match result {
+                    Ok(_) => break InFlightGuard::new(self.in_flight_handshakes.clone()),
+                    Err(_) if prioritized_ip => {
+                        self.context.sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(_) => {
+                        self.handshakes_rate_limited.inc();
+                        debug!(?address, "maximum concurrent handshakes reached");
+                        continue 'accept;
+                    }
+                }
             };
-
-            let in_flight = InFlightGuard::new(self.in_flight_handshakes.clone());
 
             // Spawn a new handshaker to upgrade connection
             self.context.with_label("handshaker").spawn({
@@ -214,6 +236,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();
                 let peer_rate_limiter = self.peer_rate_limiter.clone();
+                let prioritized_ips = self.prioritized_ips.clone();
                 let handshakes_peer_rate_limited = self.handshakes_peer_rate_limited.clone();
                 let in_flight = in_flight;
                 move |context| {
@@ -226,6 +249,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                         tracker,
                         supervisor,
                         peer_rate_limiter,
+                        prioritized_ips,
                         handshakes_peer_rate_limited,
                         in_flight,
                     )
