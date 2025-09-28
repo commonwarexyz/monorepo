@@ -2232,6 +2232,91 @@ mod tests {
     }
 
     #[test]
+    fn test_external_tokio_basic_functionality() {
+        let rt = ::tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // Create config with external tokio enabled
+            let config = tokio::Config::default().with_external_tokio(true);
+            let executor = tokio::Runner::new(config);
+
+            // We need to run this in spawn_blocking since Runner::start uses block_on
+            let result = ::tokio::task::spawn_blocking(move || {
+                executor.start(|context| async move {
+                    // Test basic spawning
+                    let handle = context.spawn(|_| async move { 42 });
+                    handle.await.unwrap()
+                })
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(result, 42);
+        });
+    }
+
+    #[test]
+    fn test_external_tokio_clock_operations() {
+        let rt = ::tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let config = tokio::Config::default().with_external_tokio(true);
+            let executor = tokio::Runner::new(config);
+
+            ::tokio::task::spawn_blocking(move || {
+                executor.start(|context| async move {
+                    // Test clock operations
+                    let start = context.current();
+                    context.sleep(Duration::from_millis(10)).await;
+                    let end = context.current();
+
+                    assert!(end.duration_since(start).unwrap() >= Duration::from_millis(10));
+                })
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_external_tokio_metrics() {
+        let rt = ::tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let config = tokio::Config::default().with_external_tokio(true);
+            let executor = tokio::Runner::new(config);
+
+            ::tokio::task::spawn_blocking(move || {
+                executor.start(|context| async move {
+                    // Test metrics functionality
+                    assert_eq!(context.label(), "");
+
+                    let counter = Counter::<u64>::default();
+                    context.register("test", "test", counter.clone());
+                    counter.inc();
+
+                    let buffer = context.encode();
+                    assert!(buffer.contains("test_total 1"));
+                })
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_external_tokio_config_default() {
+        // Test that default config has use_external_tokio = false
+        let config = tokio::Config::default();
+        assert_eq!(config.use_external_tokio(), false);
+        
+        // Test that with_external_tokio works
+        let config = config.with_external_tokio(true);
+        assert_eq!(config.use_external_tokio(), true);
+        
+        // Test that it can be turned back off
+        let config = config.with_external_tokio(false);
+        assert_eq!(config.use_external_tokio(), false);
+    }
+
+    #[test]
     fn test_tokio_process_rss_metric() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
