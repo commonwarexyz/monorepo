@@ -38,14 +38,14 @@ jobs:
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Lint
-      run: cargo clippy --all-targets ${{ matrix.flags }} -- -D warnings
+    - name: Install just
+      uses: taiki-e/install-action@just
     - name: Fmt
-      run: cargo +${{ env.NIGHTLY_VERSION }} fmt --all -- --check
+      run: just check-fmt ${{ env.NIGHTLY_VERSION }}
+    - name: Lint
+      run: just clippy ${{ matrix.flags }}
     - name: Check docs
-      run: cargo doc ${{ matrix.flags }} --no-deps --document-private-items
-      env:
-        RUSTDOCFLAGS: "-D warnings"
+      run: just check-docs ${{ matrix.flags }}
 
   Tests:
     name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/2)"
@@ -82,8 +82,12 @@ jobs:
       uses: ./.github/actions/setup
     - name: Install nextest
       uses: taiki-e/install-action@cargo-nextest
+    - name: Install just
+      uses: taiki-e/install-action@just
     - name: Run tests
-      run: cargo nextest run ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
+      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
+    - name: Run doc tests
+      run: just test-docs ${{ matrix.flags }}
 
   Tests-Gate:
     name: "Fast-Tests"
@@ -116,8 +120,10 @@ jobs:
       uses: taiki-e/install-action@v2
       with:
         tool: cargo-udeps@${{ env.UDEPS_VERSION }}
+    - name: Install just
+      uses: taiki-e/install-action@just
     - name: Check for unused dependencies
-      run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets
+      run: just udeps ${{ env.NIGHTLY_VERSION }}
 
   Lock:
     runs-on: ubuntu-latest
@@ -192,7 +198,9 @@ jobs:
         rustup toolchain install ${{ env.NIGHTLY_VERSION }} --component miri
         rustup override set ${{ env.NIGHTLY_VERSION }}
         cargo miri setup
+    - name: Install just
+      uses: taiki-e/install-action@just
     - name: Run miri tests for storage::index
       run: |
         cd storage
-        MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --lib index::
+        just miri index::

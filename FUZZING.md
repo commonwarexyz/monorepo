@@ -20,6 +20,10 @@ $ nohup cargo +nightly fuzz run roundtrip corpus/roundtrip/ -j 25 -a -- -max_len
 $ cargo +nightly fuzz run roundtrip --help 
 ```
 
+> [!NOTE]
+> If using the [`justfile`](./justfile), all fuzz tests for a given directory can be ran using 
+> `just fuzz <dir> <max_time>`.
+
 ### Coverage
 
 To explore coverage information, the following tools are required:
