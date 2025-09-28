@@ -14,6 +14,11 @@ use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
+use std::{
+    collections::HashSet,
+    net::IpAddr,
+    sync::{Arc, RwLock},
+};
 use tracing::{debug, info, warn};
 
 /// Unique suffix for all messages signed in a stream.
@@ -32,6 +37,7 @@ pub struct Network<
     tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -48,6 +54,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
+        let registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>> = if cfg.require_registered_ips {
+            Some(Arc::new(RwLock::new(HashSet::new())))
+        } else {
+            None
+        };
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
@@ -57,6 +68,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
+                registered_ips: registered_ips.clone(),
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
@@ -77,6 +89,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracker_mailbox,
                 router,
                 router_mailbox,
+                registered_ips,
             },
             oracle,
         )
@@ -148,6 +161,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
                 allowed_incoming_connection_rate: self.cfg.allowed_incoming_connection_rate,
+                registered_ips: self.registered_ips.clone(),
             },
         );
         let mut listener_task =

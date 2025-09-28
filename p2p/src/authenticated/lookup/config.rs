@@ -27,6 +27,9 @@ pub struct Config<C: Signer> {
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
+    /// Require peers to dial or accept connections only from registered IP addresses.
+    pub require_registered_ips: bool,
+
     /// Maximum size allowed for messages over any connection.
     ///
     /// The actual size of the network message will be higher due to overhead from the protocol;
@@ -98,6 +101,7 @@ impl<C: Signer> Config<C> {
             dialable,
 
             allow_private_ips: false,
+            require_registered_ips: true,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
@@ -132,6 +136,7 @@ impl<C: Signer> Config<C> {
             dialable,
 
             allow_private_ips: true,
+            require_registered_ips: true,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
@@ -156,6 +161,7 @@ impl<C: Signer> Config<C> {
             dialable: listen,
 
             allow_private_ips: true,
+            require_registered_ips: true,
             max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),

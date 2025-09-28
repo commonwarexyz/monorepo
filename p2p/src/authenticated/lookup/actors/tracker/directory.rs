@@ -8,8 +8,9 @@ use governor::{
 };
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, HashMap},
-    net::SocketAddr,
+    collections::{BTreeMap, HashMap, HashSet},
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, RwLock},
 };
 use tracing::debug;
 
@@ -17,6 +18,10 @@ use tracing::debug;
 pub struct Config {
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
+
+    /// Shared set of registered IP addresses for pre-handshake filtering. When `None`, the
+    /// pre-handshake filter is disabled.
+    pub registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>>,
 
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
@@ -35,6 +40,9 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
+
+    /// Shared set of registered IP addresses for pre-handshake filtering.
+    registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>>,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -77,12 +85,19 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             context,
             max_sets: cfg.max_sets,
             allow_private_ips: cfg.allow_private_ips,
+            registered_ips: cfg.registered_ips,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
             releaser,
             metrics,
         }
+        .with_refreshed_ips()
+    }
+
+    fn with_refreshed_ips(self) -> Self {
+        self.refresh_registered_ips();
+        self
     }
 
     // ---------- Setters ----------
@@ -153,6 +168,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Attempt to remove any old records from the rate limiter.
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
         self.rate_limiter.shrink_to_fit();
+        self.refresh_registered_ips();
         deleted_peers
     }
 
@@ -175,6 +191,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     pub fn block(&mut self, peer: &C) {
         if self.peers.get_mut(peer).is_some_and(|r| r.block()) {
             self.metrics.blocked.inc();
+            self.refresh_registered_ips();
         }
     }
 
@@ -262,7 +279,25 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
         self.peers.remove(peer);
         self.metrics.tracked.dec();
+        self.refresh_registered_ips();
         true
+    }
+
+    fn refresh_registered_ips(&self) {
+        let Some(registration) = &self.registered_ips else {
+            return;
+        };
+        let mut ips = HashSet::new();
+        for record in self.peers.values() {
+            if record.allowed(self.allow_private_ips) {
+                if let Some(addr) = record.socket() {
+                    ips.insert(addr.ip());
+                }
+            }
+        }
+        if let Ok(mut guard) = registration.write() {
+            *guard = ips;
+        }
     }
 }
 
@@ -273,7 +308,11 @@ mod tests {
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
     use futures::channel::mpsc;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        collections::HashSet,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::{Arc, RwLock},
+    };
 
     #[test]
     fn test_add_set_return_value() {
@@ -284,6 +323,7 @@ mod tests {
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
+            registered_ips: Some(Arc::new(RwLock::new(HashSet::new()))),
             max_sets: 1,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };

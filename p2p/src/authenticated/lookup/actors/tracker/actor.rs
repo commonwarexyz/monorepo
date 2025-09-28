@@ -48,6 +48,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             max_sets: cfg.tracked_peer_sets,
             rate_limit: cfg.allowed_connection_rate_per_peer,
             allow_private_ips: cfg.allow_private_ips,
+            registered_ips: cfg.registered_ips.clone(),
         };
 
         // Create the mailboxes
@@ -164,7 +165,9 @@ mod tests {
     use commonware_utils::NZU32;
     use governor::Quota;
     use std::{
+        collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::{Arc, RwLock},
         time::Duration,
     };
 
@@ -177,6 +180,7 @@ mod tests {
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
             allow_private_ips: true,
+            registered_ips: Some(Arc::new(RwLock::new(HashSet::new()))),
         }
     }
 

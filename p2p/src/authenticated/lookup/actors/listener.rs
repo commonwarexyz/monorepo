@@ -15,7 +15,11 @@ use governor::{
 };
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
-use std::net::SocketAddr;
+use std::{
+    collections::HashSet,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, RwLock},
+};
 use tracing::debug;
 
 /// Configuration for the listener actor.
@@ -23,6 +27,7 @@ pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
     pub allowed_incoming_connection_rate: Quota,
+    pub registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>>,
 }
 
 pub struct Actor<
@@ -34,6 +39,7 @@ pub struct Actor<
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
+    registered_ips: Option<Arc<RwLock<HashSet<IpAddr>>>>,
 
     handshakes_rate_limited: Counter,
 }
@@ -59,6 +65,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 cfg.allowed_incoming_connection_rate,
                 &context,
             ),
+            registered_ips: cfg.registered_ips,
 
             handshakes_rate_limited,
         }
@@ -145,6 +152,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 }
             };
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
+
+            if let Some(allowed_ips) = &self.registered_ips {
+                let ip = address.ip();
+                let allowed = allowed_ips
+                    .read()
+                    .map(|set| set.contains(&ip))
+                    .unwrap_or(false);
+                if !allowed {
+                    debug!(?address, "rejecting unregistered address");
+                    continue;
+                }
+            }
 
             // Spawn a new handshaker to upgrade connection
             self.context.with_label("handshaker").spawn({
