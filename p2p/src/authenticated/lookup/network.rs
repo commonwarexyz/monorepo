@@ -149,6 +149,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 stream_cfg: stream_cfg.clone(),
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
+                allowed_handshake_rate_per_subnet: self.cfg.allowed_handshake_rate_per_subnet,
                 allowed_handshake_rate_per_peer: self.cfg.allowed_handshake_rate_per_peer,
             },
         );

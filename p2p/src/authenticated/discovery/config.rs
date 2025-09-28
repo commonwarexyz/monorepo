@@ -66,6 +66,9 @@ pub struct Config<C: Signer> {
     /// Quota for handshake attempts originating from a single IP address.
     pub allowed_handshake_rate_per_ip: Quota,
 
+    /// Quota for handshake attempts originating from a single IP subnet.
+    pub allowed_handshake_rate_per_subnet: Quota,
+
     /// Quota for handshake attempts associated with a single peer.
     pub allowed_handshake_rate_per_peer: Quota,
 
@@ -142,6 +145,7 @@ impl<C: Signer> Config<C> {
             allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
             max_concurrent_handshakes: NZU32!(512),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(4)),
+            allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             allowed_handshake_rate_per_peer: Quota::per_second(NZU32!(4)),
             dial_frequency: Duration::from_millis(1_000),
             query_frequency: Duration::from_secs(60),
@@ -184,6 +188,7 @@ impl<C: Signer> Config<C> {
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
             max_concurrent_handshakes: NZU32!(512),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(8)),
+            allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(96)),
             allowed_handshake_rate_per_peer: Quota::per_second(NZU32!(8)),
             dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
@@ -220,6 +225,7 @@ impl<C: Signer> Config<C> {
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(4)),
             max_concurrent_handshakes: NZU32!(1_024),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)),
+            allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             allowed_handshake_rate_per_peer: Quota::per_second(NZU32!(16)),
             dial_frequency: Duration::from_millis(200),
             query_frequency: Duration::from_millis(5_000),

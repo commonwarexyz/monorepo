@@ -5,7 +5,9 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, RwLock, SinkOf, Spawner, StreamOf};
+use commonware_runtime::{
+    Clock, Handle, Listener, Metrics, Network, RwLock, SinkOf, Spawner, StreamOf,
+};
 use commonware_stream::{listen, Config as StreamConfig};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
@@ -15,7 +17,7 @@ use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{HashMap, HashSet},
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     num::NonZeroU32,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -25,12 +27,35 @@ use std::{
 };
 use tracing::debug;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SubnetKey {
+    addr: IpAddr,
+}
+
+fn subnet_of(ip: IpAddr) -> SubnetKey {
+    // IPv4 buckets share the first 24 bits; IPv6 buckets share the upper 64 bits.
+    // This matches the network’s default assumptions and contains common ISP subnet sizes.
+    match ip {
+        IpAddr::V4(v4) => {
+            let masked = Ipv4Addr::from(u32::from(v4) & 0xFFFFFF00);
+            SubnetKey {
+                addr: IpAddr::V4(masked),
+            }
+        }
+        IpAddr::V6(v6) => {
+            let masked = IpAddr::V6(Ipv6Addr::from(u128::from(v6) & !((1u128 << 64) - 1)));
+            SubnetKey { addr: masked }
+        }
+    }
+}
+
 /// Configuration for the listener actor.
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
     pub max_concurrent_handshakes: NonZeroU32,
     pub allowed_handshake_rate_per_ip: Quota,
+    pub allowed_handshake_rate_per_subnet: Quota,
     pub allowed_handshake_rate_per_peer: Quota,
 }
 
@@ -46,6 +71,8 @@ pub struct Actor<
     in_flight_handshakes: Arc<AtomicU32>,
     ip_rate_limiter:
         Arc<RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>>,
+    subnet_rate_limiter:
+        Arc<RateLimiter<SubnetKey, HashMapStateStore<SubnetKey>, E, NoOpMiddleware<E::Instant>>>,
     peer_rate_limiter: Arc<
         RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
     >,
@@ -53,6 +80,7 @@ pub struct Actor<
 
     handshakes_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
+    handshakes_subnet_rate_limited: Counter,
     handshakes_peer_rate_limited: Counter,
 }
 
@@ -79,6 +107,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             "number of handshake attempts dropped because a peer exceeded its rate limit",
             handshakes_peer_rate_limited.clone(),
         );
+        let handshakes_subnet_rate_limited = Counter::default();
+        context.register(
+            "handshake_subnet_rate_limited",
+            "number of handshake attempts dropped because a subnet exceeded its rate limit",
+            handshakes_subnet_rate_limited.clone(),
+        );
 
         Self {
             context: context.clone(),
@@ -91,6 +125,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 cfg.allowed_handshake_rate_per_ip,
                 &context,
             )),
+            subnet_rate_limiter: Arc::new(RateLimiter::hashmap_with_clock(
+                cfg.allowed_handshake_rate_per_subnet,
+                &context,
+            )),
             peer_rate_limiter: Arc::new(RateLimiter::hashmap_with_clock(
                 cfg.allowed_handshake_rate_per_peer,
                 &context,
@@ -99,6 +137,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             handshakes_rate_limited,
             handshakes_ip_rate_limited,
+            handshakes_subnet_rate_limited,
             handshakes_peer_rate_limited,
         }
     }
@@ -204,10 +243,19 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 guard.get(&address.ip()).is_some_and(|set| !set.is_empty())
             };
 
+            let subnet = subnet_of(address.ip());
+
             // Drop the connection if the IP exceeds its rate limit
             if self.ip_rate_limiter.check_key(&address.ip()).is_err() {
                 self.handshakes_ip_rate_limited.inc();
                 debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
+                self.prioritized_ips.write().await.remove(&address.ip());
+                continue;
+            }
+
+            if self.subnet_rate_limiter.check_key(&subnet).is_err() {
+                self.handshakes_subnet_rate_limited.inc();
+                debug!(ip = ?address.ip(), subnet = ?subnet, "subnet exceeded handshake rate limit");
                 self.prioritized_ips.write().await.remove(&address.ip());
                 continue;
             }
@@ -310,6 +358,9 @@ mod tests {
                     stream_cfg,
                     max_concurrent_handshakes: NonZeroU32::new(8).expect("non-zero"),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NonZeroU32::new(1).unwrap()),
+                    allowed_handshake_rate_per_subnet: Quota::per_hour(
+                        NonZeroU32::new(64).unwrap(),
+                    ),
                     allowed_handshake_rate_per_peer: Quota::per_hour(NonZeroU32::new(16).unwrap()),
                 },
             );
