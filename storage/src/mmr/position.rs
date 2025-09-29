@@ -26,10 +26,10 @@ impl Position {
     ///
     /// # Panics
     ///
-    /// Panics if the location is too large to fit in a `usize`.
+    /// Panics if the position is too large to fit in a `usize`.
     #[inline]
     pub fn as_usize(self) -> usize {
-        self.0.try_into().expect("location is too large")
+        self.0.try_into().expect("position is too large")
     }
 
     /// Return `self + rhs` returning `None` on overflow.
