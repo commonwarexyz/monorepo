@@ -16,8 +16,7 @@ use crate::{
             Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
         },
         hasher::Hasher,
-        iterator::leaf_pos_to_loc,
-        verification, Proof, StandardHasher as Standard,
+        verification, Location, Position, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -104,7 +103,7 @@ pub struct KeyValueProofInfo<K, V, const N: usize> {
     pub value: V,
 
     /// The location of the operation that assigned this value to the key.
-    pub loc: u64,
+    pub loc: Location,
 
     /// The status bitmap chunk that contains the bit corresponding the operation's location.
     pub chunk: [u8; N],
@@ -215,7 +214,7 @@ impl<
     }
 
     /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
-    pub fn inactivity_floor_loc(&self) -> u64 {
+    pub fn inactivity_floor_loc(&self) -> Location {
         self.any.inactivity_floor_loc()
     }
 
@@ -227,7 +226,7 @@ impl<
     /// Get the value of the operation with location `loc` in the db. Returns
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
-    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         self.any.get_loc(loc).await
     }
 
@@ -245,7 +244,7 @@ impl<
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let update_result = self.any.update_return_loc(key, value).await?;
         if let Some(old_loc) = update_result {
-            self.status.set_bit(old_loc, false);
+            self.status.set_bit(old_loc.as_u64(), false);
         }
         self.status.append(true);
 
@@ -261,7 +260,7 @@ impl<
         };
 
         self.status.append(false);
-        self.status.set_bit(old_loc, false);
+        self.status.set_bit(old_loc.as_u64(), false);
 
         Ok(())
     }
@@ -298,13 +297,17 @@ impl<
             if self.any.inactivity_floor_loc == self.op_count() {
                 break;
             }
-            let op = self.any.log.read(self.any.inactivity_floor_loc).await?;
+            let op = self
+                .any
+                .log
+                .read(self.any.inactivity_floor_loc.as_u64())
+                .await?;
             let old_loc = self
                 .any
                 .move_op_if_active(op, self.any.inactivity_floor_loc)
                 .await?;
             if let Some(old_loc) = old_loc {
-                self.status.set_bit(old_loc, false);
+                self.status.set_bit(old_loc.as_u64(), false);
                 self.status.append(true);
             }
             self.any.inactivity_floor_loc += 1;
@@ -333,7 +336,8 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
 
-        self.status.prune_to_bit(self.any.inactivity_floor_loc);
+        self.status
+            .prune_to_bit(self.any.inactivity_floor_loc.as_u64());
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -354,7 +358,7 @@ impl<
     /// # Panic
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
+    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         self.any.prune(target_prune_loc).await
     }
 
@@ -407,7 +411,7 @@ impl<
     pub async fn range_proof(
         &self,
         hasher: &mut H,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>, Vec<[u8; N]>), Error> {
         assert!(
@@ -419,8 +423,8 @@ impl<
         let mmr = &self.any.mmr;
         let leaves = mmr.leaves();
         assert!(start_loc < leaves, "start_loc is invalid");
-        let max_loc = start_loc + max_ops.get();
-        let end_loc = core::cmp::min(max_loc, leaves);
+        let max_loc = start_loc.checked_add(max_ops.get()).unwrap();
+        let end_loc = core::cmp::min(max_loc, Location::new(leaves));
 
         // Generate the proof from the grafted MMR.
         let height = Self::grafting_height();
@@ -428,8 +432,8 @@ impl<
         let mut proof = verification::range_proof(&grafted_mmr, start_loc..end_loc).await?;
 
         // Collect the operations necessary to verify the proof.
-        let mut ops = Vec::with_capacity((end_loc - start_loc) as usize);
-        let futures = (start_loc..end_loc)
+        let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
+        let futures = (start_loc.as_u64()..end_loc.as_u64())
             .map(|i| self.any.log.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -439,8 +443,8 @@ impl<
 
         // Gather the chunks necessary to verify the proof.
         let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let start = start_loc / chunk_bits; // chunk that contains the very first bit.
-        let end = (end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
+        let start = start_loc.as_u64() / chunk_bits; // chunk that contains the very first bit.
+        let end = (end_loc - 1).as_u64() / chunk_bits; // chunk that contains the very last bit.
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
             let bit_offset = i * chunk_bits;
@@ -464,20 +468,20 @@ impl<
     pub fn verify_range_proof(
         hasher: &mut Standard<H>,
         proof: &Proof<H::Digest>,
-        start_loc: u64,
+        start_loc: Location,
         ops: &[Fixed<K, V>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        let op_count = leaf_pos_to_loc(proof.size);
-        let Some(op_count) = op_count else {
+        let Ok(op_count) = Location::try_from(Position::from(proof.size)) else {
             debug!("verification failed, invalid proof size");
             return false;
         };
-        let end_loc = start_loc + ops.len() as u64;
+        let op_count = op_count.as_u64();
+        let end_loc = start_loc.checked_add(ops.len() as u64).unwrap();
         if end_loc > op_count {
             debug!(
-                loc = end_loc,
+                loc = ?end_loc,
                 op_count, "proof verification failed, invalid range"
             );
             return false;
@@ -486,9 +490,12 @@ impl<
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let start_chunk_loc = start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let mut verifier =
-            GraftingVerifier::<H>::new(Self::grafting_height(), start_chunk_loc, chunk_vec);
+        let start_chunk_loc = start_loc.as_u64() / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let mut verifier = GraftingVerifier::<H>::new(
+            Self::grafting_height(),
+            Location::new(start_chunk_loc),
+            chunk_vec,
+        );
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
             return proof.verify_range_inclusion(&mut verifier, &elements, start_loc, root);
@@ -546,7 +553,7 @@ impl<
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk(loc);
+        let chunk = *self.status.get_chunk(loc.as_u64());
 
         let last_chunk = self.status.last_chunk();
         if last_chunk.1 != 0 {
@@ -573,24 +580,28 @@ impl<
         info: &KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let Some(op_count) = leaf_pos_to_loc(proof.size) else {
+        let Ok(op_count) = Location::try_from(Position::from(proof.size)) else {
             debug!("verification failed, invalid proof size");
             return false;
         };
+        let op_count = op_count.as_u64();
 
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
-        if !Bitmap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc) {
+        if !Bitmap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc.as_u64()) {
             debug!(
-                loc = info.loc,
+                loc = info.loc.as_u64(),
                 "proof verification failed, operation is inactive"
             );
             return false;
         }
 
-        let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let mut verifier =
-            GraftingVerifier::<H>::new(Self::grafting_height(), num, vec![&info.chunk]);
+        let num = info.loc.as_u64() / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let mut verifier = GraftingVerifier::<H>::new(
+            Self::grafting_height(),
+            Location::new(num),
+            vec![&info.chunk],
+        );
         let element = Fixed::Update(info.key.clone(), info.value.clone()).encode();
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
@@ -609,7 +620,8 @@ impl<
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of info.chunk, since these bits are not part of
         // the mmr.
-        if info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS == op_count / Bitmap::<H, N>::CHUNK_SIZE_BITS
+        if info.loc.as_u64() / Bitmap::<H, N>::CHUNK_SIZE_BITS
+            == op_count / Bitmap::<H, N>::CHUNK_SIZE_BITS
         {
             let expected_last_chunk_digest = verifier.digest(&info.chunk);
             if last_chunk_digest != expected_last_chunk_digest {
@@ -653,15 +665,15 @@ impl<
     async fn operation_inclusion_proof(
         &self,
         hasher: &mut H,
-        loc: u64,
-    ) -> Result<(Proof<H::Digest>, Fixed<K, V>, u64, [u8; N]), Error> {
-        let op = self.any.log.read(loc).await?;
+        loc: Location,
+    ) -> Result<(Proof<H::Digest>, Fixed<K, V>, Location, [u8; N]), Error> {
+        let op = self.any.log.read(loc.as_u64()).await?;
 
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk(loc);
+        let chunk = *self.status.get_chunk(loc.as_u64());
 
         let last_chunk = self.status.last_chunk();
         if last_chunk.1 != 0 {
@@ -700,7 +712,7 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
-        self.status.prune_to_bit(target_prune_loc);
+        self.status.prune_to_bit(target_prune_loc.as_u64());
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -761,7 +773,7 @@ pub mod test {
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.inactivity_floor_loc(), 0);
+            assert_eq!(db.inactivity_floor_loc(), Location::new(0));
             let root0 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
@@ -889,8 +901,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
-                Bitmap::<Sha256, 32>::leaf_pos(active_loc),
-                Bitmap::<Sha256, 32>::leaf_pos(info.loc)
+                Bitmap::<Sha256, 32>::leaf_pos(active_loc.as_u64()),
+                Bitmap::<Sha256, 32>::leaf_pos(info.loc.as_u64())
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
@@ -906,7 +918,7 @@ pub mod test {
             // fool the verifier if we are correctly incorporating the partial chunk information
             // into the root computation.
             let mut modified_chunk = proof_inactive.3;
-            let bit_pos = proof_inactive.2;
+            let bit_pos = proof_inactive.2.as_u64();
             let byte_idx = bit_pos / 8;
             let bit_idx = bit_pos % 8;
             modified_chunk[byte_idx as usize] |= 1 << bit_idx;
@@ -979,16 +991,17 @@ pub mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.op_count();
+            let end_loc = Location::new(db.op_count());
             let start_loc = db.any.inactivity_floor_loc();
 
-            for i in start_loc..end_loc {
+            for loc in start_loc.as_u64()..end_loc.as_u64() {
+                let loc = Location::new(loc);
                 let (proof, ops, chunks) = db
-                    .range_proof(hasher.inner(), i, NZU64!(max_ops))
+                    .range_proof(hasher.inner(), loc, NZU64!(max_ops))
                     .await
                     .unwrap();
                 assert!(
-                    CurrentTest::verify_range_proof(&mut hasher, &proof, i, &ops, &chunks, &root),
+                    CurrentTest::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
             }
@@ -1014,7 +1027,7 @@ pub mod test {
             let res = db.key_value_proof(hasher.inner(), bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
-            let start = db.inactivity_floor_loc();
+            let start = db.inactivity_floor_loc().as_u64();
             for i in start..db.status.bit_count() {
                 if !db.status.get_bit(i) {
                     continue;
@@ -1109,7 +1122,7 @@ pub mod test {
             let mut old_info = KeyValueProofInfo {
                 key: k,
                 value: Sha256::fill(0x00),
-                loc: 0,
+                loc: Location::new(0),
                 chunk: [0; 32],
             };
             for i in 1u8..=255 {

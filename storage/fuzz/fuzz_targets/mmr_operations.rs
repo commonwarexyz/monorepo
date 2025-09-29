@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::{mem::Mmr, StandardHasher as Standard};
+use commonware_storage::mmr::{mem::Mmr, Location, Position, StandardHasher as Standard};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -27,10 +27,10 @@ struct FuzzInput {
 
 // Simple reference that tracks basic MMR state
 struct ReferenceMmr {
-    leaf_positions: Vec<u64>,
+    leaf_positions: Vec<Position>,
     leaf_data: Vec<Vec<u8>>,
     total_nodes_added: u64,
-    pruned_to_pos: u64,
+    pruned_to_pos: Position,
 }
 
 impl ReferenceMmr {
@@ -39,11 +39,11 @@ impl ReferenceMmr {
             leaf_positions: Vec::new(),
             leaf_data: Vec::new(),
             total_nodes_added: 0,
-            pruned_to_pos: 0,
+            pruned_to_pos: Position::new(0),
         }
     }
 
-    fn add(&mut self, leaf_pos: u64, data: Vec<u8>) {
+    fn add(&mut self, leaf_pos: Position, data: Vec<u8>) {
         self.leaf_positions.push(leaf_pos);
         self.leaf_data.push(data);
         // Track nodes added (leaf + any parent nodes)
@@ -79,7 +79,7 @@ impl ReferenceMmr {
         }
     }
 
-    fn last_leaf_pos(&self) -> Option<u64> {
+    fn last_leaf_pos(&self) -> Option<Position> {
         self.leaf_positions.last().copied()
     }
 
@@ -92,20 +92,20 @@ impl ReferenceMmr {
     }
 
     fn prune_all(&mut self) {
-        self.pruned_to_pos = self.total_nodes_added;
+        self.pruned_to_pos = Position::new(self.total_nodes_added);
     }
 
-    fn prune_to_pos(&mut self, pos: u64) {
+    fn prune_to_pos(&mut self, pos: Position) {
         if pos <= self.total_nodes_added {
             self.pruned_to_pos = pos;
         }
     }
 
-    fn get_pruned_to_pos(&self) -> u64 {
+    fn get_pruned_to_pos(&self) -> Position {
         self.pruned_to_pos
     }
 
-    fn is_leaf_pruned(&self, leaf_pos: u64) -> bool {
+    fn is_leaf_pruned(&self, leaf_pos: Position) -> bool {
         leaf_pos < self.pruned_to_pos
     }
 
@@ -241,7 +241,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::GetNode { pos } => {
                     if mmr.size() > 0 {
-                        let safe_pos = *pos % mmr.size();
+                        let safe_pos = Position::new(*pos % mmr.size());
                         let node = mmr.get_node(safe_pos);
 
                         // Check if the node is pruned
@@ -295,16 +295,17 @@ fn fuzz(input: FuzzInput) {
                     }
                     let location = (*location as usize) % reference.leaf_positions.len();
                     let test_element_pos = reference.leaf_positions[location];
+                    let location = Location::new(location as u64);
                     if test_element_pos >= mmr.size() || test_element_pos < mmr.pruned_to_pos() {
                         continue;
                     }
 
-                    if let Ok(proof) = mmr.proof(location as u64) {
+                    if let Ok(proof) = mmr.proof(location) {
                         let root = mmr.root(&mut hasher);
                         assert!(proof.verify_element_inclusion(
                             &mut hasher,
                             reference.leaf_data[location].as_slice(),
-                            location as u64,
+                            location,
                             &root,
                         ));
                     }
@@ -344,7 +345,7 @@ fn fuzz(input: FuzzInput) {
                 MmrOperation::PruneToPos { pos_idx } => {
                     if mmr.size() > 0 {
                         // Only prune to positions within the current size (0 to size inclusive)
-                        let pos = (*pos_idx) % (mmr.size() + 1);
+                        let pos = Position::new((*pos_idx) % (mmr.size() + 1));
 
                         // Skip if trying to prune to a position before or equal to what's already pruned
                         if pos <= mmr.pruned_to_pos() {
@@ -397,7 +398,7 @@ fn fuzz(input: FuzzInput) {
                     assert!(
                         last_pos < mmr.size(),
                         "Operation {op_idx}: Last leaf position {last_pos} >= size {}",
-                        mmr.size()
+                         mmr.size()
                     );
                 }
             } else {

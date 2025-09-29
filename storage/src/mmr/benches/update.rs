@@ -5,7 +5,7 @@ use commonware_runtime::{
 };
 use commonware_storage::mmr::{
     mem::{Config as MemConfig, Mmr},
-    StandardHasher,
+    Position, StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -57,7 +57,7 @@ fn bench_update(c: &mut Criterion) {
                                             .unwrap();
                                     Mmr::<Sha256>::init(MemConfig {
                                         nodes: vec![],
-                                        pruned_to_pos: 0,
+                                        pruned_to_pos: Position::new(0),
                                         pinned_nodes: vec![],
                                         pool: Some(pool),
                                     })
@@ -99,7 +99,7 @@ fn bench_update(c: &mut Criterion) {
                                 _ => {
                                     // Collect the map into a Vec of (position, element) pairs for batched updates
                                     let updates: Vec<(
-                                        u64,
+                                        Position,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     mmr.update_leaf_batched(&mut h, &updates);
