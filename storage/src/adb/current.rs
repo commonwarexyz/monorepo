@@ -16,7 +16,7 @@ use crate::{
             Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
         },
         hasher::Hasher,
-        verification, Location, Position, Proof, StandardHasher as Standard,
+        verification, Location, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -473,7 +473,7 @@ impl<
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        let Ok(op_count) = Location::try_from(Position::from(proof.size)) else {
+        let Ok(op_count) = Location::try_from(proof.size) else {
             debug!("verification failed, invalid proof size");
             return false;
         };
@@ -580,7 +580,7 @@ impl<
         info: &KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
     ) -> bool {
-        let Ok(op_count) = Location::try_from(Position::from(proof.size)) else {
+        let Ok(op_count) = Location::try_from(proof.size) else {
             debug!("verification failed, invalid proof size");
             return false;
         };

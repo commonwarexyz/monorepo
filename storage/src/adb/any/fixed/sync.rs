@@ -1227,7 +1227,9 @@ mod tests {
                 let expected = target_db.log.read(i).await.unwrap();
                 assert_eq!(got, expected);
             }
-            for i in synced_db.mmr.oldest_retained_pos().unwrap().as_u64()..synced_db.mmr.size() {
+            for i in
+                synced_db.mmr.oldest_retained_pos().unwrap().as_u64()..synced_db.mmr.size().as_u64()
+            {
                 let i = Position::new(i);
                 let got = synced_db.mmr.get_node(i).await.unwrap();
                 let expected = target_db.mmr.get_node(i).await.unwrap();

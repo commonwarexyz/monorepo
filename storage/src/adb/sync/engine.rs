@@ -537,7 +537,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::Proof;
+    use crate::mmr::{Position, Proof};
     use commonware_cryptography::sha256;
     use futures::channel::oneshot;
 
@@ -552,7 +552,7 @@ mod tests {
                 start_loc: Location::new(0),
                 result: Ok(FetchResult {
                     proof: Proof {
-                        size: 0,
+                        size: Position::new(0),
                         digests: vec![],
                     },
                     operations: vec![],

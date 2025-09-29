@@ -63,16 +63,15 @@ pub fn digests_required_for_proof<D: Digest>(
     end_loc: Location,
 ) -> Vec<Position> {
     let size = Position::from(Location::new(op_count));
-    proof::nodes_required_for_range_proof(size.as_u64(), start_loc..end_loc + 1)
+    proof::nodes_required_for_range_proof(size, start_loc..end_loc + 1)
 }
 
 /// Create a [Proof] from a op_count and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
 pub fn create_proof<D: Digest>(op_count: Location, digests: Vec<D>) -> Proof<D> {
-    let size = Position::from(op_count);
     Proof::<D> {
-        size: size.as_u64(),
+        size: Position::from(op_count),
         digests,
     }
 }

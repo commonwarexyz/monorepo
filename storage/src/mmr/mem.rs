@@ -151,13 +151,13 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
-    pub fn size(&self) -> u64 {
-        self.nodes.len() as u64 + self.pruned_to_pos.as_u64()
+    pub fn size(&self) -> Position {
+        Position::new(self.nodes.len() as u64 + *self.pruned_to_pos)
     }
 
     /// Return the total number of leaves in the MMR.
     pub fn leaves(&self) -> u64 {
-        Location::try_from(Position::new(self.size()))
+        Location::try_from(self.size())
             .expect("invalid mmr size")
             .as_u64()
     }
@@ -241,7 +241,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
-        let leaf_pos = Position::new(self.size());
+        let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
         self.add_leaf_digest(hasher, digest);
 
@@ -252,7 +252,7 @@ impl<H: CHasher> Mmr<H> {
     /// until `sync` is called. The element can be an arbitrary byte slice, and need not be
     /// converted to a digest first.
     pub fn add_batched(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
-        let leaf_pos = Position::new(self.size());
+        let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
 
         // Compute the new parent nodes if any, and insert them into the MMR
@@ -264,7 +264,7 @@ impl<H: CHasher> Mmr<H> {
 
         let mut height = 1;
         for _ in nodes_needing_parents {
-            let new_node_pos = Position::new(self.size());
+            let new_node_pos = self.size();
             // The digest we push here doesn't matter as it will be updated later.
             self.nodes.push_back(self.dirty_digest);
             self.dirty_nodes.insert((new_node_pos, height));
@@ -292,7 +292,7 @@ impl<H: CHasher> Mmr<H> {
 
         // Compute the new parent nodes if any, and insert them into the MMR.
         for sibling_pos in nodes_needing_parents {
-            let new_node_pos = Position::new(self.size());
+            let new_node_pos = self.size();
             let sibling_digest = self.get_node_unchecked(sibling_pos);
             digest = hasher.node_digest(new_node_pos, sibling_digest, &digest);
             self.nodes.push_back(digest);
@@ -316,18 +316,18 @@ impl<H: CHasher> Mmr<H> {
 
         let mut new_size = self.size() - 1;
         loop {
-            if Position::new(new_size) < self.pruned_to_pos {
-                return Err(ElementPruned(Position::new(new_size)));
+            if new_size < self.pruned_to_pos {
+                return Err(ElementPruned(new_size));
             }
             if PeakIterator::check_validity(new_size) {
                 break;
             }
             new_size -= 1;
         }
-        let num_to_drain = (self.size() - new_size) as usize;
+        let num_to_drain = (self.size() - new_size).as_u64() as usize;
         self.nodes.drain(self.nodes.len() - num_to_drain..);
 
-        Ok(Position::new(self.size()))
+        Ok(self.size())
     }
 
     /// Change the digest of any retained leaf. This is useful if you want to use the MMR
@@ -734,11 +734,11 @@ impl<H: CHasher> Mmr<H> {
         );
 
         // Create the "old_nodes" of the MMR in the fully pruned state.
-        let old_nodes = self.node_digests_to_pin(Position::new(self.size()));
+        let old_nodes = self.node_digests_to_pin(self.size());
 
         Self::init(Config {
             nodes: vec![],
-            pruned_to_pos: Position::new(self.size()),
+            pruned_to_pos: self.size(),
             pinned_nodes: old_nodes,
             #[cfg(feature = "std")]
             pool: None,
@@ -816,7 +816,10 @@ mod tests {
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
-            assert_eq!(mmr.root(&mut hasher), hasher.root(0, [].iter()));
+            assert_eq!(
+                mmr.root(&mut hasher),
+                hasher.root(Position::new(0), [].iter())
+            );
 
             let clone = mmr.clone_pruned();
             assert_eq!(clone.size(), 0);
@@ -838,7 +841,7 @@ mod tests {
                 leaves.push(mmr.add(&mut hasher, &element));
                 let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
-                assert!(peaks.len() <= mmr.size() as usize);
+                assert!(peaks.len() <= mmr.size().as_u64() as usize);
                 let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
                 assert!(nodes_needing_parents.len() <= peaks.len());
             }
@@ -905,7 +908,7 @@ mod tests {
             // verify root
             let root = mmr.root(&mut hasher);
             let peak_digests = [digest14, digest17, mmr.nodes[18]];
-            let expected_root = hasher.root(19, peak_digests.iter());
+            let expected_root = hasher.root(Position::new(19), peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests
@@ -998,9 +1001,9 @@ mod tests {
                 );
                 let old_size = mmr.size();
                 mmr.add(&mut hasher, &element);
-                for size in old_size + 1..mmr.size() {
+                for size in old_size.as_u64() + 1..mmr.size().as_u64() {
                     assert!(
-                        !PeakIterator::check_validity(size),
+                        !PeakIterator::check_validity(Position::new(size)),
                         "mmr of size {size} should be invalid",
                     );
                 }

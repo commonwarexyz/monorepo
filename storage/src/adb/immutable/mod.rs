@@ -384,10 +384,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         // Confirm post-conditions hold.
-        assert_eq!(
-            log_size,
-            Location::try_from(Position::new(mmr.size())).unwrap()
-        );
+        assert_eq!(log_size, Location::try_from(mmr.size()).unwrap());
         assert_eq!(log_size, locations.size().await?);
 
         let oldest_retained_loc = oldest_retained_loc
@@ -612,7 +609,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size.as_u64(), start_loc..end_loc)
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
         let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
         for loc in start_loc.as_u64()..end_loc.as_u64() {

@@ -610,7 +610,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let op_count = Location::new(op_count);
         let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops).unwrap());
-        let mmr_size = Position::from(op_count).as_u64();
+        let mmr_size = Position::from(op_count);
 
         let proof = self
             .mmr
@@ -1329,9 +1329,7 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
             assert_eq!(db.op_count(), 2787);
             assert_eq!(
-                Location::try_from(Position::new(db.mmr.size()))
-                    .ok()
-                    .map(|l| l.as_u64()),
+                Location::try_from(db.mmr.size()).ok().map(|l| l.as_u64()),
                 Some(2787)
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
@@ -1346,9 +1344,7 @@ pub(super) mod test {
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2787);
             assert_eq!(
-                Location::try_from(Position::new(db.mmr.size()))
-                    .ok()
-                    .map(|l| l.as_u64()),
+                Location::try_from(db.mmr.size()).ok().map(|l| l.as_u64()),
                 Some(2787)
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);

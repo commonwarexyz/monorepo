@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap};
 /// original range.
 pub struct ProofStore<D> {
     digests: HashMap<Position, D>,
-    size: u64,
+    size: Position,
 }
 
 impl<D: Digest> ProofStore<D> {
@@ -49,7 +49,7 @@ impl<D: Digest> ProofStore<D> {
     /// Create a new [ProofStore] from the result of calling
     /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
-    pub fn new_from_digests(size: u64, digests: Vec<(Position, D)>) -> Self {
+    pub fn new_from_digests(size: Position, digests: Vec<(Position, D)>) -> Self {
         Self {
             size,
             digests: digests.into_iter().collect(),
@@ -72,7 +72,7 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
         Ok(self.digests.get(&pos).cloned())
     }
 
-    fn size(&self) -> u64 {
+    fn size(&self) -> Position {
         self.size
     }
 }
@@ -93,7 +93,7 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 /// had `size` nodes.
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
-    size: u64,
+    size: Position,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
     // Get the positions of all nodes needed to generate the proof.
