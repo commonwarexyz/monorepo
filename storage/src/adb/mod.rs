@@ -65,7 +65,7 @@ async fn align_mmr_and_locations<E: Storage + Clock + Metrics, H: Hasher>(
 ) -> Result<u64, Error> {
     let aligned_size = {
         let locations_size = locations.size().await?;
-        let mmr_leaves = mmr.leaves();
+        let mmr_leaves = mmr.leaves().as_u64();
         if locations_size > mmr_leaves {
             warn!(
                 mmr_leaves,
@@ -85,7 +85,7 @@ async fn align_mmr_and_locations<E: Storage + Clock + Metrics, H: Hasher>(
 
     // Verify post-conditions hold.
     assert_eq!(aligned_size, locations.size().await?);
-    assert_eq!(aligned_size, mmr.leaves());
+    assert_eq!(aligned_size, mmr.leaves().as_u64());
 
     Ok(aligned_size)
 }

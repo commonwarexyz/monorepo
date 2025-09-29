@@ -80,13 +80,10 @@ where
         )
         .await?;
 
-        // Convert MMR size to number of operations.
-        let mmr_ops = mmr.leaves();
-
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
         let log_size = log.size().await?;
-        for i in mmr_ops..log_size {
+        for i in mmr.leaves().as_u64()..log_size {
             let op = log.read(i).await?;
             mmr.add_batched(&mut hasher, &op.encode()).await?;
             if i % apply_batch_size as u64 == 0 {

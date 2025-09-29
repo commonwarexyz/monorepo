@@ -1173,9 +1173,7 @@ mod tests {
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
-        let proof = mmr
-            .range_proof(Location::new(0)..Location::new(mmr.leaves()))
-            .unwrap();
+        let proof = mmr.range_proof(Location::new(0)..mmr.leaves()).unwrap();
         let mut node_digests = proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,

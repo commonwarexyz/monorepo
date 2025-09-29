@@ -156,10 +156,8 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Return the total number of leaves in the MMR.
-    pub fn leaves(&self) -> u64 {
-        Location::try_from(self.size())
-            .expect("invalid mmr size")
-            .as_u64()
+    pub fn leaves(&self) -> Location {
+        Location::try_from(self.size()).expect("invalid mmr size")
     }
 
     /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
@@ -808,7 +806,7 @@ mod tests {
                 "empty iterator should have no peaks"
             );
             assert_eq!(mmr.size(), 0);
-            assert_eq!(mmr.leaves(), 0);
+            assert_eq!(mmr.leaves(), Location::new(0));
             assert_eq!(mmr.last_leaf_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert_eq!(mmr.get_node(Position::new(0)), None);
@@ -936,7 +934,7 @@ mod tests {
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(Location::new(8)..Location::new(mmr.leaves())).is_ok(),
+                mmr.range_proof(Location::new(8)..mmr.leaves()).is_ok(),
                 "attempts to range_prove over all elements following oldest retained should succeed"
             );
 

@@ -193,7 +193,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             last_offset = offset;
             last_op = next_op;
             warn!(
-                location = mmr.leaves(),
+                location = ?mmr.leaves(),
                 section, offset, "adding missing operation to MMR/location map"
             );
             mmr.add_batched(hasher, &encoded_op).await?;
@@ -334,7 +334,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations.sync().await?;
             mmr.pop((aligned_size - valid_size) as usize).await?;
         }
-        assert_eq!(mmr.leaves(), locations.size().await?);
+        assert_eq!(mmr.leaves().as_u64(), locations.size().await?);
 
         // Apply operations from the log at indices beyond the `aligned_size` to the MMR and locations journal.
         //
@@ -357,7 +357,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         };
 
         // Find the last commit point and rewind to it (if necessary).
-        let op_count = mmr.leaves();
+        let op_count = mmr.leaves().as_u64();
         let size = Self::rewind_to_last_commit(
             &mut mmr,
             &mut locations,
@@ -368,7 +368,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             log_items_per_section,
         )
         .await?;
-        assert_eq!(size, mmr.leaves());
+        assert_eq!(size, mmr.leaves().as_u64());
         assert_eq!(size, locations.size().await?);
 
         Ok(Self {

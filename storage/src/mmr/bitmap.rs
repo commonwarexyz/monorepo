@@ -544,7 +544,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let chunk = *self.get_chunk(bit_offset);
         let chunk_loc = Self::chunk_loc(bit_offset);
 
-        if chunk_loc as u64 == self.mmr.leaves() {
+        if chunk_loc as u64 == self.mmr.leaves().as_u64() {
             assert!(self.next_bit > 0);
             // Proof is over a bit in the partial chunk. In this case only a single digest is
             // required in the proof: the mmr's root.

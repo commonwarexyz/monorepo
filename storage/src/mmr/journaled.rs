@@ -419,7 +419,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     }
 
     /// Return the total number of leaves in the MMR.
-    pub fn leaves(&self) -> u64 {
+    pub fn leaves(&self) -> Location {
         self.mem_mmr.leaves()
     }
 

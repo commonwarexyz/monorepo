@@ -214,7 +214,7 @@ impl<
         }
 
         // Pop any MMR elements that are ahead of the last log commit point.
-        let mut next_mmr_leaf_loc = mmr.leaves();
+        let mut next_mmr_leaf_loc = mmr.leaves().as_u64();
         if next_mmr_leaf_loc > log_size {
             let op_count = next_mmr_leaf_loc - log_size;
             warn!(log_size, op_count, "popping uncommitted MMR operations");
@@ -238,7 +238,7 @@ impl<
         }
 
         // At this point the MMR and log should be consistent.
-        assert_eq!(log.size().await?, mmr.leaves());
+        assert_eq!(log.size().await?, mmr.leaves().as_u64());
 
         Ok((inactivity_floor_loc, mmr, log))
     }
@@ -402,7 +402,7 @@ impl<
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
-        Location::new(self.mmr.leaves())
+        self.mmr.leaves()
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are

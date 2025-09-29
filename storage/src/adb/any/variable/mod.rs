@@ -345,7 +345,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         // Confirm post-conditions hold.
-        assert_eq!(self.log_size, self.mmr.leaves());
+        assert_eq!(self.log_size, self.mmr.leaves().as_u64());
         assert_eq!(self.log_size, self.locations.size().await?);
 
         debug!(log_size = self.log_size, "build_snapshot_from_log complete");
