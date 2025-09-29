@@ -2,12 +2,9 @@
 //! hiding details of erasure coded broadcast and shard verification.
 
 use crate::{
-    marshal::{
-        self,
-        ingress::coding::types::{CodedBlock, CodingCommitment},
-    },
+    marshal::{self, ingress::coding::types::CodedBlock},
     threshold_simplex::types::Context,
-    types::{Round, View},
+    types::{CodingCommitment, Round, View},
     Application, Automaton, Block, Epochable, Relay, Reporter, Supervisor, Viewable,
 };
 use commonware_coding::{Config as CodingConfig, Scheme};

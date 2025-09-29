@@ -1,7 +1,8 @@
 //! Erasure coding wrapper for [buffered::Mailbox]
 
 use crate::{
-    marshal::ingress::coding::types::{CodedBlock, CodingCommitment, DistributionShard, Shard},
+    marshal::ingress::coding::types::{CodedBlock, DistributionShard, Shard},
+    types::CodingCommitment,
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};

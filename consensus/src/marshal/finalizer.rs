@@ -1,6 +1,5 @@
 use crate::{
-    marshal::ingress::{coding::types::CodingCommitment, orchestrator::Orchestrator},
-    Block, Reporter,
+    marshal::ingress::orchestrator::Orchestrator, types::CodingCommitment, Block, Reporter,
 };
 use commonware_coding::Scheme;
 use commonware_cryptography::Committable;

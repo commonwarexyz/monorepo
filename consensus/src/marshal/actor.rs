@@ -10,14 +10,11 @@ use super::{
 };
 use crate::{
     marshal::ingress::{
-        coding::{
-            mailbox::ShardMailbox,
-            types::{CodedBlock, CodingCommitment},
-        },
+        coding::{mailbox::ShardMailbox, types::CodedBlock},
         mailbox::Identifier as BlockID,
     },
     threshold_simplex::types::{Finalization, Notarization},
-    types::Round,
+    types::{CodingCommitment, Round},
     Block, Reporter,
 };
 use commonware_codec::{Decode, Encode};
