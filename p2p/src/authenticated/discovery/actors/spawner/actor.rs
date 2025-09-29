@@ -18,12 +18,7 @@ use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::debug;
 
-pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-    O: Sink,
-    I: Stream,
-    C: PublicKey,
-> {
+pub struct Actor<O: Sink, I: Stream, C: PublicKey> {
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
@@ -31,7 +26,7 @@ pub struct Actor<
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
 
-    receiver: mpsc::Receiver<Message<E, O, I, C>>,
+    receiver: mpsc::Receiver<Message<O, I, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -39,15 +34,9 @@ pub struct Actor<
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-        O: Sink,
-        I: Stream,
-        C: PublicKey,
-    > Actor<E, O, I, C>
-{
+impl<O: Sink, I: Stream, C: PublicKey> Actor<O, I, C> {
     #[allow(clippy::type_complexity)]
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, O, I, C>>) {
+    pub fn new<E: Metrics>(context: E, cfg: Config) -> (Self, Mailbox<Message<O, I, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -88,19 +77,19 @@ impl<
         )
     }
 
-    pub fn start(
+    pub fn start<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics>(
         self,
         context: E,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         context.spawn(|context| self.run(context, tracker, router))
     }
 
-    async fn run(
+    async fn run<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics>(
         mut self,
         context: E,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
         while let Some(msg) = self.receiver.next().await {

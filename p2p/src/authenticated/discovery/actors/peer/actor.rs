@@ -100,7 +100,7 @@ impl<C: PublicKey> Actor<C> {
         context: E,
         peer: C,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
-        mut tracker: Mailbox<tracker::Message<E, C>>,
+        mut tracker: Mailbox<tracker::Message<C>>,
         channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type
