@@ -11,16 +11,20 @@ use commonware_runtime::{deterministic, Clock, Handle, Metrics, Runner};
 use commonware_utils::NZU32;
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
 
-const MAX_PEERS: usize = 10;
+const MAX_PEERS: usize = 16;
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
-const MAX_CHANNELS: u8 = 3;
+const MAX_INDEX: u8 = 10;
+
+const SUBSET_NUMBER: usize = 5;
+
+const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 
 #[derive(Debug, Arbitrary)]
 enum DiscoveryOperation {
@@ -37,7 +41,7 @@ enum DiscoveryOperation {
     },
     RegisterPeers {
         peer_idx: u8,
-        channel: u8,
+        index: u8,
         num_peers: u8,
     },
     BlockPeer {
@@ -50,18 +54,18 @@ enum DiscoveryOperation {
 struct FuzzInput {
     seed: u64,
     operations: Vec<DiscoveryOperation>,
-    n: u8,
+    peers: u8,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let seed = u.arbitrary()?;
         let operations = u.arbitrary()?;
-        let n = u.int_in_range(2..=MAX_PEERS as u32)? as u8;
+        let peers = u.int_in_range(SUBSET_NUMBER as u32..=MAX_PEERS as u32)? as u8;
         Ok(FuzzInput {
             seed,
             operations,
-            n,
+            peers,
         })
     }
 }
@@ -74,20 +78,23 @@ struct PeerInfo {
 
 struct NetworkState {
     handle: Option<Handle<()>>,
-    senders: HashMap<u8, commonware_p2p::authenticated::discovery::Sender<ed25519::PublicKey>>,
-    receivers: HashMap<u8, commonware_p2p::authenticated::discovery::Receiver<ed25519::PublicKey>>,
+    channels: (
+        commonware_p2p::authenticated::discovery::Sender<ed25519::PublicKey>,
+        commonware_p2p::authenticated::discovery::Receiver<ed25519::PublicKey>,
+    ),
     oracle: Oracle<deterministic::Context, ed25519::PublicKey>,
 }
 
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.seed);
-    let n = input.n;
+    let n = input.peers;
 
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         // Create peers
         let mut peers = Vec::new();
         let base_port = 63000;
+
         for i in 0..n {
             let seed = rng.gen::<u64>() ^ (i as u64);
             let private_key = ed25519::PrivateKey::from_seed(seed);
@@ -106,17 +113,23 @@ fn fuzz(input: FuzzInput) {
             .map(|(idx, peer)| (peer.public_key.clone(), idx as u8))
             .collect();
 
+        let addresses = peers.iter().map(|p| p.public_key.clone()).collect::<Vec<_>>();
+
         let mut networks: HashMap<u8, NetworkState> = HashMap::new();
+        // Remove unused waiters variable
+        // let mut waiters: Vec<Handle<()>> = Vec::new();
 
         for (peer_idx, peer) in peers.iter().enumerate() {
             let peer_idx_u8 = peer_idx as u8;
+            let context = context.with_label(&format!("peer-{peer_idx}"));
 
-            let bootstrappers: Vec<_> = peers
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != peer_idx)
-                .map(|(_, p)| (p.public_key.clone(), p.address))
-                .collect();
+            let mut bootstrappers = Vec::new();
+            if peer_idx > 0 {
+                bootstrappers.push((
+                    addresses[0].clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                ));
+            }
 
             let mut config = Config::aggressive(
                 peer.private_key.clone(),
@@ -130,18 +143,20 @@ fn fuzz(input: FuzzInput) {
             config.allow_private_ips = true;
             config.tracked_peer_sets = 5;
 
-            let (mut network, oracle) =
-                Network::new(context.with_label(&format!("peer-{peer_idx}")), config);
+            let (mut network, mut oracle) =
+                Network::new(context.with_label(&format!("network")), config);
 
-            let mut senders = HashMap::new();
-            let mut receivers = HashMap::new();
+            // Using single channel approach instead of multiple channels
 
-            for ch in 0..MAX_CHANNELS {
-                let quota = Quota::per_second(NZU32!(100));
-                let (sender, receiver) = network.register(ch as u32, quota, 32);
-                senders.insert(ch, sender);
-                receivers.insert(ch, receiver);
+            for index in 0..5 {
+                let mut shuffled_addresses = addresses.clone();
+                shuffled_addresses.shuffle(&mut rng);
+                let subset = shuffled_addresses[..3].to_vec();
+                oracle.register(index, subset).await;
             }
+
+            let quota = Quota::per_second(NZU32!(100));
+            let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG);
 
             let handle = network.start();
 
@@ -149,8 +164,7 @@ fn fuzz(input: FuzzInput) {
                 peer_idx_u8,
                 NetworkState {
                     handle: Some(handle),
-                    senders,
-                    receivers,
+                    channels: (sender, receiver),
                     oracle,
                 },
             );
@@ -171,83 +185,83 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let sender_idx = (*sender_idx as usize) % peers.len();
                     let sender_idx_u8 = sender_idx as u8;
-                    let channel = *channel % MAX_CHANNELS;
+                    let channel = *channel % MAX_INDEX;
 
                     if let Some(state) = networks.get_mut(&sender_idx_u8) {
-                        if let Some(sender) = state.senders.get_mut(&channel) {
-                            let msg_size = (*msg_size as usize).clamp(1, MAX_MESSAGE_SIZE);
-                            let mut message = vec![0u8; msg_size];
-                            rng.fill(&mut message[..]);
+                        let sender = &mut state.channels.0;
+                        let msg_size = (*msg_size as usize).clamp(1, MAX_MESSAGE_SIZE);
+                        let mut message = vec![0u8; msg_size];
+                        rng.fill(&mut message[..]);
 
-                            let recipient_idx = (*recipient_idx as usize) % peers.len();
-                            let recipient_pk = peers[recipient_idx].public_key.clone();
+                        let recipient_idx = (*recipient_idx as usize) % peers.len();
+                        let recipient_pk = peers[recipient_idx].public_key.clone();
 
-                            let recipients = match recipient_mode % 3 {
-                                0 => Recipients::All,
-                                1 => {
-                                    if recipient_idx == sender_idx {
-                                        continue;
-                                    }
-                                    Recipients::One(recipient_pk)
-                                },
-                                _ => {
-                                    let max_recipients = peers.len().min(3);
-                                    let num_recipients = (rng.gen::<usize>() % max_recipients).max(1);
-                                    let mut recipients_set = HashSet::new();
-                                    for _ in 0..num_recipients {
-                                        let idx = rng.gen::<usize>() % peers.len();
-                                        if idx != sender_idx {
-                                            recipients_set.insert(peers[idx].public_key.clone());
-                                        }
-                                    }
-                                    if recipients_set.is_empty() {
-                                        continue;
-                                    }
-                                    Recipients::Some(recipients_set.into_iter().collect())
+                        let recipients = match recipient_mode % 3 {
+                            0 => Recipients::All,
+                            1 => {
+                                if recipient_idx == sender_idx {
+                                    continue;
                                 }
-                            };
+                                Recipients::One(recipient_pk)
+                            },
+                            _ => {
+                                let max_recipients = peers.len().min(3);
+                                let num_recipients = (rng.gen::<usize>() % max_recipients).max(1);
+                                let mut recipients_set = HashSet::new();
+                                for _ in 0..num_recipients {
+                                    let idx = rng.gen::<usize>() % peers.len();
+                                    if idx != sender_idx {
+                                        recipients_set.insert(peers[idx].public_key.clone());
+                                    }
+                                }
+                                if recipients_set.is_empty() {
+                                    continue;
+                                }
+                                Recipients::Some(recipients_set.into_iter().collect())
+                            }
+                        };
 
-                            let message_bytes = Bytes::from(message);
+                        let message_bytes = Bytes::from(message);
 
-                            // Collect target recipient indices first
-                            let target_recipients: Vec<u8> = match &recipients {
-                                Recipients::One(pk) => {
-                                    if let Some(&to_idx) = pk_to_idx.get(pk) {
-                                        if to_idx != sender_idx_u8 {
-                                            vec![to_idx]
-                                        } else {
-                                            vec![]
-                                        }
+                        // Collect target recipient indices first
+                        let target_recipients: Vec<u8> = match &recipients {
+                            Recipients::One(pk) => {
+                                if let Some(&to_idx) = pk_to_idx.get(pk) {
+                                    if to_idx != sender_idx_u8 {
+                                        vec![to_idx]
                                     } else {
                                         vec![]
                                     }
-                                },
-                                Recipients::Some(pk_list) => {
-                                    pk_list.iter()
-                                        .filter_map(|pk| pk_to_idx.get(pk).copied())
-                                        .filter(|&to_idx| to_idx != sender_idx_u8)
-                                        .collect()
-                                },
-                                Recipients::All => {
-                                    (0..peers.len())
-                                        .map(|i| i as u8)
-                                        .filter(|&to_idx| to_idx != sender_idx_u8)
-                                        .collect()
-                                },
-                            };
-
-                            // Only add expectations if send succeeds
-                            if sender.send(recipients, message_bytes.clone(), *priority).await.is_ok() {
-                                for to_idx in target_recipients {
-                                    expected_messages.entry((to_idx, sender_idx_u8, channel))
-                                        .or_default()
-                                        .push_back(message_bytes.clone());
-                                    pending_by_receiver.entry((to_idx, channel))
-                                        .or_default()
-                                        .push(sender_idx_u8);
+                                } else {
+                                    vec![]
                                 }
+                            },
+                            Recipients::Some(pk_list) => {
+                                pk_list.iter()
+                                    .filter_map(|pk| pk_to_idx.get(pk).copied())
+                                    .filter(|&to_idx| to_idx != sender_idx_u8)
+                                    .collect()
+                            },
+                            Recipients::All => {
+                                (0..peers.len())
+                                    .map(|i| i as u8)
+                                    .filter(|&to_idx| to_idx != sender_idx_u8)
+                                    .collect()
+                            },
+                        };
+
+                        // Only add expectations if send succeeds
+                        if sender.send(recipients, message_bytes.clone(), *priority).await.is_ok() {
+                            for to_idx in target_recipients {
+                                expected_messages.entry((to_idx, sender_idx_u8, channel))
+                                    .or_default()
+                                    .push_back(message_bytes.clone());
+                                pending_by_receiver.entry((to_idx, channel))
+                                    .or_default()
+                                    .push(sender_idx_u8);
                             }
                         }
+
                     }
                 }
 
@@ -256,7 +270,7 @@ fn fuzz(input: FuzzInput) {
                     let receiver_idx_u8 = receiver_idx as u8;
 
                     if let Some(state) = networks.get_mut(&receiver_idx_u8) {
-                        let mut ch_set = std::collections::HashSet::new();
+                        let mut ch_set = HashSet::new();
                         for ((to_idx, ch), senders) in pending_by_receiver.iter() {
                             if *to_idx == receiver_idx_u8 && !senders.is_empty() {
                                 ch_set.insert(*ch);
@@ -269,9 +283,7 @@ fn fuzz(input: FuzzInput) {
                         }
 
                         for channel in channels_with_pending {
-                            let Some(receiver) = state.receivers.get_mut(&channel) else {
-                                continue;
-                            };
+                            let receiver = &mut state.channels.1;
 
                             commonware_macros::select! {
                                 result = receiver.recv() => {
@@ -325,18 +337,18 @@ fn fuzz(input: FuzzInput) {
 
                 DiscoveryOperation::RegisterPeers {
                     peer_idx,
-                    channel,
+                    index,
                     num_peers,
                 } => {
                     let peer_idx = (*peer_idx as usize) % peers.len();
                     let peer_idx_u8 = peer_idx as u8;
-                    let channel = *channel % MAX_CHANNELS;
+                    let index = *index % MAX_INDEX;
                     let num_peers = (*num_peers as usize).clamp(1, peers.len());
 
                     let Some(state) = networks.get_mut(&peer_idx_u8) else {
                         continue;
                     };
-                    
+
                     let mut peer_set = HashSet::new();
                     for _ in 0..num_peers {
                         let idx = rng.gen::<usize>() % peers.len();
@@ -344,7 +356,7 @@ fn fuzz(input: FuzzInput) {
                     }
                     let peer_subset: Vec<_> = peer_set.into_iter().collect();
 
-                    let _ = state.oracle.register(channel as u64, peer_subset).await;
+                    let _ = state.oracle.register(index as u64, peer_subset).await;
 
                 }
                 DiscoveryOperation::BlockPeer {
@@ -359,7 +371,7 @@ fn fuzz(input: FuzzInput) {
                     let Some(state) = networks.get_mut(&peer_idx_u8) else {
                         continue;
                     };
-                    
+
                     let target_pk = peers[target_idx].public_key.clone();
                     let _ = state.oracle.block(target_pk).await;
 
