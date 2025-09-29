@@ -6,7 +6,10 @@ use crate::{
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use commonware_storage::archive;
 use futures::{
-    channel::{mpsc, oneshot},
+    channel::{
+        mpsc,
+        oneshot::{self, Canceled},
+    },
     SinkExt,
 };
 use tracing::error;
@@ -122,7 +125,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn get_info(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Option<(u64, B::Commitment)> {
+    ) -> Result<Option<(u64, B::Commitment)>, Canceled> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
@@ -135,13 +138,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         {
             error!("failed to send get info message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get info: receiver dropped");
-                None
-            }
-        }
+        rx.await
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -149,7 +146,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn get_block(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Option<B> {
+    ) -> Result<Option<B>, Canceled> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
@@ -162,13 +159,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         {
             error!("failed to send get block message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get block: receiver dropped");
-                None
-            }
-        }
+        rx.await
     }
 
     /// A request to retrieve a block by its commitment.

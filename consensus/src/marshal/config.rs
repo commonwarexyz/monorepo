@@ -8,6 +8,9 @@ pub struct Config<V: Variant, B: Block> {
     /// The identity of the network.
     pub identity: V::Public,
 
+    /// The genesis block for this chain/epoch (height 0).
+    pub genesis: B,
+
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
 
