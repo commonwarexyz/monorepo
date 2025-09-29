@@ -59,7 +59,6 @@ enum SimulatedOperation {
         success_rate: u8,
         jitter_ms: u16,
     },
-    AbortNetwork,
     DropChannel {
         peer_idx: u8,
         channel_id: u8,
@@ -295,17 +294,6 @@ fn fuzz(input: FuzzInput) {
                                 .await;
                         }
                     }
-                }
-
-                SimulatedOperation::AbortNetwork => {
-                    if let Some(handle) = network_handle.take() {
-                        handle.abort();
-                    }
-                    network_msg_size = None;
-                    oracle = None;
-                    channels.clear();
-                    registered_peer_channels.clear();
-                    expected.clear();
                 }
 
                 SimulatedOperation::DropChannel {
