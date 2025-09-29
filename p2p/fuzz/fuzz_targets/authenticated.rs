@@ -168,7 +168,7 @@ fn fuzz(input: FuzzInput) {
                     config.tracked_peer_sets = PEER_SUBSET_NUMBER;
 
                     let (mut network, mut oracle) = discovery::Network::new(
-                        context.with_label(&"fuzzed-discovery_network".to_string()),
+                        context.with_label("fuzzed-discovery_network"),
                         config
                     );
 
@@ -203,7 +203,7 @@ fn fuzz(input: FuzzInput) {
                     );
 
                     let (mut network, mut oracle) = LookupNetwork::new(
-                        context.with_label(&"fuzzed-lookup-network".to_string()),
+                        context.with_label("fuzzed-lookup-network"),
                         config
                     );
 
