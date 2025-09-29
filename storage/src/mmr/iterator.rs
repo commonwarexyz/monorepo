@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 #[derive(Default)]
 pub struct PeakIterator {
     size: Position, // number of nodes in the MMR at the point the iterator was initialized
-    node_pos: u64,  // position of the current node
+    node_pos: Position, // position of the current node
     two_h: u64,     // 2^(height+1) of the current node
 }
 
@@ -38,7 +38,7 @@ impl PeakIterator {
         let two_h = 1 << start.trailing_ones();
         PeakIterator {
             size,
-            node_pos: start - 1,
+            node_pos: Position::new(start - 1),
             two_h,
         }
     }
@@ -122,10 +122,7 @@ impl Iterator for PeakIterator {
         while self.two_h > 1 {
             if self.node_pos < self.size {
                 // found a peak
-                let peak_item = (
-                    Position::new(self.node_pos),
-                    self.two_h.trailing_zeros() - 1,
-                );
+                let peak_item = (self.node_pos, self.two_h.trailing_zeros() - 1);
                 // move to the right sibling
                 self.node_pos += self.two_h - 1;
                 assert!(self.node_pos >= self.size); // sibling shouldn't be in the MMR if MMR is valid
