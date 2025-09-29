@@ -293,19 +293,19 @@ fn fuzz(input: FuzzInput) {
                     if reference.leaf_positions.is_empty() {
                         return;
                     }
-                    let location = (*location as usize) % reference.leaf_positions.len();
-                    let test_element_pos = reference.leaf_positions[location];
-                    let location = Location::new(location as u64);
+                    let location_idx = (*location as usize) % reference.leaf_positions.len();
+                    let test_element_pos = reference.leaf_positions[location_idx];
+                    let loc = Location::new(location_idx as u64);
                     if test_element_pos >= mmr.size() || test_element_pos < mmr.pruned_to_pos() {
                         continue;
                     }
 
-                    if let Ok(proof) = mmr.proof(location) {
+                    if let Ok(proof) = mmr.proof(loc) {
                         let root = mmr.root(&mut hasher);
                         assert!(proof.verify_element_inclusion(
                             &mut hasher,
-                            reference.leaf_data[location].as_slice(),
-                            location,
+                            reference.leaf_data[location_idx].as_slice(),
+                            loc,
                             &root,
                         ));
                     }

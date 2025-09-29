@@ -9,6 +9,7 @@ use commonware_storage::{
         immutable::{Config, Immutable},
         verify_proof,
     },
+    mmr::Location,
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -161,7 +162,7 @@ fn fuzz(input: FuzzInput) {
                 ImmutableOperation::GetLoc { loc } => {
                     let op_count = db.op_count();
                     if op_count > 0 && loc < op_count {
-                        let _ = db.get_loc(loc).await;
+                        let _ = db.get_loc(Location::new(loc)).await;
                     }
                 }
 
@@ -171,7 +172,7 @@ fn fuzz(input: FuzzInput) {
                     if !set_locations.is_empty() {
                         let idx = (loc as usize) % set_locations.len();
                         let (_, set_loc) = set_locations[idx];
-                        let _ = db.get_from_loc(&key, set_loc).await;
+                        let _ = db.get_from_loc(&key, Location::new(set_loc)).await;
                     }
                 }
 
@@ -194,7 +195,7 @@ fn fuzz(input: FuzzInput) {
                 ImmutableOperation::Prune { loc } => {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1);
-                        if let Ok(()) = db.prune(safe_loc).await {
+                        if let Ok(()) = db.prune(Location::new(safe_loc)).await {
                             if let Some(oldest) = db.oldest_retained_loc() {
                                 set_locations.retain(|(_, l)| *l >= oldest);
                                 keys_set.retain(|(_, l)| *l >= oldest);
@@ -213,9 +214,9 @@ fn fuzz(input: FuzzInput) {
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
-                        if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
+                        if let Ok((proof, ops)) = db.proof(Location::new(safe_start), safe_max_ops).await {
                             let root = db.root(&mut hasher);
-                            let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
+                            let _ = verify_proof(&mut hasher, &proof, Location::new(safe_start), &ops, &root);
                         }
                     }
                 }
@@ -235,7 +236,7 @@ fn fuzz(input: FuzzInput) {
                         if let Some(oldest) = db.oldest_retained_loc() {
                             if safe_start >= oldest {
                                 let _ = db
-                                    .historical_proof(safe_size, safe_start, safe_max_ops)
+                                    .historical_proof(safe_size, Location::new(safe_start), safe_max_ops)
                                     .await;
                             }
                         }

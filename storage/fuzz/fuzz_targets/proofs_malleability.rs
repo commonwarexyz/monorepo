@@ -9,6 +9,7 @@ use commonware_storage::{
     mmr::{mem::Mmr, StandardHasher as Standard},
 };
 use libfuzzer_sys::fuzz_target;
+use commonware_storage::mmr::Location;
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -117,10 +118,11 @@ fn fuzz(input: FuzzInput) {
                 let root = mmr.root(&mut hasher);
 
                 for leaf in 0u64..num_elements {
-                    let original_proof = mmr.proof(leaf).unwrap();
+                    let loc = Location::new(leaf);
+                    let original_proof = mmr.proof(loc).unwrap();
 
                     assert!(
-                        original_proof.verify_element_inclusion(&mut hasher, &element, leaf, &root),
+                        original_proof.verify_element_inclusion(&mut hasher, &element, loc, &root),
                         "Original MMR proof must be valid"
                     );
 
@@ -132,7 +134,7 @@ fn fuzz(input: FuzzInput) {
                             let is_valid = mutated_proof.verify_element_inclusion(
                                 &mut hasher,
                                 &element,
-                                leaf,
+                                loc,
                                 &root,
                             );
                             assert!(!is_valid, "Mutated MMR proof must be invalid");

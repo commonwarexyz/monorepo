@@ -178,7 +178,7 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::GetNode { position } => {
                     if bitmap.size() > 0 {
                         let safe_pos = position % bitmap.size();
-                        let _ = bitmap.get_node(safe_pos);
+                        let _ = bitmap.get_node(safe_pos.into());
                     }
                 }
 
