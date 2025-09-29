@@ -82,7 +82,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
         &config,
         &commitment,
         checking_data.pop().unwrap(),
-        &checked_shards[..to_use as usize],
+        &checked_shards[..(to_use as usize).min(checked_shards.len())],
     )
     .unwrap();
     assert_eq!(&decoded, &data);
