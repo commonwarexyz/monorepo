@@ -1,7 +1,7 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
-use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
+use crate::authenticated::lookup::{actors::tracker::ingress::ReleaserHandle, metrics};
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::Metrics as RuntimeMetrics;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -25,8 +25,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Spawner + GClock + RuntimeMetrics, C: PublicKey> {
-    context: E,
+pub struct Directory<E: GClock + RuntimeMetrics + Clone, C: PublicKey> {
 
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
@@ -47,21 +46,21 @@ pub struct Directory<E: Spawner + GClock + RuntimeMetrics, C: PublicKey> {
     rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
 
     // ---------- Message-Passing ----------
-    /// The releaser for the tracker actor.
-    releaser: Releaser<E, C>,
+    /// The releaser handle for the tracker actor.
+    releaser: ReleaserHandle<C>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
     metrics: Metrics,
 }
 
-impl<E: Spawner + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: GClock + RuntimeMetrics + Clone, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
     pub fn init(
         context: E,
         myself: (C, SocketAddr),
         cfg: Config,
-        releaser: Releaser<E, C>,
+        releaser: ReleaserHandle<C>,
     ) -> Self {
         // Create the list of peers and add myself.
         let mut peers = HashMap::new();
@@ -73,7 +72,6 @@ impl<E: Spawner + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
 
         Self {
-            context,
             max_sets: cfg.max_sets,
             allow_private_ips: cfg.allow_private_ips,
             peers,
@@ -158,7 +156,7 @@ impl<E: Spawner + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn dial(&mut self, peer: &C) -> Option<Reservation<E, C>> {
+    pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
         let socket = self.peers.get(peer)?.socket()?;
         self.reserve(Metadata::Dialer(peer.clone(), socket))
     }
@@ -166,7 +164,7 @@ impl<E: Spawner + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C) -> Option<Reservation<E, C>> {
+    pub fn listen(&mut self, peer: &C) -> Option<Reservation<C>> {
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
@@ -211,7 +209,7 @@ impl<E: Spawner + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to reserve a peer.
     ///
     /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
-    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<E, C>> {
+    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
 
         // Not reservable
@@ -237,11 +235,7 @@ impl<E: Spawner + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Reserve
         if record.reserve() {
             self.metrics.reserved.inc();
-            return Some(Reservation::new(
-                self.context.clone(),
-                metadata,
-                self.releaser.clone(),
-            ));
+            return Some(Reservation::new(metadata, self.releaser.clone()));
         }
         None
     }

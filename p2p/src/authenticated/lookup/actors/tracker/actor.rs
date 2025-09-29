@@ -15,10 +15,10 @@ use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + GClock + RuntimeMetrics, C: Signer> {
+pub struct Actor<E: GClock + RuntimeMetrics + Clone, C: Signer> {
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
-    receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
+    receiver: mpsc::Receiver<Message<C::PublicKey>>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -27,9 +27,12 @@ pub struct Actor<E: Spawner + GClock + RuntimeMetrics, C: Signer> {
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
     mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
+
+    /// Worker responsible for draining deferred releases.
+    releaser: Option<Releaser<C::PublicKey>>,
 }
 
-impl<E: Spawner + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
+impl<E: GClock + RuntimeMetrics + Clone, C: Signer> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(
@@ -37,8 +40,8 @@ impl<E: Spawner + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
         cfg: Config<C>,
     ) -> (
         Self,
-        Mailbox<Message<E, C::PublicKey>>,
-        Oracle<E, C::PublicKey>,
+        Mailbox<Message<C::PublicKey>>,
+        Oracle<C::PublicKey>,
     ) {
         // General initialization
         let directory_cfg = directory::Config {
@@ -50,18 +53,19 @@ impl<E: Spawner + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
         // Create the mailboxes
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(sender.clone());
-        let releaser = Releaser::new(sender.clone());
+        let (releaser, releaser_handle) = Releaser::new(sender.clone());
         let oracle = Oracle::new(sender);
 
         // Create the directory
         let myself = (cfg.crypto.public_key(), cfg.address);
-        let directory = Directory::init(context.clone(), myself, directory_cfg, releaser);
+        let directory = Directory::init(context.clone(), myself, directory_cfg, releaser_handle);
 
         (
             Self {
                 receiver,
                 directory,
                 mailboxes: HashMap::new(),
+                releaser: Some(releaser),
             },
             mailbox,
             oracle,
@@ -70,10 +74,14 @@ impl<E: Spawner + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
     /// Start the actor and run it in the background.
     pub fn start(self, spawner: impl Spawner) -> Handle<()> {
-        spawner.spawn(|_| self.run())
+        spawner.spawn(|spawner| self.run(spawner))
     }
 
-    async fn run(mut self) {
+    async fn run(mut self, spawner: impl Spawner) {
+        if let Some(releaser) = self.releaser.take() {
+            releaser.start(spawner);
+        }
+
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Register { index, peers } => {

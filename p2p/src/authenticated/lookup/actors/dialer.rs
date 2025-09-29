@@ -77,8 +77,8 @@ impl<C: Signer> Actor<C> {
     async fn dial_peer<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics>(
         &mut self,
         context: &E,
-        reservation: Reservation<E, C::PublicKey>,
-        supervisor: &mut Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        reservation: Reservation<C::PublicKey>,
+        supervisor: &mut Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer, address) = reservation.metadata().clone() else {
@@ -126,8 +126,8 @@ impl<C: Signer> Actor<C> {
     pub fn start<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics>(
         self,
         context: E,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         context.spawn(|context| self.run(context, tracker, supervisor))
     }
@@ -136,8 +136,8 @@ impl<C: Signer> Actor<C> {
     async fn run<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics>(
         mut self,
         mut context: E,
-        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let mut dial_deadline = context.current();
         let mut query_deadline = context.current();

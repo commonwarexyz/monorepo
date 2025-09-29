@@ -25,10 +25,7 @@ pub struct Config<C: Signer> {
     pub allowed_incoming_connection_rate: Quota,
 }
 
-pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
-    C: Signer,
-> {
+pub struct Actor<E: ReasonablyRealtime, C: Signer> {
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
@@ -67,8 +64,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Perform handshake
         let (peer, send, recv) = match listen(
@@ -103,8 +100,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     pub fn start(
         self,
         context: E,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         context.spawn(|context| self.run(context, tracker, supervisor))
     }
@@ -113,8 +110,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     async fn run(
         self,
         context: E,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Start listening for incoming connections
         let mut listener = context

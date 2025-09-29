@@ -14,12 +14,12 @@ use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge}
 use rand::{CryptoRng, Rng};
 use tracing::debug;
 
-pub struct Actor<E: Spawner, Si: Sink, St: Stream, C: PublicKey> {
+pub struct Actor<Si: Sink, St: Stream, C: PublicKey> {
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
     allowed_ping_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<E, Si, St, C>>,
+    receiver: mpsc::Receiver<Message<Si, St, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -27,14 +27,11 @@ pub struct Actor<E: Spawner, Si: Sink, St: Stream, C: PublicKey> {
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<
+impl<Si: Sink, St: Stream, C: PublicKey> Actor<Si, St, C> {
+    pub fn new<E>(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>)
+    where
         E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-        Si: Sink,
-        St: Stream,
-        C: PublicKey,
-    > Actor<E, Si, St, C>
-{
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, Si, St, C>>) {
+    {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -72,21 +69,27 @@ impl<
         )
     }
 
-    pub fn start(
+    pub fn start<E>(
         self,
         context: E,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
-    ) -> Handle<()> {
+    ) -> Handle<()>
+    where
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+    {
         context.spawn(|context| self.run(context, tracker, router))
     }
 
-    async fn run(
+    async fn run<E>(
         mut self,
         context: E,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
-    ) {
+    )
+    where
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+    {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
