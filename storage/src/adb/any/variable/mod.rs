@@ -105,7 +105,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
 
     /// The number of operations that have been appended to the log (which must equal the number of
     /// leaves in the MMR).
-    log_size: u64,
+    log_size: Location,
 
     /// The number of items to put in each section of the journal.
     log_items_per_section: u64,
@@ -188,7 +188,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let db = Self {
             mmr,
             log,
-            log_size: 0,
+            log_size: Location::new(0),
             inactivity_floor_loc: Location::new(0),
             oldest_retained_loc: Location::new(0),
             locations,
@@ -237,8 +237,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     }
                     Ok((section, offset, _, op)) => {
                         if !oldest_retained_loc_found {
-                            self.log_size = section * self.log_items_per_section;
-                            self.oldest_retained_loc = Location::new(self.log_size);
+                            self.log_size = Location::new(section * self.log_items_per_section);
+                            self.oldest_retained_loc = self.log_size;
                             oldest_retained_loc_found = true;
                         }
 
@@ -251,7 +251,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
                         // index.
-                        let expected = loc / self.log_items_per_section;
+                        let expected = loc.as_u64() / self.log_items_per_section;
                         assert_eq!(section, expected,
                                 "given section {section} did not match expected section {expected} from location {loc}");
 
@@ -277,10 +277,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             Operation::Update(key, _) => {
                                 let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
-                                    uncommitted_ops
-                                        .insert(key, (Some(old_loc), Some(Location::new(loc))));
+                                    uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
                                 } else {
-                                    uncommitted_ops.insert(key, (None, Some(Location::new(loc))));
+                                    uncommitted_ops.insert(key, (None, Some(loc)));
                                 }
                             }
                             Operation::CommitFloor(_, loc) => {
@@ -321,11 +320,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             assert!(!uncommitted_ops.is_empty());
             warn!(
                 op_count = uncommitted_ops.len(),
-                log_size = end_loc,
+                log_size = ?end_loc,
                 end_offset,
                 "rewinding over uncommitted operations at end of log"
             );
-            let prune_to_section = end_loc / self.log_items_per_section;
+            let prune_to_section = end_loc.as_u64() / self.log_items_per_section;
             self.log
                 .rewind_to_offset(prune_to_section, end_offset)
                 .await?;
@@ -335,19 +334,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Pop any MMR elements that are ahead of the last log commit point.
         if mmr_leaves > self.log_size {
-            self.locations.rewind(self.log_size).await?;
+            self.locations.rewind(self.log_size.as_u64()).await?;
             self.locations.sync().await?;
 
-            let op_count = mmr_leaves - self.log_size;
-            warn!(op_count, "popping uncommitted MMR operations");
-            self.mmr.pop(op_count as usize).await?;
+            let num_to_pop = (mmr_leaves - self.log_size.as_u64()) as usize;
+            warn!(num_to_pop, "popping uncommitted MMR operations");
+            self.mmr.pop(num_to_pop).await?;
         }
 
         // Confirm post-conditions hold.
         assert_eq!(self.log_size, self.mmr.leaves());
         assert_eq!(self.log_size, self.locations.size().await?);
 
-        debug!(log_size = self.log_size, "build_snapshot_from_log complete");
+        debug!(log_size = ?self.log_size, "build_snapshot_from_log complete");
 
         Ok(self)
     }
@@ -481,12 +480,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
-        Location::new(self.log_size)
+        self.log_size
     }
 
     /// Returns the section of the log where we are currently writing new items.
     fn current_section(&self) -> u64 {
-        self.log_size / self.log_items_per_section
+        self.log_size.as_u64() / self.log_items_per_section
     }
 
     /// Return the oldest location that remains retrievable.
@@ -651,7 +650,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         };
         try_join!(self.log.sync(section).map_err(Error::Journal), mmr_fut)?;
 
-        debug!(log_size = self.log_size, "commit complete");
+        debug!(log_size = ?self.log_size, "commit complete");
         self.uncommitted_ops = 0;
 
         Ok(())
@@ -786,7 +785,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.oldest_retained_loc = Location::new(section_with_target * self.log_items_per_section);
 
         debug!(
-            log_size = self.log_size,
+            log_size = ?self.log_size,
             oldest_retained_loc = ?self.oldest_retained_loc,
             "pruned inactive ops"
         );
