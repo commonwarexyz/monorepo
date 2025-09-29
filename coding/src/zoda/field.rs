@@ -94,7 +94,7 @@ impl F {
         // Yes. Even if x and y have the maximum value, a single subtraction of P
         // would suffice to make their sum < P. Thus, our strategy for field addition
         // will always work.
-        Self(a).sub_inner(Self(c).add_inner(Self((b << 32) - b)))
+        Self(a).sub_inner(Self(c)).add_inner(Self((b << 32) - b))
     }
 
     const fn mul_inner(self, b: Self) -> Self {
@@ -105,6 +105,37 @@ impl F {
     const fn neg_inner(self) -> Self {
         Self::zero().sub_inner(self)
     }
+
+    /// Calculate self ^ k.
+    pub const fn exp(self, mut k: u64) -> Self {
+        let mut acc = Self::one();
+        // w will contain self, self^2, self^4, ...
+        let mut w = self;
+        while k > 0 {
+            // If the ith bit of exponent is 1, multiply by self^(2^i)
+            if k & 1 != 0 {
+                acc = acc.mul_inner(w);
+            }
+            w = w.mul_inner(w);
+            k >>= 1;
+        }
+        acc
+    }
+
+    // These could be computed at compile time, but I'm choosing to just test
+    // their calculation instead.
+
+    /// Any non-zero element x = GENERATOR^k, for some k.
+    ///
+    /// This is chosen such that GENERATOR^((P - 1) / 64) = 8.
+    pub const GENERATOR: Self = Self(0xd64f951101aff9bf);
+
+    /// An element of order 2^32.
+    ///
+    /// This is specifically chosen such that ROOT_OF_UNITY^(2^26) = 8.
+    ///
+    /// That enables optimizations when doing NTTs, and things like that.
+    pub const ROOT_OF_UNITY: Self = Self(0xee41f5320c4ea145);
 }
 
 impl Add for F {
@@ -144,6 +175,21 @@ mod test {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn test_generator_calculation() {
+        assert_eq!(F::GENERATOR, F(7).exp(133));
+    }
+
+    #[test]
+    fn test_root_of_unity_calculation() {
+        assert_eq!(F::ROOT_OF_UNITY, F::GENERATOR.exp((P - 1) >> 32));
+    }
+
+    #[test]
+    fn test_root_of_unity_exp() {
+        assert_eq!(F::ROOT_OF_UNITY.exp(1 << 26), F(8));
+    }
+
     fn any_f() -> impl Strategy<Value = F> {
         any::<u64>().prop_map(F)
     }
@@ -182,6 +228,15 @@ mod test {
         #[test]
         fn test_sub_eq_mul_minus_one(x in any_f(), y in any_f()) {
             assert_eq!(x - y, x + -F::one() * y);
+        }
+
+        #[test]
+        fn test_exp(x in any_f(), k: u8) {
+            let mut naive = F::one();
+            for _ in 0..k {
+                naive = naive * x;
+            }
+            assert_eq!(naive, x.exp(k as u64));
         }
     }
 }
