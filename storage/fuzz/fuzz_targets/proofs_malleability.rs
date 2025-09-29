@@ -6,10 +6,9 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
-    mmr::{mem::Mmr, StandardHasher as Standard},
+    mmr::{mem::Mmr, Location, StandardHasher as Standard},
 };
 use libfuzzer_sys::fuzz_target;
-use commonware_storage::mmr::Location;
 
 const MAX_OPERATIONS: usize = 50;
 

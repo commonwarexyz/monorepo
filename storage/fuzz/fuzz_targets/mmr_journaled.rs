@@ -103,6 +103,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::seeded(input.seed);
 
     runner.start(|context| async move {
+        let mut leaves = Vec::new();
         let mut hasher = Standard::<Sha256>::new();
         let mmr = Mmr::init(
             context.clone(),
@@ -112,8 +113,6 @@ fn fuzz(input: FuzzInput) {
         .await
         .unwrap();
 
-        let mut leaves = Vec::new();
-        let mut positions = Vec::new();
         let mut has_batched_updates = false;
         let mut historical_sizes = Vec::new();
         let mut mmr_opt = Some(mmr);
@@ -147,7 +146,6 @@ fn fuzz(input: FuzzInput) {
                     let size_before = mmr.size();
                     let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
                     leaves.push(limited_data.to_vec());
-                    positions.push(pos);
 
                     historical_sizes.push(mmr.size());
                     assert!(mmr.size() > size_before);
@@ -168,7 +166,6 @@ fn fuzz(input: FuzzInput) {
                     let size_before = mmr.size();
                     let pos = mmr.add_batched(&mut hasher, limited_data).await.unwrap();
                     leaves.push(limited_data.to_vec());
-                    positions.push(pos);
                     has_batched_updates = true;
 
                     historical_sizes.push(mmr.size());
@@ -177,20 +174,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::Pop { count } => {
-                    if mmr.leaves() < count as u64 || leaves.is_empty() {
+                    if count as u64 > mmr.leaves() {
                         continue;
                     }
-
-                    let leaves_before = mmr.leaves();
                     mmr.process_updates(&mut hasher);
-                    if mmr.pop(count as usize).await.is_ok() {
-                        let leaves_after = mmr.leaves();
-                        let actually_popped = leaves_before - leaves_after;
 
-                        let split_index = leaves.len().saturating_sub(actually_popped as usize);
-                        let _ = leaves.split_off(split_index);
-                        let _ = positions.split_off(split_index);
-                    }
+                    let _ = mmr.pop(count as usize).await;
+                    let new_len = mmr.leaves();
+                    leaves.truncate(new_len as usize);
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
@@ -198,29 +189,25 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::Proof { location } => {
-                    assert_eq!(
-                        leaves.len(),
-                        positions.len(),
-                        "locations and positions must be the same length"
-                    );
-                    if positions.is_empty() {
+                    if mmr.leaves() == 0 {
                         continue;
                     }
                     mmr.process_updates(&mut hasher);
-                    let location = location as usize % leaves.len();
-                    let test_element_pos = positions[location];
+                    let location = location % mmr.leaves();
+                    let location = Location::new(location);
+                    let position = Position::from(location);
 
-                    if test_element_pos >= mmr.size() || test_element_pos < mmr.pruned_to_pos() {
+                    if position > mmr.size() || position < mmr.pruned_to_pos() {
                         continue;
                     }
 
-                    let location = Location::new(location as u64);
+                    let element = leaves.get(location.as_u64() as usize).unwrap();
 
                     if let Ok(proof) = mmr.proof(location).await {
                         let root = mmr.root(&mut hasher);
                         assert!(proof.verify_element_inclusion(
                             &mut hasher,
-                            leaves[location.as_u64() as usize].as_slice(),
+                            element,
                             location,
                             &root,
                         ));
@@ -228,13 +215,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::RangeProof { start_loc, end_loc } => {
+                    if mmr.leaves() == 0 {
+                        continue;
+                    }
                     let start_pos = Position::from(start_loc);
                     if start_loc >= mmr.size()
-                        || if let Some(pos) = mmr.oldest_retained_pos() {
-                            start_pos < pos
-                        } else {
-                            false
-                        }
+                        || start_pos < mmr.pruned_to_pos()
                         || start_loc > end_loc
                         || end_loc >= mmr.size()
                     {
@@ -261,15 +247,9 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     // Ensure the size represents a valid MMR structure
                     let valid_size = PeakIterator::to_nearest_size(size.min(mmr.size()));
-
                     let start_pos = Position::from(start_loc);
-
                     if (start_loc > end_loc)
-                        || if let Some(pos) = mmr.oldest_retained_pos() {
-                            start_pos < pos
-                        } else {
-                            false
-                        }
+                        || start_pos < mmr.pruned_to_pos()
                         || (start_loc >= valid_size)
                         || (end_loc >= valid_size)
                         || (valid_size == 0)
@@ -285,21 +265,18 @@ fn fuzz(input: FuzzInput) {
                 MmrJournaledOperation::Sync => {
                     mmr.sync(&mut hasher).await.unwrap();
                     has_batched_updates = false;
-
                     assert!(!mmr.is_dirty());
                 }
 
                 MmrJournaledOperation::ProcessUpdates => {
                     mmr.process_updates(&mut hasher);
                     has_batched_updates = false;
-
                     assert!(!mmr.is_dirty());
                 }
 
                 MmrJournaledOperation::PruneAll => {
                     mmr.process_updates(&mut hasher);
                     mmr.prune_all(&mut hasher).await.unwrap();
-                    assert_eq!(mmr.oldest_retained_pos(), None);
                 }
 
                 MmrJournaledOperation::PruneToPos { pos } => {
@@ -355,8 +332,6 @@ fn fuzz(input: FuzzInput) {
                     if let Some(mmr_instance) = mmr_opt.take() {
                         mmr_instance.close(&mut hasher).await.unwrap();
                         has_batched_updates = false;
-                        leaves.clear();
-                        positions.clear();
                         historical_sizes.clear();
                     }
                 }
@@ -371,8 +346,6 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .unwrap();
                         has_batched_updates = false;
-                        leaves.clear();
-                        positions.clear();
                         historical_sizes.clear();
                         mmr_opt = Some(new_mmr);
                     }
