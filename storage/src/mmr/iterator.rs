@@ -120,7 +120,7 @@ impl Iterator for PeakIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.two_h > 1 {
-            if self.node_pos < self.size.as_u64() {
+            if self.node_pos < self.size {
                 // found a peak
                 let peak_item = (
                     Position::new(self.node_pos),
@@ -128,7 +128,7 @@ impl Iterator for PeakIterator {
                 );
                 // move to the right sibling
                 self.node_pos += self.two_h - 1;
-                assert!(self.node_pos >= self.size.as_u64()); // sibling shouldn't be in the MMR if MMR is valid
+                assert!(self.node_pos >= self.size); // sibling shouldn't be in the MMR if MMR is valid
                 return Some(peak_item);
             }
             // descend to the left child
