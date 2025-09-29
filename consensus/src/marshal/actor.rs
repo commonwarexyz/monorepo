@@ -9,6 +9,7 @@ use super::{
     },
 };
 use crate::{
+    marshal::ingress::mailbox::Identifier as BlockID,
     threshold_simplex::types::{Finalization, Notarization},
     types::Round,
     Block, Reporter,
@@ -20,7 +21,7 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::archive::{immutable, Archive as _, Identifier};
+use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
@@ -83,7 +84,6 @@ pub struct Actor<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Varia
     // ---------- State ----------
     // Last view processed
     last_processed_round: Round,
-
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
@@ -217,6 +217,7 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 codec_config: config.codec_config,
+                partition_prefix: config.partition_prefix,
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
                 cache,
@@ -224,7 +225,6 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
                 finalized_blocks,
                 finalized_height,
                 processed_height,
-                partition_prefix: config.partition_prefix,
             },
             Mailbox::new(sender),
         )
@@ -268,7 +268,7 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
             notifier_rx,
         )
         .await;
-        spawner.with_label("finalizer").spawn(|_| finalizer.run());
+        spawner.spawn(|_| finalizer.run());
 
         // Create a local pool for waiter futures
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
@@ -297,6 +297,29 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
                         return;
                     };
                     match message {
+                        Message::GetInfo { identifier, response } => {
+                            let info = match identifier {
+                                // TODO: Instead of pulling out the entire block, determine the
+                                // height directly from the archive by mapping the commitment to
+                                // the index, which is the same as the height.
+                                BlockID::Commitment(commitment) => self
+                                    .finalized_blocks
+                                    .get(ArchiveID::Key(&commitment))
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|b| (b.height(), commitment)),
+                                BlockID::Height(height) => self
+                                    .finalizations_by_height
+                                    .get(ArchiveID::Index(height))
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|f| (height, f.proposal.payload)),
+                                BlockID::Latest => self.get_latest().await,
+                            };
+                            let _ = response.send(info);
+                        }
                         Message::Broadcast { block } => {
                             let _peers = buffer.broadcast(Recipients::All, block).await;
                         }
@@ -337,10 +360,24 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
                                 resolver.fetch(Request::<B>::Block(commitment)).await;
                             }
                         }
-                        Message::Get { commitment, response } => {
-                            // Check for block locally
-                            let result = self.find_block(&mut buffer, commitment).await;
-                            let _ = response.send(result);
+                        Message::GetBlock { identifier, response } => {
+                            match identifier {
+                                BlockID::Commitment(commitment) => {
+                                    let result = self.find_block(&mut buffer, commitment).await;
+                                    let _ = response.send(result);
+                                }
+                                BlockID::Height(height) => {
+                                    let result = self.get_finalized_block(height).await;
+                                    let _ = response.send(result);
+                                }
+                                BlockID::Latest => {
+                                    let block = match self.get_latest().await {
+                                        Some((_, commitment)) => self.find_block(&mut buffer, commitment).await,
+                                        None => None,
+                                    };
+                                    let _ = response.send(block);
+                                }
+                            }
                         }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
@@ -635,7 +672,7 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
 
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: u64) -> Option<B> {
-        match self.finalized_blocks.get(Identifier::Index(height)).await {
+        match self.finalized_blocks.get(ArchiveID::Index(height)).await {
             Ok(block) => block,
             Err(e) => panic!("failed to get block: {e}"),
         }
@@ -648,7 +685,7 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
     ) -> Option<Finalization<V, B::Commitment>> {
         match self
             .finalizations_by_height
-            .get(Identifier::Index(height))
+            .get(ArchiveID::Index(height))
             .await
         {
             Ok(finalization) => finalization,
@@ -696,6 +733,27 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
         let _ = notifier.try_send(());
     }
 
+    /// Get the latest finalized block information (height and commitment tuple).
+    ///
+    /// Blocks are only finalized directly with a finalization or indirectly via a descendant
+    /// block's finalization. Thus, the highest known finalized block must itself have a direct
+    /// finalization.
+    ///
+    /// We return the height and commitment using the highest known finalization that we know the
+    /// block height for. While it's possible that we have a later finalization, if we do not have
+    /// the full block for that finalization, we do not know it's height and therefore it would not
+    /// yet be found in the `finalizations_by_height` archive. While not checked explicitly, we
+    /// should have the associated block (in the `finalized_blocks` archive) for the information
+    /// returned.
+    async fn get_latest(&mut self) -> Option<(u64, B::Commitment)> {
+        let height = self.finalizations_by_height.last_index()?;
+        let finalization = self
+            .get_finalization_by_height(height)
+            .await
+            .expect("finalization missing");
+        Some((height, finalization.proposal.payload))
+    }
+
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
@@ -713,11 +771,7 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
             return Some(block);
         }
         // Check finalized blocks.
-        match self
-            .finalized_blocks
-            .get(Identifier::Key(&commitment))
-            .await
-        {
+        match self.finalized_blocks.get(ArchiveID::Key(&commitment)).await {
             Ok(block) => block, // may be None
             Err(e) => panic!("failed to get block: {e}"),
         }

@@ -186,13 +186,13 @@ fn fuzz(input: FuzzInput) {
         // for it to send a message it never will.
         let (d_res, l_res) = match select(dialer_handle, listener_handle).await {
             Either::Left((d_res, l_handle)) => {
-                match d_res.inspect_err(|e| println!("A: {:?}", e)).unwrap().ok() {
+                match d_res.inspect_err(|e| println!("A: {e:?}")).unwrap().ok() {
                     Some(d_res) => (Some(d_res), l_handle.await.unwrap().ok()),
                     None => (None, None),
                 }
             }
             Either::Right((l_res, d_handle)) => {
-                match l_res.inspect_err(|e| println!("B: {:?}", e)).unwrap().ok() {
+                match l_res.inspect_err(|e| println!("B: {e:?}")).unwrap().ok() {
                     Some(l_res) => (d_handle.await.unwrap().ok(), Some(l_res)),
                     None => (None, None),
                 }

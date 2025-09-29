@@ -1,4 +1,4 @@
-use crate::adb::sync::Journal;
+use crate::{adb::sync::Journal, mmr::Location};
 use commonware_cryptography::Digest;
 use std::future::Future;
 
@@ -23,8 +23,8 @@ pub trait Database: Sized {
     fn create_journal(
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
     ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
@@ -33,8 +33,8 @@ pub trait Database: Sized {
         config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
         apply_batch_size: usize,
     ) -> impl Future<Output = Result<Self, crate::adb::Error>>;
 
@@ -52,7 +52,7 @@ pub trait Database: Sized {
         journal: Self::Journal,
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
     ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 }
