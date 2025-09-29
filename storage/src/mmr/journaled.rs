@@ -208,7 +208,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             Metadata::<_, U64, Vec<u8>>::init(context.with_label("mmr_metadata"), metadata_cfg)
                 .await?;
 
-        if journal_size == Position::new(0) {
+        if journal_size == 0 {
             return Ok(Self {
                 mem_mmr: MemMmr::init(MemConfig {
                     nodes: vec![],
