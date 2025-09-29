@@ -22,6 +22,16 @@ impl Position {
         self.0
     }
 
+    /// Return the underlying value as `usize`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the position is too large to fit in a `usize`.
+    #[inline]
+    pub fn as_usize(self) -> usize {
+        self.0.try_into().expect("position is too large")
+    }
+
     /// Return `self + rhs` returning `None` on overflow.
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {

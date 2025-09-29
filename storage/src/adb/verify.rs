@@ -365,7 +365,7 @@ mod tests {
                 &mut hasher,
                 &proof,
                 start_loc,
-                &operations[start_loc.as_u64() as usize..=end_loc.as_u64() as usize],
+                &operations[start_loc.as_usize()..=end_loc.as_usize()],
                 &root,
             ));
         });
@@ -538,7 +538,7 @@ mod tests {
             // Prepare operations for verification
             let selected_ops: Vec<(Location, u64)> = target_locations
                 .iter()
-                .map(|&loc| (loc, operations[loc.as_u64() as usize]))
+                .map(|&loc| (loc, operations[loc.as_usize()]))
                 .collect();
 
             // Verify the multi-proof

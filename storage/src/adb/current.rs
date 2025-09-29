@@ -432,7 +432,7 @@ impl<
         let mut proof = verification::range_proof(&grafted_mmr, start_loc..end_loc).await?;
 
         // Collect the operations necessary to verify the proof.
-        let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
+        let mut ops = Vec::with_capacity((end_loc - start_loc).as_usize());
         let futures = (start_loc.as_u64()..end_loc.as_u64())
             .map(|i| self.any.log.read(i))
             .collect::<Vec<_>>();

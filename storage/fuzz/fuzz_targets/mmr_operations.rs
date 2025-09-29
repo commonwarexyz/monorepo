@@ -304,7 +304,7 @@ fn fuzz(input: FuzzInput) {
                             // If we got a proof for a pruned element, it might be pinned
                             // Verify the proof with the actual data we stored
                             let root = mmr.root(&mut hasher);
-                            let leaf_data = &reference.leaf_data[loc.as_u64() as usize];
+                            let leaf_data = &reference.leaf_data[loc.as_usize()];
                             let is_valid = proof.verify_element_inclusion(&mut hasher, leaf_data, loc, &root);
                             assert!(
                                 is_valid,

@@ -400,7 +400,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
             return digest;
         }
         self.hasher
-            .update_with_element(self.elements[index.as_u64() as usize]);
+            .update_with_element(self.elements[index.as_usize()]);
         self.hasher.update_with_digest(&digest);
 
         self.hasher.finalize()

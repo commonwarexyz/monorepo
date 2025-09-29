@@ -1502,7 +1502,7 @@ mod tests {
             .unwrap();
 
             // Add elements up to the end of the range to verify historical root
-            for elt in elements.iter().take(range.end.as_u64() as usize) {
+            for elt in elements.iter().take(range.end.as_usize()) {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
             let historical_size = ref_mmr.size();

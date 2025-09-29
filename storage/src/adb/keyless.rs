@@ -612,7 +612,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
+        let mut ops = Vec::with_capacity((end_loc - start_loc).as_usize());
         for loc in start_loc.as_u64()..end_loc.as_u64() {
             let offset = self.locations.read(loc).await?;
             let section = loc / self.log_items_per_section;

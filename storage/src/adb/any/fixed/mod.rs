@@ -538,7 +538,7 @@ impl<
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
+        let mut ops = Vec::with_capacity((end_loc - start_loc).as_usize());
         let futures = (start_loc.as_u64()..end_loc.as_u64())
             .map(|i| self.log.read(i))
             .collect::<Vec<_>>();
@@ -1582,7 +1582,7 @@ pub(super) mod test {
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
-                apply_ops(&mut ref_db, ops[0..end_loc.as_u64() as usize].to_vec()).await;
+                apply_ops(&mut ref_db, ops[0..end_loc.as_usize()].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
                 ref_db.sync().await.unwrap();
 
@@ -1591,10 +1591,7 @@ pub(super) mod test {
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
                 let end_loc = std::cmp::min(start_loc.checked_add(max_ops.get()).unwrap(), end_loc);
-                assert_eq!(
-                    ref_ops,
-                    ops[start_loc.as_u64() as usize..end_loc.as_u64() as usize]
-                );
+                assert_eq!(ref_ops, ops[start_loc.as_usize()..end_loc.as_usize()]);
 
                 // Verify proof against reference root
                 let ref_root = ref_db.root(&mut hasher);
