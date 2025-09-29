@@ -125,7 +125,7 @@ mod tests {
                 disconnect_on_block: true,
             },
         );
-        network.start();
+        network.start(context.with_label("network"));
 
         let schemes: Vec<PrivateKey> = peer_seeds
             .iter()
@@ -168,8 +168,9 @@ mod tests {
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key> {
         let public_key = signer.public_key();
+        let context = context.with_label(&format!("actor_{public_key}"));
         let (engine, mailbox) = Engine::new(
-            context.with_label(&format!("actor_{public_key}")),
+            context.clone(),
             Config {
                 coordinator: coordinator.clone(),
                 consumer,
@@ -186,7 +187,7 @@ mod tests {
                 priority_responses: false,
             },
         );
-        engine.start(connection);
+        engine.start(context, connection);
 
         mailbox
     }
