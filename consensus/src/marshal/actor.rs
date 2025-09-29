@@ -326,7 +326,11 @@ where
                     let Ok(((commitment, index), valid)) = result else {
                         continue; // Aborted future
                     };
+
                     self.notify_shard_validity_subscribers(commitment, index, valid).await;
+                    if valid {
+                        shards.try_broadcast_shard(commitment, index).await;
+                    }
                 },
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
@@ -429,7 +433,11 @@ where
                         Message::VerifyShard { commitment, index, response } => {
                             // Check for shard locally
                             if let Some(shard) = shards.get_shard(commitment, index).await {
-                                let _ = response.send(shard.verify());
+                                let valid = shard.verify();
+                                let _ = response.send(valid);
+                                if valid {
+                                    shards.try_broadcast_shard(commitment, index).await;
+                                }
                                 continue;
                             }
 
@@ -451,11 +459,6 @@ where
                                     });
                                 }
                             }
-                        }
-                        Message::Notarize { notarization_vote } => {
-                            let commitment = notarization_vote.proposal.payload;
-                            let index = notarization_vote.proposal_signature.index as usize;
-                            shards.try_broadcast_shard(commitment, index).await;
                         }
                         Message::Notarization { notarization } => {
                             let round = notarization.round();

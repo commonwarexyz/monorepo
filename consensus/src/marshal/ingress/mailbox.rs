@@ -1,6 +1,6 @@
 use crate::{
     marshal::ingress::coding::types::CodedBlock,
-    threshold_simplex::types::{Activity, Finalization, Notarization, Notarize},
+    threshold_simplex::types::{Activity, Finalization, Notarization},
     types::Round,
     Block, Reporter,
 };
@@ -100,11 +100,6 @@ pub(crate) enum Message<V: Variant, B: Block, S: Scheme, P: PublicKey> {
     },
 
     // -------------------- Consensus Engine Messages --------------------
-    /// An individual notarization vote from the consensus engine.
-    Notarize {
-        /// The notarization vote.
-        notarization_vote: Notarize<V, B::Commitment>,
-    },
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
@@ -259,7 +254,6 @@ impl<V: Variant, B: Block, S: Scheme, P: PublicKey> Reporter for Mailbox<V, B, S
 
     async fn report(&mut self, activity: Self::Activity) {
         let message = match activity {
-            Activity::Notarize(notarization_vote) => Message::Notarize { notarization_vote },
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
             _ => {
