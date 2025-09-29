@@ -27,6 +27,7 @@ bench = false
 criterion = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "coding_scheme_times"
