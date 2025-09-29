@@ -64,7 +64,7 @@ where
     ///
     /// Returns a tuple of the engine and the mailbox for sending messages.
     pub fn new(
-        context: impl Metrics,
+        metrics: impl Metrics,
         cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>,
     ) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
@@ -75,13 +75,13 @@ where
         let outstanding = Gauge::default();
         let requests = Counter::default();
         let responses = Counter::default();
-        context.register(
+        metrics.register(
             "outstanding",
             "outstanding commitments",
             outstanding.clone(),
         );
-        context.register("requests", "processed requests", requests.clone());
-        context.register("responses", "sent responses", responses.clone());
+        metrics.register("requests", "processed requests", requests.clone());
+        metrics.register("responses", "sent responses", responses.clone());
 
         (
             Self {
@@ -102,16 +102,16 @@ where
         )
     }
 
-    /// Starts the engine with the given network channels.
+    /// Starts the engine with the given spawner and network channels.
     ///
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         self,
-        context: impl Spawner,
+        spawner: impl Spawner,
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        context.spawn(|_| self.run(requests, responses))
+        spawner.spawn(|_| self.run(requests, responses))
     }
 
     async fn run(

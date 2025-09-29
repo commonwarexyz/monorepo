@@ -156,14 +156,15 @@ mod tests {
         Vec<PublicKey>,
         Registrations<PublicKey>,
     ) {
+        let network_context = context.with_label("network");
         let (network, mut oracle) = Network::new(
-            context.with_label("network"),
+            network_context.clone(),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
             },
         );
-        network.start(context.with_label("network"));
+        network.start(network_context);
 
         let mut schemes = (0..num_validators)
             .map(|i| PrivateKey::from_seed(i as u64))
@@ -234,8 +235,9 @@ mod tests {
             context.with_label("reporter").spawn(|_| reporter.run());
             reporters.insert(validator.clone(), reporter_mailbox);
 
+            let engine_context = context.with_label("engine");
             let engine = Engine::new(
-                context.with_label("engine"),
+                engine_context.clone(),
                 Config {
                     monitor,
                     validators: supervisor,
@@ -258,7 +260,7 @@ mod tests {
             );
 
             let (sender, receiver) = registrations.remove(validator).unwrap();
-            engine.start(context.with_label("engine"), (sender, receiver));
+            engine.start(engine_context, (sender, receiver));
         }
         monitors
     }
@@ -484,8 +486,9 @@ mod tests {
                             .unwrap()
                             .insert(validator.clone(), automaton.clone());
 
+                        let engine_context = validator_context.with_label("engine");
                         let engine = Engine::new(
-                            validator_context.with_label("engine"),
+                            engine_context.clone(),
                             Config {
                                 monitor,
                                 validators: supervisor,
@@ -508,7 +511,7 @@ mod tests {
                         );
 
                         let (sender, receiver) = registrations.remove(validator).unwrap();
-                        engine.start(validator_context.with_label("engine"), (sender, receiver));
+                        engine.start(engine_context, (sender, receiver));
                     }
 
                     // Create a single completion watcher for the shared reporter
@@ -634,8 +637,9 @@ mod tests {
                         .unwrap()
                         .insert(validator.clone(), automaton.clone());
 
+                    let engine_context = validator_context.with_label("engine");
                     let engine = Engine::new(
-                        validator_context.with_label("engine"),
+                        engine_context.clone(),
                         Config {
                             monitor,
                             validators: supervisor,
@@ -660,7 +664,7 @@ mod tests {
                     );
 
                     let (sender, receiver) = registrations.remove(validator).unwrap();
-                    engine.start(validator_context.with_label("engine"), (sender, receiver));
+                    engine.start(engine_context, (sender, receiver));
                 }
 
                 // Wait for validators to reach target_index (past skip_index)
@@ -719,8 +723,9 @@ mod tests {
                         .unwrap()
                         .insert(validator.clone(), automaton.clone());
 
+                    let engine_context = validator_context.with_label("engine");
                     let engine = Engine::new(
-                        validator_context.with_label("engine"),
+                        engine_context.clone(),
                         Config {
                             monitor,
                             validators: supervisor,
@@ -745,7 +750,7 @@ mod tests {
                     );
 
                     let (sender, receiver) = registrations.remove(validator).unwrap();
-                    engine.start(validator_context.with_label("engine"), (sender, receiver));
+                    engine.start(engine_context, (sender, receiver));
                 }
 
                 // Wait for skip_index to be confirmed (should happen on replay)
@@ -1017,8 +1022,9 @@ mod tests {
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(validator.clone(), reporter_mailbox);
 
+                let engine_context = context.with_label("engine");
                 let engine = Engine::new(
-                    context.with_label("engine"),
+                    engine_context.clone(),
                     Config {
                         monitor,
                         validators: supervisor,
@@ -1041,7 +1047,7 @@ mod tests {
                 );
 
                 let (sender, receiver) = registrations.remove(validator).unwrap();
-                engine.start(context.with_label("engine"), (sender, receiver));
+                engine.start(engine_context, (sender, receiver));
             }
 
             // With insufficient validators, consensus should not be achievable

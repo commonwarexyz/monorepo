@@ -68,14 +68,15 @@ mod tests {
         num_peers: u32,
         success_rate: f64,
     ) -> (Vec<PublicKey>, Registrations, Oracle<PublicKey>) {
+        let network_context = context.with_label("network");
         let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
-            context.with_label("network"),
+            network_context.clone(),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
             },
         );
-        network.start(context.with_label("network"));
+        network.start(network_context);
 
         let mut schemes = (0..num_peers)
             .map(|i| PrivateKey::from_seed(i as u64))
@@ -116,7 +117,7 @@ mod tests {
     ) -> BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>> {
         let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
-            let context = context.with_label(&peer.to_string());
+            let engine_context = context.with_label(&peer.to_string());
             let config = Config {
                 public_key: peer.clone(),
                 mailbox_size: 1024,
@@ -125,9 +126,9 @@ mod tests {
                 codec_config: RangeCfg::from(..),
             };
             let (engine, engine_mailbox) =
-                Engine::<PublicKey, TestMessage>::new(context.clone(), config);
+                Engine::<PublicKey, TestMessage>::new(engine_context.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);
-            engine.start(context, network);
+            engine.start(engine_context, network);
         }
         mailboxes
     }

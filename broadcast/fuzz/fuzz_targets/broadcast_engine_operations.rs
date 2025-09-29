@@ -152,14 +152,15 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Create network
+        let network_context = context.with_label("network");
         let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
-            context.with_label("network"),
+            network_context.clone(),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false,
             },
         );
-        network.start(context.with_label("network"));
+        network.start(network_context);
 
         // Create peers
         let mut peers = Vec::new();

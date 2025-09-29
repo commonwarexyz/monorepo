@@ -56,8 +56,9 @@ where
 {
     let (handler, receiver) = mpsc::channel(config.mailbox_size);
     let handler = Handler::new(handler);
+    let resolver_context = ctx.with_label("resolver");
     let (resolver_engine, resolver) = p2p::Engine::new(
-        ctx.with_label("resolver"),
+        resolver_context.clone(),
         p2p::Config {
             coordinator: config.coordinator,
             consumer: handler.clone(),
@@ -69,6 +70,6 @@ where
             priority_responses: config.priority_responses,
         },
     );
-    resolver_engine.start(ctx.with_label("resolver"), backfill);
+    resolver_engine.start(resolver_context, backfill);
     (receiver, resolver)
 }

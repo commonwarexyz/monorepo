@@ -337,9 +337,7 @@ impl<
                             self.metrics.digest.inc(Status::Dropped);
                         }
                         Ok(digest) => {
-                            if let Err(err) =
-                                self.handle_digest(index, digest, &mut sender).await
-                            {
+                            if let Err(err) = self.handle_digest(index, digest, &mut sender).await {
                                 debug!(?err, ?index, "handle_digest failed");
                                 continue;
                             }

@@ -104,12 +104,12 @@ pub struct Engine<P: PublicKey, M: Committable + Digestible + Codec> {
 }
 
 impl<P: PublicKey, M: Committable + Digestible + Codec> Engine<P, M> {
-    /// Creates a new engine with the given context and configuration.
+    /// Creates a new engine with the given metrics and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: impl Metrics, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
+    pub fn new(metrics: impl Metrics, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::init(metrics);
 
         let result = Self {
             public_key: cfg.public_key,
@@ -127,23 +127,23 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Engine<P, M> {
         (result, mailbox)
     }
 
-    /// Starts the engine with the given network.
+    /// Starts the engine with the given spawner and network.
     pub fn start(
         self,
-        context: impl Spawner,
+        spawner: impl Spawner,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        context.spawn(|context| self.run(context, network))
+        spawner.spawn(|spawner| self.run(spawner, network))
     }
 
     /// Inner run loop called by `start`.
     async fn run(
         mut self,
-        context: impl Spawner,
+        spawner: impl Spawner,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
-        let mut shutdown = context.stopped();
+        let mut shutdown = spawner.stopped();
 
         loop {
             // Cleanup waiters
