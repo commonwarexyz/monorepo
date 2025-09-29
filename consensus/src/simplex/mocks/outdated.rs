@@ -8,8 +8,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, Signer};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Spawner};
-use rand::{CryptoRng, Rng};
+use commonware_runtime::{Handle, Spawner};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -20,13 +19,7 @@ pub struct Config<C: Signer, S: Supervisor<Index = View>> {
     pub view_delta: u64,
 }
 
-pub struct Outdated<
-    E: Clock + Rng + CryptoRng + Spawner,
-    C: Signer,
-    H: Hasher,
-    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-> {
-    context: Option<E>,
+pub struct Outdated<C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
     crypto: C,
     supervisor: S,
 
@@ -36,16 +29,11 @@ pub struct Outdated<
     view_delta: u64,
 }
 
-impl<
-        E: Clock + Rng + CryptoRng + Spawner,
-        C: Signer,
-        H: Hasher,
-        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Outdated<E, C, H, S>
+impl<C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
+    Outdated<C, H, S>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> Self {
+    pub fn new(cfg: Config<C, S>) -> Self {
         Self {
-            context: Some(context),
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
 
@@ -56,11 +44,12 @@ impl<
         }
     }
 
-    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|_| self.run(voter_network))
+    pub fn start(
+        self,
+        spawner: impl Spawner,
+        voter_network: (impl Sender, impl Receiver),
+    ) -> Handle<()> {
+        spawner.spawn(|_| self.run(voter_network))
     }
 
     async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {

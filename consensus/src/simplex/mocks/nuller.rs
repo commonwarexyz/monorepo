@@ -18,13 +18,7 @@ pub struct Config<C: Signer, S: Supervisor<Index = View, PublicKey = C::PublicKe
     pub namespace: Vec<u8>,
 }
 
-pub struct Nuller<
-    E: Spawner,
-    C: Signer,
-    H: Hasher,
-    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-> {
-    context: Option<E>,
+pub struct Nuller<C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
     crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
@@ -32,12 +26,9 @@ pub struct Nuller<
     namespace: Vec<u8>,
 }
 
-impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
-    Nuller<E, C, H, S>
-{
-    pub fn new(context: E, cfg: Config<C, S>) -> Self {
+impl<C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>> Nuller<C, H, S> {
+    pub fn new(cfg: Config<C, S>) -> Self {
         Self {
-            context: Some(context),
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
@@ -46,11 +37,12 @@ impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C
         }
     }
 
-    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|_| self.run(voter_network))
+    pub fn start(
+        self,
+        spawner: impl Spawner,
+        voter_network: (impl Sender, impl Receiver),
+    ) -> Handle<()> {
+        spawner.spawn(|_| self.run(voter_network))
     }
 
     async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {

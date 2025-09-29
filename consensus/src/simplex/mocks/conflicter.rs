@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, Hasher, Signer};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Spawner};
+use commonware_runtime::{Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
@@ -20,12 +20,12 @@ pub struct Config<C: Signer, S: Supervisor<Index = View>> {
 }
 
 pub struct Conflicter<
-    E: Clock + Rng + CryptoRng + Spawner,
+    E: Rng + CryptoRng + Send + 'static,
     C: Signer,
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
-    context: Option<E>,
+    context: E,
     crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
@@ -34,7 +34,7 @@ pub struct Conflicter<
 }
 
 impl<
-        E: Clock + Rng + CryptoRng + Spawner,
+        E: Rng + CryptoRng + Send + 'static,
         C: Signer,
         H: Hasher,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
@@ -42,7 +42,7 @@ impl<
 {
     pub fn new(context: E, cfg: Config<C, S>) -> Self {
         Self {
-            context: Some(context),
+            context,
             crypto: cfg.crypto,
             supervisor: cfg.supervisor,
             _hasher: PhantomData,
@@ -51,14 +51,15 @@ impl<
         }
     }
 
-    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|context| self.run(context, voter_network))
+    pub fn start(
+        self,
+        spawner: impl Spawner,
+        voter_network: (impl Sender, impl Receiver),
+    ) -> Handle<()> {
+        spawner.spawn(|_| self.run(voter_network))
     }
 
-    async fn run(mut self, mut context: E, voter_network: (impl Sender, impl Receiver)) {
+    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
@@ -81,7 +82,7 @@ impl<
                         .unwrap();
 
                     // Notarize random digest
-                    let payload = H::Digest::random(&mut context);
+                    let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(notarize.proposal.round, notarize.proposal.parent, payload);
                     let msg = Notarize::sign(
@@ -111,7 +112,7 @@ impl<
                         .unwrap();
 
                     // Finalize random digest
-                    let payload = H::Digest::random(&mut context);
+                    let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(finalize.proposal.round, finalize.proposal.parent, payload);
                     let msg = Finalize::sign(

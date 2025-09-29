@@ -121,7 +121,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub verify_latency: Latency,
 }
 
-pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
+pub struct Application<E: Clock + RngCore, H: Hasher, P: PublicKey> {
     context: E,
     hasher: H,
     participant: P,
@@ -139,7 +139,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     verified: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
+impl<E: Clock + RngCore, H: Hasher, P: PublicKey> Application<E, H, P> {
     pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());
@@ -152,7 +152,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         let (sender, receiver) = mpsc::channel(1024);
         (
             Self {
-                context: Some(context),
+                context,
                 hasher: cfg.hasher,
                 participant: cfg.participant,
 
@@ -186,14 +186,16 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     /// When proposing a block, we do not care if the parent is verified (or even in our possession).
     /// Backfilling verification dependencies is considered out-of-scope for consensus.
-    async fn propose(&mut self, runtime: &mut E, context: Context<H::Digest>) -> H::Digest {
+    async fn propose(&mut self, context: Context<H::Digest>) -> H::Digest {
         // Simulate the propose latency
-        let duration = self.propose_latency.sample(runtime);
-        runtime.sleep(Duration::from_millis(duration as u64)).await;
+        let duration = self.propose_latency.sample(&mut self.context);
+        self.context
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
 
         // Generate the payload
         let parent = context.parent.1;
-        let random = runtime.gen::<u64>(); // Ensures we always have a unique payload
+        let random = self.context.gen::<u64>(); // Ensures we always have a unique payload
         let payload = (context.round, parent, random).encode();
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
@@ -208,14 +210,15 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     async fn verify(
         &mut self,
-        runtime: &mut E,
         context: Context<H::Digest>,
         payload: H::Digest,
         mut contents: Bytes,
     ) -> bool {
         // Simulate the verify latency
-        let duration = self.verify_latency.sample(runtime);
-        runtime.sleep(Duration::from_millis(duration as u64)).await;
+        let duration = self.verify_latency.sample(&mut self.context);
+        self.context
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
 
         // Verify contents
         let (parsed_round, parent, _) =
@@ -244,14 +247,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
     }
 
-    pub fn start(mut self) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|runtime| self.run(runtime))
+    pub fn start(self, spawner: impl Spawner) -> Handle<()> {
+        spawner.spawn(|_| self.run())
     }
 
-    async fn run(mut self, mut runtime: E) {
+    async fn run(mut self) {
         // Setup digest tracking
         #[allow(clippy::type_complexity)]
         let mut waiters: HashMap<
@@ -274,13 +274,13 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                             let _ = response.send(digest);
                         }
                         Message::Propose { context, response } => {
-                            let digest = self.propose(&mut runtime, context).await;
+                            let digest = self.propose(context).await;
                             let _ = response.send(digest);
                         }
                         Message::Verify { context, payload, response } => {
                             if let Some(contents) = seen.get(&payload) {
                                 let verified =
-                                    self.verify(&mut runtime, context, payload, contents.clone()).await;
+                                    self.verify(context, payload, contents.clone()).await;
                                 let _ = response.send(verified);
                             } else {
                                 waiters
@@ -304,7 +304,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     if let Some(waiters) = waiters.remove(&digest) {
                         for (context, sender) in waiters {
                             let verified =
-                                self.verify(&mut runtime, context, digest, contents.clone()).await;
+                                self.verify(context, digest, contents.clone()).await;
                             sender.send(verified).expect("Failed to send verification");
                         }
                     }
