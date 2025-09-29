@@ -4,6 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
+    iterator::PeakIterator,
     journaled::{Config, Mmr, SyncConfig},
     location::Location,
     Position, StandardHasher as Standard,
@@ -259,7 +260,6 @@ fn fuzz(input: FuzzInput) {
                     end_loc,
                 } => {
                     // Ensure the size represents a valid MMR structure
-                    use commonware_storage::mmr::iterator::PeakIterator;
                     let valid_size = PeakIterator::to_nearest_size(size.min(mmr.size()));
 
                     let start_pos = Position::from(start_loc);
