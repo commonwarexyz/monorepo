@@ -81,7 +81,8 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 ///
 /// # Errors
 ///
-/// Returns ElementPruned error if some element needed to generate the proof has been pruned.
+/// Returns ElementPruned error if some element needed to generate the proof has been pruned, or
+/// Empty error if the requested range is empty.
 pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
@@ -91,11 +92,20 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
 /// had `size` nodes.
+///
+/// # Errors
+///
+/// Returns ElementPruned error if some element needed to generate the proof has been pruned, or
+/// Empty error if the requested range is empty.
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     size: u64,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
+    if range.is_empty() {
+        return Err(Error::Empty);
+    }
+
     // Get the positions of all nodes needed to generate the proof.
     let positions = proof::nodes_required_for_range_proof(size, range);
 
@@ -118,20 +128,21 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 /// range_proof but supports non-contiguous locations.
 ///
 /// The order of positions does not affect the output (sorted internally).
+///
+/// # Errors
+///
+/// Returns Empty error if the requested locations are empty.
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     locations: &[Location],
 ) -> Result<Proof<D>, Error> {
-    // If there are no positions, return an empty proof
-    let size = mmr.size();
     if locations.is_empty() {
-        return Ok(Proof {
-            size,
-            digests: vec![],
-        });
+        // Disallow proofs over empty element lists just as we disallow proofs over empty ranges.
+        return Err(Error::Empty);
     }
 
     // Collect all required node positions
+    let size = mmr.size();
     let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations);
 
     // Fetch all required digests in parallel and collect with positions

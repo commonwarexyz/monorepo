@@ -890,10 +890,40 @@ mod tests {
             assert_eq!(mmr.size(), 0);
             mmr.sync(&mut hasher).await.unwrap();
 
-            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
             assert_eq!(mmr.size(), 0);
+
+            let empty_proof = Proof::default();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let root = mmr.root(&mut hasher);
+            assert!(empty_proof.verify_range_inclusion(
+                &mut hasher,
+                &[] as &[Digest],
+                Location::new(0),
+                &root
+            ));
+            assert!(empty_proof.verify_multi_inclusion(
+                &mut hasher,
+                &[] as &[(Digest, Location)],
+                &root
+            ));
+
+            // Confirm empty proof no longer verifies after adding an element.
+            mmr.add(&mut hasher, &test_digest(0)).await.unwrap();
+            let root = mmr.root(&mut hasher);
+            assert!(!empty_proof.verify_range_inclusion(
+                &mut hasher,
+                &[] as &[Digest],
+                Location::new(0),
+                &root
+            ));
+            assert!(!empty_proof.verify_multi_inclusion(
+                &mut hasher,
+                &[] as &[(Digest, Location)],
+                &root
+            ));
 
             mmr.destroy().await.unwrap();
         });
