@@ -5,7 +5,8 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
     journaled::{Config, Mmr, SyncConfig},
-    StandardHasher as Standard,
+    location::Location,
+    Position, StandardHasher as Standard,
 };
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
@@ -34,13 +35,13 @@ enum MmrJournaledOperation {
         location: u64,
     },
     RangeProof {
-        start_pos: u64,
-        end_pos: u64,
+        start_loc: u64,
+        end_loc: u64,
     },
     HistoricalRangeProof {
         size: u64,
-        start_pos: u64,
-        end_pos: u64,
+        start_loc: u64,
+        end_loc: u64,
     },
     Sync,
     ProcessUpdates,
@@ -192,7 +193,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
-                    let _ = mmr.get_node(pos).await;
+                    let _ = mmr.get_node(Position::new(pos)).await;
                 }
 
                 MmrJournaledOperation::Proof { location } => {
@@ -205,31 +206,42 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     mmr.process_updates(&mut hasher);
-                    let location = (location as usize) % leaves.len();
+                    let location = location as usize % leaves.len();
                     let test_element_pos = positions[location];
 
                     if test_element_pos >= mmr.size() || test_element_pos < mmr.pruned_to_pos() {
                         continue;
                     }
 
-                    if let Ok(proof) = mmr.proof(location as u64).await {
+                    let location = Location::new(location as u64);
+
+                    if let Ok(proof) = mmr.proof(location).await {
                         let root = mmr.root(&mut hasher);
                         assert!(proof.verify_element_inclusion(
                             &mut hasher,
-                            leaves[location].as_slice(),
-                            location as u64,
+                            leaves[location.as_u64() as usize].as_slice(),
+                            location,
                             &root,
                         ));
                     }
                 }
 
-                MmrJournaledOperation::RangeProof { start_pos, end_pos } => {
-                    if start_pos >= mmr.size() || start_pos > end_pos || end_pos >= mmr.size() {
+                MmrJournaledOperation::RangeProof { start_loc, end_loc } => {
+                    let start_pos = Position::from(start_loc);
+                    if start_loc >= mmr.size()
+                        || if let Some(pos) = mmr.oldest_retained_pos() {
+                            start_pos < pos
+                        } else {
+                            false
+                        }
+                        || start_loc > end_loc
+                        || end_loc >= mmr.size()
+                    {
                         continue;
                     }
 
                     mmr.process_updates(&mut hasher);
-                    let range = start_pos..end_pos;
+                    let range = Location::new(start_loc)..Location::new(end_loc);
                     if let Ok(proof) = mmr.range_proof(range.clone()).await {
                         let original_size = mmr.size();
                         let historical_proof = mmr
@@ -243,23 +255,30 @@ fn fuzz(input: FuzzInput) {
 
                 MmrJournaledOperation::HistoricalRangeProof {
                     size,
-                    start_pos,
-                    end_pos,
+                    start_loc,
+                    end_loc,
                 } => {
                     // Ensure the size represents a valid MMR structure
                     use commonware_storage::mmr::iterator::PeakIterator;
                     let valid_size = PeakIterator::to_nearest_size(size.min(mmr.size()));
 
-                    if (start_pos > end_pos)
-                        || (start_pos >= valid_size)
-                        || (end_pos >= valid_size)
+                    let start_pos = Position::from(start_loc);
+
+                    if (start_loc > end_loc)
+                        || if let Some(pos) = mmr.oldest_retained_pos() {
+                            start_pos < pos
+                        } else {
+                            false
+                        }
+                        || (start_loc >= valid_size)
+                        || (end_loc >= valid_size)
                         || (valid_size == 0)
                     {
                         continue;
                     }
                     mmr.process_updates(&mut hasher);
 
-                    let range = start_pos..end_pos;
+                    let range = Location::new(start_loc)..Location::new(end_loc);
                     let _ = mmr.historical_range_proof(valid_size, range).await;
                 }
 
@@ -281,23 +300,16 @@ fn fuzz(input: FuzzInput) {
                     mmr.process_updates(&mut hasher);
                     mmr.prune_all(&mut hasher).await.unwrap();
                     assert_eq!(mmr.oldest_retained_pos(), None);
-
-                    // Return, otherwise we will need to process leaves and update them in `positions`
-                    // and `elements` to match in the `proof` call.`
-                    return;
                 }
 
                 MmrJournaledOperation::PruneToPos { pos } => {
                     mmr.process_updates(&mut hasher);
-
                     if mmr.size() > 0 {
                         let safe_pos = pos % (mmr.size() + 1);
-                        mmr.prune_to_pos(&mut hasher, safe_pos).await.unwrap();
+                        mmr.prune_to_pos(&mut hasher, safe_pos.into())
+                            .await
+                            .unwrap();
                         assert!(mmr.pruned_to_pos() <= mmr.size());
-
-                        // Return, otherwise we will need to process leaves and update them in `positions`
-                        // and `elements` to match in the `proof` call.`
-                        return;
                     }
                 }
 
@@ -398,8 +410,8 @@ fn fuzz(input: FuzzInput) {
                     lower_bound,
                     upper_bound,
                 } => {
-                    let safe_lower = lower_bound % 1000;
-                    let safe_upper = safe_lower + (upper_bound % 100);
+                    let safe_lower = Position::new(lower_bound % 1000);
+                    let safe_upper = Position::new(*(safe_lower + (upper_bound % 100)));
 
                     let sync_config = SyncConfig {
                         config: test_config("sync"),

@@ -8,12 +8,14 @@ use commonware_storage::{
         any::variable::{Any, Config},
         verify_proof,
     },
+    mmr,
     mmr::hasher::Standard,
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use mmr::location::Location;
+use std::{collections::HashMap, num::NonZeroU64};
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -48,13 +50,13 @@ enum Operation {
         loc_offset: u32,
     },
     Proof {
-        start_loc: u32,
-        max_ops: u16,
+        start_loc: Location,
+        max_ops: NonZeroU64,
     },
     HistoricalProof {
         size: u32,
-        start_loc: u32,
-        max_ops: u16,
+        start_loc: Location,
+        max_ops: NonZeroU64,
     },
     Sync,
     OldestRetainedLoc,
@@ -116,13 +118,17 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             9 => {
                 let start_loc = u.arbitrary()?;
-                let max_ops = u.arbitrary()?;
+                let start_loc = Location::new(start_loc);
+                let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
+                let max_ops = NZU64!(max_ops);
                 Ok(Operation::Proof { start_loc, max_ops })
             }
             10 => {
                 let size = u.arbitrary()?;
                 let start_loc = u.arbitrary()?;
-                let max_ops = u.arbitrary()?;
+                let start_loc = Location::new(start_loc);
+                let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
+                let max_ops = NZU64!(max_ops);
                 Ok(Operation::HistoricalProof {
                     size,
                     start_loc,
@@ -233,7 +239,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::GetLoc { loc_offset } => {
                     let op_count = db.op_count();
                     if op_count > 0 {
-                        let loc = (*loc_offset as u64) % op_count;
+                        let loc = mmr::location::Location::new((*loc_offset as u64) % op_count);
                         let _ = db.get_loc(loc).await;
                     }
                 }
@@ -253,26 +259,18 @@ fn fuzz(input: FuzzInput) {
                 Operation::Proof { start_loc, max_ops } => {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
-                        let start_loc = (*start_loc as u64) % op_count;
-                        let max_ops_value = *max_ops as u64;
-
-                        // TODO: validate these restrictions, we need them to not verify proofs with max_ops=0
-
                         // Skip invalid cases
                         if db.op_count() == 0 || map.is_empty() {
                             continue;
                         }
-                        if start_loc < db.oldest_retained_loc().unwrap() {
-                            continue;
-                        }
-                        // Skip empty proofs as they are not meaningful and don't verify correctly
-                        if max_ops_value == 0 {
+                        if *start_loc < db.oldest_retained_loc().unwrap() || *start_loc >= op_count
+                        {
                             continue;
                         }
 
-                        if let Ok((proof, log)) = db.proof(start_loc, max_ops_value).await {
+                        if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
                             let root = db.root(&mut hasher);
-                            assert!(verify_proof(&mut hasher, &proof, start_loc, &log, &root));
+                            assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                         }
                     }
                 }
@@ -285,27 +283,19 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let size = ((*size as u64) % op_count) + 1;
-                        // Ensure start_loc is less than size to satisfy the assertion in historical_proof
-                        let start_loc = (*start_loc as u64) % size;
-                        let max_ops_value = *max_ops as u64;
-
-                        // TODO: validate these restrictions, we need them to not verify proofs with max_ops=0
-
-                        // Skip empty proofs as they are not meaningful and don't verify correctly
-                        if max_ops_value == 0 {
+                        // Skip invalid cases
+                        if db.op_count() == 0 || map.is_empty() {
+                            continue;
+                        }
+                        if *start_loc > size || *start_loc >= op_count {
                             continue;
                         }
 
-                        // Only verify when size == op_count because we can only get the current root
-                        // For historical sizes, we need to compute historical root that
-                        // requires access to peaks at that size
-                        if size == op_count {
+                        if let Ok((proof, log)) =
+                            db.historical_proof(size, *start_loc, *max_ops).await
+                        {
                             let root = db.root(&mut hasher);
-                            if let Ok((proof, log)) =
-                                db.historical_proof(size, start_loc, max_ops_value).await
-                            {
-                                assert!(verify_proof(&mut hasher, &proof, start_loc, &log, &root));
-                            }
+                            assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                         }
                     }
                 }
