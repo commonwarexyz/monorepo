@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tests-slow-${{ github.head_ref }}
+  group: tests-slow-${{ github.head_ref || github.ref_name || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

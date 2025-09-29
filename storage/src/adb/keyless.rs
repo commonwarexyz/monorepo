@@ -1319,7 +1319,7 @@ mod test {
                 );
 
                 // Check that we got operations
-                let expected_ops = std::cmp::min(max_ops, (db.op_count() - start_loc.as_u64()).as_u64());
+                let expected_ops = std::cmp::min(max_ops, (db.op_count() - start_loc).as_u64());
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
