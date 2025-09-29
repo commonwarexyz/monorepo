@@ -23,12 +23,10 @@ pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
 }
 
 pub struct Reconfigurer<
-    E: Spawner,
     V: Variant,
     H: Hasher,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
-    context: Option<E>,
     supervisor: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
@@ -36,15 +34,13 @@ pub struct Reconfigurer<
 }
 
 impl<
-        E: Spawner,
         V: Variant,
         H: Hasher,
         S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Reconfigurer<E, V, H, S>
+    > Reconfigurer<V, H, S>
 {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+    pub fn new(cfg: Config<S>) -> Self {
         Self {
-            context: Some(context),
             supervisor: cfg.supervisor,
             namespace: cfg.namespace,
             _hasher: PhantomData,
@@ -52,11 +48,12 @@ impl<
         }
     }
 
-    pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|_| self.run(pending_network))
+    pub fn start(
+        self,
+        spawner: impl Spawner,
+        pending_network: (impl Sender, impl Receiver),
+    ) -> Handle<()> {
+        spawner.spawn(|_| self.run(pending_network))
     }
 
     async fn run(self, pending_network: (impl Sender, impl Receiver)) {

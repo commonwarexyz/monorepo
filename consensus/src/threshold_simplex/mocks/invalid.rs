@@ -14,8 +14,7 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Spawner};
-use rand::{CryptoRng, Rng};
+use commonware_runtime::{Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -25,12 +24,10 @@ pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
 }
 
 pub struct Invalid<
-    E: Clock + Rng + CryptoRng + Spawner,
     V: Variant,
     H: Hasher,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
-    context: Option<E>,
     supervisor: S,
 
     namespace: Vec<u8>,
@@ -40,15 +37,13 @@ pub struct Invalid<
 }
 
 impl<
-        E: Clock + Rng + CryptoRng + Spawner,
         V: Variant,
         H: Hasher,
         S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Invalid<E, V, H, S>
+    > Invalid<V, H, S>
 {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+    pub fn new(cfg: Config<S>) -> Self {
         Self {
-            context: Some(context),
             supervisor: cfg.supervisor,
 
             namespace: cfg.namespace,
@@ -58,11 +53,12 @@ impl<
         }
     }
 
-    pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context
-            .take()
-            .expect("context is only consumed on start")
-            .spawn(|_| self.run(pending_network))
+    pub fn start(
+        self,
+        spawner: impl Spawner,
+        pending_network: (impl Sender, impl Receiver),
+    ) -> Handle<()> {
+        spawner.spawn(|_| self.run(pending_network))
     }
 
     async fn run(self, pending_network: (impl Sender, impl Receiver)) {
