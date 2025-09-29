@@ -593,7 +593,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
         self.journal_size = self.size();
         self.journal.sync().await?;
-        assert_eq!(self.journal_size.as_u64(), self.journal.size().await?);
+        assert_eq!(self.journal_size, self.journal.size().await?);
 
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
@@ -673,7 +673,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
     /// blob.
     pub async fn prune_all(&mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
-        if self.size() != Position::new(0) {
+        if self.size() != 0 {
             self.prune_to_pos(h, self.size()).await?;
             return Ok(());
         }
@@ -1321,7 +1321,7 @@ mod tests {
                     mmr.add(&mut hasher, last_leaf).await.unwrap();
                 }
                 let end_size = mmr.size();
-                let total_to_write = (end_size.as_u64() - start_size.as_u64()) as usize;
+                let total_to_write = (end_size - start_size).as_u64() as usize;
                 let partial_write_limit = i % total_to_write;
                 mmr.simulate_partial_sync(&mut hasher, partial_write_limit)
                     .await
@@ -1357,7 +1357,7 @@ mod tests {
                 .historical_range_proof(original_size, Location::new(2)..Location::new(6))
                 .await
                 .unwrap();
-            assert_eq!(historical_proof.size.as_u64(), original_size.as_u64());
+            assert_eq!(historical_proof.size, original_size);
             let root = mmr.root(&mut hasher);
             assert!(historical_proof.verify_range_inclusion(
                 &mut hasher,
@@ -1440,7 +1440,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(historical_proof.size.as_u64(), historical_size.as_u64());
+            assert_eq!(historical_proof.size, historical_size);
 
             // Verify proof works despite pruning
             assert!(historical_proof.verify_range_inclusion(
