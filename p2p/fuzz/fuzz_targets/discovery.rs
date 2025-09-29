@@ -44,9 +44,6 @@ enum DiscoveryOperation {
         peer_idx: u8,
         target_idx: u8,
     },
-    Sleep {
-        ms: u16,
-    },
 }
 
 #[derive(Debug)]
@@ -291,7 +288,6 @@ fn fuzz(input: FuzzInput) {
                                         let Some(expected_message) = queue.pop_front() else {
                                             continue;
                                         };
-                                        
                                         assert_eq!(message, expected_message);
                                         if queue.is_empty() {
                                             expected_messages.remove(&key);
@@ -375,11 +371,6 @@ fn fuzz(input: FuzzInput) {
                             !senders.is_empty()
                         });
                     }
-                }
-
-                DiscoveryOperation::Sleep { ms } => {
-                    let duration = Duration::from_millis((*ms as u64).min(100));
-                    context.sleep(duration).await;
                 }
             }
         }
