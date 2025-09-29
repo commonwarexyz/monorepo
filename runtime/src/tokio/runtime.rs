@@ -274,7 +274,11 @@ impl crate::Runner for Runner {
         // We prefer to collect process metrics outside of `Context` because
         // we are using `runtime_registry` rather than the one provided by `Context`.
         let process = MeteredProcess::init(runtime_registry);
-        runtime.spawn(process.collect(tokio::time::sleep));
+        if self.cfg.use_external_tokio {
+            tokio::spawn(process.collect(tokio::time::sleep));
+        } else {
+            runtime.spawn(process.collect(tokio::time::sleep));
+        }
 
         // Initialize storage
         cfg_if::cfg_if! {
