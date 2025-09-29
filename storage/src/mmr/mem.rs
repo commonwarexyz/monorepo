@@ -192,7 +192,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the position of the element given its index in the current nodes vector.
     fn index_to_pos(&self, index: usize) -> Position {
-        Position::new(index as u64 + self.pruned_to_pos.as_u64())
+        self.pruned_to_pos + (index as u64)
     }
 
     /// Returns the requested node, assuming it is either retained or known to exist in the
