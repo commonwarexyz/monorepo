@@ -198,13 +198,13 @@ mod tests {
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
         let network = oracle.register(secret.public_key(), 2).await.unwrap();
-        broadcast_engine.start(network);
+        broadcast_engine.start(context.clone(), network);
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
         let application = Application::<B>::default();
 
         // Start the application
-        actor.start(application.clone(), buffer, resolver);
+        actor.start(context.clone(), application.clone(), buffer, resolver);
 
         (application, mailbox)
     }
@@ -277,7 +277,7 @@ mod tests {
                 disconnect_on_block: true,
             },
         );
-        network.start();
+        network.start(context.with_label("network"));
         oracle
     }
 

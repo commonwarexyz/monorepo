@@ -158,7 +158,7 @@ mod tests {
                 disconnect_on_block: true,
             },
         );
-        network.start();
+        network.start(context.with_label("network"));
 
         let mut schemes = (0..num_validators)
             .map(|i| PrivateKey::from_seed(i as u64))
@@ -248,7 +248,7 @@ mod tests {
             );
 
             let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
-            engine.start((a1, a2), (b1, b2));
+            engine.start(context.with_label("engine"), (a1, a2), (b1, b2));
         }
         monitors
     }
@@ -392,7 +392,7 @@ mod tests {
                         disconnect_on_block: true,
                     },
                 );
-                network.start();
+                network.start(context.with_label("network"));
 
                 let mut schemes = (0..num_validators)
                     .map(|i| PrivateKey::from_seed(i as u64))
@@ -806,7 +806,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register all participants
             let mut registrations = register_participants(&mut oracle, &participants).await;
@@ -879,7 +879,7 @@ mod tests {
                 );
 
                 let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
-                engine.start((a1, a2), (b1, b2));
+                engine.start(context.with_label("engine"), (a1, a2), (b1, b2));
             }
 
             // Spawn sequencer engine
@@ -933,7 +933,7 @@ mod tests {
                 );
 
                 let ((a1, a2), (b1, b2)) = registrations.remove(&sequencer.public_key()).unwrap();
-                engine.start((a1, a2), (b1, b2));
+                engine.start(context.with_label("engine"), (a1, a2), (b1, b2));
             }
 
             // Await reporters

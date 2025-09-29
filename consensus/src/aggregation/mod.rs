@@ -163,7 +163,7 @@ mod tests {
                 disconnect_on_block: true,
             },
         );
-        network.start();
+        network.start(context.with_label("network"));
 
         let mut schemes = (0..num_validators)
             .map(|i| PrivateKey::from_seed(i as u64))
@@ -258,7 +258,7 @@ mod tests {
             );
 
             let (sender, receiver) = registrations.remove(validator).unwrap();
-            engine.start((sender, receiver));
+            engine.start(context.with_label("engine"), (sender, receiver));
         }
         monitors
     }
@@ -508,7 +508,7 @@ mod tests {
                         );
 
                         let (sender, receiver) = registrations.remove(validator).unwrap();
-                        engine.start((sender, receiver));
+                        engine.start(validator_context.with_label("engine"), (sender, receiver));
                     }
 
                     // Create a single completion watcher for the shared reporter
@@ -660,7 +660,7 @@ mod tests {
                     );
 
                     let (sender, receiver) = registrations.remove(validator).unwrap();
-                    engine.start((sender, receiver));
+                    engine.start(validator_context.with_label("engine"), (sender, receiver));
                 }
 
                 // Wait for validators to reach target_index (past skip_index)
@@ -745,7 +745,7 @@ mod tests {
                     );
 
                     let (sender, receiver) = registrations.remove(validator).unwrap();
-                    engine.start((sender, receiver));
+                    engine.start(validator_context.with_label("engine"), (sender, receiver));
                 }
 
                 // Wait for skip_index to be confirmed (should happen on replay)
@@ -1041,7 +1041,7 @@ mod tests {
                 );
 
                 let (sender, receiver) = registrations.remove(validator).unwrap();
-                engine.start((sender, receiver));
+                engine.start(context.with_label("engine"), (sender, receiver));
             }
 
             // With insufficient validators, consensus should not be achievable
