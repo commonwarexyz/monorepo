@@ -95,7 +95,7 @@ mod tests {
                 disconnect_on_block: true,
             },
         );
-        network.start();
+        network.start(context.with_label("network"));
 
         let schemes: Vec<PrivateKey> = peer_seeds
             .iter()
@@ -143,8 +143,9 @@ mod tests {
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,
     ) -> Mailbox<PublicKey, Request> {
         let public_key = signer.public_key();
+        let context = context.with_label(&format!("engine_{public_key}"));
         let (engine, mailbox) = Engine::new(
-            context.with_label(&format!("engine_{public_key}")),
+            context.clone(),
             Config {
                 blocker,
                 monitor,
@@ -156,7 +157,7 @@ mod tests {
                 response_codec: (),
             },
         );
-        engine.start(connection.0, connection.1);
+        engine.start(context, connection.0, connection.1);
 
         mailbox
     }
@@ -675,8 +676,9 @@ mod tests {
             let (_, receiver1) = conn.0; // Request channel
             let sender1 = super::mocks::sender::Failing::<PublicKey>::new();
             let (sender2, receiver2) = conn.1; // Response channel
+            let context = context.with_label(&format!("engine_{}", scheme.public_key()));
             let (engine, mut mailbox) = Engine::new(
-                context.with_label(&format!("engine_{}", scheme.public_key())),
+                context.clone(),
                 Config {
                     blocker: oracle.control(scheme.public_key()),
                     monitor: MockMonitor::dummy(),
@@ -690,7 +692,7 @@ mod tests {
             );
 
             // Start engine
-            engine.start((sender1, receiver1), (sender2, receiver2));
+            engine.start(context, (sender1, receiver1), (sender2, receiver2));
 
             // Send request
             let request = Request { id: 1, data: 1 };
@@ -716,8 +718,9 @@ mod tests {
             let conn = connections.next().unwrap();
             let (sender1, receiver1) = conn.0; // Request channel
             let (sender2, receiver2) = conn.1; // Response channel
+            let context = context.with_label(&format!("engine_{}", scheme.public_key()));
             let (engine, mut mailbox) = Engine::new(
-                context.with_label(&format!("engine_{}", scheme.public_key())),
+                context.clone(),
                 Config {
                     blocker: oracle.control(scheme.public_key()),
                     monitor: MockMonitor::dummy(),
@@ -731,7 +734,7 @@ mod tests {
             );
 
             // Start engine
-            let handle = engine.start((sender1, receiver1), (sender2, receiver2));
+            let handle = engine.start(context, (sender1, receiver1), (sender2, receiver2));
 
             // Stop the engine (which will result in all further requests being canceled)
             handle.abort();
