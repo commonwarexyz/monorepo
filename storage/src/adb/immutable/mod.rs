@@ -91,7 +91,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
 
     /// The number of operations that have been appended to the log (which must equal the number of
     /// leaves in the MMR).
-    log_size: u64,
+    log_size: Location,
 
     /// The number of items to put in each section of the journal.
     log_items_per_section: u64,
@@ -108,7 +108,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     /// # Invariant
     ///
     /// Only references operations of type [Variable::Set].
-    snapshot: Index<T, u64>,
+    snapshot: Index<T, Location>,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     hasher: Standard<H>,
@@ -165,8 +165,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut snapshot: Index<T, u64> =
-            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let (log_size, oldest_retained_loc) = Self::build_snapshot_from_log(
             &mut hasher,
             cfg.log_items_per_section,
@@ -177,7 +176,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let last_commit = log_size.checked_sub(1).map(Location::new);
+        let last_commit = log_size.checked_sub(1);
 
         Ok(Immutable {
             mmr,
@@ -246,7 +245,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let last_commit = log_size.checked_sub(1).map(Location::new);
+        let last_commit = log_size.checked_sub(1);
 
         let mut db = Immutable {
             mmr,
@@ -282,13 +281,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         mmr: &mut Mmr<E, H>,
         log: &mut variable::Journal<E, Variable<K, V>>,
         locations: &mut fixed::Journal<E, u32>,
-        snapshot: &mut Index<T, u64>,
-    ) -> Result<(u64, Location), Error> {
+        snapshot: &mut Index<T, Location>,
+    ) -> Result<(Location, Location), Error> {
         // Align the mmr with the location map.
         let mut mmr_leaves = super::align_mmr_and_locations(mmr, locations).await?;
 
         // The number of operations in the log.
-        let mut log_size = 0;
+        let mut log_size = Location::new(0);
         // The location and blob-offset of the first operation to follow the last known commit point.
         let mut after_last_commit = None;
         // A list of uncommitted operations that must be rolled back, in order of their locations.
@@ -310,7 +309,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     }
                     Ok((section, offset, _, op)) => {
                         if oldest_retained_loc.is_none() {
-                            log_size = section * log_items_per_section.get();
+                            log_size = Location::new(section * log_items_per_section.get());
                             oldest_retained_loc = Some(log_size);
                         }
 
@@ -323,7 +322,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
                         // index.
-                        let expected = loc / log_items_per_section.get();
+                        let expected = loc.as_u64() / log_items_per_section.get();
                         assert_eq!(section, expected,
                                 "section {section} did not match expected session {expected} from location {loc}");
 
@@ -363,11 +362,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             assert!(!uncommitted_ops.is_empty());
             warn!(
                 op_count = uncommitted_ops.len(),
-                log_size = end_loc,
+                log_size = ?end_loc,
                 end_offset,
                 "rewinding over uncommitted operations at end of log"
             );
-            let prune_to_section = end_loc / log_items_per_section.get();
+            let prune_to_section = end_loc.as_u64() / log_items_per_section.get();
             log.rewind_to_offset(prune_to_section, end_offset).await?;
             log.sync(prune_to_section).await?;
             log_size = end_loc;
@@ -375,27 +374,25 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Pop any MMR elements that are ahead of the last log commit point.
         if mmr_leaves > log_size {
-            locations.rewind(log_size).await?;
+            locations.rewind(log_size.as_u64()).await?;
             locations.sync().await?;
 
-            let op_count = mmr_leaves - log_size;
+            let op_count = (mmr_leaves - log_size.as_u64()) as usize;
             warn!(op_count, "popping uncommitted MMR operations");
-            mmr.pop(op_count as usize).await?;
+            mmr.pop(op_count).await?;
         }
 
         // Confirm post-conditions hold.
         assert_eq!(log_size, Location::try_from(mmr.size()).unwrap());
         assert_eq!(log_size, locations.size().await?);
 
-        let oldest_retained_loc = oldest_retained_loc
-            .map(Location::new)
-            .unwrap_or(Location::new(0));
+        let oldest_retained_loc = oldest_retained_loc.unwrap_or(Location::new(0));
         Ok((log_size, oldest_retained_loc))
     }
 
     /// Returns the section of the log where we are currently writing new items.
     fn current_section(&self) -> u64 {
-        self.log_size / self.log_items_per_section
+        self.log_size.as_u64() / self.log_items_per_section
     }
 
     /// Return the oldest location that remains retrievable.
@@ -443,7 +440,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             if loc < self.oldest_retained_loc {
                 continue;
             }
-            if let Some(v) = self.get_from_loc(key, Location::new(loc)).await? {
+            if let Some(v) = self.get_from_loc(key, loc).await? {
                 return Ok(Some(v));
             }
         }
@@ -510,7 +507,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
-        Location::new(self.log_size)
+        self.log_size
     }
 
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
@@ -627,7 +624,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        self.last_commit = Some(Location::new(self.log_size));
+        self.last_commit = Some(self.log_size);
         let op = Variable::<K, V>::Commit(metadata);
         let encoded_op = op.encode();
         let section = self.current_section();
