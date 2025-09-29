@@ -215,7 +215,7 @@ where
 
     // Get the historical proof and operations
     let result = database
-        .historical_proof(request.size, request.start_loc, max_ops)
+        .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
     drop(database);

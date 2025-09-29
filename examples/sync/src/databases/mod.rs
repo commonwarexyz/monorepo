@@ -70,7 +70,7 @@ pub trait Syncable {
     /// Get historical proof and operations.
     fn historical_proof(
         &self,
-        size: u64,
+        op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send;

@@ -204,7 +204,7 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let target_size = self.target.upper_bound.checked_add(1).unwrap().as_u64();
+        let target_size = self.target.upper_bound.checked_add(1).unwrap();
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
