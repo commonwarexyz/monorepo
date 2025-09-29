@@ -216,18 +216,17 @@ impl<
         // Pop any MMR elements that are ahead of the last log commit point.
         let mut next_mmr_leaf_loc = mmr.leaves().as_u64();
         if next_mmr_leaf_loc > log_size {
-            let op_count = next_mmr_leaf_loc - log_size;
-            warn!(log_size, op_count, "popping uncommitted MMR operations");
-            mmr.pop(op_count as usize).await?;
+            let num_to_pop = (next_mmr_leaf_loc - log_size) as usize;
+            warn!(log_size, num_to_pop, "popping uncommitted MMR operations");
+            mmr.pop(num_to_pop).await?;
             next_mmr_leaf_loc = log_size;
         }
 
         // If the MMR is behind, replay log operations to catch up.
         if next_mmr_leaf_loc < log_size {
-            let op_count = log_size - next_mmr_leaf_loc;
             warn!(
                 log_size,
-                op_count, "MMR lags behind log, replaying log to catch up"
+                next_mmr_leaf_loc, "MMR lags behind log, replaying log to catch up"
             );
             while next_mmr_leaf_loc < log_size {
                 let op = log.read(next_mmr_leaf_loc).await?;
