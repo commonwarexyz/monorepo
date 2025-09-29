@@ -664,7 +664,7 @@ impl<
         }
 
         debug!(
-            log_size = self.op_count().as_u64(),
+            log_size = ?self.op_count(),
             ?target_prune_loc,
             "pruned inactive ops"
         );
@@ -1097,7 +1097,7 @@ pub(super) mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = NZU64!(4);
-            let end_loc = db.op_count();
+            let end_loc = db.op_count().as_u64();
             let start_pos = db.mmr.pruned_to_pos();
             let start_loc = Location::try_from(start_pos).unwrap().as_u64();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
@@ -1106,15 +1106,10 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
-            for i in start_loc..end_loc.as_u64() {
-                let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
-                assert!(verify_proof(
-                    &mut hasher,
-                    &proof,
-                    Location::new(i),
-                    &log,
-                    &root
-                ));
+            for loc in start_loc..end_loc {
+                let loc = Location::new(loc);
+                let (proof, log) = db.proof(loc, max_ops).await.unwrap();
+                assert!(verify_proof(&mut hasher, &proof, loc, &log, &root));
             }
 
             db.destroy().await.unwrap();
