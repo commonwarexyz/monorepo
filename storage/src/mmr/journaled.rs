@@ -160,7 +160,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Store the pruning boundary in metadata
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        metadata.put(pruning_boundary_key, mmr_size.to_be_bytes().into());
+        metadata.put(pruning_boundary_key, mmr_size.as_u64().to_be_bytes().into());
 
         // Store the pinned nodes in metadata
         let nodes_to_pin_positions = nodes_to_pin(mmr_size);
