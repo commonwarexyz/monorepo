@@ -4,13 +4,14 @@ use crate::{
     adb::{
         self,
         sync::{
+            error::EngineError,
             requests::Requests,
             resolver::{FetchResult, Resolver},
             target::validate_update,
-            Database, Error, Journal, Target,
+            Database, Error as SyncError, Journal, Target,
         },
     },
-    mmr::StandardHasher,
+    mmr::{Location, StandardHasher},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
@@ -20,8 +21,7 @@ use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Type alias for sync engine errors
-type EngineError<DB, R> =
-    Error<<DB as Database>::Error, <R as Resolver>::Error, <DB as Database>::Digest>;
+type Error<DB, R> = adb::sync::Error<<R as Resolver>::Error, <DB as Database>::Digest>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
@@ -47,7 +47,7 @@ enum Event<Op, D: Digest, E> {
 #[derive(Debug)]
 pub(super) struct IndexedFetchResult<Op, D: Digest, E> {
     /// The location of the first operation in the batch
-    pub start_loc: u64,
+    pub start_loc: Location,
     /// The result of the fetch operation
     pub result: Result<FetchResult<Op, D>, E>,
 }
@@ -111,7 +111,7 @@ where
     outstanding_requests: Requests<DB::Op, DB::Digest, R::Error>,
 
     /// Operations that have been fetched but not yet applied to the log
-    fetched_operations: BTreeMap<u64, Vec<DB::Op>>,
+    fetched_operations: BTreeMap<Location, Vec<DB::Op>>,
 
     /// Pinned MMR nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
@@ -166,23 +166,22 @@ where
     DB::Op: Encode,
 {
     /// Create a new sync engine with the given configuration
-    pub async fn new(config: Config<DB, R>) -> Result<Self, EngineError<DB, R>> {
-        if config.target.lower_bound_ops > config.target.upper_bound_ops {
-            return Err(Error::InvalidTarget {
-                lower_bound_pos: config.target.lower_bound_ops,
-                upper_bound_pos: config.target.upper_bound_ops,
-            });
+    pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
+        if config.target.lower_bound > config.target.upper_bound {
+            return Err(SyncError::Engine(EngineError::InvalidTarget {
+                lower_bound_pos: config.target.lower_bound,
+                upper_bound_pos: config.target.upper_bound,
+            }));
         }
 
         // Create journal and verifier using the database's factory methods
         let journal = DB::create_journal(
             config.context.clone(),
             &config.db_config,
-            config.target.lower_bound_ops,
-            config.target.upper_bound_ops,
+            config.target.lower_bound,
+            config.target.upper_bound,
         )
-        .await
-        .map_err(Error::database)?;
+        .await?;
 
         let mut engine = Self {
             outstanding_requests: Requests::new(),
@@ -204,13 +203,13 @@ where
     }
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
-    async fn schedule_requests(&mut self) -> Result<(), EngineError<DB, R>> {
-        let target_size = self.target.upper_bound_ops + 1;
+    async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
+        let target_size = self.target.upper_bound.checked_add(1).unwrap().as_u64();
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
         if self.pinned_nodes.is_none() {
-            let start_loc = self.target.lower_bound_ops;
+            let start_loc = self.target.lower_bound;
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
                 start_loc,
@@ -228,11 +227,11 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_requests.len());
 
-        let log_size = self.journal.size().await.map_err(Error::database)?;
+        let log_size = self.journal.size().await?;
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
-            let operation_counts: BTreeMap<u64, u64> = self
+            let operation_counts: BTreeMap<Location, u64> = self
                 .fetched_operations
                 .iter()
                 .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
@@ -240,17 +239,18 @@ where
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next(
-                log_size,
-                self.target.upper_bound_ops,
+                Location::new(log_size),
+                self.target.upper_bound,
                 &operation_counts,
                 self.outstanding_requests.locations(),
-                self.fetch_batch_size.get(),
+                self.fetch_batch_size,
             ) else {
                 break; // No more gaps to fill
             };
 
             // Calculate batch size for this gap
-            let gap_size = NZU64!(end_loc - start_loc + 1);
+            let diff = end_loc.checked_sub(start_loc.into()).unwrap();
+            let gap_size = NZU64!(diff.as_u64() + 1);
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
@@ -273,16 +273,15 @@ where
     pub async fn reset_for_target_update(
         self,
         new_target: Target<DB::Digest>,
-    ) -> Result<Self, EngineError<DB, R>> {
+    ) -> Result<Self, Error<DB, R>> {
         let journal = DB::resize_journal(
             self.journal,
             self.context.clone(),
             &self.config,
-            new_target.lower_bound_ops,
-            new_target.upper_bound_ops,
+            new_target.lower_bound,
+            new_target.upper_bound,
         )
-        .await
-        .map_err(Error::database)?;
+        .await?;
 
         Ok(Self {
             outstanding_requests: Requests::new(),
@@ -302,7 +301,7 @@ where
     }
 
     /// Store a batch of fetched operations
-    pub fn store_operations(&mut self, start_loc: u64, operations: Vec<DB::Op>) {
+    pub fn store_operations(&mut self, start_loc: Location, operations: Vec<DB::Op>) {
         self.fetched_operations.insert(start_loc, operations);
     }
 
@@ -311,13 +310,13 @@ where
     /// This method finds operations that are contiguous with the current journal tip
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
-    pub async fn apply_operations(&mut self) -> Result<(), EngineError<DB, R>> {
-        let mut next_loc = self.journal.size().await.map_err(Error::database)?;
+    pub async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
+        let mut next_loc = self.journal.size().await?;
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
         self.fetched_operations.retain(|&start_loc, operations| {
-            let end_loc = start_loc + operations.len() as u64 - 1;
+            let end_loc = start_loc.checked_add(operations.len() as u64 - 1).unwrap();
             end_loc >= next_loc
         });
 
@@ -328,7 +327,8 @@ where
                 self.fetched_operations
                     .iter()
                     .find_map(|(range_start, range_ops)| {
-                        let range_end = range_start + range_ops.len() as u64 - 1;
+                        let range_end =
+                            range_start.checked_add(range_ops.len() as u64 - 1).unwrap();
                         if *range_start <= next_loc && next_loc <= range_end {
                             Some(*range_start)
                         } else {
@@ -344,7 +344,7 @@ where
             // Remove the batch of operations that contains the next operation to apply.
             let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
             // Skip operations that are before the next location.
-            let skip_count = (next_loc - range_start_loc) as usize;
+            let skip_count = (next_loc - range_start_loc.as_u64()) as usize;
             let operations_count = operations.len() - skip_count;
             let remaining_operations = operations.into_iter().skip(skip_count);
             next_loc += operations_count as u64;
@@ -355,12 +355,12 @@ where
     }
 
     /// Apply a batch of operations to the journal
-    async fn apply_operations_batch<I>(&mut self, operations: I) -> Result<(), EngineError<DB, R>>
+    async fn apply_operations_batch<I>(&mut self, operations: I) -> Result<(), Error<DB, R>>
     where
         I: IntoIterator<Item = DB::Op>,
     {
         for op in operations {
-            self.journal.append(op).await.map_err(Error::database)?;
+            self.journal.append(op).await?;
             // No need to sync here -- the journal will periodically sync its storage
             // and we will also sync when we're done applying all operations.
         }
@@ -368,17 +368,17 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub async fn is_complete(&self) -> Result<bool, EngineError<DB, R>> {
-        let journal_size = self.journal.size().await.map_err(Error::database)?;
+    pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
+        let journal_size = self.journal.size().await?;
 
         // Calculate the target journal size (upper bound is inclusive)
-        let target_journal_size = self.target.upper_bound_ops + 1;
+        let target_journal_size = self.target.upper_bound + 1;
 
         // Check if we've completed sync
         if journal_size >= target_journal_size {
             if journal_size > target_journal_size {
                 // This shouldn't happen in normal operation - indicates a bug
-                return Err(Error::InvalidState);
+                return Err(SyncError::Engine(EngineError::InvalidState));
             }
             return Ok(true);
         }
@@ -397,7 +397,7 @@ where
     fn handle_fetch_result(
         &mut self,
         fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
-    ) -> Result<(), EngineError<DB, R>> {
+    ) -> Result<(), Error<DB, R>> {
         // Mark request as complete
         self.outstanding_requests.remove(fetch_result.start_loc);
 
@@ -406,7 +406,7 @@ where
             proof,
             operations,
             success_tx,
-        } = fetch_result.result.map_err(Error::Resolver)?;
+        } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
         let operations_len = operations.len() as u64;
@@ -431,7 +431,7 @@ where
 
         if proof_valid {
             // Extract pinned nodes if we don't have them and this is the first batch
-            if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound_ops {
+            if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound {
                 if let Ok(nodes) =
                     crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
                 {
@@ -456,7 +456,7 @@ where
     ///
     /// Returns `StepResult::Complete(database)` when sync is finished, or
     /// `StepResult::Continue(self)` when more work remains.
-    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, EngineError<DB, R>> {
+    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         // Check if sync is complete
         if self.is_complete().await? {
             // Build the database from the completed sync
@@ -465,21 +465,20 @@ where
                 self.config,
                 self.journal,
                 self.pinned_nodes,
-                self.target.lower_bound_ops,
-                self.target.upper_bound_ops,
+                self.target.lower_bound,
+                self.target.upper_bound,
                 self.apply_batch_size,
             )
-            .await
-            .map_err(Error::database)?;
+            .await?;
 
             // Verify the final root digest matches the final target
             let got_root = database.root();
             let expected_root = self.target.root;
             if got_root != expected_root {
-                return Err(Error::RootMismatch {
+                return Err(SyncError::Engine(EngineError::RootMismatch {
                     expected: expected_root,
                     actual: got_root,
-                });
+                }));
             }
 
             return Ok(NextStep::Complete(database));
@@ -488,7 +487,7 @@ where
         // Wait for the next synchronization event
         let event = wait_for_event(&mut self.update_receiver, &mut self.outstanding_requests)
             .await
-            .ok_or(Error::SyncStalled)?;
+            .ok_or(SyncError::Engine(EngineError::SyncStalled))?;
 
         match event {
             Event::TargetUpdate(new_target) => {
@@ -524,7 +523,7 @@ where
     ///
     /// This method repeatedly calls `step()` until sync is complete. The `step()` method
     /// handles building the final database and verifying the root digest.
-    pub async fn sync(mut self) -> Result<DB, EngineError<DB, R>> {
+    pub async fn sync(mut self) -> Result<DB, Error<DB, R>> {
         // Run sync loop until completion
         loop {
             match self.step().await? {
@@ -550,7 +549,7 @@ mod tests {
         // Test adding requests
         let fut = Box::pin(async {
             IndexedFetchResult {
-                start_loc: 0,
+                start_loc: Location::new(0),
                 result: Ok(FetchResult {
                     proof: Proof {
                         size: 0,
@@ -561,12 +560,12 @@ mod tests {
                 }),
             }
         });
-        requests.add(10, fut);
+        requests.add(Location::new(10), fut);
         assert_eq!(requests.len(), 1);
-        assert!(requests.locations().contains(&10));
+        assert!(requests.locations().contains(&Location::new(10)));
 
         // Test removing requests
-        requests.remove(10);
-        assert!(!requests.locations().contains(&10));
+        requests.remove(Location::new(10));
+        assert!(!requests.locations().contains(&Location::new(10)));
     }
 }

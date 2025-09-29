@@ -1,8 +1,12 @@
+//! Mock `ThresholdSupervisor` and `Monitor` for tests: tracks participants/leaders,
+//! verifies activities, records votes/faults, and exposes a simple subscription.
+
 use crate::{
     threshold_simplex::types::{
         Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
-        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, Seedable, View,
+        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, Seedable,
     },
+    types::View,
     Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -70,11 +74,8 @@ impl<P: PublicKey, V: Variant, D: Digest> Supervisor<P, V, D> {
             }
             validators.sort();
             let view_identity = public::<V>(&polynomial);
-            if identity.is_none() {
-                identity = Some(*view_identity);
-            } else if identity.as_ref().unwrap() != view_identity {
-                panic!("public keys do not match");
-            }
+            let identity_ref = identity.get_or_insert(*view_identity);
+            assert_eq!(identity_ref, view_identity, "public keys do not match");
             parsed_participants.insert(view, (evaluations, map, validators, my_share));
         }
         Self {
