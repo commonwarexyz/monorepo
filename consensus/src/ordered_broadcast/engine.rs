@@ -371,9 +371,7 @@ impl<
                     };
 
                     // Propose the chunk
-                    if let Err(err) =
-                        self.propose(context.clone(), payload, &mut node_sender).await
-                    {
+                    if let Err(err) = self.propose(context.clone(), payload, &mut node_sender).await {
                         warn!(?err, ?context, "propose new failed");
                         continue;
                     }

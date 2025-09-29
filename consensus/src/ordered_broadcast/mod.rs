@@ -222,8 +222,9 @@ mod tests {
             context.with_label("reporter").spawn(|_| reporter.run());
             reporters.insert(validator.clone(), reporter_mailbox);
 
+            let engine_context = context.with_label("engine");
             let engine = Engine::new(
-                context.with_label("engine"),
+                engine_context.clone(),
                 Config {
                     crypto: scheme.clone(),
                     relay: automaton.clone(),
@@ -248,7 +249,7 @@ mod tests {
             );
 
             let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
-            engine.start(context.with_label("engine"), (a1, a2), (b1, b2));
+            engine.start(engine_context, (a1, a2), (b1, b2));
         }
         monitors
     }
@@ -799,14 +800,15 @@ mod tests {
             participants.push(sequencer.public_key()); // as long as external participants are in same position for all, it is safe
 
             // Create network
+            let network_context = context.with_label("network");
             let (network, mut oracle) = Network::new(
-                context.with_label("network"),
+                network_context.clone(),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
                 },
             );
-            network.start(context.with_label("network"));
+            network.start(network_context);
 
             // Register all participants
             let mut registrations = register_participants(&mut oracle, &participants).await;
@@ -853,8 +855,9 @@ mod tests {
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(validator.clone(), reporter_mailbox);
 
+                let engine_context = context.with_label("engine");
                 let engine = Engine::new(
-                    context.with_label("engine"),
+                    engine_context.clone(),
                     Config {
                         crypto: scheme.clone(),
                         relay: automaton.clone(),
@@ -879,7 +882,7 @@ mod tests {
                 );
 
                 let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
-                engine.start(context.with_label("engine"), (a1, a2), (b1, b2));
+                engine.start(engine_context, (a1, a2), (b1, b2));
             }
 
             // Spawn sequencer engine
@@ -898,8 +901,9 @@ mod tests {
                     );
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(sequencer.public_key(), reporter_mailbox);
+                let engine_context = context.with_label("engine");
                 let engine = Engine::new(
-                    context.with_label("engine"),
+                    engine_context.clone(),
                     Config {
                         crypto: sequencer.clone(),
                         relay: automaton.clone(),
@@ -933,7 +937,7 @@ mod tests {
                 );
 
                 let ((a1, a2), (b1, b2)) = registrations.remove(&sequencer.public_key()).unwrap();
-                engine.start(context.with_label("engine"), (a1, a2), (b1, b2));
+                engine.start(engine_context, (a1, a2), (b1, b2));
             }
 
             // Await reporters
