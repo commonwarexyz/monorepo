@@ -90,7 +90,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.with_label("network"));
 
             // Get participants
             let mut schemes = Vec::new();
@@ -126,7 +126,7 @@ mod tests {
                 context.with_label("application"),
                 application_cfg,
             );
-            actor.start();
+            actor.start(context.with_label("application"));
             let cfg = Config {
                 crypto: scheme,
                 automaton: application.clone(),
@@ -192,7 +192,7 @@ mod tests {
             });
 
             // Run the actor
-            actor.start(backfiller, voter_sender, voter_receiver);
+            actor.start(context.clone(), backfiller, voter_sender, voter_receiver);
 
             // Send finalization over network (view 100)
             let payload = Sha256::hash(b"test");
@@ -290,7 +290,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.with_label("network"));
 
             // Get participants
             let mut private_keys = Vec::new();
@@ -325,7 +325,7 @@ mod tests {
                 context.with_label("application"),
                 application_cfg,
             );
-            actor.start();
+            actor.start(context.with_label("application"));
             let cfg = Config {
                 crypto: private_key,
                 automaton: application.clone(),
@@ -391,7 +391,7 @@ mod tests {
             });
 
             // Run the actor
-            actor.start(backfiller, voter_sender, voter_receiver);
+            actor.start(context.clone(), backfiller, voter_sender, voter_receiver);
 
             // Establish Prune Floor (50 - 10 + 5 = 45)
             //

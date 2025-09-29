@@ -349,7 +349,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -412,7 +412,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
@@ -444,7 +444,12 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    context.with_label("engine"),
+                    pending,
+                    recovered,
+                    resolver,
+                ));
             }
 
             // Wait for all engines to finish
@@ -607,7 +612,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants (active)
             let mut schemes = Vec::new();
@@ -680,7 +685,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     crypto: scheme,
@@ -712,7 +717,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine.start(pending, recovered, resolver);
+                engine.start(context.with_label("engine"), pending, recovered, resolver);
             }
 
             // Wait for all  engines to finish
@@ -788,7 +793,7 @@ mod tests {
                 );
 
                 // Start network
-                network.start();
+                network.start(context.with_label("network"));
 
                 // Register participants
                 let mut schemes = Vec::new();
@@ -847,7 +852,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
@@ -879,7 +884,12 @@ mod tests {
                     let (pending, recovered, resolver) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    engine_handlers.push(engine.start(pending, recovered, resolver));
+                    engine_handlers.push(engine.start(
+                        context.with_label("engine"),
+                        pending,
+                        recovered,
+                        resolver,
+                    ));
                 }
 
                 // Store all finalizer handles
@@ -969,7 +979,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1043,7 +1053,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
@@ -1075,7 +1085,12 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    context.with_label("engine"),
+                    pending,
+                    recovered,
+                    resolver,
+                ));
             }
 
             // Wait for all engines to finish
@@ -1171,7 +1186,7 @@ mod tests {
                 context.with_label("application"),
                 application_cfg,
             );
-            actor.start();
+            actor.start(context.with_label("application"));
             let blocker = oracle.control(scheme.public_key());
             let cfg = config::Config {
                 crypto: scheme,
@@ -1203,7 +1218,12 @@ mod tests {
             let (pending, recovered, resolver) = registrations
                 .remove(&validator)
                 .expect("validator should be registered");
-            engine_handlers.push(engine.start(pending, recovered, resolver));
+            engine_handlers.push(engine.start(
+                context.with_label("engine"),
+                pending,
+                recovered,
+                resolver,
+            ));
 
             // Wait for new engine to finalize required
             let (mut latest, mut monitor) = supervisor.subscribe().await;
@@ -1244,7 +1264,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1318,7 +1338,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
@@ -1350,7 +1370,12 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    context.with_label("engine"),
+                    pending,
+                    recovered,
+                    resolver,
+                ));
             }
 
             // Wait for all engines to finish
@@ -1512,7 +1537,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1585,7 +1610,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
@@ -1617,7 +1642,12 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    context.with_label("engine"),
+                    pending,
+                    recovered,
+                    resolver,
+                ));
             }
 
             // Wait for all engines to finish
@@ -1702,7 +1732,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1765,7 +1795,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
@@ -1797,7 +1827,12 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    context.with_label("engine"),
+                    pending,
+                    recovered,
+                    resolver,
+                ));
             }
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
@@ -1918,7 +1953,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1981,7 +2016,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
@@ -2013,7 +2048,12 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    context.with_label("engine"),
+                    pending,
+                    recovered,
+                    resolver,
+                ));
             }
 
             // Wait for all engines to finish
@@ -2130,7 +2170,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2193,7 +2233,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
@@ -2225,7 +2265,12 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    context.with_label("engine"),
+                    pending,
+                    recovered,
+                    resolver,
+                ));
             }
 
             // Wait for all engines to finish
@@ -2311,7 +2356,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2375,7 +2420,7 @@ mod tests {
                             context.with_label("byzantine_engine"),
                             cfg,
                         );
-                    engine.start(pending);
+                    engine.start(context.with_label("byzantine_engine"), pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2389,7 +2434,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
@@ -2416,7 +2461,7 @@ mod tests {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(pending, recovered, resolver);
+                    engine.start(context.with_label("engine"), pending, recovered, resolver);
                 }
             }
 
@@ -2506,7 +2551,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2565,9 +2610,9 @@ mod tests {
                         namespace: namespace.clone(),
                     };
 
-                    let engine: mocks::invalid::Invalid<_, V, Sha256, _> =
-                        mocks::invalid::Invalid::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(pending);
+                    let engine: mocks::invalid::Invalid<V, Sha256, _> =
+                        mocks::invalid::Invalid::new(cfg);
+                    engine.start(context.with_label("byzantine_engine"), pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2581,7 +2626,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
@@ -2608,7 +2653,7 @@ mod tests {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(pending, recovered, resolver);
+                    engine.start(context.with_label("engine"), pending, recovered, resolver);
                 }
             }
 
@@ -2686,7 +2731,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2745,12 +2790,9 @@ mod tests {
                         namespace: namespace.clone(),
                     };
 
-                    let engine: mocks::impersonator::Impersonator<_, V, Sha256, _> =
-                        mocks::impersonator::Impersonator::new(
-                            context.with_label("byzantine_engine"),
-                            cfg,
-                        );
-                    engine.start(pending);
+                    let engine: mocks::impersonator::Impersonator<V, Sha256, _> =
+                        mocks::impersonator::Impersonator::new(cfg);
+                    engine.start(context.with_label("byzantine_engine"), pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2764,7 +2806,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
@@ -2791,7 +2833,7 @@ mod tests {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(pending, recovered, resolver);
+                    engine.start(context.with_label("engine"), pending, recovered, resolver);
                 }
             }
 
@@ -2865,7 +2907,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2923,12 +2965,9 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::reconfigurer::Reconfigurer<_, V, Sha256, _> =
-                        mocks::reconfigurer::Reconfigurer::new(
-                            context.with_label("byzantine_engine"),
-                            cfg,
-                        );
-                    engine.start(pending);
+                    let engine: mocks::reconfigurer::Reconfigurer<V, Sha256, _> =
+                        mocks::reconfigurer::Reconfigurer::new(cfg);
+                    engine.start(context.with_label("byzantine_engine"), pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2942,7 +2981,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
@@ -2969,7 +3008,7 @@ mod tests {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(pending, recovered, resolver);
+                    engine.start(context.with_label("engine"), pending, recovered, resolver);
                 }
             }
 
@@ -3043,7 +3082,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -3101,9 +3140,9 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::nuller::Nuller<_, V, Sha256, _> =
-                        mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(pending);
+                    let engine: mocks::nuller::Nuller<V, Sha256, _> =
+                        mocks::nuller::Nuller::new(cfg);
+                    engine.start(context.with_label("byzantine_engine"), pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -3117,7 +3156,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
@@ -3144,7 +3183,7 @@ mod tests {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(pending, recovered, resolver);
+                    engine.start(context.with_label("engine"), pending, recovered, resolver);
                 }
             }
 
@@ -3231,7 +3270,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -3290,9 +3329,9 @@ mod tests {
                         namespace: namespace.clone(),
                         view_delta: activity_timeout * 4,
                     };
-                    let engine: mocks::outdated::Outdated<_, V, Sha256, _> =
-                        mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(pending);
+                    let engine: mocks::outdated::Outdated<V, Sha256, _> =
+                        mocks::outdated::Outdated::new(cfg);
+                    engine.start(context.with_label("byzantine_engine"), pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -3306,7 +3345,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
@@ -3333,7 +3372,7 @@ mod tests {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(pending, recovered, resolver);
+                    engine.start(context.with_label("engine"), pending, recovered, resolver);
                 }
             }
 
@@ -3400,7 +3439,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -3463,7 +3502,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
@@ -3495,7 +3534,12 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    context.with_label("engine"),
+                    pending,
+                    recovered,
+                    resolver,
+                ));
             }
 
             // Wait for all engines to finish
@@ -3557,7 +3601,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -3629,7 +3673,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
@@ -3661,7 +3705,12 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.push(engine.start(
+                    context.with_label("engine"),
+                    pending,
+                    recovered,
+                    resolver,
+                ));
             }
 
             // Prepare TLE test data

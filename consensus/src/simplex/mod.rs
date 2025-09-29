@@ -257,7 +257,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -310,7 +310,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let cfg = config::Config {
                     crypto: scheme,
                     automaton: application.clone(),
@@ -339,7 +339,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(context.with_label("engine"), voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -491,7 +491,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -554,7 +554,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
 
                 // Configure engine
                 let cfg = config::Config {
@@ -585,7 +585,7 @@ mod tests {
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine.start(voter, resolver);
+                engine.start(context.with_label("engine"), voter, resolver);
             }
 
             // Wait for all engines (including the observer) to finish
@@ -632,7 +632,7 @@ mod tests {
                 );
 
                 // Start network
-                network.start();
+                network.start(context.with_label("network"));
 
                 // Register participants
                 let mut schemes = Vec::new();
@@ -685,7 +685,8 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
+
                     let cfg = config::Config {
                         crypto: scheme,
                         automaton: application.clone(),
@@ -714,7 +715,11 @@ mod tests {
                     let (voter_network, resolver_network) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    engine_handlers.push(engine.start(voter_network, resolver_network));
+                    engine_handlers.push(engine.start(
+                        context.with_label("engine"),
+                        voter_network,
+                        resolver_network,
+                    ));
                 }
 
                 // Store all finalizer handles
@@ -792,7 +797,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -856,7 +861,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     automaton: application.clone(),
@@ -885,7 +890,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(context.with_label("engine"), voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -975,7 +980,7 @@ mod tests {
                 context.with_label("application"),
                 application_cfg,
             );
-            actor.start();
+            actor.start(context.with_label("application"));
             let cfg = config::Config {
                 crypto: scheme,
                 automaton: application.clone(),
@@ -1004,7 +1009,7 @@ mod tests {
                 .remove(&validator)
                 .expect("validator should be registered");
             let engine = Engine::new(context.with_label("engine"), cfg);
-            engine_handlers.push(engine.start(voter, resolver));
+            engine_handlers.push(engine.start(context.with_label("engine"), voter, resolver));
 
             // Wait for new engine to finalize required
             let (mut latest, mut monitor) = supervisor.subscribe().await;
@@ -1035,7 +1040,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1099,7 +1104,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let cfg = config::Config {
                     crypto: scheme,
                     automaton: application.clone(),
@@ -1128,7 +1133,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(context.with_label("engine"), voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -1264,7 +1269,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1327,7 +1332,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let cfg = config::Config {
                     crypto: scheme,
                     automaton: application.clone(),
@@ -1356,7 +1361,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(context.with_label("engine"), voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -1434,7 +1439,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1487,7 +1492,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     automaton: application.clone(),
@@ -1516,7 +1521,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(context.with_label("engine"), voter, resolver));
             }
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
@@ -1622,7 +1627,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1672,7 +1677,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     automaton: application.clone(),
@@ -1701,7 +1706,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(context.with_label("engine"), voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -1800,7 +1805,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -1853,7 +1858,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let cfg = config::Config {
                     crypto: scheme,
                     automaton: application.clone(),
@@ -1882,7 +1887,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(context.with_label("engine"), voter, resolver));
             }
 
             // Wait for all engines to finish
@@ -1954,7 +1959,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2008,7 +2013,7 @@ mod tests {
                             context.with_label("byzantine_engine"),
                             cfg,
                         );
-                    engine.start(voter);
+                    engine.start(context.with_label("byzantine_engine"), voter);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2022,7 +2027,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let cfg = config::Config {
                         crypto: scheme,
                         automaton: application.clone(),
@@ -2051,7 +2056,7 @@ mod tests {
                         .remove(&validator)
                         .expect("validator should be registered");
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(context.with_label("engine"), voter, resolver);
                 }
             }
 
@@ -2127,7 +2132,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2176,9 +2181,9 @@ mod tests {
                     let (voter, _) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    let engine: mocks::nuller::Nuller<_, _, Sha256, _> =
-                        mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(voter);
+                    let engine: mocks::nuller::Nuller<_, Sha256, _> =
+                        mocks::nuller::Nuller::new(cfg);
+                    engine.start(context.with_label("byzantine_engine"), voter);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2192,7 +2197,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let cfg = config::Config {
                         crypto: scheme,
                         automaton: application.clone(),
@@ -2221,7 +2226,7 @@ mod tests {
                         .remove(&validator)
                         .expect("validator should be registered");
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(context.with_label("engine"), voter, resolver);
                 }
             }
 
@@ -2284,7 +2289,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2333,12 +2338,9 @@ mod tests {
                     let (voter, _) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    let engine: mocks::reconfigurer::Reconfigurer<_, _, Sha256, _> =
-                        mocks::reconfigurer::Reconfigurer::new(
-                            context.with_label("byzantine_engine"),
-                            cfg,
-                        );
-                    engine.start(voter);
+                    let engine: mocks::reconfigurer::Reconfigurer<_, Sha256, _> =
+                        mocks::reconfigurer::Reconfigurer::new(cfg);
+                    engine.start(context.with_label("byzantine_engine"), voter);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2352,7 +2354,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let cfg = config::Config {
                         crypto: scheme,
                         automaton: application.clone(),
@@ -2381,7 +2383,7 @@ mod tests {
                         .remove(&validator)
                         .expect("validator should be registered");
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(context.with_label("engine"), voter, resolver);
                 }
             }
 
@@ -2446,7 +2448,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2496,9 +2498,9 @@ mod tests {
                     let (voter, _) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    let engine: mocks::outdated::Outdated<_, _, Sha256, _> =
-                        mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(voter);
+                    let engine: mocks::outdated::Outdated<_, Sha256, _> =
+                        mocks::outdated::Outdated::new(cfg);
+                    engine.start(context.with_label("byzantine_engine"), voter);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2512,7 +2514,7 @@ mod tests {
                         context.with_label("application"),
                         application_cfg,
                     );
-                    actor.start();
+                    actor.start(context.with_label("application"));
                     let cfg = config::Config {
                         crypto: scheme,
                         automaton: application.clone(),
@@ -2541,7 +2543,7 @@ mod tests {
                         .remove(&validator)
                         .expect("validator should be registered");
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(context.with_label("engine"), voter, resolver);
                 }
             }
 
@@ -2597,7 +2599,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.with_label("network"));
 
             // Register participants
             let mut schemes = Vec::new();
@@ -2650,7 +2652,7 @@ mod tests {
                     context.with_label("application"),
                     application_cfg,
                 );
-                actor.start();
+                actor.start(context.with_label("application"));
                 let cfg = config::Config {
                     crypto: scheme,
                     automaton: application.clone(),
@@ -2679,7 +2681,7 @@ mod tests {
                     .remove(&validator)
                     .expect("validator should be registered");
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(context.with_label("engine"), voter, resolver));
             }
 
             // Wait for all engines to finish

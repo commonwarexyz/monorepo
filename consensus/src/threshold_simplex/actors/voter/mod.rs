@@ -100,7 +100,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.with_label("network"));
 
             // Get participants
             let mut schemes = Vec::new();
@@ -147,7 +147,7 @@ mod tests {
                 context.with_label("application"),
                 application_cfg,
             );
-            actor.start();
+            actor.start(context.with_label("application"));
             let cfg = Config {
                 crypto: scheme,
                 blocker: oracle.control(validator.clone()),
@@ -214,6 +214,7 @@ mod tests {
 
             // Run the actor
             actor.start(
+                context.clone(),
                 batcher,
                 resolver,
                 pending_sender,
@@ -417,7 +418,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.with_label("network"));
 
             // Get participants
             let mut private_keys = Vec::new();
@@ -461,7 +462,7 @@ mod tests {
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
-            actor.start();
+            actor.start(context.with_label("app"));
             let voter_config = Config {
                 crypto: private_key.clone(),
                 blocker: oracle.control(validator.clone()),
@@ -528,6 +529,7 @@ mod tests {
 
             // Start the actor
             actor.start(
+                context.clone(),
                 batcher_mailbox,
                 resolver_mailbox,
                 pending_sender,
