@@ -319,10 +319,9 @@ fn fuzz(input: FuzzInput) {
                                         break;
                                     }
                                 },
-                                    _ = context.sleep(Duration::from_millis(100)) => {
-                                        continue;
-                                    },
-                                }
+                                _ = context.sleep(Duration::from_millis(100)) => {
+                                    continue;
+                                },
                             }
                         }
                     }
