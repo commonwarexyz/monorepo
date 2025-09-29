@@ -1,6 +1,6 @@
 use crate::{
     adb::{self, any::fixed::Any, immutable::Immutable},
-    mmr::Proof,
+    mmr::{Location, Proof},
     store::operation::{Fixed, Variable},
     translator::Translator,
 };
@@ -49,7 +49,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     fn get_operations<'a>(
         &'a self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
@@ -70,7 +70,7 @@ where
     async fn get_operations(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         self.historical_proof(size, start_loc, max_ops)
@@ -102,7 +102,7 @@ where
     async fn get_operations(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, adb::Error> {
         let db = self.read().await;
@@ -133,7 +133,7 @@ where
     async fn get_operations(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         self.historical_proof(size, start_loc, max_ops)
@@ -165,7 +165,7 @@ where
     async fn get_operations(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let db = self.read().await;
@@ -205,7 +205,7 @@ pub(crate) mod tests {
         async fn get_operations(
             &self,
             _size: u64,
-            _start_loc: u64,
+            _start_loc: Location,
             _max_ops: NonZeroU64,
         ) -> Result<FetchResult<Self::Op, Self::Digest>, adb::Error> {
             Err(adb::Error::KeyNotFound) // Arbitrary dummy error

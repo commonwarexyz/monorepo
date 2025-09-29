@@ -9,10 +9,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
-use commonware_stream::{
-    public_key::{Connection, Sender},
-    Receiver as _, Sender as _,
-};
+use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -99,10 +96,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         Ok(())
     }
 
-    pub async fn run<Si: Sink, St: Stream>(
+    pub async fn run<O: Sink, I: Stream>(
         mut self,
         peer: C,
-        connection: Connection<Si, St>,
+        (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
         mut tracker: Mailbox<tracker::Message<E, C>>,
         channels: Channels<C>,
     ) -> Error {
@@ -117,7 +114,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         let rate_limits = Arc::new(rate_limits);
 
         // Send/Receive messages from the peer
-        let (mut conn_sender, mut conn_receiver) = connection.split();
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
             let peer = peer.clone();
             let mut tracker = tracker.clone();
@@ -179,7 +175,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 loop {
                     // Receive a message from the peer
                     let msg = conn_receiver
-                        .receive()
+                        .recv()
                         .await
                         .map_err(Error::ReceiveFailed)?;
 

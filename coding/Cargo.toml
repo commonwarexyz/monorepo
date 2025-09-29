@@ -17,6 +17,7 @@ commonware-storage = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 reed-solomon-simd = "3.0.1"
+rand_core = { workspace = true }
 
 [lib]
 bench = false
@@ -24,8 +25,14 @@ bench = false
 [dev-dependencies]
 criterion = { workspace = true }
 rand = { workspace = true }
+rand_chacha = { workspace = true }
 
 [[bench]]
-name = "reed_solomon"
+name = "coding_scheme_times"
 harness = false
-path = "src/reed_solomon/benches/bench.rs"
+path = "src/benches/bench.rs"
+
+[[bench]]
+name = "coding_scheme_sizes"
+harness = false
+path = "src/benches/bench_size.rs"

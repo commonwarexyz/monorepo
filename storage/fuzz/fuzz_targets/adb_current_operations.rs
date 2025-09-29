@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::current::{Config, Current},
-    mmr::{hasher::Hasher as MmrHasher, StandardHasher as Standard},
+    mmr::{hasher::Hasher as MmrHasher, Location, StandardHasher as Standard},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -151,13 +151,15 @@ fn fuzz(data: FuzzInput) {
                         }
 
                         let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
-                        let adjusted_start = *start_loc % current_op_count;
-                        let adjusted_max_ops = (*max_ops % 50).max(1);
+
+                        // Adjust start_loc and max_ops to be within valid range
+                        let start_loc = Location::new(start_loc % current_op_count);
+                        let max_ops = (*max_ops % 50).max(1);
 
                         let oldest_loc = db.inactivity_floor_loc();
-                        if adjusted_start >= oldest_loc {
+                        if start_loc >= oldest_loc {
                             let (proof, ops, chunks) = db
-                                .range_proof(hasher.inner(), adjusted_start, NZU64!(adjusted_max_ops))
+                                .range_proof(hasher.inner(), start_loc, NZU64!(max_ops))
                                 .await
                                 .expect("Range proof should not fail");
 
@@ -165,12 +167,12 @@ fn fuzz(data: FuzzInput) {
                                 Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
                                     &mut hasher,
                                     &proof,
-                                    adjusted_start,
+                                    start_loc,
                                     &ops,
                                     &chunks,
                                     &current_root
                                 ),
-                                "Range proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}"
+                                "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
                             );
                         }
                     }

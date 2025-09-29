@@ -1,7 +1,7 @@
 use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
-    index::Index,
+    index::{Index as _, Unordered as Index},
     journal::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };
@@ -354,6 +354,14 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.intervals.next_gap(index)
+    }
+
+    fn first_index(&self) -> Option<u64> {
+        self.intervals.first_index()
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        self.intervals.last_index()
     }
 
     async fn close(self) -> Result<(), Error> {

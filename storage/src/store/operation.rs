@@ -3,6 +3,7 @@
 //! The `Operation` enum implements the `Array` trait, allowing for a persistent log of operations
 //! based on a `crate::Journal`.
 
+use crate::mmr::Location;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     util::at_least, varint::UInt, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize,
@@ -52,7 +53,7 @@ pub enum Fixed<K: Array, V: CodecFixed> {
 
     /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
     /// operations has been raised to the wrapped value.
-    CommitFloor(u64),
+    CommitFloor(Location),
 }
 
 /// Operations for keyless stores.
@@ -238,7 +239,7 @@ impl<K: Array, V: CodecFixed> Write for Fixed<K, V> {
             }
             Fixed::CommitFloor(floor_loc) => {
                 COMMIT_FLOOR_CONTEXT.write(buf);
-                buf.put_slice(&floor_loc.to_be_bytes());
+                buf.put_slice(&floor_loc.as_u64().to_be_bytes());
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
             }
@@ -323,7 +324,7 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
                         ));
                     }
                 }
-                Ok(Self::CommitFloor(floor_loc))
+                Ok(Self::CommitFloor(Location::new(floor_loc)))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -430,7 +431,7 @@ mod tests {
         let delete_op = Fixed::<U64, U64>::Delete(key.clone());
         assert_eq!(&key, delete_op.key().unwrap());
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(42);
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new(42));
         assert_eq!(None, commit_op.key());
     }
 
@@ -445,7 +446,7 @@ mod tests {
         let delete_op = Fixed::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.value());
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(42);
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new(42));
         assert_eq!(None, commit_op.value());
     }
 
@@ -470,10 +471,10 @@ mod tests {
         assert_eq!(None, from.value());
         assert_eq!(delete_op, from);
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(42);
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new(42));
         let from = Fixed::<U64, U64>::decode(commit_op.encode()).unwrap();
         assert_eq!(None, from.value());
-        assert!(matches!(from, Fixed::CommitFloor(42)));
+        assert!(matches!(from, Fixed::CommitFloor(loc) if loc == Location::new(42)));
         assert_eq!(commit_op, from);
 
         // test non-zero byte detection in delete operation

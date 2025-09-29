@@ -14,12 +14,12 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
         hasher::Hasher,
-        iterator::{leaf_num_to_pos, nodes_to_pin},
+        iterator::nodes_to_pin,
         mem::{Config, Mmr},
         storage::Storage,
         verification, Error,
         Error::*,
-        Proof,
+        Location, Position, Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -93,7 +93,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.mmr.size()
     }
 
-    pub fn get_node(&self, position: u64) -> Option<H::Digest> {
+    pub fn get_node(&self, position: Position) -> Option<H::Digest> {
         self.mmr.get_node(position)
     }
 
@@ -130,20 +130,17 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         if pruned_chunks == 0 {
             return Ok(Self::new());
         }
-        let mmr_size = leaf_num_to_pos(pruned_chunks as u64);
+        let mmr_size = Position::from(Location::new(pruned_chunks as u64));
 
         let mut pinned_nodes = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
-                error!(size = mmr_size, pos, "missing pinned node");
+                error!(?mmr_size, ?pos, "missing pinned node");
                 return Err(MissingNode(pos));
             };
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
-                error!(
-                    size = mmr_size,
-                    pos, "could not convert node bytes to digest"
-                );
+                error!(?mmr_size, ?pos, "could not convert node bytes to digest");
                 return Err(MissingNode(pos));
             };
             pinned_nodes.push(digest);
@@ -187,7 +184,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         metadata.put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
 
         // Write the pinned nodes.
-        let mmr_size = leaf_num_to_pos(self.bitmap.pruned_chunks() as u64);
+        let mmr_size = Position::from(Location::new(self.bitmap.pruned_chunks() as u64));
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
@@ -223,8 +220,8 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     ///
     /// - Panics if there are unprocessed updates.
     pub fn prune_to_bit(&mut self, bit_offset: usize) {
-        let chunk_num = BitMap::<N>::raw_chunk_index(bit_offset);
-        if chunk_num < self.bitmap.pruned_chunks() {
+        let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset);
+        if chunk_loc < self.bitmap.pruned_chunks() {
             return;
         }
         assert!(!self.is_dirty(), "cannot prune with unprocessed updates");
@@ -236,7 +233,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.authenticated_len = self.bitmap.chunks_len() - 1;
 
         // Update MMR
-        let mmr_pos = leaf_num_to_pos(chunk_num as u64);
+        let mmr_pos = Position::from(Location::new(chunk_loc as u64));
         self.mmr.prune_to_pos(mmr_pos);
     }
 
@@ -268,9 +265,10 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
-    pub(crate) fn leaf_pos(bit_offset: usize) -> u64 {
-        let chunk_num = BitMap::<N>::raw_chunk_index(bit_offset);
-        leaf_num_to_pos(chunk_num as u64)
+    #[cfg(test)]
+    pub(crate) fn leaf_pos(bit_offset: usize) -> Position {
+        let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset);
+        Position::from(Location::new(chunk_loc as u64))
     }
 
     /// Get the value of a bit.
@@ -310,16 +308,16 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.chunks_len() - 1
     }
 
-    /// The chunks (identified by their number) that have been modified or added since the last `sync`.
-    pub fn dirty_chunks(&self) -> Vec<u64> {
+    /// The chunks that have been modified or added since the last `sync`.
+    pub fn dirty_chunks(&self) -> Vec<Location> {
         let pruned_chunks = self.bitmap.pruned_chunks();
-        let mut chunks: Vec<u64> = self
+        let mut chunks: Vec<Location> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| (chunk_index + pruned_chunks) as u64)
+            .map(|&chunk_index| Location::new((chunk_index + pruned_chunks) as u64))
             .collect();
         for i in self.authenticated_len..self.bitmap.chunks_len() - 1 {
-            chunks.push((i + pruned_chunks) as u64);
+            chunks.push(Location::new((i + pruned_chunks) as u64));
         }
 
         chunks
@@ -339,11 +337,12 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.authenticated_len = end;
 
         // Inform the MMR of modified chunks.
+        let pruned_chunks = self.bitmap.pruned_chunks();
         let updates = self
             .dirty_chunks
             .iter()
             .map(|chunk_index| {
-                let pos = leaf_num_to_pos((*chunk_index + self.bitmap.pruned_chunks()) as u64);
+                let pos = Position::from(Location::new((*chunk_index + pruned_chunks) as u64));
                 (pos, self.bitmap.get_chunk_by_index(*chunk_index))
             })
             .collect::<Vec<_>>();
@@ -426,11 +425,11 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             "cannot compute proof with unprocessed updates"
         );
 
-        let leaf_pos = Self::leaf_pos(bit_offset as usize);
-        let chunk = self.get_chunk(bit_offset as usize);
-
+        let chunk = *self.get_chunk(bit_offset as usize);
+        let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset as usize);
         let (last_chunk, next_bit) = self.bitmap.last_chunk();
-        if leaf_pos == self.mmr.size() {
+
+        if chunk_loc as u64 == self.mmr.leaves() {
             assert!(next_bit > 0);
             // Proof is over a bit in the partial chunk. In this case only a single digest is
             // required in the proof: the mmr's root.
@@ -439,15 +438,16 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
                     size: self.len() as u64,
                     digests: vec![self.mmr.root(hasher)],
                 },
-                *chunk,
+                chunk,
             ));
         }
 
-        let mut proof = verification::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+        let range = Location::new(chunk_loc as u64)..Location::new((chunk_loc + 1) as u64);
+        let mut proof = verification::range_proof(&self.mmr, range).await?;
         proof.size = self.len() as u64;
         if next_bit == 0 {
             // Bitmap is chunk aligned.
-            return Ok((proof, *chunk));
+            return Ok((proof, chunk));
         }
 
         // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
@@ -455,7 +455,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         let last_chunk_digest = hasher.digest(last_chunk);
         proof.digests.push(last_chunk_digest);
 
-        Ok((proof, *chunk))
+        Ok((proof, chunk))
     }
 
     /// Verify whether `proof` proves that the `chunk` containing the referenced bit belongs to the
@@ -472,15 +472,21 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             debug!(bit_len, bit_offset, "tried to verify non-existent bit");
             return false;
         }
-        let leaf_pos = Self::leaf_pos(bit_offset as usize);
 
+        let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset as usize);
+        let leaves = (bit_len / Self::CHUNK_SIZE_BITS) as usize;
         let mut mmr_proof = Proof::<H::Digest> {
-            size: leaf_num_to_pos(bit_len / Self::CHUNK_SIZE_BITS),
+            size: Position::from(Location::new(leaves as u64)).into(),
             digests: proof.digests.clone(),
         };
 
         if bit_len % Self::CHUNK_SIZE_BITS == 0 {
-            return mmr_proof.verify_element_inclusion(hasher, chunk, leaf_pos, root);
+            return mmr_proof.verify_element_inclusion(
+                hasher,
+                chunk,
+                Location::new(chunk_loc as u64),
+                root,
+            );
         }
 
         if proof.digests.is_empty() {
@@ -489,7 +495,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         }
         let last_digest = mmr_proof.digests.pop().unwrap();
 
-        if mmr_proof.size == leaf_pos {
+        if leaves == chunk_loc {
             // The proof is over a bit in the partial chunk. In this case the proof's only digest
             // should be the MMR's root, otherwise it is invalid. Since we've popped off the last
             // digest already, there should be no remaining digests.
@@ -513,13 +519,14 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], leaf_pos) {
-            Ok(root) => root,
-            Err(error) => {
-                debug!(error = ?error, "invalid proof input");
-                return false;
-            }
-        };
+        let mmr_root =
+            match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new(chunk_loc as u64)) {
+                Ok(root) => root,
+                Err(error) => {
+                    debug!(error = ?error, "invalid proof input");
+                    return false;
+                }
+            };
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
@@ -549,7 +556,7 @@ impl<H: CHasher, const N: usize> Storage<H::Digest> for MerkleizedBitMap<H, N> {
         self.size()
     }
 
-    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
+    async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
         Ok(self.get_node(position))
     }
 }
