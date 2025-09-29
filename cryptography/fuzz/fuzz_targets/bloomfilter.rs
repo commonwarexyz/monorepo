@@ -13,7 +13,7 @@ use std::{
 enum Op {
     Insert(Vec<u8>),
     Contains(Vec<u8>),
-    Encode(Vec<u8>),
+    Encode,
     EncodeSize,
 }
 
@@ -52,7 +52,7 @@ fn fuzz(input: FuzzInput) {
                     assert!(res);
                 }
             }
-            Op::Encode(_item) => {
+            Op::Encode => {
                 let encoded = bf.encode();
                 let decoded = BloomFilter::decode_cfg(encoded.clone(), &cfg).unwrap();
                 assert_eq!(bf, decoded);

@@ -65,3 +65,10 @@ path = "fuzz_targets/futures.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tmp_put_slice"
+path = "fuzz_targets/tmp_put_slice.rs"
+test = false
+doc = false
+bench = false
