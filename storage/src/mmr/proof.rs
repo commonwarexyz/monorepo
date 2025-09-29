@@ -947,7 +947,7 @@ mod tests {
                 assert!(proof.is_ok());
                 assert!(proof.unwrap().verify_element_inclusion(
                     &mut hasher,
-                    &elements[loc.as_u64() as usize],
+                    &elements[loc.as_usize()],
                     loc,
                     &root
                 ));
