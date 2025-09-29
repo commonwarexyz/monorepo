@@ -283,7 +283,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 }
                             }
                             Operation::CommitFloor(_, loc) => {
-                                self.inactivity_floor_loc = Location::new(loc);
+                                self.inactivity_floor_loc = loc;
 
                                 // Apply all uncommitted operations.
                                 for (key, (old_loc, new_loc)) in uncommitted_ops.iter() {
@@ -743,11 +743,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Operation::CommitFloor(
-            metadata,
-            self.inactivity_floor_loc.as_u64(),
-        ))
-        .await?;
+        self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
+            .await?;
 
         Ok(())
     }
