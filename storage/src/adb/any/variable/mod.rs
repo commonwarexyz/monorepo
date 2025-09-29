@@ -869,7 +869,7 @@ pub(super) mod test {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::NZU64;
-    use std::{collections::HashMap, num::NonZero};
+    use std::{collections::HashMap};
 
     const PAGE_SIZE: usize = 77;
     const PAGE_CACHE_SIZE: usize = 9;
