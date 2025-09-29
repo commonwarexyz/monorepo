@@ -120,6 +120,7 @@ fn fuzz(input: FuzzInput) {
                     network_msg_size = Option::from((max_size as usize).clamp(MIN_MESSAGE_SIZE, MAX_MESSAGE_SIZE));
                     let config = Config {
                         max_size: network_msg_size.unwrap(),
+
                     };
                     if let Some(handle) = network_handle.take() {
                         handle.abort();

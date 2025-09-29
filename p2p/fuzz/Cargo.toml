@@ -29,15 +29,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "lookup"
-path = "fuzz_targets/lookup.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "discovery"
-path = "fuzz_targets/discovery.rs"
+name = "authenticated"
+path = "fuzz_targets/authenticated.rs"
 test = false
 doc = false
 bench = false
