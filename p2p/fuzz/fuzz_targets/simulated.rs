@@ -169,43 +169,47 @@ fn fuzz(input: FuzzInput) {
                     let max_user_msg_size = max_size - CHANNEL_SIZE;
                     let msg_size = min(msg_size as usize, max_user_msg_size);
 
-                    if let Some((ref mut sender, _)) = channels.get_mut(&(from_idx, channel_id)) {
-                        let mut bytes = vec![0u8; msg_size];
-                        rng.fill(&mut bytes[..]);
-                        let message = Bytes::from(bytes);
+                    let Some((ref mut sender, _)) = channels.get_mut(&(from_idx, channel_id)) else {
+                        continue;
+                    };
 
-                        // Only add expectation if send succeeds
-                        let res = sender
-                            .send(Recipients::One(peers[to_idx].clone()), message.clone(), true)
-                            .await;
-                        if res.is_ok() {
-                            expected.entry((to_idx, channel_id))
-                                .or_default()
-                                .push_back(message);
-                        }
+                    let mut bytes = vec![0u8; msg_size];
+                    rng.fill(&mut bytes[..]);
+                    let message = Bytes::from(bytes);
+
+                    // Only add expectation if send succeeds
+                    let res = sender
+                        .send(Recipients::One(peers[to_idx].clone()), message.clone(), true)
+                        .await;
+                    if res.is_ok() {
+                        expected.entry((to_idx, channel_id))
+                            .or_default()
+                            .push_back(message);
                     }
                 }
 
                 SimulatedOperation::ReceiveMessages => {
                     let expected_keys: Vec<_> = expected.keys().copied().collect();
                     for (to_idx, channel_id) in expected_keys {
-                        if let Some((_, ref mut receiver)) = channels.get_mut(&(to_idx, channel_id)) {
-                            if let Some(queue) = expected.get_mut(&(to_idx, channel_id)) {
-                                commonware_macros::select! {
-                                    result = receiver.recv() => {
-                                        if let Ok((_peer, message)) = result {
-                                            if let Some(pos) = queue.iter().position(|m| m == &message) {
-                                                queue.remove(pos); // remove the matched one
-                                                if queue.is_empty() { expected.remove(&(to_idx, channel_id)); }
-                                            } else {
-                                                panic!("Message not found in expected queue");
-                                            }
-                                        }
-                                    },
-                                    _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
-                                        continue;
+                        let Some((_, ref mut receiver)) = channels.get_mut(&(to_idx, channel_id)) else {
+                            continue;
+                        };
+                        let Some(queue) = expected.get_mut(&(to_idx, channel_id)) else {
+                            continue;
+                        };
+                        commonware_macros::select! {
+                            result = receiver.recv() => {
+                                if let Ok((_peer, message)) = result {
+                                    if let Some(pos) = queue.iter().position(|m| m == &message) {
+                                        queue.remove(pos); // remove the matched one
+                                        if queue.is_empty() { expected.remove(&(to_idx, channel_id)); }
+                                    } else {
+                                        panic!("Message not found in expected queue");
                                     }
                                 }
+                            },
+                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
+                                continue;
                             }
                         }
                     }
