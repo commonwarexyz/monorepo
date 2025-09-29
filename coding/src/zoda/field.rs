@@ -13,53 +13,18 @@ impl F {
     /// The zero element of the field.
     ///
     /// This is the identity for addition.
-    pub fn zero() -> Self {
+    pub const fn zero() -> Self {
         Self(0)
     }
 
     /// The one element of the field.
     ///
     /// This is the identity for multiplication.
-    pub fn one() -> Self {
+    pub const fn one() -> Self {
         Self(1)
     }
 
-    /// Reduce a 128 bit integer into a field element.
-    fn reduce_128(x: u128) -> Self {
-        // We exploit special properties of the field.
-        //
-        // First, 2^64 = 2^32 - 1 mod P.
-        //
-        // Second, 2^96 = 2^32(2^32 - 1) = 2^64 - 2^32 = -1 mod P.
-        //
-        // Thus, if we write a 128 bit integer x as:
-        //     x = c 2^96 + b 2^64 + a
-        // We have:
-        //     x = b (2^32 - 1) + (a - c) mod P
-        // And this expression will be our strategy for performing the reduction.
-        let a = x as u64;
-        let b = ((x >> 64) & 0xFF_FF_FF_FF) as u64;
-        let c = (x >> 96) as u64;
-
-        // While we lean on existing code, we need to be careful because some of
-        // these types are partially reduced.
-        //
-        // First, if we look at a - c, the end result with our field code can
-        // be any 64 bit value (consider c = 0). We can also make the same assumption
-        // for (b << 32) - b. The question then becomes, is Field(x) + Field(y)
-        // ok even if both x and y are arbitrary u64 values?
-        //
-        // Yes. Even if x and y have the maximum value, a single subtraction of P
-        // would suffice to make their sum < P. Thus, our strategy for field addition
-        // will always work.
-        (Self(a) - Self(c)) + Self((b << 32) - b)
-    }
-}
-
-impl Add for F {
-    type Output = Self;
-
-    fn add(self, b: Self) -> Self::Output {
+    const fn add_inner(self, b: Self) -> Self {
         // We want to calculate self + b mod P.
         // At a high level, this can be done by adding self + b, as integers,
         // and then subtracting P as long as the result >= P.
@@ -87,12 +52,8 @@ impl Add for F {
             Self(addition)
         }
     }
-}
 
-impl Sub for F {
-    type Output = Self;
-
-    fn sub(self, b: Self) -> Self::Output {
+    const fn sub_inner(self, b: Self) -> Self {
         // The strategy here is to perform the subtraction, and then (maybe) add back P.
         // If no underflow happened, the result is reduced, since both values were < P.
         // If an underflow happened, the largest result we can have is -1. Adding
@@ -104,14 +65,69 @@ impl Sub for F {
             Self(subtraction)
         }
     }
+
+    /// Reduce a 128 bit integer into a field element.
+    const fn reduce_128(x: u128) -> Self {
+        // We exploit special properties of the field.
+        //
+        // First, 2^64 = 2^32 - 1 mod P.
+        //
+        // Second, 2^96 = 2^32(2^32 - 1) = 2^64 - 2^32 = -1 mod P.
+        //
+        // Thus, if we write a 128 bit integer x as:
+        //     x = c 2^96 + b 2^64 + a
+        // We have:
+        //     x = b (2^32 - 1) + (a - c) mod P
+        // And this expression will be our strategy for performing the reduction.
+        let a = x as u64;
+        let b = ((x >> 64) & 0xFF_FF_FF_FF) as u64;
+        let c = (x >> 96) as u64;
+
+        // While we lean on existing code, we need to be careful because some of
+        // these types are partially reduced.
+        //
+        // First, if we look at a - c, the end result with our field code can
+        // be any 64 bit value (consider c = 0). We can also make the same assumption
+        // for (b << 32) - b. The question then becomes, is Field(x) + Field(y)
+        // ok even if both x and y are arbitrary u64 values?
+        //
+        // Yes. Even if x and y have the maximum value, a single subtraction of P
+        // would suffice to make their sum < P. Thus, our strategy for field addition
+        // will always work.
+        Self(a).sub_inner(Self(c).add_inner(Self((b << 32) - b)))
+    }
+
+    const fn mul_inner(self, b: Self) -> Self {
+        // We do a u64 x u64 -> u128 multiplication, then reduce mod P
+        Self::reduce_128((self.0 as u128) * (b.0 as u128))
+    }
+
+    const fn neg_inner(self) -> Self {
+        Self::zero().sub_inner(self)
+    }
+}
+
+impl Add for F {
+    type Output = Self;
+
+    fn add(self, b: Self) -> Self::Output {
+        self.add_inner(b)
+    }
+}
+
+impl Sub for F {
+    type Output = Self;
+
+    fn sub(self, b: Self) -> Self::Output {
+        self.sub_inner(b)
+    }
 }
 
 impl Mul for F {
     type Output = Self;
 
     fn mul(self, b: Self) -> Self::Output {
-        // We do a u64 x u64 -> u128 multiplication, then reduce mod P
-        Self::reduce_128((self.0 as u128) * (b.0 as u128))
+        Self::mul_inner(self, b)
     }
 }
 
@@ -119,7 +135,7 @@ impl Neg for F {
     type Output = Self;
 
     fn neg(self) -> Self::Output {
-        Self::zero() - self
+        self.neg_inner()
     }
 }
 
