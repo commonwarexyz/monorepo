@@ -38,11 +38,7 @@ impl<E: GClock + RuntimeMetrics + Clone, C: Signer> Actor<E, C> {
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (
-        Self,
-        Mailbox<Message<C::PublicKey>>,
-        Oracle<C::PublicKey>,
-    ) {
+    ) -> (Self, Mailbox<Message<C::PublicKey>>, Oracle<C::PublicKey>) {
         // General initialization
         let directory_cfg = directory::Config {
             max_sets: cfg.tracked_peer_sets,
@@ -193,8 +189,8 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
-        oracle: Oracle<deterministic::Context, PublicKey>,
+        mailbox: Mailbox<Message<PublicKey>>,
+        oracle: Oracle<PublicKey>,
     }
 
     fn setup_actor(
@@ -203,7 +199,7 @@ mod tests {
     ) -> TestHarness {
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
-        runner_context.spawn(|_| actor.run());
+        runner_context.spawn(|context| actor.run(context));
 
         TestHarness { mailbox, oracle }
     }
@@ -416,7 +412,7 @@ mod tests {
                 match res.metadata() {
                     crate::authenticated::lookup::actors::tracker::Metadata::Dialer(pk, addr) => {
                         assert_eq!(pk, &boot_pk);
-                        assert_eq!(*addr, boot_addr);
+                        assert_eq!(addr, &boot_addr);
                     }
                     _ => panic!("Expected Dialer metadata"),
                 }

@@ -285,7 +285,7 @@ mod tests {
         PrivateKeyExt as _, Signer,
     };
     use commonware_runtime::{
-        deterministic::{self, Context},
+        deterministic::{self},
         Clock, Runner,
     };
     use commonware_utils::{BitVec as UtilsBitVec, NZU32};
@@ -355,11 +355,11 @@ mod tests {
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
     // sent an initialization.
     async fn connect_to_peer(
-        mailbox: &mut Mailbox<Message<Context, PublicKey>>,
+        mailbox: &mut Mailbox<Message<PublicKey>>,
         peer: &PublicKey,
         peer_mailbox: &Mailbox<peer::Message<PublicKey>>,
         peer_receiver: &mut mpsc::Receiver<peer::Message<PublicKey>>,
-    ) -> tracker::Reservation<Context, PublicKey> {
+    ) -> tracker::Reservation<PublicKey> {
         let res = mailbox
             .listen(peer.clone())
             .await
@@ -378,8 +378,8 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
-        oracle: Oracle<deterministic::Context, PublicKey>,
+        mailbox: Mailbox<Message<PublicKey>>,
+        oracle: Oracle<PublicKey>,
         ip_namespace: Vec<u8>,
         tracker_pk: PublicKey,
         tracker_signer: PrivateKey,
@@ -970,7 +970,7 @@ mod tests {
                         addr,
                     ) => {
                         assert_eq!(pk, &boot_pk);
-                        assert_eq!(*addr, boot_addr);
+                        assert_eq!(addr, &boot_addr);
                     }
                     _ => panic!("Expected Dialer metadata"),
                 }

@@ -85,7 +85,7 @@
 //!     let (network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 //!
 //!     // Start network
-//!     let network_handler = network.start();
+//!     let network_handler = network.start(context.clone());
 //!
 //!     // Register peers
 //!     let (sender1, receiver1) = oracle.register(peers[0].clone(), 0).await.unwrap();
@@ -205,7 +205,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.clone());
 
             // Register agents
             let mut agents = BTreeMap::new();
@@ -322,7 +322,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.clone());
 
             // Register agents
             let mut agents = HashMap::new();
@@ -363,7 +363,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.clone());
 
             // Register agents
             let pk = PrivateKey::from_seed(0).public_key();
@@ -401,7 +401,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.clone());
 
             // Register agents
             let pk = PrivateKey::from_seed(0).public_key();
@@ -427,7 +427,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.clone());
 
             // Register agents
             let pk1 = PrivateKey::from_seed(0).public_key();
@@ -467,7 +467,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.clone());
 
             // Register agents
             let pk1 = PrivateKey::from_seed(0).public_key();
@@ -541,7 +541,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.clone());
 
             // Register agents
             let pk1 = PrivateKey::from_seed(0).public_key();
@@ -594,7 +594,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.clone());
 
             // Define agents
             let pk1 = PrivateKey::from_seed(0).public_key();
@@ -664,7 +664,7 @@ mod tests {
             );
 
             // Start network
-            network.start();
+            network.start(context.clone());
 
             // Register agents
             let pk1 = PrivateKey::from_seed(0).public_key();
@@ -848,7 +848,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             // Both sender and receiver have the same bandiwdth (1000 B/s)
             // 500 bytes at 1000 B/s = 0.5 seconds
@@ -940,7 +940,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             // Configuration
             const NUM_PEERS: usize = 100;
@@ -1090,7 +1090,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             // Register agents
             let pk1 = PrivateKey::from_seed(1).public_key();
@@ -1148,7 +1148,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
@@ -1254,7 +1254,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             // Create 10 senders and 1 receiver
             let mut senders = Vec::new();
@@ -1337,7 +1337,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             // Create fast sender
             let sender = ed25519::PrivateKey::from_seed(0).public_key();
@@ -1421,7 +1421,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             // Create 10 slow senders
             let mut senders = Vec::new();
@@ -1511,7 +1511,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             // Create 3 senders
             let mut senders = Vec::new();
@@ -1651,7 +1651,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             // Create 3 senders
             let mut senders = Vec::new();
@@ -1746,7 +1746,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             // Create two peers
             let sender = PrivateKey::from_seed(1).public_key();
@@ -1843,7 +1843,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             let pk_sender = PrivateKey::from_seed(1).public_key();
             let pk_receiver = PrivateKey::from_seed(2).public_key();
@@ -1929,7 +1929,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             let pk_sender = PrivateKey::from_seed(1).public_key();
             let pk_receiver = PrivateKey::from_seed(2).public_key();
@@ -2000,7 +2000,7 @@ mod tests {
                     disconnect_on_block: true,
                 },
             );
-            network.start();
+            network.start(context.clone());
 
             let pk_sender = PrivateKey::from_seed(1).public_key();
             let pk_receiver = PrivateKey::from_seed(2).public_key();

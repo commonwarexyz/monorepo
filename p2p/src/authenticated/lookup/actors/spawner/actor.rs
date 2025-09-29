@@ -86,8 +86,7 @@ impl<Si: Sink, St: Stream, C: PublicKey> Actor<Si, St, C> {
         context: E,
         tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
-    )
-    where
+    ) where
         E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
     {
         while let Some(msg) = self.receiver.next().await {

@@ -293,14 +293,15 @@ mod tests {
 
     /// Start the network and return the oracle.
     fn start_network(context: deterministic::Context) -> Oracle<Pk> {
+        let network_context = context.with_label("network");
         let (network, oracle) = Network::new(
-            context.with_label("network"),
+            network_context.clone(),
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
             },
         );
-        network.start();
+        network.start(network_context);
         oracle
     }
 
@@ -322,12 +323,12 @@ mod tests {
         seed: u64,
     ) -> (
         Pk,
-        MuxHandle<E, impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
+        MuxHandle<impl Spawner, impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle.register(pubkey.clone(), 0).await.unwrap();
         let (mux, handle) = Muxer::new(context.clone(), sender, receiver, CAPACITY);
-        mux.start();
+        mux.start(context.clone());
         (pubkey, handle)
     }
 
@@ -345,10 +346,10 @@ mod tests {
     }
 
     /// Wait for `n` messages to be received on the receiver.
-    async fn expect_n_messages<E: Spawner + Clock>(
+    async fn expect_n_messages<E: Spawner, Ctx: Clock>(
         rx: &mut SubReceiver<E, impl Receiver<PublicKey = Pk>>,
         n: usize,
-        context: &E,
+        clock: &Ctx,
     ) {
         let mut count = 0;
         loop {
@@ -357,7 +358,7 @@ mod tests {
                     res.expect("should have received message");
                     count += 1;
                 },
-                _ = context.sleep(Duration::from_millis(100)) => { break; },
+                _ = clock.sleep(Duration::from_millis(100)) => { break; },
             }
         }
         assert_eq!(n, count);

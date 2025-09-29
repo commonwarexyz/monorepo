@@ -113,7 +113,7 @@
 //!     );
 //!
 //!     // Run network
-//!     let network_handler = network.start();
+//!     let network_handler = network.start(context.with_label("network"));
 //!
 //!     // Example: Use sender
 //!     let _ = sender.send(Recipients::All, bytes::Bytes::from_static(b"hello"), false).await;
@@ -224,7 +224,8 @@ mod tests {
 
             // Create network
             let config = Config::test(private_key.clone(), *address, max_message_size);
-            let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
+            let network_context = context.with_label("network");
+            let (mut network, mut oracle) = Network::new(network_context.clone(), config);
 
             // Register peers
             oracle.register(0, peers.clone()).await;
@@ -234,7 +235,7 @@ mod tests {
                 network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
 
             // Wait to connect to all peers, and then send messages to everyone
-            network.start();
+            network.start(network_context.clone());
 
             // Send/Receive messages
             let peers = peers.clone();
@@ -485,7 +486,8 @@ mod tests {
                     *peer_addr,
                     1_024 * 1_024, // 1MB
                 );
-                let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
+                let network_context = context.with_label("network");
+                let (mut network, mut oracle) = Network::new(network_context.clone(), config);
 
                 // Register peers at separate indices
                 oracle.register(0, vec![peers[0].clone()]).await;
@@ -501,7 +503,7 @@ mod tests {
                     network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
 
                 // Wait to connect to all peers, and then send messages to everyone
-                network.start();
+                network.start(network_context.clone());
 
                 // Send/Receive messages
                 let msg = peer_pk.clone();
@@ -575,7 +577,8 @@ mod tests {
                 addr,
                 1_024 * 1_024, // 1MB
             );
-            let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
+            let network_context = context.with_label("network");
+            let (mut network, mut oracle) = Network::new(network_context.clone(), config);
 
             // Register peers
             oracle.register(0, peers.clone()).await;
@@ -585,7 +588,7 @@ mod tests {
                 network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
 
             // Wait to connect to all peers, and then send messages to everyone
-            network.start();
+            network.start(network_context.clone());
 
             // Crate random message
             let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)
@@ -625,19 +628,21 @@ mod tests {
 
             // Create network for peer 0
             let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
-            let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
+            let peer0_ctx = context.with_label("peer-0");
+            let (mut network0, mut oracle0) = Network::new(peer0_ctx.clone(), config0);
             oracle0.register(0, peers.clone()).await;
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
-            network0.start();
+            network0.start(peer0_ctx.clone());
 
             // Create network for peer 1
             let config1 = Config::test(sk1, addr1, 1_024 * 1_024); // 1MB
-            let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
+            let peer1_ctx = context.with_label("peer-1");
+            let (mut network1, mut oracle1) = Network::new(peer1_ctx.clone(), config1);
             oracle1.register(0, peers.clone()).await;
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
-            network1.start();
+            network1.start(peer1_ctx.clone());
 
             // Send first message, which should be allowed and consume the quota.
             let msg = vec![0u8; 1024]; // 1KB

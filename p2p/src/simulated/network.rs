@@ -771,7 +771,7 @@ mod tests {
             };
             let network_context = context.with_label("network");
             let (network, mut oracle) = Network::new(network_context.clone(), cfg);
-            network_context.spawn(|context| network.run(context));
+            let _handle = network.start(network_context.clone());
 
             // Create two public keys
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
@@ -851,8 +851,9 @@ mod tests {
         let runner = deterministic::Runner::default();
 
         runner.start(|context| async move {
-            let (network, mut oracle) = Network::new(context.with_label("network"), cfg);
-            let network_handle = network.start();
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            let network_handle = network.start(network_context.clone());
 
             let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
             let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
@@ -913,8 +914,9 @@ mod tests {
         let runner = deterministic::Runner::default();
 
         runner.start(|context| async move {
-            let (network, mut oracle) = Network::new(context.with_label("network"), cfg);
-            let network_handle = network.start();
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            let network_handle = network.start(network_context.clone());
 
             let sender_pk = ed25519::PrivateKey::from_seed(42).public_key();
             let recipient_a = ed25519::PrivateKey::from_seed(43).public_key();

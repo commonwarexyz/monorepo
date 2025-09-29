@@ -26,7 +26,6 @@ pub struct Config {
 
 /// Represents a collection of records for all peers.
 pub struct Directory<E: GClock + RuntimeMetrics + Clone, C: PublicKey> {
-
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: usize,
@@ -261,7 +260,7 @@ impl<E: GClock + RuntimeMetrics + Clone, C: PublicKey> Directory<E, C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::lookup::actors::tracker::directory::Directory;
+    use crate::authenticated::lookup::actors::tracker::{directory::Directory, ingress::Releaser};
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
@@ -274,7 +273,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
         let (tx, _rx) = mpsc::channel(1);
-        let releaser = super::Releaser::new(tx);
+        let (releaser, handle) = Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             max_sets: 1,
@@ -289,7 +288,8 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
-            let mut directory = Directory::init(context, (my_pk, my_addr), config, releaser);
+            releaser.start(context.clone());
+            let mut directory = Directory::init(context, (my_pk, my_addr), config, handle);
 
             let deleted =
                 directory.add_set(0, vec![(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]);
