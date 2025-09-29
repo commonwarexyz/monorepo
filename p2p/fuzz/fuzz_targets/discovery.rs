@@ -272,44 +272,53 @@ fn fuzz(input: FuzzInput) {
                         }
 
                         for channel in channels_with_pending {
-                            if let Some(receiver) = state.receivers.get_mut(&channel) {
-                                commonware_macros::select! {
-                                    result = receiver.recv() => {
-                                        if let Ok((sender_pk, message)) = result {
-                                            if let Some(&actual_sender_idx) = pk_to_idx.get(&sender_pk) {
-                                                let key = (receiver_idx_u8, actual_sender_idx, channel);
-                                                if let Some(queue) = expected_messages.get_mut(&key) {
-                                                    if let Some(expected_message) = queue.pop_front() {
-                                                        assert_eq!(message, expected_message);
-                                                        if queue.is_empty() {
-                                                            expected_messages.remove(&key);
-                                                        }
-                                                        // Remove from pending_by_receiver
-                                                        if let Some(senders) = pending_by_receiver.get_mut(&(receiver_idx_u8, channel)) {
-                                                            if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
-                                                                senders.remove(pos);
-                                                            }
-                                                            if senders.is_empty() {
-                                                                pending_by_receiver.remove(&(receiver_idx_u8, channel));
-                                                            }
-                                                        }
-                                                        break;
-                                                    }
-                                                } else {
-                                                    // Unexpected delivery - still need to clean up pending_by_receiver
-                                                    if let Some(senders) = pending_by_receiver.get_mut(&(receiver_idx_u8, channel)) {
-                                                        if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
-                                                            senders.remove(pos);
-                                                        }
-                                                        if senders.is_empty() {
-                                                            pending_by_receiver.remove(&(receiver_idx_u8, channel));
-                                                        }
-                                                    }
-                                                    break;
-                                                }
+                            let Some(receiver) = state.receivers.get_mut(&channel) else {
+                                continue;
+                            };
+
+                            commonware_macros::select! {
+                                result = receiver.recv() => {
+                                    let Ok((sender_pk, message)) = result else {
+                                        continue;
+                                    };
+
+                                    let Some(&actual_sender_idx) = pk_to_idx.get(&sender_pk) else {
+                                        continue;
+                                    };
+
+                                    let key = (receiver_idx_u8, actual_sender_idx, channel);
+                                    if let Some(queue) = expected_messages.get_mut(&key) {
+                                        let Some(expected_message) = queue.pop_front() else {
+                                            continue;
+                                        };
+                                        
+                                        assert_eq!(message, expected_message);
+                                        if queue.is_empty() {
+                                            expected_messages.remove(&key);
+                                        }
+                                        // Remove from pending_by_receiver
+                                        if let Some(senders) = pending_by_receiver.get_mut(&(receiver_idx_u8, channel)) {
+                                            if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
+                                                senders.remove(pos);
+                                            }
+                                            if senders.is_empty() {
+                                                pending_by_receiver.remove(&(receiver_idx_u8, channel));
                                             }
                                         }
-                                    },
+                                        break;
+                                    } else {
+                                        // Unexpected delivery - still need to clean up pending_by_receiver
+                                        if let Some(senders) = pending_by_receiver.get_mut(&(receiver_idx_u8, channel)) {
+                                            if let Some(pos) = senders.iter().position(|&x| x == actual_sender_idx) {
+                                                senders.remove(pos);
+                                            }
+                                            if senders.is_empty() {
+                                                pending_by_receiver.remove(&(receiver_idx_u8, channel));
+                                            }
+                                        }
+                                        break;
+                                    }
+                                },
                                     _ = context.sleep(Duration::from_millis(100)) => {
                                         continue;
                                     },
