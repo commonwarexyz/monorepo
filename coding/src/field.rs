@@ -7,7 +7,7 @@ const P: u64 = u64::wrapping_neg(1 << 32) + 1;
 
 /// An element of the [Goldilocks field](https://xn--2-umb.com/22/goldilocks/).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct F(u64);
+pub struct F(u64);
 
 impl F {
     /// The zero element of the field.
