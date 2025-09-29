@@ -473,18 +473,18 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             return false;
         }
 
-        let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset as usize);
-        let leaves = (bit_len / Self::CHUNK_SIZE_BITS) as usize;
+        let leaves = BitMap::<N>::raw_chunk_index(bit_len as usize);
         let mut mmr_proof = Proof::<H::Digest> {
             size: Position::from(Location::new(leaves as u64)).into(),
             digests: proof.digests.clone(),
         };
 
+        let loc = BitMap::<N>::raw_chunk_index(bit_offset as usize);
         if bit_len % Self::CHUNK_SIZE_BITS == 0 {
             return mmr_proof.verify_element_inclusion(
                 hasher,
                 chunk,
-                Location::new(chunk_loc as u64),
+                Location::new(loc as u64),
                 root,
             );
         }
@@ -495,7 +495,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         }
         let last_digest = mmr_proof.digests.pop().unwrap();
 
-        if leaves == chunk_loc {
+        if leaves == loc {
             // The proof is over a bit in the partial chunk. In this case the proof's only digest
             // should be the MMR's root, otherwise it is invalid. Since we've popped off the last
             // digest already, there should be no remaining digests.
@@ -519,14 +519,14 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root =
-            match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new(chunk_loc as u64)) {
-                Ok(root) => root,
-                Err(error) => {
-                    debug!(error = ?error, "invalid proof input");
-                    return false;
-                }
-            };
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new(loc as u64))
+        {
+            Ok(root) => root,
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
+                return false;
+            }
+        };
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
