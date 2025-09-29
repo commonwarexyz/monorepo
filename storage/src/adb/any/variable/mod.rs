@@ -587,7 +587,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        self.historical_proof(self.op_count().as_u64(), start_loc, max_ops)
+        self.historical_proof(self.op_count(), start_loc, max_ops)
             .await
     }
 
@@ -601,14 +601,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// - Panics if `op_count` is greater than the number of operations.
     pub async fn historical_proof(
         &self,
-        op_count: u64,
+        op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         assert!(op_count <= self.op_count());
         assert!(start_loc < op_count);
 
-        let op_count = Location::new(op_count);
         let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops.get()).unwrap());
         let mmr_size = Position::from(op_count);
 
