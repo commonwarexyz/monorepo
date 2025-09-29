@@ -238,7 +238,7 @@ impl<
         }
 
         // At this point the MMR and log should be consistent.
-        assert_eq!(log.size().await?, mmr.leaves().as_u64());
+        assert_eq!(log.size().await?, mmr.leaves());
 
         Ok((inactivity_floor_loc, mmr, log))
     }
