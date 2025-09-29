@@ -199,16 +199,11 @@ impl Read for GetOperationsRequest {
 
 impl GetOperationsRequest {
     pub fn validate(&self) -> Result<(), crate::Error> {
-        if self.start_loc.as_u64() >= self.op_count {
+        if self.start_loc >= self.op_count {
             return Err(crate::Error::InvalidRequest(format!(
                 "start_loc >= size ({}) >= ({})",
                 self.start_loc, self.op_count
             )));
-        }
-        if self.max_ops.get() == 0 {
-            return Err(crate::Error::InvalidRequest(
-                "max_ops cannot be zero".to_string(),
-            ));
         }
         Ok(())
     }
