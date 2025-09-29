@@ -93,7 +93,7 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
         size: Position,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher.update(&size.to_be_bytes());
+        self.hasher.update(&size.as_u64().to_be_bytes());
         for digest in peak_digests {
             self.update_with_digest(digest);
         }
