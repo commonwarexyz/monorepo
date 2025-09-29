@@ -11,6 +11,8 @@ use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
+mod field;
+
 const NAMESPACE: &[u8] = b"commonware-zoda";
 
 fn required_samples(config: &Config) -> usize {
