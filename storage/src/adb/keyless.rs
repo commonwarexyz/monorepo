@@ -222,8 +222,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         last_offset: u32,
         log_items_per_section: u64,
     ) -> Result<Location, Error> {
-        let op_count = op_count.as_u64();
-        let mut first_uncommitted: Option<(u64, u32)> = None;
+        let mut first_uncommitted: Option<(Location, u32)> = None;
         let mut op_index = op_count - 1;
         let mut op = last_log_op;
         let mut offset = last_offset;
@@ -250,27 +249,27 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 break;
             }
             op_index -= 1;
-            offset = locations.read(op_index).await?;
-            let section = op_index / log_items_per_section;
+            offset = locations.read(op_index.as_u64()).await?;
+            let section = op_index.as_u64() / log_items_per_section;
             op = log.get(section, offset).await?;
         }
 
         // If there are no uncommitted operations, exit early.
         let Some((rewind_size, rewind_offset)) = first_uncommitted else {
-            return Ok(Location::new(op_index + 1));
+            return Ok(op_index + 1);
         };
 
         // Rewind the log and MMR to the last commit point.
-        let ops_to_rewind = (op_count - rewind_size) as usize;
-        warn!(ops_to_rewind, rewind_size, "rewinding log to last commit");
-        locations.rewind(rewind_size).await?;
+        let ops_to_rewind = (op_count - rewind_size).as_u64() as usize;
+        warn!(ops_to_rewind, ?rewind_size, "rewinding log to last commit");
+        locations.rewind(rewind_size.as_u64()).await?;
         locations.sync().await?;
         mmr.pop(ops_to_rewind).await?; // sync is handled by pop
-        let section = rewind_size / log_items_per_section;
+        let section = rewind_size.as_u64() / log_items_per_section;
         log.rewind_to_offset(section, rewind_offset).await?;
         log.sync(section).await?;
 
-        Ok(Location::new(rewind_size))
+        Ok(rewind_size)
     }
 
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
@@ -980,7 +979,7 @@ mod test {
                 context: deterministic::Context,
                 root: <Sha256 as CHasher>::Digest,
                 hasher: &mut Standard<Sha256>,
-                op_count: u64,
+                op_count: Location,
             ) {
                 let mut db = open_db(context.clone()).await;
                 apply_more_ops(&mut db).await;
@@ -1024,10 +1023,10 @@ mod test {
                 let db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
                 assert_eq!(db.root(hasher), root);
-                assert_eq!(db.last_commit_loc(), Some(Location::new(op_count - 1)));
+                assert_eq!(db.last_commit_loc(), Some(op_count - 1));
             }
 
-            recover_from_failure(context.clone(), root, &mut hasher, op_count.as_u64()).await;
+            recover_from_failure(context.clone(), root, &mut hasher, op_count).await;
 
             // Simulate a failure during pruning and ensure we recover.
             let db = open_db(context.clone()).await;
@@ -1045,7 +1044,7 @@ mod test {
             assert_eq!(db.root(&mut hasher), root);
             db.close().await.unwrap();
 
-            recover_from_failure(context.clone(), root, &mut hasher, op_count.as_u64()).await;
+            recover_from_failure(context.clone(), root, &mut hasher, op_count).await;
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             let mut db = open_db(context.clone()).await;
