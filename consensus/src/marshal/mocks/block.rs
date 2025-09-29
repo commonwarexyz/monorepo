@@ -1,4 +1,4 @@
-use crate::marshal::ingress::coding::types::CodingCommitment;
+use crate::types::CodingCommitment;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{Committable, Digest, Digestible, Hasher};

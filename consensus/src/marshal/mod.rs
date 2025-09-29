@@ -76,15 +76,12 @@ mod tests {
         resolver::p2p as resolver,
     };
     use crate::{
-        marshal::ingress::coding::{
-            mailbox::ShardMailbox,
-            types::{CodedBlock, CodingCommitment},
-        },
+        marshal::ingress::coding::{mailbox::ShardMailbox, types::CodedBlock},
         threshold_simplex::types::{
             finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
             Notarization, Notarize, Proposal,
         },
-        types::Round,
+        types::{CodingCommitment, Round},
         Block as _, Reporter,
     };
     use commonware_broadcast::buffered;

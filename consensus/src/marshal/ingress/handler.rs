@@ -240,9 +240,7 @@ impl<B: Block> Debug for Request<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marshal::{
-        ingress::coding::types::CodingCommitment, mocks::block::Block as TestBlock,
-    };
+    use crate::{marshal::mocks::block::Block as TestBlock, types::CodingCommitment};
     use commonware_codec::{Encode, ReadExt};
     use commonware_cryptography::{
         sha256::{Digest as Sha256Digest, Sha256},

@@ -1,118 +1,10 @@
 //! Types for erasure coded [Block] broadcast and reconstruction.
 
-use crate::Block;
-use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use crate::{types::CodingCommitment, Block};
+use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
-use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
-use commonware_utils::{Array, Span};
-use rand_core::CryptoRngCore;
+use commonware_cryptography::{Committable, Digestible, Hasher};
 use std::{fmt::Debug, ops::Deref};
-
-const CODING_COMMITMENT_SIZE: usize = 32 + CodingConfig::SIZE;
-
-/// A [Digest] containing a coding commitment and encoded [CodingConfig].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CodingCommitment([u8; CODING_COMMITMENT_SIZE]);
-
-impl CodingCommitment {
-    /// Extracts the [CodingConfig] from this [CodingCommitment].
-    pub fn config(&self) -> CodingConfig {
-        let mut buf = &self.0[32..];
-        CodingConfig::read(&mut buf).expect("CodingCommitment always contains a valid config")
-    }
-
-    /// Extracts a [Digest] from this [CodingCommitment].
-    ///
-    /// ## Panics
-    ///
-    /// Panics if the [Digest]'s [FixedSize::SIZE] is > 32 bytes.
-    pub fn inner<D: Digest>(&self) -> D {
-        const {
-            if D::SIZE > 32 {
-                panic!("Cannot extract Digest with size > 32 from CodingCommitment");
-            }
-        }
-
-        D::read(&mut self.0[..D::SIZE].as_ref())
-            .expect("CodingCommitment always contains a valid digest")
-    }
-}
-
-impl Digest for CodingCommitment {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
-        let mut buf = [0u8; CODING_COMMITMENT_SIZE];
-        rng.fill_bytes(&mut buf);
-        Self(buf)
-    }
-}
-
-impl Write for CodingCommitment {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        buf.put_slice(&self.0);
-    }
-}
-
-impl FixedSize for CodingCommitment {
-    const SIZE: usize = CODING_COMMITMENT_SIZE;
-}
-
-impl Read for CodingCommitment {
-    type Cfg = ();
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        _cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let mut arr = [0u8; CODING_COMMITMENT_SIZE];
-        buf.copy_to_slice(&mut arr);
-        Ok(CodingCommitment(arr))
-    }
-}
-
-impl AsRef<[u8]> for CodingCommitment {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Deref for CodingCommitment {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for CodingCommitment {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "0x")?;
-        write!(f, "{}", commonware_utils::hex(self.as_ref()))
-    }
-}
-
-impl Default for CodingCommitment {
-    fn default() -> Self {
-        Self([0u8; CODING_COMMITMENT_SIZE])
-    }
-}
-
-impl<D: Digest> From<(D, CodingConfig)> for CodingCommitment {
-    fn from((digest, config): (D, CodingConfig)) -> Self {
-        const {
-            if D::SIZE > 32 {
-                panic!("Cannot create CodingCommitment from Digest with size > 32");
-            }
-        }
-
-        let mut buf = [0u8; CODING_COMMITMENT_SIZE];
-        buf[..D::SIZE].copy_from_slice(&digest);
-        buf[32..].copy_from_slice(&config.encode());
-        Self(buf)
-    }
-}
-
-impl Span for CodingCommitment {}
-impl Array for CodingCommitment {}
 
 const STRONG_SHARD_TAG: u8 = 0;
 const WEAK_SHARD_TAG: u8 = 1;
@@ -468,11 +360,7 @@ impl<B: Block<Commitment = CodingCommitment>, S: Scheme> Block for CodedBlock<B,
     }
 }
 
-impl<B, S> PartialEq for CodedBlock<B, S>
-where
-    B: Block + PartialEq,
-    S: Scheme,
-{
+impl<B: Block + PartialEq, S: Scheme> PartialEq for CodedBlock<B, S> {
     fn eq(&self, other: &Self) -> bool {
         self.inner == other.inner
             && self.config == other.config
@@ -481,12 +369,7 @@ where
     }
 }
 
-impl<B, S> Eq for CodedBlock<B, S>
-where
-    B: Block + Eq,
-    S: Scheme,
-{
-}
+impl<B: Block + Eq, S: Scheme> Eq for CodedBlock<B, S> {}
 
 #[cfg(test)]
 mod test {
