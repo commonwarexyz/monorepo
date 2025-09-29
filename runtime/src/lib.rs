@@ -2305,15 +2305,15 @@ mod tests {
     fn test_external_tokio_config_default() {
         // Test that default config has use_external_tokio = false
         let config = tokio::Config::default();
-        assert_eq!(config.use_external_tokio(), false);
+        assert!(!config.use_external_tokio());
         
         // Test that with_external_tokio works
         let config = config.with_external_tokio(true);
-        assert_eq!(config.use_external_tokio(), true);
+        assert!(config.use_external_tokio());
         
         // Test that it can be turned back off
         let config = config.with_external_tokio(false);
-        assert_eq!(config.use_external_tokio(), false);
+        assert!(!config.use_external_tokio());
     }
 
     #[test]
