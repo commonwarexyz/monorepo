@@ -75,7 +75,7 @@ mod tests {
                 disconnect_on_block: true,
             },
         );
-        network.start();
+        network.start(context.with_label("network"));
 
         let mut schemes = (0..num_peers)
             .map(|i| PrivateKey::from_seed(i as u64))
@@ -125,9 +125,9 @@ mod tests {
                 codec_config: RangeCfg::from(..),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, TestMessage>::new(context.clone(), config);
+                Engine::<PublicKey, TestMessage>::new(context.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);
-            engine.start(network);
+            engine.start(context, network);
         }
         mailboxes
     }
