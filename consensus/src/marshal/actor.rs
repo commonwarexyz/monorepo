@@ -29,7 +29,6 @@ use futures::{
 };
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::Rng;
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap},
@@ -57,7 +56,7 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> {
+pub struct Actor<B: Block, E: Metrics + Clock + GClock + Storage, V: Variant> {
     // ---------- Context ----------
     context: E,
 
@@ -102,7 +101,7 @@ pub struct Actor<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Varia
     processed_height: Gauge,
 }
 
-impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
+impl<B: Block, E: Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
     /// Create a new application actor.
     pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B>) {
         // Initialize cache
@@ -233,7 +232,7 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
     /// Start the actor.
     pub fn start<R, P>(
         self,
-        spawner: impl Spawner + Metrics,
+        spawner: impl Spawner,
         application: impl Reporter<Activity = B>,
         buffer: buffered::Mailbox<P, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
@@ -248,7 +247,7 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
     /// Run the application actor.
     async fn run<R, P>(
         mut self,
-        spawner: impl Spawner + Metrics,
+        spawner: impl Spawner,
         application: impl Reporter<Activity = B>,
         mut buffer: buffered::Mailbox<P, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
@@ -260,8 +259,9 @@ impl<B: Block, E: Rng + Metrics + Clock + GClock + Storage, V: Variant> Actor<B,
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
+        let finalizer_context = self.context.with_label("finalizer");
         let finalizer = Finalizer::new(
-            self.context.with_label("finalizer"),
+            finalizer_context,
             format!("{}-finalizer", self.partition_prefix.clone()),
             application,
             orchestrator,

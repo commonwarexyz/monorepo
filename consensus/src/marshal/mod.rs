@@ -205,7 +205,7 @@ mod tests {
         let application = Application::<B>::default();
 
         // Start the application
-        actor.start(context.clone(), application.clone(), buffer, resolver);
+        actor.start(context, application.clone(), buffer, resolver);
 
         (application, mailbox)
     }
@@ -271,14 +271,15 @@ mod tests {
     }
 
     fn setup_network(context: deterministic::Context) -> Oracle<P> {
+        let network_context = context.with_label("network");
         let (network, oracle) = Network::new(
-            context.with_label("network"),
+            network_context.clone(),
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
             },
         );
-        network.start(context.with_label("network"));
+        network.start(network_context);
         oracle
     }
 
