@@ -206,7 +206,8 @@ mod tests {
         let network = oracle.register(secret.public_key(), 2).await.unwrap();
         broadcast_engine.start(network);
 
-        let shard_mailbox = ShardMailbox::<_, H, _, _>::new(buffer, ());
+        let shard_mailbox =
+            ShardMailbox::<_, H, _, _>::new(context.with_label("shard_mailbox"), buffer, ());
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
         let application = Application::<B>::default();
