@@ -127,7 +127,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
     /// # Invariant
     ///
     /// Only references operations of type Operation::Update.
-    pub(super) snapshot: Index<T, u64>,
+    pub(super) snapshot: Index<T, Location>,
 
     /// The number of operations that are pending commit.
     pub(super) uncommitted_ops: u64,
@@ -145,8 +145,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let snapshot: Index<T, u64> =
-            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        let snapshot = Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let mut hasher = Standard::<H>::new();
 
         let mmr = Mmr::init(
@@ -302,7 +301,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                         }
                                     } else {
                                         assert!(new_loc.is_some());
-                                        self.snapshot.insert(key, new_loc.unwrap().as_u64());
+                                        self.snapshot.insert(key, new_loc.unwrap());
                                     }
                                 }
                                 uncommitted_ops.clear();
@@ -357,7 +356,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
-            if let Some(v) = self.get_from_loc(key, Location::new(loc)).await? {
+            if let Some(v) = self.get_from_loc(key, loc).await? {
                 return Ok(Some(v));
             }
         }
@@ -389,8 +388,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get_key_loc(&self, key: &K) -> Result<Option<Location>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
-            if self.get_from_loc(key, Location::new(loc)).await?.is_some() {
-                return Ok(Some(Location::new(loc)));
+            if self.get_from_loc(key, loc).await?.is_some() {
+                return Ok(Some(loc));
             }
         }
 
@@ -398,7 +397,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Remove the location `delete_loc` from the snapshot if it's associated with `key`.
-    fn delete_loc(snapshot: &mut Index<T, u64>, key: &K, delete_loc: Location) {
+    fn delete_loc(snapshot: &mut Index<T, Location>, key: &K, delete_loc: Location) {
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return;
         };
@@ -413,14 +412,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Update the location associated with `key` with value `old_loc` to `new_loc`. If there is no
     /// such key or value, this is a no-op.
-    fn update_loc(snapshot: &mut Index<T, u64>, key: &K, old_loc: Location, new_loc: Location) {
+    fn update_loc(
+        snapshot: &mut Index<T, Location>,
+        key: &K,
+        old_loc: Location,
+        new_loc: Location,
+    ) {
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return;
         };
 
         while let Some(&loc) = cursor.next() {
             if loc == old_loc {
-                cursor.update(new_loc.as_u64());
+                cursor.update(new_loc);
                 return;
             }
         }
@@ -507,7 +511,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         if let Some(old_loc) = self.get_key_loc(&key).await? {
             Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
         } else {
-            self.snapshot.insert(&key, new_loc.as_u64());
+            self.snapshot.insert(&key, new_loc);
         };
 
         let op = Operation::Update(key, value);
@@ -697,7 +701,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             // `op` is not a key-related operation, so it is not active.
             return Ok(None);
         };
-        let new_loc = self.op_count().as_u64();
+        let new_loc = self.op_count();
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
