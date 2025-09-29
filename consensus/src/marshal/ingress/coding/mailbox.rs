@@ -10,10 +10,13 @@ use commonware_codec::{Decode, Error as CodecError};
 use commonware_coding::Scheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_p2p::Recipients;
+use commonware_runtime::Metrics;
 use futures::channel::oneshot;
+use prometheus_client::metrics::gauge::Gauge;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     ops::Deref,
+    time::Instant,
 };
 use thiserror::Error;
 use tracing::debug;
@@ -61,6 +64,10 @@ where
     ///
     /// These blocks are evicted by marshal after they are delivered to the application.
     reconstructed_blocks: BTreeMap<CodingCommitment, CodedBlock<B, S>>,
+
+    block_broadcast_duration: Gauge,
+    shard_broadcast_duration: Gauge,
+    erasure_decode_duration: Gauge,
 }
 
 impl<S, H, B, P> ShardMailbox<S, H, B, P>
@@ -70,12 +77,40 @@ where
     B: Block<Commitment = CodingCommitment>,
     P: PublicKey,
 {
-    pub fn new(mailbox: buffered::Mailbox<P, Shard<S, H>>, block_codec_cfg: B::Cfg) -> Self {
+    pub fn new(
+        context: impl Metrics,
+        mailbox: buffered::Mailbox<P, Shard<S, H>>,
+        block_codec_cfg: B::Cfg,
+    ) -> Self {
+        let block_broadcast_duration = Gauge::default();
+        context.register(
+            "block_broadcast_duration",
+            "Duration of proposer broadcast in milliseconds",
+            block_broadcast_duration.clone(),
+        );
+
+        let shard_broadcast_duration = Gauge::default();
+        context.register(
+            "shard_broadcast_duration",
+            "Duration of individual shard broadcast in milliseconds",
+            shard_broadcast_duration.clone(),
+        );
+
+        let erasure_decode_duration = Gauge::default();
+        context.register(
+            "erasure_decode_duration",
+            "Duration of erasure decoding in milliseconds",
+            erasure_decode_duration.clone(),
+        );
+
         Self {
             mailbox,
             block_codec_cfg,
             block_subscriptions: BTreeMap::new(),
             reconstructed_blocks: BTreeMap::new(),
+            block_broadcast_duration,
+            shard_broadcast_duration,
+            erasure_decode_duration,
         }
     }
 
@@ -91,12 +126,15 @@ where
             "number of participants must equal number of shards"
         );
 
+        let start = Instant::now();
         for (index, peer) in participants.into_iter().enumerate() {
             let message = block
                 .shard(index)
                 .expect("peer index impossibly out of bounds");
             let _peers = self.mailbox.broadcast(Recipients::One(peer), message).await;
         }
+        self.block_broadcast_duration
+            .set(start.elapsed().as_millis() as i64);
     }
 
     /// Broadcasts a local [Shard] of a block to all peers, if the [Shard] is present
@@ -133,7 +171,11 @@ where
 
             // Broadcast the weak shard to all peers for reconstruction.
             let reshard = Shard::new(commitment, index, DistributionShard::Weak(reshard));
+
+            let start = Instant::now();
             let _peers = self.mailbox.broadcast(Recipients::All, reshard).await;
+            self.shard_broadcast_duration
+                .set(start.elapsed().as_millis() as i64);
 
             debug!(%commitment, index, "broadcasted local shard to all peers");
         } else {
@@ -218,6 +260,7 @@ where
         }
 
         // Attempt to reconstruct the encoded blob
+        let start = Instant::now();
         let decoded = S::decode(
             &config,
             &commitment.inner(),
@@ -225,6 +268,8 @@ where
             checked_shards.as_slice(),
         )
         .map_err(ReconstructionError::CodingRecovery)?;
+        self.erasure_decode_duration
+            .set(start.elapsed().as_millis() as i64);
 
         // Attempt to decode the block from the encoded blob
         let block = CodedBlock::<B, S>::decode_cfg(decoded.as_slice(), &self.block_codec_cfg)?;
@@ -418,7 +463,8 @@ mod test {
                 PublicKey,
                 Shard<ReedSolomon<Sha256>, Sha256>,
             >::new(context.clone(), config);
-            let shard_mailbox = SMailbox::new(engine_mailbox, ());
+            let shard_mailbox =
+                SMailbox::new(context.with_label("shard_mailbox"), engine_mailbox, ());
             mailboxes.insert(peer.clone(), shard_mailbox);
 
             engine.start(network);

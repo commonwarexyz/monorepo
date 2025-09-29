@@ -10,9 +10,10 @@ use crate::{
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Committable, PublicKey};
 use commonware_runtime::{Clock, Metrics, Spawner};
-use futures::channel::oneshot;
+use futures::{channel::oneshot, lock::Mutex};
+use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use std::sync::{Arc, Mutex};
+use std::{sync::Arc, time::Instant};
 use tracing::{debug, info, warn};
 
 /// An [Application] adapter that handles erasure coding and shard verification for consensus.
@@ -34,6 +35,10 @@ where
     identity: P,
     supervisor: Z,
     last_built: Arc<Mutex<Option<(View, CodedBlock<B, S>)>>>,
+
+    parent_fetch_duration: Gauge,
+    build_duration: Gauge,
+    erasure_code_duration: Gauge,
 }
 
 impl<E, A, V, B, S, P, Z> CodingAdapter<E, A, V, B, S, P, Z>
@@ -53,6 +58,27 @@ where
         identity: P,
         supervisor: Z,
     ) -> Self {
+        let parent_fetch_duration = Gauge::default();
+        context.register(
+            "parent_fetch_duration",
+            "Time taken to fetch a parent block from marshal to build on top of, in milliseconds",
+            parent_fetch_duration.clone(),
+        );
+
+        let build_duration = Gauge::default();
+        context.register(
+            "build_duration",
+            "Time taken for the application to build a new block, in milliseconds",
+            build_duration.clone(),
+        );
+
+        let erasure_code_duration = Gauge::default();
+        context.register(
+            "erasure_code_duration",
+            "Time taken to erasure code a built block, in milliseconds",
+            erasure_code_duration.clone(),
+        );
+
         Self {
             context,
             application,
@@ -60,6 +86,10 @@ where
             identity,
             supervisor,
             last_built: Arc::new(Mutex::new(None)),
+
+            parent_fetch_duration,
+            build_duration,
+            erasure_code_duration,
         }
     }
 }
@@ -100,10 +130,16 @@ where
         let n_participants = participants.len() as u16;
         let coding_config = coding_config_for_participants(n_participants);
 
+        // Metrics
+        let parent_fetch_duration = self.parent_fetch_duration.clone();
+        let build_duration = self.build_duration.clone();
+        let erasure_code_duration = self.erasure_code_duration.clone();
+
         let (tx, rx) = oneshot::channel();
         self.context
             .with_label("propose")
             .spawn(move |r_ctx| async move {
+                let start = Instant::now();
                 let parent_block = if parent_commitment == genesis.commitment() {
                     genesis
                 } else {
@@ -122,16 +158,25 @@ where
                         return;
                     }
                 };
+                parent_fetch_duration.set(start.elapsed().as_millis() as i64);
 
+                let start = Instant::now();
                 let built_block = application
                     .build(r_ctx.with_label("build"), parent_commitment, parent_block)
                     .await;
+                build_duration.set(start.elapsed().as_millis() as i64);
+
+                let start = Instant::now();
                 let coded_block = CodedBlock::new(built_block, coding_config);
+                erasure_code_duration.set(start.elapsed().as_millis() as i64);
+
                 let commitment = coded_block.commitment();
 
                 // Update the latest built block.
-                let mut lock = last_built.lock().expect("failed to lock last_built mutex");
-                *lock = Some((context.view(), coded_block));
+                {
+                    let mut lock = last_built.lock().await;
+                    *lock = Some((context.view(), coded_block));
+                }
 
                 let result = tx.send(commitment);
                 info!(
@@ -197,7 +242,7 @@ where
     type Digest = B::Commitment;
 
     async fn broadcast(&mut self, _commitment: Self::Digest) {
-        let Some((round, block)) = self.last_built.lock().unwrap().clone() else {
+        let Some((round, block)) = self.last_built.lock().await.clone() else {
             warn!("missing block to broadcast");
             return;
         };
