@@ -297,11 +297,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         if let Some(leaf) = orphaned_leaf {
             // Recover the orphaned leaf and any missing parents.
             let pos = s.mem_mmr.size();
-            warn!(pos = pos.as_u64(), "recovering orphaned leaf");
+            warn!(?pos, "recovering orphaned leaf");
             s.mem_mmr.add_leaf_digest(hasher, leaf);
-            assert_eq!(pos, journal_size.as_u64());
+            assert_eq!(pos, journal_size);
             s.sync(hasher).await?;
-            assert_eq!(s.size().as_u64(), s.journal.size().await?);
+            assert_eq!(s.size(), s.journal.size().await?);
         }
 
         Ok(s)
@@ -356,7 +356,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             cfg.upper_bound_pos.as_u64(),
         )
         .await?;
-        let journal_size = journal.size().await?;
+        let journal_size = Position::new(journal.size().await?);
         assert!(journal_size <= cfg.upper_bound_pos + 1);
 
         // Open the metadata.
@@ -382,7 +382,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
 
         // Create the in-memory MMR with the pinned nodes required for its size.
-        let nodes_to_pin_mem = nodes_to_pin(Position::new(journal_size));
+        let nodes_to_pin_mem = nodes_to_pin(journal_size);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
             let digest =
@@ -391,13 +391,13 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
         let mut mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: Position::new(journal_size),
+            pruned_to_pos: journal_size,
             pinned_nodes: mem_pinned_nodes,
             pool: cfg.config.thread_pool,
         });
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
-        if cfg.lower_bound_pos.as_u64() < journal_size {
+        if cfg.lower_bound_pos < journal_size {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound_pos)
                 .await?;
         }
@@ -406,7 +406,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(Self {
             mem_mmr,
             journal,
-            journal_size: Position::new(journal_size),
+            journal_size,
             metadata,
             pruned_to_pos: cfg.lower_bound_pos,
         })
