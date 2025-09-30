@@ -1347,10 +1347,8 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
             assert_eq!(db.op_count(), 2787);
             assert_eq!(
-                Location::try_from(Position::new(db.mmr.size()))
-                    .ok()
-                    .map(|l| *l),
-                Some(2787)
+                Location::try_from(Position::new(db.mmr.size())).ok(),
+                Some(Location::new(2787))
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, Location::new(1480));
@@ -1364,10 +1362,8 @@ pub(super) mod test {
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2787);
             assert_eq!(
-                Location::try_from(Position::new(db.mmr.size()))
-                    .ok()
-                    .map(|l| *l),
-                Some(2787)
+                Location::try_from(Position::new(db.mmr.size())).ok(),
+                Some(Location::new(2787))
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, Location::new(1480));
