@@ -776,3 +776,97 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::marshal::{config::Config, mocks::block::Block as testBlock};
+    use commonware_cryptography::{
+        bls12381::primitives::{
+            group::Element,
+            variant::{MinPk as VMinPk, Variant},
+        },
+        sha256::{Digest as Sha256Digest, Sha256},
+        Committable, Digestible, Hasher as _,
+    };
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+    use commonware_utils::{NZUsize, NZU64};
+
+    type D = Sha256Digest;
+    type BTest = testBlock<D>;
+    type VTest = VMinPk;
+
+    fn actor_config(prefix: &str, identity: <VTest as Variant>::Public) -> Config<VTest, BTest> {
+        Config {
+            identity,
+            mailbox_size: 10,
+            namespace: b"test".to_vec(),
+            view_retention_timeout: 0,
+            max_repair: 0,
+            codec_config: (),
+            partition_prefix: prefix.to_string(),
+            prunable_items_per_section: NZU64!(1),
+            replay_buffer: NZUsize!(64),
+            write_buffer: NZUsize!(64),
+            freezer_table_initial_size: 8,
+            freezer_table_resize_frequency: 4,
+            freezer_table_resize_chunk_size: 4,
+            freezer_journal_target_size: 256,
+            freezer_journal_compression: None,
+            freezer_journal_buffer_pool: PoolRef::new(NZUsize!(256), NZUsize!(4)),
+            immutable_items_per_section: NZU64!(4),
+        }
+    }
+
+    #[test]
+    fn test_actor_prunes_verified_and_notarized_blocks() {
+        let runner = deterministic::Runner::timed(std::time::Duration::from_secs(30));
+        runner.start(|context| async move {
+            // Create a dummy identity for the actor
+            // Any public key is fine here; signatures are not verified in this path
+            let identity = <<VTest as Variant>::Public as Element>::one();
+
+            // Initialize actor (we won't start its run loop; we'll exercise cache helpers directly)
+            let (mut actor, _mailbox) = Actor::<BTest, _, VTest>::init(
+                context.clone(),
+                actor_config("actor-prune", identity),
+            )
+            .await;
+
+            // Build three blocks in epoch 0, views 1..=3
+            let genesis = Sha256::hash(b"");
+            let b1 = BTest::new::<Sha256>(genesis, 1, 1);
+            let b2 = BTest::new::<Sha256>(b1.digest(), 2, 2);
+            let b3 = BTest::new::<Sha256>(b2.digest(), 3, 3);
+
+            let r1 = Round::new(0, 1);
+            let r2 = Round::new(0, 2);
+            let r3 = Round::new(0, 3);
+
+            // Cache: verified at view 1, notarized at view 2
+            actor.cache_verified(r1, b1.commitment(), b1.clone()).await;
+            actor.cache_block(r2, b2.commitment(), b2.clone()).await;
+            actor.cache_verified(r3, b3.commitment(), b3.clone()).await;
+            actor.cache_block(r3, b3.commitment(), b3.clone()).await;
+
+            // Sanity: both retrievable via cache
+            assert!(actor.cache.find_block(b1.commitment()).await.is_some());
+            assert!(actor.cache.find_block(b2.commitment()).await.is_some());
+            assert!(actor.cache.find_block(b3.commitment()).await.is_some());
+
+            // Prune to view 2 (items_per_section = 1 => removes view < 2)
+            actor.cache.prune(r2).await;
+
+            // Verified at view 1 should be gone; notarized at view 2 should remain
+            assert!(actor.cache.find_block(b1.commitment()).await.is_none());
+            assert!(actor.cache.find_block(b2.commitment()).await.is_some());
+
+            // Now prune to view 3, removing view 2 as well
+            actor.cache.prune(r3).await;
+            assert!(actor.cache.find_block(b2.commitment()).await.is_none());
+
+            // Check that b3 is still in the cache
+            assert!(actor.cache.find_block(b3.commitment()).await.is_some());
+        });
+    }
+}

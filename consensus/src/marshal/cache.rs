@@ -368,3 +368,72 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::marshal::mocks::block::Block as TestBlock;
+    use commonware_cryptography::{
+        bls12381::primitives::variant::MinPk as VMinPk,
+        sha256::{Digest as Sha256Digest, Sha256},
+        Committable, Digestible, Hasher as _,
+    };
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+    use commonware_utils::{NZUsize, NZU64};
+
+    type D = Sha256Digest;
+    type BTest = TestBlock<D>;
+    type VTest = VMinPk;
+
+    fn cfg(prefix: &str) -> Config {
+        Config {
+            partition_prefix: prefix.to_string(),
+            prunable_items_per_section: NZU64!(1),
+            replay_buffer: NZUsize!(64),
+            write_buffer: NZUsize!(64),
+            freezer_journal_buffer_pool: PoolRef::new(NZUsize!(256), NZUsize!(4)),
+        }
+    }
+
+    #[test]
+    fn test_prune_verified_and_notarized_blocks() {
+        let runner = deterministic::Runner::timed(std::time::Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut manager: Manager<_, BTest, VTest> =
+                Manager::init(context.clone(), cfg("cache-prune"), ()).await;
+
+            // Build three blocks in epoch 0 at views 1..=3
+            let genesis = Sha256::hash(b"");
+            let b1 = BTest::new::<Sha256>(genesis, 1, 1);
+            let b2 = BTest::new::<Sha256>(b1.digest(), 2, 2);
+            let b3 = BTest::new::<Sha256>(b2.digest(), 3, 3);
+
+            let r1 = Round::new(0, 1);
+            let r2 = Round::new(0, 2);
+            let r3 = Round::new(0, 3);
+
+            // Insert: verified at view 1, notarized at view 2, both at view 3
+            manager.put_verified(r1, b1.commitment(), b1.clone()).await;
+            manager.put_block(r2, b2.commitment(), b2.clone()).await;
+            manager.put_verified(r3, b3.commitment(), b3.clone()).await;
+            manager.put_block(r3, b3.commitment(), b3.clone()).await;
+
+            // Sanity: they exist
+            assert!(manager.find_block(b1.commitment()).await.is_some());
+            assert!(manager.find_block(b2.commitment()).await.is_some());
+            assert!(manager.find_block(b3.commitment()).await.is_some());
+
+            // Prune to r2 (>= section rounding). With items_per_section=1, removes view < 2
+            manager.prune(r2).await;
+            assert!(manager.find_block(b1.commitment()).await.is_none());
+            assert!(manager.find_block(b2.commitment()).await.is_some());
+
+            // Prune to r3, removing view 2 as well
+            manager.prune(r3).await;
+            assert!(manager.find_block(b2.commitment()).await.is_none());
+
+            // Check that b3 is still in the cache
+            assert!(manager.find_block(b3.commitment()).await.is_some());
+        });
+    }
+}
