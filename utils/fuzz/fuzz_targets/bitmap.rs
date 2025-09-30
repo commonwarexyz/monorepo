@@ -208,7 +208,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let v = BitMap::from(&bools);
                 let v_len = v.len();
 
-                if index >= v_len || index > usize::MAX as u64 {
+                if index >= v_len {
                     return;
                 }
 
@@ -471,7 +471,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let iter = v.iter();
 
                 let (lower, upper) = iter.size_hint();
-                assert_eq!(lower, v.len() as usize);
+                assert_eq!(lower as u64, v.len());
                 assert_eq!(upper, Some(v.len() as usize));
 
                 let collected: Vec<bool> = iter.collect();
