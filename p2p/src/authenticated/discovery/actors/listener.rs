@@ -193,6 +193,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             } else {
                 false
             };
+
+            // We wait to check whether the handshake is permitted until after updating both the ip
+            // and subnet rate limiters
             if ip_limited || subnet_limited {
                 continue;
             }
