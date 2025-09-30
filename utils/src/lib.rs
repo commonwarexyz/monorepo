@@ -25,6 +25,8 @@ pub use bitvec::{BitIterator, BitVec};
 #[cfg(feature = "std")]
 pub mod channels;
 #[cfg(feature = "std")]
+pub mod net;
+#[cfg(feature = "std")]
 pub mod time;
 #[cfg(feature = "std")]
 pub use time::{DurationExt, SystemTimeExt};
@@ -38,6 +40,8 @@ mod priority_set;
 pub use priority_set::PrioritySet;
 #[cfg(feature = "std")]
 pub mod futures;
+#[cfg(feature = "std")]
+pub use net::{IpAddrExt, Subnet};
 mod stable_buf;
 pub use stable_buf::StableBuf;
 /// Converts bytes to a hexadecimal string.

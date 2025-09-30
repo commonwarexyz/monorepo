@@ -9,6 +9,7 @@ use commonware_runtime::{
     Clock, Handle, Listener, Metrics, Network, RwLock, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{listen, Config as StreamConfig};
+use commonware_utils::{IpAddrExt, Subnet};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -17,7 +18,7 @@ use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     num::NonZeroU32,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -26,28 +27,6 @@ use std::{
     time::Duration,
 };
 use tracing::debug;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct SubnetKey {
-    addr: IpAddr,
-}
-
-fn subnet_of(ip: IpAddr) -> SubnetKey {
-    // IPv4 buckets share the first 24 bits; IPv6 buckets share the upper 64 bits.
-    // This matches the network’s default assumptions and contains common ISP subnet sizes.
-    match ip {
-        IpAddr::V4(v4) => {
-            let masked = Ipv4Addr::from(u32::from(v4) & 0xFFFFFF00);
-            SubnetKey {
-                addr: IpAddr::V4(masked),
-            }
-        }
-        IpAddr::V6(v6) => {
-            let masked = IpAddr::V6(Ipv6Addr::from(u128::from(v6) & !((1u128 << 64) - 1)));
-            SubnetKey { addr: masked }
-        }
-    }
-}
 
 /// Configuration for the listener actor.
 pub struct Config<C: Signer> {
@@ -72,7 +51,7 @@ pub struct Actor<
     ip_rate_limiter:
         Arc<RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>>,
     subnet_rate_limiter:
-        Arc<RateLimiter<SubnetKey, HashMapStateStore<SubnetKey>, E, NoOpMiddleware<E::Instant>>>,
+        Arc<RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>>,
     peer_rate_limiter: Arc<
         RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
     >,
@@ -244,7 +223,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 guard.get(&address.ip()).is_some_and(|set| !set.is_empty())
             };
 
-            let subnet = subnet_of(address.ip());
+            let subnet = address.ip().subnet_of();
 
             if self.ip_rate_limiter.check_key(&address.ip()).is_err() {
                 self.handshakes_ip_rate_limited.inc();
