@@ -181,17 +181,17 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
                 self.handshakes_ip_rate_limited.inc();
                 debug!(?address, "ip exceeded handshake rate limit");
-                false
-            } else {
                 true
+            } else {
+                false
             };
             let subnet = ip.subnet();
             let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
                 self.handshakes_subnet_rate_limited.inc();
                 debug!(?address, "subnet exceeded handshake rate limit");
-                false
-            } else {
                 true
+            } else {
+                false
             };
             if ip_limited || subnet_limited {
                 continue;
