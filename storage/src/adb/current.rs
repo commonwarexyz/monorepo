@@ -472,12 +472,11 @@ impl<
             debug!("verification failed, invalid proof size");
             return false;
         };
-        let op_count = *op_count;
         let end_loc = start_loc.checked_add(ops.len() as u64).unwrap();
         if end_loc > op_count {
             debug!(
                 loc = ?end_loc,
-                op_count, "proof verification failed, invalid range"
+                ?op_count, "proof verification failed, invalid range"
             );
             return false;
         }
@@ -492,7 +491,8 @@ impl<
             chunk_vec,
         );
 
-        if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
+        let next_bit = *op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        if next_bit == 0 {
             return proof.verify_range_inclusion(&mut verifier, &elements, start_loc, root);
         }
 
@@ -513,7 +513,6 @@ impl<
             }
         };
 
-        let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let reconstructed_root = Bitmap::<H, N>::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
