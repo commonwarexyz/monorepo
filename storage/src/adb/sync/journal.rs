@@ -13,7 +13,4 @@ pub trait Journal {
 
     /// Append an operation to the journal
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>>;
-
-    /// Close the journal and release resources
-    fn close(self) -> impl Future<Output = Result<(), Self::Error>>;
 }

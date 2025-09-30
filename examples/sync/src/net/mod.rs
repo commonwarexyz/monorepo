@@ -115,6 +115,7 @@ impl Read for ErrorResponse {
 mod tests {
     use crate::net::{request_id::Generator, wire::GetOperationsRequest, ErrorCode};
     use commonware_codec::{DecodeExt as _, Encode as _};
+    use commonware_storage::mmr::Location;
     use commonware_utils::NZU64;
 
     #[test]
@@ -153,7 +154,7 @@ mod tests {
         let request = GetOperationsRequest {
             request_id: requester.next(),
             size: 100,
-            start_loc: 10,
+            start_loc: Location::new(10),
             max_ops: NZU64!(50),
         };
         assert!(request.validate().is_ok());
@@ -162,7 +163,7 @@ mod tests {
         let request = GetOperationsRequest {
             request_id: requester.next(),
             size: 100,
-            start_loc: 100,
+            start_loc: Location::new(100),
             max_ops: NZU64!(50),
         };
         assert!(matches!(
@@ -174,7 +175,7 @@ mod tests {
         let request = GetOperationsRequest {
             request_id: requester.next(),
             size: 100,
-            start_loc: 150,
+            start_loc: Location::new(150),
             max_ops: NZU64!(50),
         };
         assert!(matches!(

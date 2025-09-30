@@ -1,6 +1,6 @@
 //! Manages outstanding fetch requests
 
-use crate::adb::sync::engine::IndexedFetchResult;
+use crate::{adb::sync::engine::IndexedFetchResult, mmr::Location};
 use commonware_cryptography::Digest;
 use futures::stream::FuturesUnordered;
 use std::{collections::BTreeSet, future::Future, pin::Pin};
@@ -12,7 +12,7 @@ pub(super) struct Requests<Op, D: Digest, E> {
     futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>,
     /// Start locations of outstanding requests
     /// Each element corresponds to an element in `futures` and vice versa
-    locations: BTreeSet<u64>,
+    locations: BTreeSet<Location>,
 }
 
 impl<Op, D: Digest, E> Requests<Op, D, E> {
@@ -27,7 +27,7 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     /// Add a new outstanding request
     pub fn add(
         &mut self,
-        start_loc: u64,
+        start_loc: Location,
         future: Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>,
     ) {
         self.locations.insert(start_loc);
@@ -36,12 +36,12 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
 
     /// Remove a request from `self.locations` by its starting location.
     /// Doesn't remove from `self.futures` as it would be expensive.
-    pub fn remove(&mut self, start_loc: u64) {
+    pub fn remove(&mut self, start_loc: Location) {
         self.locations.remove(&start_loc);
     }
 
     /// Get the set of outstanding request locations
-    pub fn locations(&self) -> &BTreeSet<u64> {
+    pub fn locations(&self) -> &BTreeSet<Location> {
         &self.locations
     }
 

@@ -357,7 +357,7 @@ mod tests {
             Network::start(
                 Config {
                     iouring_config: iouring::Config {
-                        force_poll: Some(Duration::from_millis(100)),
+                        force_poll: Duration::from_millis(100),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -377,7 +377,7 @@ mod tests {
                 Config {
                     iouring_config: iouring::Config {
                         size: 256,
-                        force_poll: Some(Duration::from_millis(100)),
+                        force_poll: Duration::from_millis(100),
                         ..Default::default()
                     },
                     ..Default::default()
