@@ -5,11 +5,11 @@ use super::{
 };
 use crate::authenticated::{
     discovery::{actors::tracker::ingress::Releaser, types},
-    ip, Mailbox,
+    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{union, SystemTimeExt};
+use commonware_utils::{union, IpAddrExt, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
@@ -123,7 +123,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let my_public_key = self.crypto.public_key();
         for info in infos {
             // Check if IP is allowed
-            if !self.allow_private_ips && !ip::is_global(info.socket.ip()) {
+            if !self.allow_private_ips && !info.socket.ip().is_global() {
                 return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
             }
 

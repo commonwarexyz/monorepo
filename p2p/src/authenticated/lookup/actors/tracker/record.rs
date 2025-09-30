@@ -1,4 +1,4 @@
-use crate::authenticated::ip;
+use commonware_utils::IpAddrExt;
 use std::net::SocketAddr;
 
 /// Represents information known about a peer's address.
@@ -142,7 +142,7 @@ impl Record {
     pub fn dialable(&self, allow_private_ips: bool) -> bool {
         match self.address {
             Address::Known(addr) => {
-                self.status == Status::Inert && (allow_private_ips || ip::is_global(addr.ip()))
+                self.status == Status::Inert && (allow_private_ips || addr.ip().is_global())
             }
             _ => false,
         }
@@ -182,8 +182,7 @@ impl Record {
         match self.address {
             Address::Blocked | Address::Myself(_) => false,
             Address::Known(addr) => {
-                (self.sets > 0 || self.persistent)
-                    && (allow_private_ips || ip::is_global(addr.ip()))
+                (self.sets > 0 || self.persistent) && (allow_private_ips || addr.ip().is_global())
             }
         }
     }
