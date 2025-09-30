@@ -165,10 +165,10 @@ impl<
 
         // Ensure consistency between the bitmap and the db.
         let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
-        if (status.len() as u64) < inactivity_floor_loc {
+        if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
-            while (status.len() as u64) < inactivity_floor_loc {
+            while status.len() < inactivity_floor_loc {
                 status.push(false);
             }
 
