@@ -7,7 +7,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{IpAddrExt, Limiter, Reservation, Subnet};
+use commonware_utils::{IpAddrExt, Limiter, Subnet};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -93,7 +93,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         }
     }
 
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     async fn handshake(
         context: E,
         address: SocketAddr,
@@ -102,7 +102,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream: StreamOf<E>,
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
-        _reservation: Reservation,
     ) {
         // Perform handshake
         let (peer, send, recv) = match listen(
@@ -203,18 +202,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 let stream_cfg = self.stream_cfg.clone();
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();
-                let reservation = reservation;
-                move |context| {
+                move |context| async move {
                     Self::handshake(
-                        context,
-                        address,
-                        stream_cfg,
-                        sink,
-                        stream,
-                        tracker,
-                        supervisor,
-                        reservation,
+                        context, address, stream_cfg, sink, stream, tracker, supervisor,
                     )
+                    .await;
+
+                    // Once the handshake attempt is complete, release the reservation
+                    drop(reservation);
                 }
             });
         }
