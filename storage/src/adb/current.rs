@@ -439,7 +439,7 @@ impl<
         // Gather the chunks necessary to verify the proof.
         let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let start = *start_loc / chunk_bits; // chunk that contains the very first bit.
-        let end = *(end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
+        let end = (*end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
             let bit_offset = i * chunk_bits;
