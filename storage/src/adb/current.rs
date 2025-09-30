@@ -578,13 +578,12 @@ impl<
             debug!("verification failed, invalid proof size");
             return false;
         };
-        let op_count = *op_count;
 
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
         if !Bitmap::<H, N>::get_bit_from_chunk(&info.chunk, *info.loc) {
             debug!(
-                loc = *info.loc,
+                loc = ?info.loc,
                 "proof verification failed, operation is inactive"
             );
             return false;
@@ -598,7 +597,8 @@ impl<
         );
         let element = Fixed::Update(info.key.clone(), info.value.clone()).encode();
 
-        if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
+        let next_bit = *op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        if next_bit == 0 {
             return proof.verify_element_inclusion(&mut verifier, &element, info.loc, root);
         }
 
@@ -614,7 +614,8 @@ impl<
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of info.chunk, since these bits are not part of
         // the mmr.
-        if *info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS == op_count / Bitmap::<H, N>::CHUNK_SIZE_BITS
+        if *info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS
+            == *op_count / Bitmap::<H, N>::CHUNK_SIZE_BITS
         {
             let expected_last_chunk_digest = verifier.digest(&info.chunk);
             if last_chunk_digest != expected_last_chunk_digest {
@@ -632,7 +633,6 @@ impl<
             }
         };
 
-        let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let reconstructed_root =
             Bitmap::<H, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
 
