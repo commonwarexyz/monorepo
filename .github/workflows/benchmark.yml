@@ -48,10 +48,6 @@ jobs:
             cargo_flags: "--features commonware-runtime/iouring-storage" # Additional features can be added here
             file_suffix: "-features"
             benchmark_name: "commonware-storage --features"
-          - package: commonware-stream
-            cargo_flags: ""
-            file_suffix: ""
-            benchmark_name: "commonware-stream"
           - package: commonware-coding
             cargo_flags: ""
             file_suffix: ""
