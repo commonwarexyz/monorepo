@@ -91,7 +91,7 @@ impl Write for BloomFilter {
 }
 
 impl Read for BloomFilter {
-    type Cfg = (RangeCfg, RangeCfg);
+    type Cfg = (RangeCfg, u64);
 
     fn read_cfg(
         buf: &mut impl Buf,
@@ -171,7 +171,7 @@ mod tests {
         bf.insert(b"test1");
         bf.insert(b"test2");
 
-        let cfg = ((1..=100).into(), (100..=100).into());
+        let cfg = ((1..=100).into(), 100);
 
         let encoded = bf.encode();
         let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn test_codec_empty() {
         let bf = BloomFilter::new(NZU8!(4), NZUsize!(128));
-        let cfg = ((1..=100).into(), (128..=128).into());
+        let cfg = ((1..=100).into(), 128);
         let encoded = bf.encode();
         let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(bf, decoded);
@@ -195,7 +195,7 @@ mod tests {
         let encoded = bf.encode();
 
         // Too small
-        let cfg = ((10..=10).into(), (100..=100).into());
+        let cfg = ((10..=10).into(), 100);
         let decoded = BloomFilter::decode_cfg(encoded.clone(), &cfg);
         assert!(matches!(
             decoded,
@@ -203,7 +203,7 @@ mod tests {
         ));
 
         // Too large
-        let cfg = ((0..5).into(), (100..=100).into());
+        let cfg = ((0..5).into(), 100);
         let decoded = BloomFilter::decode_cfg(encoded, &cfg);
         assert!(matches!(
             decoded,
@@ -217,13 +217,8 @@ mod tests {
         bf.insert(b"test1");
         let encoded = bf.encode();
 
-        // Too small
-        let cfg_small = ((5..=5).into(), (101..=110).into());
-        let result_small = BloomFilter::decode_cfg(encoded.clone(), &cfg_small);
-        assert!(matches!(result_small, Err(CodecError::InvalidLength(100))));
-
         // Too large
-        let cfg_large = ((5..=5).into(), (0..100).into());
+        let cfg_large = ((5..=5).into(), 99);
         let result_large = BloomFilter::decode_cfg(encoded.clone(), &cfg_large);
         assert!(matches!(result_large, Err(CodecError::InvalidLength(100))));
     }

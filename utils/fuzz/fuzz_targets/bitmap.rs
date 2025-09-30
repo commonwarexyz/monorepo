@@ -1,10 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{
-    codec::{EncodeSize, Read, Write},
-    RangeCfg,
-};
+use commonware_codec::codec::{EncodeSize, Read, Write};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 100_000;
@@ -16,18 +13,18 @@ type BitMap = commonware_utils::bitmap::BitMap;
 enum FuzzInput {
     New,
     WithCapacity(usize),
-    Zeroes(usize),
-    Ones(usize),
+    Zeroes(u64),
+    Ones(u64),
     FromBools(Vec<bool>),
     Push(Vec<bool>, bool),
     Pop(Vec<bool>),
     Iter(Vec<bool>),
-    Get(Vec<bool>, usize),
-    Set(Vec<bool>, usize),
-    Clear(Vec<bool>, usize),
-    Flip(Vec<bool>, usize),
+    Get(Vec<bool>, u64),
+    Set(Vec<bool>, u64),
+    Clear(Vec<bool>, u64),
+    Flip(Vec<bool>, u64),
     FlipAll(Vec<bool>),
-    SetTo(Vec<bool>, usize, bool),
+    SetTo(Vec<bool>, u64, bool),
     SetAll(Vec<bool>, bool),
     And(Vec<bool>, Vec<bool>),
     Or(Vec<bool>, Vec<bool>),
@@ -40,7 +37,7 @@ enum FuzzInput {
     FromRefArrayBool(FixedBoolArray),
     ToVecBool(Vec<bool>),
     Debug(Vec<bool>),
-    Index(Vec<bool>, usize),
+    Index(Vec<bool>, u64),
     BitAndOp(Vec<bool>, Vec<bool>),
     BitOrOp(Vec<bool>, Vec<bool>),
     BitXorOp(Vec<bool>, Vec<bool>),
@@ -150,7 +147,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Zeroes(size) => {
-                let size = size.min(MAX_SIZE) as u64;
+                let size = size.min(MAX_SIZE as u64);
                 let v = BitMap::zeroes(size);
                 assert_eq!(v.len(), size);
                 assert_eq!(v.count_zeros(), size);
@@ -162,7 +159,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Ones(size) => {
-                let size = size.min(MAX_SIZE) as u64;
+                let size = size.min(MAX_SIZE as u64);
                 let v = BitMap::ones(size);
                 assert_eq!(v.len(), size);
                 assert_eq!(v.count_ones(), size);
@@ -211,44 +208,44 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let v = BitMap::from(&bools);
                 let v_len = v.len();
 
-                if index as u64 >= v_len {
+                if index >= v_len || index > usize::MAX as u64 {
                     return;
                 }
 
-                let result = v.get(index as u64);
-                assert_eq!(result, bools[index]);
+                let result = v.get(index);
+                assert_eq!(result, bools[index as usize]);
             }
 
             FuzzInput::Set(bools, index) => {
                 let mut v = BitMap::from(&bools);
-                if (index as u64) < v.len() {
-                    v.set(index as u64, true);
-                    assert!(v.get(index as u64));
+                if index < v.len() {
+                    v.set(index, true);
+                    assert!(v.get(index));
                 }
             }
 
             FuzzInput::Clear(bools, index) => {
                 let mut v = BitMap::from(&bools);
-                if (index as u64) < v.len() {
-                    v.set(index as u64, false);
-                    assert!(!v.get(index as u64));
+                if index < v.len() {
+                    v.set(index, false);
+                    assert!(!v.get(index));
                 }
             }
 
             FuzzInput::Flip(bools, index) => {
                 let mut v = BitMap::from(&bools);
-                if (index as u64) < v.len() {
-                    let old_value = v.get(index as u64);
-                    v.flip(index as u64);
-                    assert_eq!(v.get(index as u64), !old_value);
+                if index < v.len() {
+                    let old_value = v.get(index);
+                    v.flip(index);
+                    assert_eq!(v.get(index), !old_value);
                 }
             }
 
             FuzzInput::SetTo(bools, index, value) => {
                 let mut v = BitMap::from(&bools);
-                if (index as u64) < v.len() {
-                    v.set(index as u64, value);
-                    assert_eq!(v.get(index as u64), value);
+                if index < v.len() {
+                    v.set(index, value);
+                    assert_eq!(v.get(index), value);
                 }
             }
 
@@ -399,8 +396,7 @@ fn fuzz(input: Vec<FuzzInput>) {
 
             FuzzInput::Index(bools, index) => {
                 let v = BitMap::from(&bools);
-                if (index as u64) < v.len() {
-                    let index = index as u64;
+                if index < v.len() {
                     let indexed_value = v[index];
                     assert_eq!(indexed_value, v.get(index));
                 }
@@ -462,8 +458,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert!(!buf.is_empty());
 
                 let mut cursor = std::io::Cursor::new(buf);
-                let range_cfg: RangeCfg = (0..MAX_SIZE).into();
-                if let Ok(decoded) = BitMap::read_cfg(&mut cursor, &range_cfg) {
+                if let Ok(decoded) = BitMap::read_cfg(&mut cursor, &(MAX_SIZE as u64)) {
                     assert_eq!(decoded.len(), v.len());
                     for i in 0..decoded.len() {
                         assert_eq!(decoded.get(i), v.get(i));

@@ -66,7 +66,7 @@ impl Read for Record {
             0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),
             1 => Ok(Self::Ordinal(Option::<BitMap>::read_cfg(
                 buf,
-                &(0..=usize::MAX).into(),
+                &(usize::MAX as u64),
             )?)),
             _ => Err(commonware_codec::Error::InvalidEnum(tag)),
         }
