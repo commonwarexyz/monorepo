@@ -369,40 +369,38 @@ impl<
             return None;
         }
         let proposal = self.proposal.as_ref().unwrap().clone();
-
-        // Ensure we have a notarization
-        let Some(notarization) = &self.notarization else {
-            return None;
-        };
-        let seed_signature = notarization.seed_signature;
-
-        // Check notarization and finalization proposal match
-        if notarization.proposal != proposal {
-            warn!(
-                ?proposal,
-                ?notarization.proposal,
-                "finalization proposal does not match notarization"
-            );
-        }
-
-        // There should never exist enough finalizes for multiple proposals, so it doesn't
-        // matter which one we choose.
         debug!(
             ?proposal,
             verified = self.verified_proposal,
             "broadcasting finalization"
         );
 
-        // Only select verified finalizes
-        let proposals = self
-            .finalizes
-            .iter()
-            .map(|finalize| &finalize.proposal_signature);
-
         // Recover threshold signature
         let mut timer = self.recover_latency.timer();
-        let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
-            .expect("failed to recover threshold signature");
+        let (proposals, seeds): (Vec<_>, Vec<_>) = self
+            .finalizes
+            .iter()
+            .map(|finalize| (&finalize.proposal_signature, &finalize.seed_signature))
+            .unzip();
+
+        // If we have a notarization we'll extract the recovered seed signature (equivalent to what we'd recover)
+        let (proposal_signature, seed_signature) = if let Some(notarization) = &self.notarization {
+            // It is not possible to have a finalization that does not match the notarization proposal. If this
+            // is detected, there is a critical bug or there has been a safety violation.
+            assert_eq!(
+                notarization.proposal, proposal,
+                "finalization proposal does not match notarization"
+            );
+
+            // Recover only the proposal signature
+            let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
+                .expect("failed to recover threshold signature");
+            (proposal_signature, notarization.seed_signature)
+        } else {
+            // Recover both the proposal and seed signatures
+            threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
+                .expect("failed to recover threshold signature")
+        };
         timer.observe();
 
         // Construct finalization
