@@ -158,7 +158,7 @@ where
         (
             database.root(&mut hasher),
             database.lower_bound(),
-            database.op_count().checked_sub(1).unwrap(),
+            database.op_count().saturating_sub(1),
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
