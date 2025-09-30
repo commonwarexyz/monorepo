@@ -98,7 +98,7 @@ impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
             Variable::Delete(_) => K::SIZE,
             Variable::Update(_, v) => K::SIZE + v.encode_size(),
             Variable::CommitFloor(v, floor_loc) => {
-                v.encode_size() + UInt(floor_loc.as_u64()).encode_size()
+                v.encode_size() + UInt(**floor_loc).encode_size()
             }
             Variable::Set(_, v) => K::SIZE + v.encode_size(),
             Variable::Commit(v) => v.encode_size(),
@@ -273,7 +273,7 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
             Variable::CommitFloor(v, floor_loc) => {
                 COMMIT_FLOOR_CONTEXT.write(buf);
                 v.write(buf);
-                UInt(floor_loc.as_u64()).write(buf);
+                UInt(**floor_loc).write(buf);
             }
         }
     }
