@@ -12,7 +12,7 @@ use commonware_storage::mmr::{
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 
-const MAX_OPERATIONS: usize = 100;
+const MAX_OPERATIONS: usize = 200;
 const MAX_DATA_SIZE: usize = 64;
 const PAGE_SIZE: usize = 111;
 const PAGE_CACHE_SIZE: usize = 5;
@@ -146,7 +146,6 @@ fn fuzz(input: FuzzInput) {
                     let size_before = mmr.size();
                     let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
                     leaves.push(limited_data.to_vec());
-
                     historical_sizes.push(mmr.size());
                     assert!(mmr.size() > size_before);
                     assert_eq!(mmr.last_leaf_pos(), Some(pos));
@@ -215,20 +214,22 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::RangeProof { start_loc, end_loc } => {
+                    let start_loc = start_loc.clamp(0, u8::MAX as u64);
+                    let end_loc = end_loc.clamp(1, u8::MAX as u64);
                     if mmr.leaves() == 0 {
                         continue;
                     }
-                    let start_pos = Position::from(start_loc);
-                    if start_loc >= mmr.size()
+                    let range = Location::new(start_loc)..Location::new(end_loc);
+                    let start_pos = Position::from(range.start);
+                    if start_loc >= mmr.leaves()
                         || start_pos < mmr.pruned_to_pos()
                         || start_loc > end_loc
-                        || end_loc >= mmr.size()
+                        || end_loc == 0
+                        || end_loc >= mmr.leaves()
                     {
                         continue;
                     }
-
                     mmr.process_updates(&mut hasher);
-                    let range = Location::new(start_loc)..Location::new(end_loc);
                     if let Ok(proof) = mmr.range_proof(range.clone()).await {
                         let original_size = mmr.size();
                         let historical_proof = mmr
@@ -245,20 +246,28 @@ fn fuzz(input: FuzzInput) {
                     start_loc,
                     end_loc,
                 } => {
+                    let start_loc = start_loc.clamp(0, u8::MAX as u64);
+                    let end_loc = end_loc.clamp(1, u8::MAX as u64);
+                    if mmr.leaves() == 0 {
+                        continue;
+                    }
                     // Ensure the size represents a valid MMR structure
                     let valid_size = PeakIterator::to_nearest_size(size.min(mmr.size()));
-                    let start_pos = Position::from(start_loc);
+                    let start_element_pos = Position::from(start_loc);
                     if (start_loc > end_loc)
-                        || start_pos < mmr.pruned_to_pos()
+                        || start_element_pos < mmr.pruned_to_pos()
+                        || start_loc >= mmr.leaves()
                         || (start_loc >= valid_size)
                         || (end_loc >= valid_size)
                         || (valid_size == 0)
+                        || end_loc >= mmr.size()
+                        || end_loc == 0
+                        || start_element_pos >= mmr.size()
                     {
                         continue;
                     }
-                    mmr.process_updates(&mut hasher);
-
                     let range = Location::new(start_loc)..Location::new(end_loc);
+                    mmr.process_updates(&mut hasher);
                     let _ = mmr.historical_range_proof(valid_size, range).await;
                 }
 
