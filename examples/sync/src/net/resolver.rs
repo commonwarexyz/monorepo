@@ -81,14 +81,14 @@ where
 
     async fn get_operations(
         &self,
-        size: u64,
+        op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<sync::resolver::FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
             request_id,
-            size,
+            op_count,
             start_loc,
             max_ops,
         });

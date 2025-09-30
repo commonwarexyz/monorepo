@@ -64,7 +64,7 @@ fn fuzz(data: FuzzInput) {
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
         let mut uncommitted_ops = 0;
-        let mut last_known_op_count = 0;
+        let mut last_known_op_count = Location::new(0);
 
         for op in &data.operations {
             match op {
@@ -130,7 +130,7 @@ fn fuzz(data: FuzzInput) {
                         let current_root = adb.root(&mut hasher);
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
-                        let adjusted_start = Location::new(*start_loc % actual_op_count);
+                        let adjusted_start = Location::new(*start_loc % *actual_op_count);
                         let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 
                         let (proof, log) = adb
