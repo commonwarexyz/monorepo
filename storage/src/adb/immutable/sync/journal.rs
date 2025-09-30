@@ -10,6 +10,7 @@
 use crate::{
     adb::{self, sync},
     journal::variable::{self, Config as VConfig, Journal as VJournal},
+    mmr::Location,
     store::operation::Variable,
 };
 use commonware_codec::Codec;
@@ -88,11 +89,13 @@ where
         let section = self.size / self.items_per_section;
         self.inner.append(section, op).await?;
         self.size += 1;
+        if self.size > 0 && self.size % self.items_per_section == 0 {
+            // Sync this full section before appending to the next section.
+            // TODO(#1718): Migrate to the new contiguous variable journal type, which will handle section
+            // calculation and syncing internally.
+            self.inner.sync(section).await?;
+        }
         Ok(())
-    }
-
-    async fn close(self) -> Result<(), Self::Error> {
-        self.inner.close().await
     }
 }
 
@@ -188,13 +191,13 @@ pub(super) async fn init_journal<E: Storage + Metrics, V: Codec>(
 
     // Check if data exceeds the sync range
     if last_section > upper_section {
-        let loc = last_section * items_per_section;
+        let loc = Location::new(last_section * items_per_section);
         return Err(adb::Error::UnexpectedData(loc));
     }
 
     let size = get_size(&journal, items_per_section).await?;
     if size > upper_bound + 1 {
-        return Err(adb::Error::UnexpectedData(size));
+        return Err(adb::Error::UnexpectedData(size.into()));
     }
     Ok((journal, size))
 }
@@ -212,7 +215,7 @@ pub(super) async fn get_size<E: Storage + Metrics, V: Codec>(
     items_per_section: u64,
 ) -> Result<u64, adb::Error> {
     let Some(last_section) = journal.blobs.last_key_value().map(|(&s, _)| s) else {
-        return Err(adb::Error::UnexpectedData(0));
+        return Err(adb::Error::UnexpectedData(Location::new(0)));
     };
     let last_section_start = last_section * items_per_section;
     let items_in_last_section = journal

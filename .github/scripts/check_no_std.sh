@@ -8,15 +8,20 @@ no_std_packages=(
   commonware-storage
 )
 
+target="thumbv7em-none-eabihf"
+base_rustflags="${RUSTFLAGS:-}"
+
 for package in "${no_std_packages[@]}"; do
-  build_cmd="cargo build -p $package --no-default-features --target thumbv7em-none-eabihf --release"
+  build_cmd=(cargo build -p "$package" --no-default-features --target "$target" --release)
+  pretty_cmd="${build_cmd[*]}"
   if [ -n "$CI" ]; then
-    echo "::group::$build_cmd"
+    echo "::group::${pretty_cmd}"
   else
-    printf "\n%s:\n  %s\n" "$package" "$build_cmd"
+    printf "\n%s:\n  %s\n" "$package" "$pretty_cmd"
   fi
 
-  $build_cmd && du -h "target/thumbv7em-none-eabihf/release/lib${package//-/_}.rlib"
+  RUSTFLAGS="${base_rustflags} -D warnings" "${build_cmd[@]}"
+  du -h "target/${target}/release/lib${package//-/_}.rlib"
 
   if [ -n "$CI" ]; then
     echo "::endgroup::"

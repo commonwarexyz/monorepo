@@ -7,13 +7,13 @@ use crate::{
         },
         sync::{self, Journal as SyncJournal},
     },
-    index::Index,
+    index::Unordered as Index,
     journal::{
         fixed,
         variable::{Config as VConfig, Journal as VJournal},
     },
     metadata::Metadata,
-    mmr::{hasher::Standard, iterator::leaf_loc_to_pos},
+    mmr::{hasher::Standard, Location, Position},
     store::operation::Variable,
     translator::Translator,
 };
@@ -43,7 +43,7 @@ where
     items_per_section: NonZeroU64,
 
     /// Next location to append to in the `inner` journal.
-    size: u64,
+    size: Location,
 
     /// Tracks the oldest retained location in the `inner` journal.
     metadata: Metadata<E, U64, u64>,
@@ -66,7 +66,7 @@ where
         inner: VJournal<E, Variable<K, V>>,
         items_per_section: NonZeroU64,
         metadata: Metadata<E, U64, u64>,
-        size: u64,
+        size: Location,
     ) -> Result<Self, crate::journal::Error> {
         Ok(Self {
             inner,
@@ -93,23 +93,17 @@ where
     type Error = crate::journal::Error;
 
     async fn size(&self) -> Result<u64, Self::Error> {
-        Ok(self.size)
+        Ok(*self.size)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        let section = self.size / self.items_per_section;
+        let section = *self.size / self.items_per_section;
         self.inner.append(section, op).await?;
         self.size += 1;
-        if self.size > 0 && self.size % self.items_per_section == 0 {
+        if self.size > 0 && *self.size % self.items_per_section == 0 {
             // Sync this full section before appending to the next section
             self.inner.sync(section).await?;
         }
-        Ok(())
-    }
-
-    async fn close(self) -> Result<(), Self::Error> {
-        self.inner.close().await?;
-        self.metadata.close().await?;
         Ok(())
     }
 }
@@ -132,8 +126,8 @@ where
     async fn create_journal(
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
     ) -> Result<Self::Journal, adb::Error> {
         // Initialize the variable journal
         let mut journal = VJournal::init(
@@ -178,8 +172,8 @@ where
         db_config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
         _apply_batch_size: usize,
     ) -> Result<Self, adb::Error> {
         // Initialize MMR for sync with proper bounds and pinned nodes
@@ -194,8 +188,8 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
-                lower_bound_pos: leaf_loc_to_pos(lower_bound),
-                upper_bound_pos: leaf_loc_to_pos(upper_bound + 1) - 1,
+                lower_bound_pos: Position::from(lower_bound),
+                upper_bound_pos: Position::from(upper_bound + 1) - 1,
                 pinned_nodes,
             },
         )
@@ -210,8 +204,8 @@ where
                 write_buffer: db_config.log_write_buffer,
                 buffer_pool: db_config.buffer_pool.clone(),
             },
-            lower_bound,
-            upper_bound,
+            *lower_bound,
+            *upper_bound,
         )
         .await?;
 
@@ -247,8 +241,8 @@ where
         journal: Self::Journal,
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound: Location,
+        upper_bound: Location,
     ) -> Result<Self::Journal, adb::Error> {
         let size = journal.size().await.map_err(adb::Error::from)?;
         if size <= lower_bound {
@@ -296,14 +290,14 @@ where
 async fn prune_lower<E, V>(
     journal: &mut VJournal<E, V>,
     metadata: &mut Metadata<E, U64, u64>,
-    lower_bound: u64,
+    lower_bound: Location,
     items_per_section: u64,
 ) -> Result<(), crate::journal::Error>
 where
     E: Storage + Metrics + Clock,
     V: Codec,
 {
-    let lower_section = lower_bound / items_per_section;
+    let lower_section = *lower_bound / items_per_section;
 
     if !journal.blobs.contains_key(&lower_section) {
         return Ok(()); // Section doesn't exist, nothing to prune
@@ -343,17 +337,19 @@ where
     let is_contiguous = lower_bound <= max_loc + 1;
     if is_contiguous {
         debug!(
-            max_loc,
-            lower_bound,
-            oldest_retained_loc,
+            ?max_loc,
+            ?lower_bound,
+            ?oldest_retained_loc,
             "existing items are contiguous with new range, skipping rebuild"
         );
         return Ok(());
     }
 
     debug!(
-        max_loc,
-        lower_bound, oldest_retained_loc, "existing items are non-contiguous, rebuilding section"
+        ?max_loc,
+        ?lower_bound,
+        ?oldest_retained_loc,
+        "existing items are non-contiguous, rebuilding section"
     );
 
     // Filter operations to keep only those >= lower_bound
@@ -420,10 +416,10 @@ where
 pub async fn prune_journal<E, V>(
     journal: &mut VJournal<E, V>,
     metadata: &mut Metadata<E, U64, u64>,
-    lower_bound: u64,
-    upper_bound: u64,
+    lower_bound: Location,
+    upper_bound: Location,
     items_per_section: NonZeroU64,
-) -> Result<u64, adb::Error>
+) -> Result<Location, adb::Error>
 where
     E: Storage + Metrics + Clock,
     V: Codec,
@@ -436,14 +432,14 @@ where
     let oldest_retained_loc = read_oldest_retained_loc(metadata);
     let items_per_section = items_per_section.get();
     // The section containing the lower bound
-    let lower_section = lower_bound / items_per_section;
+    let lower_section = *lower_bound / items_per_section;
     // The section containing the upper bound
-    let upper_section = upper_bound / items_per_section;
+    let upper_section = *upper_bound / items_per_section;
 
     debug!(
-        lower_bound,
-        upper_bound,
-        oldest_retained_loc,
+        ?lower_bound,
+        ?upper_bound,
+        ?oldest_retained_loc,
         lower_section,
         upper_section,
         items_per_section,
@@ -454,7 +450,7 @@ where
     if lower_section > 0 {
         debug!(lower_section, "removing sections before lower_section");
         // Satisfy metadata invariant by updating oldest_retained_loc before log.
-        let lower_section_start = lower_section * items_per_section;
+        let lower_section_start = Location::new(lower_section * items_per_section);
         if oldest_retained_loc < lower_section_start {
             write_oldest_retained_loc(metadata, lower_section_start);
             metadata.sync().await?;
@@ -482,7 +478,7 @@ where
 
     // Check if data exceeds the sync range
     if last_section > upper_section {
-        let loc = last_section * items_per_section;
+        let loc = Location::new(last_section * items_per_section);
         return Err(crate::adb::Error::UnexpectedData(loc));
     }
 
@@ -492,7 +488,7 @@ where
     let last_section_start = if last_section == lower_section {
         read_oldest_retained_loc(metadata)
     } else {
-        last_section * items_per_section
+        Location::new(last_section * items_per_section)
     };
     let next_loc = last_section_start + items_in_last_section;
 
@@ -598,7 +594,7 @@ mod tests {
             // Capture target state
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             let root = target_db.root(&mut hasher);
-            let lower_bound = target_db.oldest_retained_loc().unwrap_or(0);
+            let lower_bound = target_db.oldest_retained_loc().unwrap_or(Location::new(0));
             let upper_bound = target_db.op_count() - 1;
 
             // Configure sync engine
@@ -609,8 +605,8 @@ mod tests {
                 resolver: resolver.clone(),
                 target: Target {
                     root,
-                    lower_bound_ops: lower_bound,
-                    upper_bound_ops: upper_bound,
+                    lower_bound,
+                    upper_bound,
                 },
                 max_outstanding_requests: 2,
                 fetch_batch_size: NZU64!(10),
@@ -626,7 +622,7 @@ mod tests {
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             assert_eq!(synced_db.root(&mut hasher), root);
             assert_eq!(synced_db.op_count(), upper_bound + 1);
-            assert_eq!(synced_db.oldest_retained_loc().unwrap_or(0), lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);
 
             // Verify data
             for (k, v) in updates.iter().copied() {
@@ -739,8 +735,8 @@ mod tests {
                 fetch_batch_size,
                 target: Target {
                     root: target_root,
-                    lower_bound_ops: target_inactivity_floor,
-                    upper_bound_ops: target_op_count - 1,
+                    lower_bound: target_inactivity_floor,
+                    upper_bound: target_op_count - 1,
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -817,7 +813,7 @@ mod tests {
 
             // Capture the database state before closing
             let final_synced_op_count = got_db.op_count();
-            let final_synced_oldest_retained_loc = got_db.oldest_retained_loc().unwrap_or(0);
+            let final_synced_oldest_retained_loc = got_db.oldest_retained_loc().unwrap();
             let final_synced_root = got_db.root(&mut hasher);
 
             // Close the database
@@ -829,7 +825,7 @@ mod tests {
             // Compare state against the database state before closing
             assert_eq!(reopened_db.op_count(), final_synced_op_count);
             assert_eq!(
-                reopened_db.oldest_retained_loc().unwrap_or(0),
+                reopened_db.oldest_retained_loc().unwrap(),
                 final_synced_oldest_retained_loc
             );
             assert_eq!(reopened_db.root(&mut hasher), final_synced_root);
@@ -872,8 +868,8 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: sha256::Digest::from([1u8; 32]),
-                    lower_bound_ops: 31, // Invalid: lower > upper
-                    upper_bound_ops: 30,
+                    lower_bound: Location::new(31), // Invalid: lower > upper
+                    upper_bound: Location::new(30),
                 },
                 context,
                 resolver: Arc::new(RwLock::new(target_db)),
@@ -905,8 +901,8 @@ mod tests {
 
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             let root = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.inactivity_floor_loc;
-            let upper_bound_ops = target_db.op_count() - 1;
+            let lower_bound = target_db.inactivity_floor_loc;
+            let upper_bound = target_db.op_count() - 1;
 
             // Add another operation after the sync range
             let final_op = &target_ops[TARGET_DB_OPS - 1];
@@ -919,8 +915,8 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    lower_bound_ops,
-                    upper_bound_ops,
+                    lower_bound,
+                    upper_bound,
                 },
                 context,
                 resolver: Arc::new(RwLock::new(target_db)),
@@ -931,13 +927,10 @@ mod tests {
             let synced_db: AnyTest = sync::sync(config).await.unwrap();
 
             // Verify the synced database has the correct range of operations
-            assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
-            assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
-            assert_eq!(
-                synced_db.mmr.pruned_to_pos(),
-                leaf_loc_to_pos(lower_bound_ops)
-            );
-            assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound));
+            assert_eq!(synced_db.mmr.pruned_to_pos(), Position::from(lower_bound));
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
 
             // Verify the final root digest matches our target
             assert_eq!(synced_db.root(&mut hasher), root);
@@ -982,8 +975,8 @@ mod tests {
             target_db.commit(None).await.unwrap();
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             let root = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.inactivity_floor_loc;
-            let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
+            let lower_bound = target_db.inactivity_floor_loc;
+            let upper_bound = target_db.op_count() - 1; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
             let target_db = Arc::new(RwLock::new(target_db));
@@ -992,8 +985,8 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    lower_bound_ops,
-                    upper_bound_ops,
+                    lower_bound,
+                    upper_bound,
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -1004,16 +997,13 @@ mod tests {
             let sync_db: AnyTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(sync_db.op_count(), upper_bound + 1);
             assert_eq!(
                 sync_db.inactivity_floor_loc,
                 target_db.read().await.inactivity_floor_loc
             );
-            assert!(sync_db.oldest_retained_loc().unwrap() <= lower_bound_ops);
-            assert_eq!(
-                sync_db.mmr.pruned_to_pos(),
-                leaf_loc_to_pos(lower_bound_ops)
-            );
+            assert!(sync_db.oldest_retained_loc().unwrap() <= lower_bound);
+            assert_eq!(sync_db.mmr.pruned_to_pos(), Position::from(lower_bound));
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);
 
@@ -1046,7 +1036,7 @@ mod tests {
 
             // Capture target state
             let target_db_op_count = target_db.op_count();
-            let target_db_oldest_retained_loc = target_db.oldest_retained_loc().unwrap_or(0);
+            let target_db_oldest_retained_loc = target_db.oldest_retained_loc().unwrap();
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             let target_root = target_db.root(&mut hasher);
 
@@ -1072,8 +1062,8 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    lower_bound_ops: target_db_oldest_retained_loc,
-                    upper_bound_ops: target_db_op_count - 1,
+                    lower_bound: target_db_oldest_retained_loc,
+                    upper_bound: target_db_op_count - 1,
                 },
                 context,
                 resolver: target_db.clone(),
@@ -1087,7 +1077,7 @@ mod tests {
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(
-                sync_db.oldest_retained_loc().unwrap_or(0),
+                sync_db.oldest_retained_loc().unwrap(),
                 target_db_oldest_retained_loc
             );
             assert_eq!(sync_db.root(&mut hasher), target_root);
@@ -1142,8 +1132,8 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    lower_bound_ops: initial_lower_bound,
-                    upper_bound_ops: initial_upper_bound,
+                    lower_bound: initial_lower_bound,
+                    upper_bound: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1156,8 +1146,8 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    lower_bound_ops: initial_lower_bound.saturating_sub(1),
-                    upper_bound_ops: initial_upper_bound.saturating_add(1),
+                    lower_bound: initial_lower_bound.saturating_sub(1),
+                    upper_bound: initial_upper_bound.saturating_add(1),
                 })
                 .await
                 .unwrap();
@@ -1205,8 +1195,8 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    lower_bound_ops: initial_lower_bound,
-                    upper_bound_ops: initial_upper_bound,
+                    lower_bound: initial_lower_bound,
+                    upper_bound: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1219,8 +1209,8 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    lower_bound_ops: initial_lower_bound,
-                    upper_bound_ops: initial_upper_bound.saturating_sub(1),
+                    lower_bound: initial_lower_bound,
+                    upper_bound: initial_upper_bound.saturating_sub(1),
                 })
                 .await
                 .unwrap();
@@ -1280,8 +1270,8 @@ mod tests {
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
-                    lower_bound_ops: initial_lower_bound,
-                    upper_bound_ops: initial_upper_bound,
+                    lower_bound: initial_lower_bound,
+                    upper_bound: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1293,8 +1283,8 @@ mod tests {
             update_sender
                 .send(Target {
                     root: final_root,
-                    lower_bound_ops: final_lower_bound,
-                    upper_bound_ops: final_upper_bound,
+                    lower_bound: final_lower_bound,
+                    upper_bound: final_upper_bound,
                 })
                 .await
                 .unwrap();
@@ -1346,8 +1336,8 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    lower_bound_ops: initial_lower_bound,
-                    upper_bound_ops: initial_upper_bound,
+                    lower_bound: initial_lower_bound,
+                    upper_bound: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1360,8 +1350,8 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    lower_bound_ops: initial_upper_bound, // Greater than upper bound
-                    upper_bound_ops: initial_lower_bound, // Less than lower bound
+                    lower_bound: initial_upper_bound, // Greater than upper bound
+                    upper_bound: initial_lower_bound, // Less than lower bound
                 })
                 .await
                 .unwrap();
@@ -1407,8 +1397,8 @@ mod tests {
                 fetch_batch_size: NZU64!(20),
                 target: Target {
                     root,
-                    lower_bound_ops: lower_bound,
-                    upper_bound_ops: upper_bound,
+                    lower_bound,
+                    upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1425,8 +1415,8 @@ mod tests {
                 .send(Target {
                     // Dummy target update
                     root: sha256::Digest::from([2u8; 32]),
-                    lower_bound_ops: lower_bound + 1,
-                    upper_bound_ops: upper_bound + 1,
+                    lower_bound: lower_bound + 1,
+                    upper_bound: upper_bound + 1,
                 })
                 .await;
 
@@ -1488,8 +1478,8 @@ mod tests {
                     db_config: create_sync_config(&format!("test_config_{}", context.next_u64())),
                     target: Target {
                         root: initial_root,
-                        lower_bound_ops: initial_lower_bound,
-                        upper_bound_ops: initial_upper_bound,
+                        lower_bound: initial_lower_bound,
+                        upper_bound: initial_upper_bound,
                     },
                     resolver: target_db.clone(),
                     fetch_batch_size: NZU64!(1), // Small batch size so we don't finish after one batch
@@ -1528,8 +1518,8 @@ mod tests {
                 update_sender
                     .send(Target {
                         root: new_root,
-                        lower_bound_ops: new_lower_bound,
-                        upper_bound_ops: new_upper_bound,
+                        lower_bound: new_lower_bound,
+                        upper_bound: new_upper_bound,
                     })
                     .await
                     .unwrap();
@@ -1572,14 +1562,16 @@ mod tests {
             }
 
             // Verify the expected operations are present in the synced database.
-            for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
-                let got = synced_db.get_op(i).await.unwrap();
-                let expected = target_db.get_op(i).await.unwrap();
+            for loc in *synced_db.inactivity_floor_loc..*synced_db.op_count() {
+                let loc = Location::new(loc);
+                let got = synced_db.get_op(loc).await.unwrap();
+                let expected = target_db.get_op(loc).await.unwrap();
                 assert_eq!(got, expected);
             }
-            for i in synced_db.mmr.oldest_retained_pos().unwrap()..synced_db.mmr.size() {
-                let got = synced_db.mmr.get_node(i).await.unwrap();
-                let expected = target_db.mmr.get_node(i).await.unwrap();
+            for pos in *synced_db.mmr.oldest_retained_pos().unwrap()..*synced_db.mmr.size() {
+                let pos = Position::new(pos);
+                let got = synced_db.mmr.get_node(pos).await.unwrap();
+                let expected = target_db.mmr.get_node(pos).await.unwrap();
                 assert_eq!(got, expected);
             }
 
@@ -1613,8 +1605,8 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: target_root,
-                    lower_bound_ops: lower_bound,
-                    upper_bound_ops: upper_bound,
+                    lower_bound,
+                    upper_bound,
                 },
                 context,
                 resolver: target_db.clone(),
@@ -1679,8 +1671,8 @@ mod tests {
                 context,
                 target: Target {
                     root: target_root,
-                    lower_bound_ops: 0,
-                    upper_bound_ops: 4,
+                    lower_bound: Location::new(0),
+                    upper_bound: Location::new(4),
                 },
                 resolver,
                 apply_batch_size: 2,
@@ -1723,9 +1715,9 @@ mod tests {
             .await
             .expect("Failed to create metadata");
 
-            let lower_bound = 10;
-            let upper_bound = 20;
-            write_oldest_retained_loc(&mut metadata, 0);
+            let lower_bound = Location::new(10);
+            let upper_bound = Location::new(20);
+            write_oldest_retained_loc(&mut metadata, Location::new(0));
             let items_per_section = NZU64!(5);
 
             let next_loc = prune_journal(
@@ -1782,9 +1774,9 @@ mod tests {
             }
 
             // New bounds are ahead of data in the journal
-            let lower_bound = 15; // Section 3
-            let upper_bound = 25; // Section 5
-            write_oldest_retained_loc(&mut metadata, 0);
+            let lower_bound = Location::new(15); // Section 3
+            let upper_bound = Location::new(25); // Section 5
+            write_oldest_retained_loc(&mut metadata, Location::new(0));
 
             let next_loc = prune_journal(
                 &mut journal,
@@ -1839,9 +1831,9 @@ mod tests {
                 }
             }
 
-            let lower_bound = 7; // Middle of section 1
-            let upper_bound = 20; // Section 4
-            write_oldest_retained_loc(&mut metadata, 0);
+            let lower_bound = Location::new(7); // Middle of section 1
+            let upper_bound = Location::new(20); // Section 4
+            write_oldest_retained_loc(&mut metadata, Location::new(0));
 
             let next_loc = prune_journal(
                 &mut journal,
@@ -1854,9 +1846,9 @@ mod tests {
             .expect("Failed to prune journal");
 
             // Should have data from locations 5-14 (all of section 1 and all of section 2)
-            assert_eq!(next_loc, 15);
+            assert_eq!(next_loc, Location::new(15));
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
-            assert_eq!(new_oldest_retained_loc, 5); // Should be section boundary (start of section 1)
+            assert_eq!(new_oldest_retained_loc, Location::new(5)); // Should be section boundary (start of section 1)
 
             // Section 0 should be removed
             assert!(!journal.blobs.contains_key(&0));
@@ -1903,9 +1895,9 @@ mod tests {
                 }
             }
 
-            let lower_bound = 5; // Section 1
-            let upper_bound = 25; // Section 5
-            write_oldest_retained_loc(&mut metadata, 10); // Start of section 2
+            let lower_bound = Location::new(5); // Section 1
+            let upper_bound = Location::new(25); // Section 5
+            write_oldest_retained_loc(&mut metadata, Location::new(10)); // Start of section 2
 
             let next_loc = prune_journal(
                 &mut journal,
@@ -1918,9 +1910,9 @@ mod tests {
             .expect("Failed to prune journal");
 
             // Should have data from locations 10-19
-            assert_eq!(next_loc, 20);
+            assert_eq!(next_loc, Location::new(20));
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
-            assert_eq!(new_oldest_retained_loc, 10);
+            assert_eq!(new_oldest_retained_loc, Location::new(10));
 
             // Sections 2 and 3 should remain
             assert!(journal.blobs.contains_key(&2));
@@ -1964,8 +1956,8 @@ mod tests {
                 }
             }
 
-            let lower_bound = 7; // Middle of section 1
-            let upper_bound = 17; // We have data beyond this bound already
+            let lower_bound = Location::new(7); // Middle of section 1
+            let upper_bound = Location::new(17); // We have data beyond this bound already
 
             let result = prune_journal(
                 &mut journal,
@@ -2019,9 +2011,9 @@ mod tests {
                 journal.append(1, 100 + i).await.unwrap();
             }
 
-            let lower_bound = 12; // Within section 1
-            let upper_bound = 17; // Also within section 1
-            write_oldest_retained_loc(&mut metadata, 0);
+            let lower_bound = Location::new(12); // Within section 1
+            let upper_bound = Location::new(17); // Also within section 1
+            write_oldest_retained_loc(&mut metadata, Location::new(0));
 
             let next_loc = prune_journal(
                 &mut journal,
@@ -2034,9 +2026,9 @@ mod tests {
             .expect("Failed to prune journal");
 
             // Should keep all elements 10-17 from section 1
-            assert_eq!(next_loc, 18);
+            assert_eq!(next_loc, Location::new(18));
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
-            assert_eq!(new_oldest_retained_loc, 10); // Section boundary (start of section 1)
+            assert_eq!(new_oldest_retained_loc, Location::new(10)); // Section boundary (start of section 1)
 
             // Only section 1 should remain
             assert!(!journal.blobs.contains_key(&0));
@@ -2080,9 +2072,9 @@ mod tests {
                 }
             }
 
-            let lower_bound = 10; // Start of section 2
-            let upper_bound = 19; // End of section 3
-            write_oldest_retained_loc(&mut metadata, 0);
+            let lower_bound = Location::new(10); // Start of section 2
+            let upper_bound = Location::new(19); // End of section 3
+            write_oldest_retained_loc(&mut metadata, Location::new(0));
 
             let next_loc = prune_journal(
                 &mut journal,
@@ -2095,7 +2087,7 @@ mod tests {
             .expect("Failed to prune journal");
 
             // Should have data from location 10 to 19
-            assert_eq!(next_loc, 20);
+            assert_eq!(next_loc, Location::new(20));
             let new_oldest_retained_loc = read_oldest_retained_loc(&metadata);
             assert_eq!(new_oldest_retained_loc, lower_bound); // Should be lower_bound after pruning at start of section 2
 
@@ -2137,9 +2129,9 @@ mod tests {
             .await
             .expect("Failed to create metadata");
 
-            let lower_bound = 20;
-            let upper_bound = 10; // Invalid: lower > upper
-            write_oldest_retained_loc(&mut metadata, 0);
+            let lower_bound = Location::new(20);
+            let upper_bound = Location::new(10); // Invalid: lower > upper
+            write_oldest_retained_loc(&mut metadata, Location::new(0));
             let items_per_section = NZU64!(5);
 
             let _result = prune_journal(
@@ -2188,9 +2180,9 @@ mod tests {
             }
 
             // Set up non-contiguous scenario: existing items [10,14], lower_bound=16 (gap exists)
-            let lower_bound = 16; // Gap between existing_max(14) and lower_bound(16)
-            let upper_bound = 19;
-            write_oldest_retained_loc(&mut metadata, 10);
+            let lower_bound = Location::new(16); // Gap between existing_max(14) and lower_bound(16)
+            let upper_bound = Location::new(19);
+            write_oldest_retained_loc(&mut metadata, Location::new(10));
 
             let next_loc = prune_journal(
                 &mut journal,

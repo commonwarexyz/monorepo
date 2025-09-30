@@ -14,12 +14,12 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
         hasher::Hasher,
-        iterator::{leaf_loc_to_pos, nodes_to_pin},
+        iterator::nodes_to_pin,
         mem::{Config, Mmr},
         storage::Storage,
         verification, Error,
         Error::*,
-        Proof,
+        Location, Position, Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -110,11 +110,11 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
     }
 
-    pub fn size(&self) -> u64 {
+    pub fn size(&self) -> Position {
         self.mmr.size()
     }
 
-    pub fn get_node(&self, position: u64) -> Option<H::Digest> {
+    pub fn get_node(&self, position: Position) -> Option<H::Digest> {
         self.mmr.get_node(position)
     }
 
@@ -151,20 +151,17 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         if pruned_chunks == 0 {
             return Ok(Self::new());
         }
-        let mmr_size = leaf_loc_to_pos(pruned_chunks as u64);
+        let mmr_size = Position::from(Location::new(pruned_chunks as u64));
 
         let mut pinned_nodes = Vec::new();
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
-                error!(size = mmr_size, pos, "missing pinned node");
+                error!(?mmr_size, ?pos, "missing pinned node");
                 return Err(MissingNode(pos));
             };
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
-                error!(
-                    size = mmr_size,
-                    pos, "could not convert node bytes to digest"
-                );
+                error!(?mmr_size, ?pos, "could not convert node bytes to digest");
                 return Err(MissingNode(pos));
             };
             pinned_nodes.push(digest);
@@ -210,7 +207,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         metadata.put(key, self.pruned_chunks.to_be_bytes().to_vec());
 
         // Write the pinned nodes.
-        let mmr_size = leaf_loc_to_pos(self.pruned_chunks as u64);
+        let mmr_size = Position::from(Location::new(self.pruned_chunks as u64));
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
@@ -252,7 +249,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.pruned_chunks = chunk_loc;
         self.authenticated_len = self.bitmap.len() - 1;
 
-        let mmr_pos = leaf_loc_to_pos(chunk_loc as u64);
+        let mmr_pos = Position::from(Location::new(chunk_loc as u64));
         self.mmr.prune_to_pos(mmr_pos);
     }
 
@@ -360,7 +357,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     #[inline]
     #[cfg(test)]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
-        leaf_loc_to_pos(Self::chunk_loc(bit_offset) as u64)
+        Position::from(Location::new(Self::chunk_loc(bit_offset) as u64)).into()
     }
 
     #[inline]
@@ -432,15 +429,15 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.len() - 1
     }
 
-    /// The chunks (identified by their number) that have been modified or added since the last `sync`.
-    pub fn dirty_chunks(&self) -> Vec<u64> {
-        let mut chunks: Vec<u64> = self
+    /// The chunks that have been modified or added since the last `sync`.
+    pub fn dirty_chunks(&self) -> Vec<Location> {
+        let mut chunks: Vec<Location> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| (chunk_index + self.pruned_chunks) as u64)
+            .map(|&chunk_index| Location::new((chunk_index + self.pruned_chunks) as u64))
             .collect();
         for i in self.authenticated_len..self.bitmap.len() - 1 {
-            chunks.push((i + self.pruned_chunks) as u64);
+            chunks.push(Location::new((i + self.pruned_chunks) as u64));
         }
 
         chunks
@@ -462,7 +459,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             .dirty_chunks
             .iter()
             .map(|chunk_index| {
-                let pos = leaf_loc_to_pos((*chunk_index + self.pruned_chunks) as u64);
+                let pos = Position::from(Location::new((*chunk_index + self.pruned_chunks) as u64));
                 (pos, &self.bitmap[*chunk_index])
             })
             .collect::<Vec<_>>();
@@ -547,22 +544,22 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let chunk = *self.get_chunk(bit_offset);
         let chunk_loc = Self::chunk_loc(bit_offset);
 
-        if chunk_loc as u64 == self.mmr.leaves() {
+        if chunk_loc as u64 == *self.mmr.leaves() {
             assert!(self.next_bit > 0);
             // Proof is over a bit in the partial chunk. In this case only a single digest is
             // required in the proof: the mmr's root.
             return Ok((
                 Proof {
-                    size: self.bit_count(),
+                    size: Position::new(self.bit_count()),
                     digests: vec![self.mmr.root(hasher)],
                 },
                 chunk,
             ));
         }
 
-        let range = chunk_loc as u64..(chunk_loc + 1) as u64;
+        let range = Location::new(chunk_loc as u64)..Location::new((chunk_loc + 1) as u64);
         let mut proof = verification::range_proof(&self.mmr, range).await?;
-        proof.size = self.bit_count();
+        proof.size = Position::new(self.bit_count());
         if self.next_bit == 0 {
             // Bitmap is chunk aligned.
             return Ok((proof, chunk));
@@ -585,7 +582,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         bit_offset: u64,
         root: &H::Digest,
     ) -> bool {
-        let bit_count = proof.size;
+        let bit_count = *proof.size;
         if bit_offset >= bit_count {
             debug!(bit_count, bit_offset, "tried to verify non-existent bit");
             return false;
@@ -593,13 +590,13 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         let leaves = Self::chunk_loc(bit_count) as u64;
         let mut mmr_proof = Proof::<H::Digest> {
-            size: leaf_loc_to_pos(leaves),
+            size: Position::from(Location::new(leaves)),
             digests: proof.digests.clone(),
         };
 
         let loc = Self::chunk_loc(bit_offset) as u64;
         if bit_count % Self::CHUNK_SIZE_BITS == 0 {
-            return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
+            return mmr_proof.verify_element_inclusion(hasher, chunk, Location::new(loc), root);
         }
 
         if proof.digests.is_empty() {
@@ -632,7 +629,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc) {
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new(loc)) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -664,11 +661,11 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 }
 
 impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
-    fn size(&self) -> u64 {
+    fn size(&self) -> Position {
         self.size()
     }
 
-    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
+    async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
         Ok(self.get_node(position))
     }
 }
@@ -700,7 +697,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher = StandardHasher::new();
             let proof = Proof {
-                size: 100,
+                size: Position::new(100),
                 digests: Vec::new(),
             };
             assert!(

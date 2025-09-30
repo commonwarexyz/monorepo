@@ -61,8 +61,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "index_operations"
-path = "fuzz_targets/index_operations.rs"
+name = "ordered_index_operations"
+path = "fuzz_targets/ordered_index_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unordered_index_operations"
+path = "fuzz_targets/unordered_index_operations.rs"
 test = false
 doc = false
 bench = false

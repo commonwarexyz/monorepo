@@ -140,8 +140,8 @@ fn fuzz(input: FuzzInput) {
                     let mut hasher = Standard::<Sha256>::new();
                     let target = sync::Target {
                         root: src.root(&mut hasher),
-                        lower_bound_ops: src.inactivity_floor_loc(),
-                        upper_bound_ops: src.op_count() - 1,
+                        lower_bound: src.inactivity_floor_loc(),
+                        upper_bound: src.op_count() - 1,
                     };
 
                     let wrapped_src = Arc::new(RwLock::new(src));

@@ -152,21 +152,21 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, lower_bound_ops, upper_bound_ops) = {
+    let (root, lower_bound, upper_bound) = {
         let mut hasher = Standard::new();
         let database = state.database.read().await;
         (
             database.root(&mut hasher),
-            database.lower_bound_ops(),
-            database.op_count().saturating_sub(1),
+            database.lower_bound(),
+            database.op_count().checked_sub(1).unwrap(),
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound_ops,
-            upper_bound_ops,
+            lower_bound,
+            upper_bound,
         },
     };
 
@@ -197,7 +197,7 @@ where
     }
 
     // Calculate how many operations to return
-    let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
+    let max_ops = std::cmp::min(request.max_ops.get(), *db_size - *request.start_loc);
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
     let max_ops =
         NonZeroU64::new(max_ops).expect("max_ops cannot be zero since start_loc < db_size");
@@ -205,14 +205,14 @@ where
     debug!(
         request_id = request.request_id,
         max_ops,
-        start_loc = request.start_loc,
-        db_size,
+        start_loc = ?request.start_loc,
+        ?db_size,
         "operations request"
     );
 
     // Get the historical proof and operations
     let result = database
-        .historical_proof(request.size, request.start_loc, max_ops)
+        .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
     drop(database);
@@ -388,7 +388,7 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = database.op_count(),
+        op_count = ?database.op_count(),
         root = %root_hex,
         "{} database ready",
         DB::name()

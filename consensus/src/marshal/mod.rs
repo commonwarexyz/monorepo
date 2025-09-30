@@ -76,6 +76,7 @@ mod tests {
         resolver::p2p as resolver,
     };
     use crate::{
+        marshal::ingress::mailbox::Identifier,
         threshold_simplex::types::{
             finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
             Notarization, Proposal,
@@ -345,13 +346,12 @@ mod tests {
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
-            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             for (i, secret) in schemes.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    coordinator.clone(),
+                    p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
                     identity,
                 )
@@ -449,14 +449,13 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    coordinator.clone(),
+                    p2p::mocks::Coordinator::new(vec![]),
                     secret.clone(),
                     identity,
                 )
@@ -498,14 +497,13 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    coordinator.clone(),
+                    p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
                     identity,
                 )
@@ -567,14 +565,13 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    coordinator.clone(),
+                    p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
                     identity,
                 )
@@ -628,14 +625,13 @@ mod tests {
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone());
             let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = p2p::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
                 let (_application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
-                    coordinator.clone(),
+                    p2p::mocks::Coordinator::new(peers.clone()),
                     secret.clone(),
                     identity,
                 )
@@ -718,6 +714,245 @@ mod tests {
             let received5 = sub5_rx.await.unwrap();
             assert_eq!(received5.digest(), block5.digest());
             assert_eq!(received5.height(), 5);
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_info_basic_queries_present_and_missing() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone());
+            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
+
+            // Single validator actor
+            let secret = schemes[0].clone();
+            let (_application, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                p2p::mocks::Coordinator::new(vec![]),
+                secret,
+                identity,
+            )
+            .await;
+
+            // Initially, no latest
+            assert!(actor.get_info(Identifier::Latest).await.is_none());
+
+            // Before finalization, specific height returns None
+            assert!(actor.get_info(1).await.is_none());
+
+            // Create and verify a block, then finalize it
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
+            let digest = block.digest();
+            let round = Round::new(0, 1);
+            actor.verified(round, block.clone()).await;
+
+            let proposal = Proposal {
+                round,
+                parent: 0,
+                payload: digest,
+            };
+            let finalization = make_finalization(proposal, &shares, QUORUM);
+            actor.report(Activity::Finalization(finalization)).await;
+
+            // Latest should now be the finalized block
+            assert_eq!(actor.get_info(Identifier::Latest).await, Some((1, digest)));
+
+            // Height 1 now present
+            assert_eq!(actor.get_info(1).await, Some((1, digest)));
+
+            // Commitment should map to its height
+            assert_eq!(actor.get_info(&digest).await, Some((1, digest)));
+
+            // Missing height
+            assert!(actor.get_info(2).await.is_none());
+
+            // Missing commitment
+            let missing = Sha256::hash(b"missing");
+            assert!(actor.get_info(&missing).await.is_none());
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_info_latest_progression_multiple_finalizations() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone());
+            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
+
+            // Single validator actor
+            let secret = schemes[0].clone();
+            let (_application, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                p2p::mocks::Coordinator::new(vec![]),
+                secret,
+                identity,
+            )
+            .await;
+
+            // Initially none
+            assert!(actor.get_info(Identifier::Latest).await.is_none());
+
+            // Build and finalize heights 1..=3
+            let parent0 = Sha256::hash(b"");
+            let block1 = B::new::<Sha256>(parent0, 1, 1);
+            let d1 = block1.digest();
+            actor.verified(Round::new(0, 1), block1.clone()).await;
+            let f1 = make_finalization(
+                Proposal {
+                    round: Round::new(0, 1),
+                    parent: 0,
+                    payload: d1,
+                },
+                &shares,
+                QUORUM,
+            );
+            actor.report(Activity::Finalization(f1)).await;
+            let latest = actor.get_info(Identifier::Latest).await;
+            assert_eq!(latest, Some((1, d1)));
+
+            let block2 = B::new::<Sha256>(d1, 2, 2);
+            let d2 = block2.digest();
+            actor.verified(Round::new(0, 2), block2.clone()).await;
+            let f2 = make_finalization(
+                Proposal {
+                    round: Round::new(0, 2),
+                    parent: 1,
+                    payload: d2,
+                },
+                &shares,
+                QUORUM,
+            );
+            actor.report(Activity::Finalization(f2)).await;
+            let latest = actor.get_info(Identifier::Latest).await;
+            assert_eq!(latest, Some((2, d2)));
+
+            let block3 = B::new::<Sha256>(d2, 3, 3);
+            let d3 = block3.digest();
+            actor.verified(Round::new(0, 3), block3.clone()).await;
+            let f3 = make_finalization(
+                Proposal {
+                    round: Round::new(0, 3),
+                    parent: 2,
+                    payload: d3,
+                },
+                &shares,
+                QUORUM,
+            );
+            actor.report(Activity::Finalization(f3)).await;
+            let latest = actor.get_info(Identifier::Latest).await;
+            assert_eq!(latest, Some((3, d3)));
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_block_by_height_and_latest() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone());
+            let (schemes, _peers, identity, shares) = setup_validators_and_shares(&mut context);
+
+            let secret = schemes[0].clone();
+            let (_application, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                p2p::mocks::Coordinator::new(vec![]),
+                secret,
+                identity,
+            )
+            .await;
+
+            // Before any finalization, GetBlock::Latest should be None
+            let latest_block = actor.get_block(Identifier::Latest).await;
+            assert!(latest_block.is_none());
+
+            // Finalize a block at height 1
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
+            let commitment = block.digest();
+            let round = Round::new(0, 1);
+            actor.verified(round, block.clone()).await;
+            let proposal = Proposal {
+                round,
+                parent: 0,
+                payload: commitment,
+            };
+            let finalization = make_finalization(proposal, &shares, QUORUM);
+            actor.report(Activity::Finalization(finalization)).await;
+
+            // Get by height
+            let by_height = actor.get_block(1).await.expect("missing block by height");
+            assert_eq!(by_height.height(), 1);
+            assert_eq!(by_height.digest(), commitment);
+
+            // Get by latest
+            let by_latest = actor
+                .get_block(Identifier::Latest)
+                .await
+                .expect("missing block by latest");
+            assert_eq!(by_latest.height(), 1);
+            assert_eq!(by_latest.digest(), commitment);
+
+            // Missing height
+            let by_height = actor.get_block(2).await;
+            assert!(by_height.is_none());
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_block_by_commitment_from_sources_and_missing() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone());
+            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+
+            let secret = schemes[0].clone();
+            let (_application, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                p2p::mocks::Coordinator::new(peers),
+                secret,
+                identity,
+            )
+            .await;
+
+            // 1) From cache via verified
+            let parent = Sha256::hash(b"");
+            let ver_block = B::new::<Sha256>(parent, 1, 1);
+            let ver_commitment = ver_block.digest();
+            let round1 = Round::new(0, 1);
+            actor.verified(round1, ver_block.clone()).await;
+            let got = actor
+                .get_block(&ver_commitment)
+                .await
+                .expect("missing block from cache");
+            assert_eq!(got.digest(), ver_commitment);
+
+            // 2) From finalized archive
+            let fin_block = B::new::<Sha256>(ver_commitment, 2, 2);
+            let fin_commitment = fin_block.digest();
+            let round2 = Round::new(0, 2);
+            actor.verified(round2, fin_block.clone()).await;
+            let proposal = Proposal {
+                round: round2,
+                parent: 1,
+                payload: fin_commitment,
+            };
+            let finalization = make_finalization(proposal, &shares, QUORUM);
+            actor.report(Activity::Finalization(finalization)).await;
+            let got = actor
+                .get_block(&fin_commitment)
+                .await
+                .expect("missing block from finalized archive");
+            assert_eq!(got.digest(), fin_commitment);
+            assert_eq!(got.height(), 2);
+
+            // 3) Missing commitment
+            let missing = Sha256::hash(b"definitely-missing");
+            let missing_block = actor.get_block(&missing).await;
+            assert!(missing_block.is_none());
         })
     }
 }

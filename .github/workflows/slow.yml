@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tests-slow-${{ github.head_ref }}
+  group: tests-slow-${{ github.head_ref || github.ref_name || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -82,8 +82,6 @@ jobs:
             cargo_flags: ""
           - package: commonware-storage
             cargo_flags: "--features commonware-runtime/iouring-storage" # Additional features can be added here
-          - package: commonware-stream
-            cargo_flags: ""
           - package: commonware-coding
             cargo_flags: ""
     steps:

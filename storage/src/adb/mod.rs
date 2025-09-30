@@ -10,7 +10,10 @@
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 
-use crate::{journal::fixed::Journal, mmr::journaled};
+use crate::{
+    journal::fixed::Journal,
+    mmr::{journaled, Location},
+};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use thiserror::Error;
@@ -44,14 +47,14 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
 
     #[error("operation pruned: {0}")]
-    OperationPruned(u64),
+    OperationPruned(Location),
 
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
     KeyNotFound,
 
     #[error("unexpected data at location: {0}")]
-    UnexpectedData(u64),
+    UnexpectedData(Location),
 }
 
 /// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &
@@ -62,7 +65,7 @@ async fn align_mmr_and_locations<E: Storage + Clock + Metrics, H: Hasher>(
 ) -> Result<u64, Error> {
     let aligned_size = {
         let locations_size = locations.size().await?;
-        let mmr_leaves = mmr.leaves();
+        let mmr_leaves = *mmr.leaves();
         if locations_size > mmr_leaves {
             warn!(
                 mmr_leaves,

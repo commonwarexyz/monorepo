@@ -69,7 +69,9 @@
 
 pub mod hasher;
 pub mod iterator;
+pub mod location;
 pub mod mem;
+pub mod position;
 pub mod proof;
 pub mod stability;
 
@@ -84,6 +86,8 @@ cfg_if::cfg_if! {
 }
 
 pub use hasher::Standard as StandardHasher;
+pub use location::Location;
+pub use position::Position;
 pub use proof::Proof;
 use thiserror::Error;
 
@@ -100,15 +104,15 @@ pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("missing node: {0}")]
-    MissingNode(u64),
+    MissingNode(Position),
     #[error("invalid proof")]
     InvalidProof,
     #[error("root mismatch")]
     RootMismatch,
     #[error("element pruned: {0}")]
-    ElementPruned(u64),
+    ElementPruned(Position),
     #[error("missing digest: {0}")]
-    MissingDigest(u64),
+    MissingDigest(Position),
     #[error("invalid proof length")]
     InvalidProofLength,
     #[error("invalid size: {0}")]

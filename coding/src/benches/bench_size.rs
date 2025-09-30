@@ -22,10 +22,8 @@ fn benchmark_size<S: Scheme>(name: &str) {
                 data
             };
 
-            let (commitment, shard_proofs) = S::encode(&config, data.as_slice()).unwrap();
-            let (shard, proof) = shard_proofs.first().unwrap();
-            let reshard = S::check(&commitment, proof, shard).unwrap();
-
+            let (commitment, mut shards) = S::encode(&config, data.as_slice()).unwrap();
+            let shard = shards.pop().unwrap();
             println!(
                 "{} (shard)/msg_len={} chunks={}: {} B",
                 name,
@@ -33,13 +31,14 @@ fn benchmark_size<S: Scheme>(name: &str) {
                 chunks,
                 shard.encode_size()
             );
-            println!(
-                "{} (proof)/msg_len={} chunks={}: {} B",
-                name,
-                data_length,
-                chunks,
-                proof.encode_size()
-            );
+
+            let (_, _, reshard) = S::reshard(
+                &config,
+                &commitment,
+                config.minimum_shards + config.extra_shards - 1,
+                shard,
+            )
+            .unwrap();
             println!(
                 "{} (reshard)/msg_len={} chunks={}: {} B",
                 name,
