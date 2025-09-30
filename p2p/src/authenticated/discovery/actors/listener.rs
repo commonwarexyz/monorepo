@@ -231,7 +231,7 @@ mod tests {
     };
 
     #[test_traced("DEBUG")]
-    fn increments_ip_rate_limit_metric() {
+    fn rate_limits_ip() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_001);
