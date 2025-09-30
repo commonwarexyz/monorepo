@@ -3,7 +3,10 @@ use super::{
     config::Config,
     types::{Activity, Context},
 };
-use crate::{types::View, Automaton, Relay, Reporter, ThresholdSupervisor};
+use crate::{
+    threshold_simplex::signing::SigningScheme, types::View, Automaton, Relay, Reporter,
+    ThresholdSupervisor,
+};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Signer,
@@ -33,16 +36,17 @@ pub struct Engine<
         Polynomial = Vec<V::Public>,
         Share = group::Share,
     >,
+    G: SigningScheme,
 > {
     context: E,
 
-    voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
+    voter: voter::Actor<E, C, B, V, D, A, R, F, S, G>,
     voter_mailbox: voter::Mailbox<V, D>,
 
-    batcher: batcher::Actor<E, C::PublicKey, B, V, D, F, S>,
+    batcher: batcher::Actor<E, C::PublicKey, B, V, D, F, S, G>,
     batcher_mailbox: batcher::Mailbox<C::PublicKey, V, D>,
 
-    resolver: resolver::Actor<E, C::PublicKey, B, V, D, S>,
+    resolver: resolver::Actor<E, C::PublicKey, B, V, D, S, G>,
     resolver_mailbox: resolver::Mailbox<V, D>,
 }
 
@@ -63,10 +67,11 @@ impl<
             Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
-    > Engine<E, C, B, V, D, A, R, F, S>
+        G: SigningScheme,
+    > Engine<E, C, B, V, D, A, R, F, S, G>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S, G>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -77,6 +82,7 @@ impl<
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
                 supervisor: cfg.supervisor.clone(),
+                signing: cfg.signing.clone(),
                 epoch: cfg.epoch,
                 namespace: cfg.namespace.clone(),
                 mailbox_size: cfg.mailbox_size,
@@ -95,6 +101,7 @@ impl<
                 relay: cfg.relay,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
+                signing: cfg.signing.clone(),
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
@@ -116,6 +123,7 @@ impl<
                 blocker: cfg.blocker,
                 crypto: cfg.crypto.public_key(),
                 supervisor: cfg.supervisor,
+                signing: cfg.signing,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,

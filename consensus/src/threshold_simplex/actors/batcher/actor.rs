@@ -4,6 +4,7 @@ use crate::{
         actors::voter,
         interesting,
         metrics::Inbound,
+        signing::SigningScheme,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
             Finalize, Notarize, Nullify, NullifyFinalize, Voter,
@@ -37,12 +38,14 @@ struct Round<
         PublicKey = C,
         Identity = V::Public,
     >,
+    G: SigningScheme,
 > {
     view: View,
 
     blocker: B,
     reporter: R,
     supervisor: S,
+    signing: G,
     verifier: BatchVerifier<V, D>,
     notarizes: Vec<Option<Notarize<V, D>>>,
     nullifies: Vec<Option<Nullify<V>>>,
@@ -65,12 +68,14 @@ impl<
             PublicKey = C,
             Identity = V::Public,
         >,
-    > Round<C, B, V, D, R, S>
+        G: SigningScheme,
+    > Round<C, B, V, D, R, S, G>
 {
     fn new(
         blocker: B,
         reporter: R,
         supervisor: S,
+        signing: G,
         inbound_messages: Family<Inbound, Counter>,
         view: View,
         batch: bool,
@@ -90,6 +95,7 @@ impl<
             blocker,
             reporter,
             supervisor,
+            signing,
             verifier: BatchVerifier::new(quorum),
 
             notarizes: vec![None; participants],
@@ -329,11 +335,13 @@ pub struct Actor<
         Identity = V::Public,
         Polynomial = Vec<V::Public>,
     >,
+    G: SigningScheme,
 > {
     context: E,
     blocker: B,
     reporter: R,
     supervisor: S,
+    signing: G,
 
     activity_timeout: View,
     skip_timeout: View,
@@ -364,9 +372,10 @@ impl<
             Identity = V::Public,
             Polynomial = Vec<V::Public>,
         >,
-    > Actor<E, C, B, V, D, R, S>
+        G: SigningScheme,
+    > Actor<E, C, B, V, D, R, S, G>
 {
-    pub fn new(context: E, cfg: Config<B, R, S>) -> (Self, Mailbox<C, V, D>) {
+    pub fn new(context: E, cfg: Config<B, R, S, G>) -> (Self, Mailbox<C, V, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -401,6 +410,7 @@ impl<
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
+                signing: cfg.signing,
 
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
@@ -440,7 +450,7 @@ impl<
         let mut current: View = 0;
         let mut finalized: View = 0;
         #[allow(clippy::type_complexity)]
-        let mut work: BTreeMap<u64, Round<C, B, V, D, R, S>> = BTreeMap::new();
+        let mut work: BTreeMap<u64, Round<C, B, V, D, R, S, G>> = BTreeMap::new();
         let mut initialized = false;
 
         loop {
@@ -457,9 +467,17 @@ impl<
                             current = new_current;
                             finalized = new_finalized;
                             let leader_index = self.supervisor.is_participant(current, &leader).unwrap();
-                            work.entry(current)
-                                .or_insert(Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), self.inbound_messages.clone(), current, initialized))
-                                .set_leader(leader_index);
+                            work.entry(current).or_insert(
+                                Round::new(
+                                    self.blocker.clone(),
+                                    self.reporter.clone(),
+                                    self.supervisor.clone(),
+                                    self.signing.clone(),
+                                    self.inbound_messages.clone(),
+                                    current,
+                                    initialized
+                                )
+                            ).set_leader(leader_index);
                             initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active
@@ -506,7 +524,15 @@ impl<
 
                             // Add the message to the verifier
                             work.entry(view).or_insert(
-                                Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), self.inbound_messages.clone(), view, initialized)
+                                Round::new(
+                                    self.blocker.clone(),
+                                    self.reporter.clone(),
+                                    self.supervisor.clone(),
+                                    self.signing.clone(),
+                                    self.inbound_messages.clone(),
+                                    view,
+                                    initialized
+                                )
                             ).add_constructed(message).await;
                             self.added.inc();
                         }
@@ -549,7 +575,15 @@ impl<
 
                     // Add the message to the verifier
                     let added = work.entry(view).or_insert(
-                        Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), self.inbound_messages.clone(), view, initialized)
+                        Round::new(
+                            self.blocker.clone(),
+                            self.reporter.clone(),
+                            self.supervisor.clone(),
+                            self.signing.clone(),
+                            self.inbound_messages.clone(),
+                            view,
+                            initialized
+                        )
                     ).add(sender, message).await;
                     if added {
                         self.added.inc();

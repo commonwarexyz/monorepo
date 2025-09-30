@@ -2,7 +2,10 @@ mod actor;
 mod ingress;
 
 use crate::{
-    threshold_simplex::types::{Activity, Context},
+    threshold_simplex::{
+        signing::SigningScheme,
+        types::{Activity, Context},
+    },
     types::{Epoch, View},
     Automaton, Relay, Reporter, ThresholdSupervisor,
 };
@@ -25,6 +28,7 @@ pub struct Config<
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+    G: SigningScheme,
 > {
     pub crypto: C,
     pub blocker: B,
@@ -32,6 +36,7 @@ pub struct Config<
     pub relay: R,
     pub reporter: F,
     pub supervisor: S,
+    pub signing: G,
 
     pub partition: String,
     pub epoch: Epoch,

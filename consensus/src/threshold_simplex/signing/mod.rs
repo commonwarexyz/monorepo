@@ -437,7 +437,7 @@ where
 }
 
 /// Trait that signing schemes must implement.
-pub trait SigningScheme: Send + Sync {
+pub trait SigningScheme: Clone + Send + Sync + 'static {
     type SignerId: Clone + Ord;
     type Signature: Clone;
     type Certificate: Clone;
@@ -482,7 +482,7 @@ pub trait SigningScheme: Send + Sync {
 }
 
 /// Placeholder for the upcoming BLS threshold implementation.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BlsThresholdScheme<V: Variant> {
     polynomial: Vec<V::Public>,
     identity: V::Public,

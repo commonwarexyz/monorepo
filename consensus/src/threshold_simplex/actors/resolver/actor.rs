@@ -5,6 +5,7 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
+        signing::SigningScheme,
         types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
     },
     types::{Epoch, View},
@@ -110,10 +111,12 @@ pub struct Actor<
         Identity = V::Public,
         Polynomial = Vec<V::Public>,
     >,
+    G: SigningScheme,
 > {
     context: E,
     blocker: B,
     supervisor: S,
+    signing: G,
 
     epoch: Epoch,
     namespace: Vec<u8>,
@@ -150,9 +153,10 @@ impl<
             Identity = V::Public,
             Polynomial = Vec<V::Public>,
         >,
-    > Actor<E, C, B, V, D, S>
+        G: SigningScheme,
+    > Actor<E, C, B, V, D, S, G>
 {
-    pub fn new(context: E, cfg: Config<C, B, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, S, G>) -> (Self, Mailbox<V, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto,
@@ -185,6 +189,7 @@ impl<
                 context,
                 blocker: cfg.blocker,
                 supervisor: cfg.supervisor,
+                signing: cfg.signing,
 
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,

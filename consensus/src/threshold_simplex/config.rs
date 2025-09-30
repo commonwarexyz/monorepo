@@ -1,5 +1,6 @@
 use super::types::{Activity, Context};
 use crate::{
+    threshold_simplex::signing::SigningScheme,
     types::{Epoch, View},
     Automaton, Relay, Reporter, ThresholdSupervisor,
 };
@@ -28,6 +29,7 @@ pub struct Config<
         PublicKey = C::PublicKey,
         Share = group::Share,
     >,
+    G: SigningScheme,
 > {
     /// Cryptographic primitives.
     pub crypto: C,
@@ -48,6 +50,9 @@ pub struct Config<
 
     /// Supervisor for the consensus engine.
     pub supervisor: S,
+
+    /// Signing scheme for the consensus engine.
+    pub signing: G,
 
     /// Partition for the consensus engine.
     pub partition: String,
@@ -124,7 +129,8 @@ impl<
             Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
-    > Config<C, B, V, D, A, R, F, S>
+        G: SigningScheme,
+    > Config<C, B, V, D, A, R, F, S, G>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

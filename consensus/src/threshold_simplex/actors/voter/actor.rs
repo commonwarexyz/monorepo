@@ -5,6 +5,7 @@ use crate::{
         interesting,
         metrics::{self, Inbound, Outbound},
         min_active,
+        signing::SigningScheme,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal, Voter,
@@ -75,9 +76,11 @@ struct Round<
         Seed = V::Signature,
         Share = group::Share,
     >,
+    G: SigningScheme,
 > {
     start: SystemTime,
     supervisor: S,
+    signing: G,
 
     round: Rnd,
     quorum: u32,
@@ -136,11 +139,13 @@ impl<
             PublicKey = C,
             Identity = V::Public,
         >,
-    > Round<E, C, V, D, S>
+        G: SigningScheme,
+    > Round<E, C, V, D, S, G>
 {
     pub fn new(
         context: &E,
         supervisor: S,
+        signing: G,
         recover_latency: histogram::Timed<E>,
         round: Rnd,
     ) -> Self {
@@ -149,6 +154,7 @@ impl<
         Self {
             start: context.current(),
             supervisor,
+            signing,
 
             round,
             quorum,
@@ -437,6 +443,7 @@ pub struct Actor<
         Polynomial = Vec<V::Public>,
         Share = group::Share,
     >,
+    G: SigningScheme,
 > {
     context: E,
     crypto: C,
@@ -445,6 +452,7 @@ pub struct Actor<
     relay: R,
     reporter: F,
     supervisor: S,
+    signing: G,
 
     partition: String,
     replay_buffer: NonZeroUsize,
@@ -465,7 +473,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     view: View,
-    views: BTreeMap<View, Round<E, C::PublicKey, V, D, S>>,
+    views: BTreeMap<View, Round<E, C::PublicKey, V, D, S, G>>,
     last_finalized: View,
 
     current_view: Gauge,
@@ -495,9 +503,10 @@ impl<
             Polynomial = Vec<V::Public>,
             Share = group::Share,
         >,
-    > Actor<E, C, B, V, D, A, R, F, S>
+        G: SigningScheme,
+    > Actor<E, C, B, V, D, A, R, F, S, G>
 {
-    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S, G>) -> (Self, Mailbox<V, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -553,6 +562,7 @@ impl<
                 relay: cfg.relay,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
+                signing: cfg.signing,
 
                 partition: cfg.partition,
                 replay_buffer: cfg.replay_buffer,
@@ -850,6 +860,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.signing.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
         ));
@@ -1055,6 +1066,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.signing.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
         ));
@@ -1111,6 +1123,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.signing.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
         ));
@@ -1166,6 +1179,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.signing.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
         ));
@@ -1223,6 +1237,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.signing.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
         ));
@@ -1249,6 +1264,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.signing.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
         ));
@@ -1304,6 +1320,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.signing.clone(),
             self.recover_latency.clone(),
             Rnd::new(self.epoch, view),
         ));
