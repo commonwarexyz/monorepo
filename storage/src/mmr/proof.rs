@@ -1187,7 +1187,7 @@ mod tests {
                 &root,
             )
             .unwrap();
-        assert_eq!(Position::from(node_digests.len()), mmr.size());
+        assert_eq!(node_digests.len() as u64, mmr.size());
         node_digests.sort_by_key(|(pos, _)| *pos);
         for (i, (pos, d)) in node_digests.into_iter().enumerate() {
             assert_eq!(pos, i as u64);
