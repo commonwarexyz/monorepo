@@ -54,8 +54,10 @@ jobs:
       uses: ./.github/actions/setup
     - name: Install nextest
       uses: taiki-e/install-action@cargo-nextest
+    - name: Install just
+      uses: taiki-e/install-action@just
     - name: Run ignored tests
-      run: cargo nextest run ${{ matrix.flags }} --partition hash:${{matrix.partition}}/4 --verbose -- --ignored
+      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/4 --verbose -- --ignored
 
   Tests-Gate:
     name: "Slow-Tests"
@@ -91,11 +93,10 @@ jobs:
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Run setup
       uses: ./.github/actions/setup
+    - name: Install just
+      uses: taiki-e/install-action@just
     - name: Test benchmarks
-      run: |
-        cargo test ${{ matrix.cargo_flags }} \
-          --benches -p ${{ matrix.package }} \
-          -- --verbose
+      run: just test-benches ${{ matrix.package }} ${{ matrix.cargo_flags }}
 
   Fuzz:
     runs-on: ubuntu-latest
@@ -122,8 +123,7 @@ jobs:
     - name: Install cargo-fuzz
       if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
       run: cargo +${{ env.NIGHTLY_VERSION }} install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
+    - name: Install just
+      uses: taiki-e/install-action@just
     - name: Test all targets
-      run: |
-        for target in $(cargo +${{ env.NIGHTLY_VERSION }} fuzz list --fuzz-dir ${{ matrix.fuzz_dir }}); do
-          cargo +${{ env.NIGHTLY_VERSION }} fuzz run $target --fuzz-dir ${{ matrix.fuzz_dir }} -- -max_total_time=60
-        done
+      run: just fuzz ${{ matrix.fuzz_dir }} 60 ${{ env.NIGHTLY_VERSION }}
