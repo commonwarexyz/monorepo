@@ -449,29 +449,28 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         journal: &Journal<E, H::Digest>,
         pos: Position,
     ) -> Result<H::Digest, Error> {
-        let pos = *pos;
-        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, pos)) {
-            debug!(pos, "read node from metadata");
+        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
+            debug!(?pos, "read node from metadata");
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
                 error!(
-                    pos,
+                    ?pos,
                     err = %digest.expect_err("digest is Err in else branch"),
                     "could not convert node from metadata bytes to digest"
                 );
-                return Err(Error::MissingNode(Position::new(pos)));
+                return Err(Error::MissingNode(pos));
             };
             return Ok(digest);
         }
 
         // If a node isn't found in the metadata, it might still be in the journal.
-        debug!(pos, "reading node from journal");
-        let node = journal.read(pos).await;
+        debug!(?pos, "reading node from journal");
+        let node = journal.read(*pos).await;
         match node {
             Ok(node) => Ok(node),
             Err(JError::ItemPruned(_)) => {
-                error!(pos, "node is missing from metadata and journal");
-                Err(Error::MissingNode(Position::new(pos)))
+                error!(?pos, "node is missing from metadata and journal");
+                Err(Error::MissingNode(pos))
             }
             Err(e) => Err(Error::JournalError(e)),
         }
