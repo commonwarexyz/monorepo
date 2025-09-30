@@ -1639,7 +1639,7 @@ mod tests {
     fn test_codec_error_cases() {
         // Test invalid length with range check
         let mut buf = BytesMut::new();
-        100usize.write(&mut buf); // bits length
+        100u64.write(&mut buf); // bits length
 
         // 100 bits requires 4 chunks (3 full + partially filled)
         for _ in 0..4 {
@@ -1647,13 +1647,13 @@ mod tests {
         }
 
         // Test with a restricted range that excludes 100
-        let result = BitMap::<4>::decode_cfg(&mut buf, &100);
+        let result = BitMap::<4>::decode_cfg(&mut buf, &99);
         assert!(matches!(result, Err(CodecError::InvalidLength(100))));
 
         // Test truncated buffer (not enough chunks)
         let mut buf = BytesMut::new();
-        100usize.write(&mut buf); // bits length requiring 4 chunks (3 full + partially filled)
-                                  // Only write 3 chunks
+        100u64.write(&mut buf); // bits length requiring 4 chunks (3 full + partially filled)
+                                // Only write 3 chunks
         [0u8; 4].write(&mut buf);
         [0u8; 4].write(&mut buf);
         [0u8; 4].write(&mut buf);
