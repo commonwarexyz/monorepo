@@ -17,11 +17,6 @@ use core::{
     fmt::{Debug, Write as FmtWrite},
     time::Duration,
 };
-#[cfg(feature = "std")]
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
-};
 
 pub mod sequence;
 pub use sequence::{Array, Span};
@@ -31,6 +26,8 @@ pub use bitvec::{BitIterator, BitVec};
 pub mod channels;
 #[cfg(feature = "std")]
 pub mod net;
+#[cfg(feature = "std")]
+pub use net::{IpAddrExt, Subnet};
 #[cfg(feature = "std")]
 pub mod time;
 #[cfg(feature = "std")]
@@ -45,61 +42,11 @@ mod priority_set;
 pub use priority_set::PrioritySet;
 #[cfg(feature = "std")]
 pub mod futures;
-#[cfg(feature = "std")]
-pub use net::{IpAddrExt, Subnet};
 mod stable_buf;
 pub use stable_buf::StableBuf;
 #[cfg(feature = "std")]
-#[derive(Clone)]
-pub struct Limiter {
-    inner: Arc<LimiterInner>,
-}
+pub mod concurrency;
 
-#[cfg(feature = "std")]
-struct LimiterInner {
-    max: u32,
-    current: AtomicU32,
-}
-
-#[cfg(feature = "std")]
-impl Limiter {
-    /// Create a limiter that allows up to `max` concurrent reservations.
-    pub fn new(max: u32) -> Self {
-        assert!(max > 0, "limiter capacity must be non-zero");
-        Self {
-            inner: Arc::new(LimiterInner {
-                max,
-                current: AtomicU32::new(0),
-            }),
-        }
-    }
-
-    /// Attempt to reserve a slot. Returns `None` when the limiter is saturated.
-    pub fn try_acquire(&self) -> Option<Reservation> {
-        self.inner
-            .current
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
-                (current < self.inner.max).then_some(current + 1)
-            })
-            .map(|_| Reservation {
-                inner: Arc::clone(&self.inner),
-            })
-            .ok()
-    }
-}
-
-#[cfg(feature = "std")]
-#[must_use]
-pub struct Reservation {
-    inner: Arc<LimiterInner>,
-}
-
-#[cfg(feature = "std")]
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        self.inner.current.fetch_sub(1, Ordering::AcqRel);
-    }
-}
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();

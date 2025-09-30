@@ -7,7 +7,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{IpAddrExt, Limiter, Subnet};
+use commonware_utils::{concurrency::Limiter, IpAddrExt, Subnet};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -78,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
-            handshakes: Limiter::new(cfg.max_concurrent_handshakes.get()),
+            handshakes: Limiter::new(cfg.max_concurrent_handshakes),
             ip_rate_limiter: RateLimiter::hashmap_with_clock(
                 cfg.allowed_handshake_rate_per_ip,
                 &context,
