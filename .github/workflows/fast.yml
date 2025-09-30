@@ -33,13 +33,15 @@ jobs:
             flags: ""
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Install nightly Rust toolchain
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Install just
-      uses: taiki-e/install-action@just
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0
     - name: Fmt
       run: just check-fmt ${{ env.NIGHTLY_VERSION }}
     - name: Lint
@@ -77,13 +79,13 @@ jobs:
             flags: "--no-default-features"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Install nextest
-      uses: taiki-e/install-action@cargo-nextest
-    - name: Install just
-      uses: taiki-e/install-action@just
+    - name: Install just & nextest
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0,cargo-nextest@0.9.104
     - name: Run tests
       run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
     - name: Run doc tests
@@ -108,7 +110,7 @@ jobs:
     timeout-minutes: 20
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Install nightly Rust toolchain
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Get Rust version
@@ -116,12 +118,10 @@ jobs:
       run: echo "rust_version=$(rustc +${{ env.NIGHTLY_VERSION }} --version)" >> "$GITHUB_OUTPUT"
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Install cargo-udeps
-      uses: taiki-e/install-action@v2
+    - name: Install just & cargo-udeps
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
-        tool: cargo-udeps@${{ env.UDEPS_VERSION }}
-    - name: Install just
-      uses: taiki-e/install-action@just
+        tool: just@1.43.0,cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
       run: just udeps ${{ env.NIGHTLY_VERSION }}
 
@@ -130,7 +130,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Build entire workspace
@@ -150,7 +150,7 @@ jobs:
     timeout-minutes: 10
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Add WASM target
@@ -173,7 +173,7 @@ jobs:
     timeout-minutes: 10
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Add minimal no_std target
@@ -190,7 +190,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Install miri
@@ -199,7 +199,9 @@ jobs:
         rustup override set ${{ env.NIGHTLY_VERSION }}
         cargo miri setup
     - name: Install just
-      uses: taiki-e/install-action@just
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0
     - name: Run miri tests for storage::index
       run: |
         cd storage

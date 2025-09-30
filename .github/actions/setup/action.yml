@@ -3,7 +3,7 @@ runs:
   using: 'composite'
   steps:
     - name: Run sccache-cache
-      uses: mozilla-actions/sccache-action@v0.0.9
+      uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
     - name: Configure sccache
       shell: bash
       run: |
@@ -11,7 +11,7 @@ runs:
         echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=6G" >> "$GITHUB_ENV"
     - name: Cache cargo registry
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: |
           ~/.cargo/registry
@@ -22,7 +22,7 @@ runs:
         restore-keys: |
           ${{ runner.os }}-cargo-registry-
     - name: Cache cargo git
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cargo/git
         key: ${{ runner.os }}-cargo-git
@@ -32,7 +32,7 @@ runs:
       run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
     - name: Cache cargo-cache
       id: cargo-cache-cache
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: |
           ~/.cargo/bin/cargo-cache
