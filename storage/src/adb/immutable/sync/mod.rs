@@ -48,8 +48,8 @@ where
                 write_buffer: config.log_write_buffer,
                 buffer_pool: config.buffer_pool.clone(),
             },
-            lower_bound_loc.as_u64(),
-            upper_bound_loc.as_u64(),
+            *lower_bound_loc,
+            *upper_bound_loc,
             config.log_items_per_section,
         )
         .await?;
@@ -121,7 +121,7 @@ where
 
             // Use Variable journal's section-based pruning
             let items_per_section = config.log_items_per_section.get();
-            let lower_section = lower_bound.as_u64() / items_per_section;
+            let lower_section = *lower_bound / items_per_section;
             variable_journal
                 .prune(lower_section)
                 .await

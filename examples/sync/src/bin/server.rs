@@ -197,10 +197,7 @@ where
     }
 
     // Calculate how many operations to return
-    let max_ops = std::cmp::min(
-        request.max_ops.get(),
-        (db_size - request.start_loc).as_u64(),
-    );
+    let max_ops = std::cmp::min(request.max_ops.get(), *db_size - *request.start_loc);
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
     let max_ops =
         NonZeroU64::new(max_ops).expect("max_ops cannot be zero since start_loc < db_size");

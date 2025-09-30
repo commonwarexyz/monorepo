@@ -44,7 +44,8 @@ impl<H: CHasher> Standard<H> {
     }
 
     pub fn update_with_pos(&mut self, pos: Position) {
-        self.hasher.update(&pos.as_u64().to_be_bytes());
+        let pos = *pos;
+        self.hasher.update(&pos.to_be_bytes());
     }
 
     pub fn update_with_digest(&mut self, digest: &H::Digest) {
@@ -93,7 +94,7 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
         size: Position,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher.update(&size.as_u64().to_be_bytes());
+        self.hasher.update(&size.to_be_bytes());
         for digest in peak_digests {
             self.update_with_digest(digest);
         }

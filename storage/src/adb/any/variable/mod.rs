@@ -251,7 +251,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
                         // index.
-                        let expected = loc.as_u64() / self.log_items_per_section;
+                        let expected = *loc / self.log_items_per_section;
                         assert_eq!(section, expected,
                                 "given section {section} did not match expected section {expected} from location {loc}");
 
@@ -324,7 +324,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 end_offset,
                 "rewinding over uncommitted operations at end of log"
             );
-            let prune_to_section = end_loc.as_u64() / self.log_items_per_section;
+            let prune_to_section = *end_loc / self.log_items_per_section;
             self.log
                 .rewind_to_offset(prune_to_section, end_offset)
                 .await?;
@@ -334,10 +334,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Pop any MMR elements that are ahead of the last log commit point.
         if mmr_leaves > self.log_size {
-            self.locations.rewind(self.log_size.as_u64()).await?;
+            self.locations.rewind(*self.log_size).await?;
             self.locations.sync().await?;
 
-            let num_to_pop = (mmr_leaves - self.log_size.as_u64()) as usize;
+            let num_to_pop = (mmr_leaves - *self.log_size) as usize;
             warn!(num_to_pop, "popping uncommitted MMR operations");
             self.mmr.pop(num_to_pop).await?;
         }
@@ -375,8 +375,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::OperationPruned(loc));
         }
 
-        let offset = self.locations.read(loc.as_u64()).await?;
-        let section = loc.as_u64() / self.log_items_per_section;
+        let offset = self.locations.read(*loc).await?;
+        let section = *loc / self.log_items_per_section;
         let op = self.log.get(section, offset).await?;
 
         Ok(op.into_value())
@@ -438,7 +438,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
         assert!(loc < self.op_count());
 
-        match self.locations.read(loc.as_u64()).await {
+        match self.locations.read(*loc).await {
             Ok(offset) => {
                 return self.get_from_offset(key, loc, offset).await;
             }
@@ -448,9 +448,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the operation at location `loc` in the log.
     async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {
-        match self.locations.read(loc.as_u64()).await {
+        match self.locations.read(*loc).await {
             Ok(offset) => {
-                let section = loc.as_u64() / self.log_items_per_section;
+                let section = *loc / self.log_items_per_section;
                 self.log.get(section, offset).await.map_err(Error::Journal)
             }
             Err(e) => Err(Error::Journal(e)),
@@ -465,7 +465,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         loc: Location,
         offset: u32,
     ) -> Result<Option<V>, Error> {
-        let section = loc.as_u64() / self.log_items_per_section;
+        let section = *loc / self.log_items_per_section;
         let Operation::Update(k, v) = self.log.get(section, offset).await? else {
             panic!("didn't find Update operation at location {loc} and offset {offset}");
         };
@@ -485,7 +485,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Returns the section of the log where we are currently writing new items.
     fn current_section(&self) -> u64 {
-        self.log_size.as_u64() / self.log_items_per_section
+        *self.log_size / self.log_items_per_section
     }
 
     /// Return the oldest location that remains retrievable.
@@ -618,8 +618,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc).as_usize());
-        for loc in start_loc.as_u64()..end_loc.as_u64() {
+        let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
+        for loc in *start_loc..*end_loc {
             let section = loc / self.log_items_per_section;
             let offset = self.locations.read(loc).await?;
             let op = self.log.get(section, offset).await?;
@@ -659,7 +659,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
     pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let mut last_commit = self.op_count().as_u64() - self.uncommitted_ops;
+        let mut last_commit = *self.op_count() - self.uncommitted_ops;
         if last_commit == 0 {
             return Ok(None);
         }
@@ -775,7 +775,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // actual pruning boundary. This procedure ensures all log operations always have
         // corresponding MMR & location entries, even in the event of failures, with no need for
         // special recovery.
-        let section_with_target = target_prune_loc.as_u64() / self.log_items_per_section;
+        let section_with_target = *target_prune_loc / self.log_items_per_section;
         if !self.log.prune(section_with_target).await? {
             return Ok(());
         }
@@ -790,7 +790,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         try_join!(
             self.locations
-                .prune(self.oldest_retained_loc.as_u64())
+                .prune(*self.oldest_retained_loc)
                 .map_err(Error::Journal),
             self.mmr
                 .prune_to_pos(&mut self.hasher, Position::from(self.oldest_retained_loc))
@@ -1175,19 +1175,19 @@ pub(super) mod test {
             let max_ops = NZU64!(4);
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
-            let start_loc = Location::try_from(start_pos).unwrap().as_u64();
+            let start_loc = Location::try_from(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(None, 100).await.unwrap();
             db.sync().await.unwrap();
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
-            for i in start_loc..end_loc.as_u64() {
-                let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
+            for loc in *start_loc..*end_loc {
+                let (proof, log) = db.proof(Location::new(loc), max_ops).await.unwrap();
                 assert!(verify_proof(
                     &mut hasher,
                     &proof,
-                    Location::new(i),
+                    Location::new(loc),
                     &log,
                     &root
                 ));
@@ -1349,8 +1349,8 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
             assert_eq!(db.op_count(), 2787);
             assert_eq!(
-                Location::try_from(db.mmr.size()).ok().map(|l| l.as_u64()),
-                Some(2787)
+                Location::try_from(db.mmr.size()).ok(),
+                Some(Location::new(2787))
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, Location::new(1480));
@@ -1364,8 +1364,8 @@ pub(super) mod test {
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2787);
             assert_eq!(
-                Location::try_from(db.mmr.size()).ok().map(|l| l.as_u64()),
-                Some(2787)
+                Location::try_from(db.mmr.size()).ok(),
+                Some(Location::new(2787))
             );
             assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, Location::new(1480));

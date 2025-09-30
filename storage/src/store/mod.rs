@@ -338,14 +338,14 @@ where
     }
 
     fn current_section(&self) -> u64 {
-        self.log_size.as_u64() / self.log_items_per_section
+        *self.log_size / self.log_items_per_section
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        let current_section = self.log_size.as_u64() / self.log_items_per_section;
+        let current_section = *self.log_size / self.log_items_per_section;
         try_join!(self.log.sync(current_section), self.locations.sync())?;
 
         Ok(())
@@ -373,7 +373,7 @@ where
         // prune the log first, and then prune the locations structure based on the log's actual
         // pruning boundary. This procedure ensures all log operations always have corresponding
         // location entries, even in the event of failures, with no need for special recovery.
-        let section_with_target = target_prune_loc.as_u64() / self.log_items_per_section;
+        let section_with_target = *target_prune_loc / self.log_items_per_section;
         if !self.log.prune(section_with_target).await? {
             return Ok(());
         }
@@ -387,7 +387,7 @@ where
 
         // Prune the locations map up to the oldest retained item in the log after pruning.
         self.locations
-            .prune(self.oldest_retained_loc.as_u64())
+            .prune(*self.oldest_retained_loc)
             .await
             .map_err(Error::Journal)?;
 
@@ -397,7 +397,7 @@ where
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
     pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let mut last_commit = (self.op_count() - self.uncommitted_ops).as_u64();
+        let mut last_commit = *self.op_count() - self.uncommitted_ops;
         if last_commit == 0 {
             return Ok(None);
         }
@@ -507,7 +507,7 @@ where
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
                         // index.
-                        let expected = loc.as_u64() / self.log_items_per_section;
+                        let expected = *loc / self.log_items_per_section;
                         assert_eq!(section, expected,
                                 "given section {section} did not match expected section {expected} from location {loc}");
 
@@ -576,7 +576,7 @@ where
                 end_offset,
                 "rewinding over uncommitted operations at end of log"
             );
-            let prune_to_section = end_loc.as_u64() / self.log_items_per_section;
+            let prune_to_section = *end_loc / self.log_items_per_section;
             self.log
                 .rewind_to_offset(prune_to_section, end_offset)
                 .await?;
@@ -591,7 +591,7 @@ where
                 log_size = ?self.log_size,
                 "rewinding uncommitted locations"
             );
-            self.locations.rewind(self.log_size.as_u64()).await?;
+            self.locations.rewind(*self.log_size).await?;
             self.locations.sync().await?;
         }
 
@@ -654,8 +654,8 @@ where
             return Err(Error::OperationPruned(loc));
         }
 
-        let section = loc.as_u64() / self.log_items_per_section;
-        let offset = self.locations.read(loc.as_u64()).await?;
+        let section = *loc / self.log_items_per_section;
+        let offset = self.locations.read(*loc).await?;
 
         // Get the operation from the log at the specified section and offset.
         self.log.get(section, offset).await.map_err(Error::Journal)

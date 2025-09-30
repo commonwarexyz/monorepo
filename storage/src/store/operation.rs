@@ -241,7 +241,7 @@ impl<K: Array, V: CodecFixed> Write for Fixed<K, V> {
             }
             Fixed::CommitFloor(floor_loc) => {
                 COMMIT_FLOOR_CONTEXT.write(buf);
-                buf.put_slice(&floor_loc.as_u64().to_be_bytes());
+                buf.put_slice(&floor_loc.to_be_bytes());
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
             }

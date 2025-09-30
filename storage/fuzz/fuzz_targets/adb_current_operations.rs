@@ -153,7 +153,7 @@ fn fuzz(data: FuzzInput) {
                         let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
 
                         // Adjust start_loc and max_ops to be within valid range
-                        let start_loc = Location::new(start_loc % current_op_count.as_u64());
+                        let start_loc = Location::new(start_loc % *current_op_count);
                         let max_ops = (*max_ops % 50).max(1);
 
                         let oldest_loc = db.inactivity_floor_loc();

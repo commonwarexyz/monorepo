@@ -67,14 +67,14 @@ impl<D: Digest> PartialEq for Proof<D> {
 
 impl<D: Digest> EncodeSize for Proof<D> {
     fn encode_size(&self) -> usize {
-        UInt(self.size.as_u64()).encode_size() + self.digests.encode_size()
+        UInt(*self.size).encode_size() + self.digests.encode_size()
     }
 }
 
 impl<D: Digest> Write for Proof<D> {
     fn write(&self, buf: &mut impl BufMut) {
         // Write the number of nodes in the MMR as a varint
-        UInt(self.size.as_u64()).write(buf);
+        UInt(*self.size).write(buf);
 
         // Write the digests
         self.digests.write(buf);
@@ -938,7 +938,7 @@ mod tests {
 
         // Confirm we can successfully prove all retained elements in the MMR after pruning.
         let root = mmr.root(&mut hasher);
-        for i in 1..mmr.size().as_u64() {
+        for i in 1..*mmr.size() {
             mmr.prune_to_pos(Position::new(i));
             let pruned_root = mmr.root(&mut hasher);
             assert_eq!(root, pruned_root);
@@ -951,7 +951,7 @@ mod tests {
                 assert!(proof.is_ok());
                 assert!(proof.unwrap().verify_element_inclusion(
                     &mut hasher,
-                    &elements[loc.as_usize()],
+                    &elements[*loc as usize],
                     loc,
                     &root
                 ));
@@ -1187,8 +1187,8 @@ mod tests {
                 &root,
             )
             .unwrap();
-        assert_eq!(node_digests.len(), mmr.size().as_u64() as usize);
-        node_digests.sort_by_key(|(pos, _)| pos.as_u64());
+        assert_eq!(Position::from(node_digests.len()), mmr.size());
+        node_digests.sort_by_key(|(pos, _)| *pos);
         for (i, (pos, d)) in node_digests.into_iter().enumerate() {
             assert_eq!(pos, i as u64);
             assert_eq!(mmr.get_node(pos).unwrap(), d);

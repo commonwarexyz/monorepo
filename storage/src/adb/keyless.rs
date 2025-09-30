@@ -249,8 +249,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 break;
             }
             op_index -= 1;
-            offset = locations.read(op_index.as_u64()).await?;
-            let section = op_index.as_u64() / log_items_per_section;
+            offset = locations.read(*op_index).await?;
+            let section = *op_index / log_items_per_section;
             op = log.get(section, offset).await?;
         }
 
@@ -260,12 +260,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         };
 
         // Rewind the log and MMR to the last commit point.
-        let ops_to_rewind = (op_count - rewind_size).as_u64() as usize;
+        let ops_to_rewind = (*op_count - *rewind_size) as usize;
         warn!(ops_to_rewind, ?rewind_size, "rewinding log to last commit");
-        locations.rewind(rewind_size.as_u64()).await?;
+        locations.rewind(*rewind_size).await?;
         locations.sync().await?;
         mmr.pop(ops_to_rewind).await?; // sync is handled by pop
-        let section = rewind_size.as_u64() / log_items_per_section;
+        let section = *rewind_size / log_items_per_section;
         log.rewind_to_offset(section, rewind_offset).await?;
         log.sync(section).await?;
 
@@ -385,9 +385,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Get the value at location `loc` in the database.
     pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
         assert!(loc < self.size);
-        let offset = self.locations.read(loc.as_u64()).await?;
+        let offset = self.locations.read(*loc).await?;
 
-        let section = loc.as_u64() / self.log_items_per_section;
+        let section = *loc / self.log_items_per_section;
         let op = self.log.get(section, offset).await?;
 
         Ok(op.into_value())
@@ -406,7 +406,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Returns the section of the operations log where we are currently writing new operations.
     fn current_section(&self) -> u64 {
-        self.size.as_u64() / self.log_items_per_section
+        *self.size / self.log_items_per_section
     }
 
     /// Return the oldest location that remains retrievable.
@@ -440,7 +440,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )?;
 
         // Prune the log first since it's always the source of truth.
-        let section = loc.as_u64() / self.log_items_per_section;
+        let section = *loc / self.log_items_per_section;
         if !self.log.prune(section).await? {
             return Ok(());
         }
@@ -453,9 +453,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             self.mmr
                 .prune_to_pos(&mut self.hasher, Position::from(prune_loc))
                 .map_err(Error::Mmr),
-            self.locations
-                .prune(prune_loc.as_u64())
-                .map_err(Error::Journal),
+            self.locations.prune(*prune_loc).map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -561,8 +559,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let Some(loc) = self.last_commit_loc else {
             return Ok(None);
         };
-        let offset = self.locations.read(loc.as_u64()).await?;
-        let section = loc.as_u64() / self.log_items_per_section;
+        let offset = self.locations.read(*loc).await?;
+        let section = *loc / self.log_items_per_section;
         let op = self.log.get(section, offset).await?;
         let Operation::Commit(metadata) = op else {
             return Ok(None);
@@ -612,8 +610,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             .mmr
             .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc).as_usize());
-        for loc in start_loc.as_u64()..end_loc.as_u64() {
+        let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
+        for loc in *start_loc..*end_loc {
             let offset = self.locations.read(loc).await?;
             let section = loc / self.log_items_per_section;
             let value = self.log.get(section, offset).await?;
@@ -679,7 +677,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.locations.sync().map_err(Error::Journal),
         )?;
-        let section = loc.as_u64() / self.log_items_per_section;
+        let section = *loc / self.log_items_per_section;
         assert!(
             self.log.prune(section).await?,
             "nothing was pruned, so could not simulate failure"
@@ -1184,7 +1182,7 @@ mod test {
                 );
 
                 // Check that we got the expected number of operations
-                let expected_ops = std::cmp::min(max_ops, (db.op_count() - start_loc).as_u64());
+                let expected_ops = std::cmp::min(max_ops, *db.op_count() - start_loc);
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
@@ -1283,7 +1281,7 @@ mod test {
             assert!(db.oldest_retained_loc().await.unwrap().unwrap() <= PRUNE_LOC);
 
             // Test that we can't get pruned values
-            for i in 0..oldest_retained.unwrap().as_u64() {
+            for i in 0..*oldest_retained.unwrap() {
                 let result = db.get(Location::new(i)).await;
                 // Should either return None (for commit ops) or encounter pruned data
                 match result {
@@ -1318,7 +1316,7 @@ mod test {
                 );
 
                 // Check that we got operations
-                let expected_ops = std::cmp::min(max_ops, (db.op_count() - start_loc).as_u64());
+                let expected_ops = std::cmp::min(max_ops, *db.op_count() - *start_loc);
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,

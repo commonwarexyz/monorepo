@@ -164,8 +164,8 @@ where
 impl Write for GetOperationsRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
-        self.op_count.as_u64().write(buf);
-        self.start_loc.as_u64().write(buf);
+        self.op_count.write(buf);
+        self.start_loc.write(buf);
         self.max_ops.get().write(buf);
     }
 }
@@ -173,8 +173,8 @@ impl Write for GetOperationsRequest {
 impl EncodeSize for GetOperationsRequest {
     fn encode_size(&self) -> usize {
         self.request_id.encode_size()
-            + self.op_count.as_u64().encode_size()
-            + self.start_loc.as_u64().encode_size()
+            + self.op_count.encode_size()
+            + self.start_loc.encode_size()
             + self.max_ops.get().encode_size()
     }
 }

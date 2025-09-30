@@ -250,7 +250,7 @@ where
 
             // Calculate batch size for this gap
             let diff = end_loc.checked_sub(start_loc.into()).unwrap();
-            let gap_size = NZU64!(diff.as_u64() + 1);
+            let gap_size = NZU64!(*diff + 1);
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
@@ -344,7 +344,7 @@ where
             // Remove the batch of operations that contains the next operation to apply.
             let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
             // Skip operations that are before the next location.
-            let skip_count = (next_loc - range_start_loc.as_u64()) as usize;
+            let skip_count = (next_loc - *range_start_loc) as usize;
             let operations_count = operations.len() - skip_count;
             let remaining_operations = operations.into_iter().skip(skip_count);
             next_loc += operations_count as u64;
