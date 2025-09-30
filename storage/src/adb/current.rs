@@ -423,7 +423,7 @@ impl<
         let mmr = &self.any.mmr;
         let leaves = mmr.leaves();
         assert!(start_loc < leaves, "start_loc is invalid");
-        let max_loc = start_loc.checked_add(max_ops.get()).unwrap();
+        let max_loc = start_loc.saturating_add(max_ops.get());
         let end_loc = core::cmp::min(max_loc, Location::new(leaves));
 
         // Generate the proof from the grafted MMR.
