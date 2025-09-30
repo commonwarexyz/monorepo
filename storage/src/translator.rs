@@ -153,7 +153,7 @@ mod tests {
         let t2 = t.transform(b"a");
         let t3 = t.transform(b"abcd");
         let t4 = t.transform(b"abcdef");
-        let t5 = t.transform(b"blsdkjfldk");
+        let t5 = t.transform(b"b");
 
         assert_eq!(t1, 0);
         assert!(t1 < t2);
@@ -168,7 +168,7 @@ mod tests {
         let t = EightCap;
         let t1 = t.transform(b"");
         let t2 = t.transform(b"a");
-        let t3 = t.transform(b"abcdefghsdklfslkfjsldfkj");
+        let t3 = t.transform(b"abcdefghaaaaaaa");
         let t4 = t.transform(b"abcdefghijkzzzzzzzzzzzzzzzzzz");
         let t5 = t.transform(b"b");
 
