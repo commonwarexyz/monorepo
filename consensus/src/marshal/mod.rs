@@ -894,7 +894,7 @@ mod tests {
                 .get_block(1)
                 .await
                 .unwrap()
-                .expect("missing block by height");
+                .expect("block at height 1 should exist after finalization");
             assert_eq!(by_height.height(), 1);
             assert_eq!(by_height.digest(), commitment);
 
@@ -903,7 +903,7 @@ mod tests {
                 .get_block(Identifier::Latest)
                 .await
                 .unwrap()
-                .expect("missing block by latest");
+                .expect("latest block should exist after finalization");
             assert_eq!(by_latest.height(), 1);
             assert_eq!(by_latest.digest(), commitment);
 
@@ -940,7 +940,7 @@ mod tests {
                 .get_block(&ver_commitment)
                 .await
                 .unwrap()
-                .expect("missing block from cache");
+                .expect("verified block should be in cache after verified()");
             assert_eq!(got.digest(), ver_commitment);
 
             // 2) From finalized archive
@@ -959,7 +959,7 @@ mod tests {
                 .get_block(&fin_commitment)
                 .await
                 .unwrap()
-                .expect("missing block from finalized archive");
+                .expect("finalized block should be present in archive after finalization");
             assert_eq!(got.digest(), fin_commitment);
             assert_eq!(got.height(), 2);
 

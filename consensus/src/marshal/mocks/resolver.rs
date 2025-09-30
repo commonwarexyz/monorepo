@@ -18,10 +18,18 @@ impl<K: Eq + std::hash::Hash, V> Default for Resolver<K, V> {
 
 impl<K: Eq + std::hash::Hash, V: Clone> Resolver<K, V> {
     pub fn get(&self, key: K) -> V {
-        self.data.lock().unwrap().get(&key).unwrap().clone()
+        self.data
+            .lock()
+            .expect("mock resolver mutex should not be poisoned on get")
+            .get(&key)
+            .expect("key should exist in mock resolver")
+            .clone()
     }
 
     pub fn put(&self, key: K, value: V) {
-        self.data.lock().unwrap().insert(key, value);
+        self.data
+            .lock()
+            .expect("mock resolver mutex should not be poisoned on put")
+            .insert(key, value);
     }
 }

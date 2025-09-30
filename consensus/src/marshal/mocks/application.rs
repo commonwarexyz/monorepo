@@ -21,7 +21,10 @@ impl<B: Block> Default for Application<B> {
 impl<B: Block> Application<B> {
     /// Returns the finalized blocks.
     pub fn blocks(&self) -> BTreeMap<u64, B> {
-        self.blocks.lock().unwrap().clone()
+        self.blocks
+            .lock()
+            .expect("application mutex should not be poisoned on blocks()")
+            .clone()
     }
 }
 
@@ -31,7 +34,7 @@ impl<B: Block> Reporter for Application<B> {
     async fn report(&mut self, activity: Self::Activity) {
         self.blocks
             .lock()
-            .unwrap()
+            .expect("application mutex should not be poisoned on report()")
             .insert(activity.height(), activity);
     }
 }

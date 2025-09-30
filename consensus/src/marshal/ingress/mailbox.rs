@@ -6,10 +6,7 @@ use crate::{
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use commonware_storage::archive;
 use futures::{
-    channel::{
-        mpsc,
-        oneshot::{self, Canceled},
-    },
+    channel::{mpsc, oneshot},
     SinkExt,
 };
 use tracing::error;
@@ -47,6 +44,12 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
             archive::Identifier::Key(key) => Self::Commitment(*key),
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("mailbox closed")]
+    Closed,
 }
 
 /// Messages sent to the marshal [Actor](super::super::actor::Actor).
@@ -125,20 +128,16 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn get_info(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Result<Option<(u64, B::Commitment)>, Canceled> {
+    ) -> Result<Option<(u64, B::Commitment)>, Error> {
         let (tx, rx) = oneshot::channel();
-        if self
-            .sender
+        self.sender
             .send(Message::GetInfo {
                 identifier: identifier.into(),
                 response: tx,
             })
             .await
-            .is_err()
-        {
-            error!("failed to send get info message to actor: receiver dropped");
-        }
-        rx.await
+            .map_err(|_| Error::Closed)?;
+        rx.await.map_err(|_| Error::Closed)
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -146,20 +145,16 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     pub async fn get_block(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Result<Option<B>, Canceled> {
+    ) -> Result<Option<B>, Error> {
         let (tx, rx) = oneshot::channel();
-        if self
-            .sender
+        self.sender
             .send(Message::GetBlock {
                 identifier: identifier.into(),
                 response: tx,
             })
             .await
-            .is_err()
-        {
-            error!("failed to send get block message to actor: receiver dropped");
-        }
-        rx.await
+            .map_err(|_| Error::Closed)?;
+        rx.await.map_err(|_| Error::Closed)
     }
 
     /// A request to retrieve a block by its commitment.
@@ -177,18 +172,16 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         commitment: B::Commitment,
     ) -> oneshot::Receiver<B> {
         let (tx, rx) = oneshot::channel();
-        if self
+        // Ignore the result.
+        // If the channel is closed, the returned `oneshot::Receiver` will result in an error.
+        let _ = self
             .sender
             .send(Message::Subscribe {
                 round,
                 commitment,
                 response: tx,
             })
-            .await
-            .is_err()
-        {
-            error!("failed to send subscribe message to actor: receiver dropped");
-        }
+            .await;
         rx
     }
 
