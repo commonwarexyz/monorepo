@@ -126,7 +126,7 @@ impl<const N: usize> BitMap<N> {
         self.len() == 0
     }
 
-    /// Get the number of chunks currently in the bitmap.
+    // Get the number of chunks currently in the bitmap.
     fn chunks_len(&self) -> usize {
         self.chunks.len()
     }
@@ -183,15 +183,15 @@ impl<const N: usize> BitMap<N> {
         (byte & mask) != 0
     }
 
-    /// Return the last chunk of the bitmap and its size in bits.
-    /// The size can be 0 (meaning the last chunk is empty).
+    // Return the last chunk of the bitmap and its size in bits.
+    // The size can be 0 (meaning the last chunk is empty).
     #[inline]
     fn last_chunk(&self) -> (&[u8; N], u64) {
         (self.chunks.back().unwrap(), self.next_bit)
     }
 
-    /// Return the last chunk of the bitmap and its size in bits.
-    /// The size can be 0 (meaning the last chunk is empty).
+    // Return the last chunk of the bitmap and its size in bits.
+    // The size can be 0 (meaning the last chunk is empty).
     #[inline]
     fn last_chunk_mut(&mut self) -> &mut [u8; N] {
         self.chunks.back_mut().unwrap()
@@ -305,11 +305,11 @@ impl<const N: usize> BitMap<N> {
         }
     }
 
-    /// Efficiently add a byte's worth of bits to the bitmap.
-    ///
-    /// # Warning
-    ///
-    /// Panics if self.next_bit is not byte aligned.
+    // Efficiently add a byte's worth of bits to the bitmap.
+    //
+    // # Warning
+    //
+    // Panics if self.next_bit is not byte aligned.
     fn push_byte(&mut self, byte: u8) {
         assert!(
             self.next_bit.is_multiple_of(8),
@@ -386,11 +386,11 @@ impl<const N: usize> BitMap<N> {
 
     /* Pruning */
 
-    /// Remove the first `n` chunks from the bitmap.
-    ///
-    /// # Warning
-    ///
-    /// Panics if trying to prune more chunks than exist.
+    // Remove the first `n` chunks from the bitmap.
+    //
+    // # Warning
+    //
+    // Panics if trying to prune more chunks than exist.
     fn prune_chunks(&mut self, chunks: usize) {
         assert!(
             chunks <= self.chunks.len(),

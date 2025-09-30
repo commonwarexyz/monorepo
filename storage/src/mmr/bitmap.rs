@@ -573,13 +573,13 @@ mod tests {
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
 
     impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
-        /// Efficiently add a byte's worth of bits to the bitmap.
-        ///
-        /// # Warning
-        ///
-        /// - The update will not impact the root until `sync` is called.
-        ///
-        /// - Assumes self.next_bit is currently byte aligned, and panics otherwise.
+        // Efficiently add a byte's worth of bits to the bitmap.
+        //
+        // # Warning
+        //
+        // - The update will not impact the root until `sync` is called.
+        //
+        // - Assumes self.next_bit is currently byte aligned, and panics otherwise.
         fn push_byte(&mut self, byte: u8) {
             self.bitmap.push_byte(byte);
         }
