@@ -186,7 +186,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             let subnet = ip.subnet();
             if self.subnet_rate_limiter.check_key(&subnet).is_err() {
                 self.handshakes_subnet_rate_limited.inc();
-                debug!(ip = ?address.ip(), subnet = ?subnet, "subnet exceeded handshake rate limit");
+                debug!(ip = ?address.ip(), "subnet exceeded handshake rate limit");
                 continue;
             }
 
@@ -305,6 +305,92 @@ mod tests {
             let metrics = context.encode();
             assert!(
                 metrics.contains("handshake_ip_rate_limited_total 3"),
+                "{}",
+                metrics
+            );
+
+            listener_handle.abort();
+            tracker_task.abort();
+            supervisor_task.abort();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn rate_limits_subnet() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
+            let stream_cfg = StreamConfig {
+                signing_key: PrivateKey::from_seed(1),
+                namespace: b"test-rate-limit".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_millis(5),
+            };
+
+            let actor = Actor::new(
+                context.clone(),
+                Config {
+                    address,
+                    stream_cfg,
+                    max_concurrent_handshakes: NZU32!(8),
+                    allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
+                    allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(1)),
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) = Mailbox::test();
+            let tracker_task = context.clone().spawn(|_| async move {
+                while let Some(message) = tracker_rx.next().await {
+                    match message {
+                        tracker::Message::Listenable { responder, .. } => {
+                            let _ = responder.send(true);
+                        }
+                        tracker::Message::Listen { reservation, .. } => {
+                            let _ = reservation.send(None);
+                        }
+                        tracker::Message::Release { .. } => {}
+                        _ => panic!("unexpected tracker message"),
+                    }
+                }
+            });
+
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
+            let supervisor_task = context
+                .clone()
+                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
+            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+
+            // Allow a single handshake attempt from this IP.
+            let (sink, mut stream) = loop {
+                match context.dial(address).await {
+                    Ok(pair) => break pair,
+                    Err(RuntimeError::ConnectionFailed) => {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(err) => panic!("unexpected dial error: {err:?}"),
+                }
+            };
+
+            // Wait for some message or drop.
+            let buf = vec![0u8; 1];
+            let _ = stream.recv(buf).await;
+            drop((sink, stream));
+
+            // Additional attempts should be rate limited immediately.
+            for _ in 0..3 {
+                let (sink, mut stream) = context.dial(address).await.expect("dial");
+
+                // Wait for some message or drop.
+                let buf = vec![0u8; 1];
+                let _ = stream.recv(buf).await;
+                drop((sink, stream));
+            }
+
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("handshake_subnet_rate_limited_total 3"),
                 "{}",
                 metrics
             );
