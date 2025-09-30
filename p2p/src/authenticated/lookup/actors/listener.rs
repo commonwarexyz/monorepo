@@ -157,7 +157,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             .expect("failed to bind listener");
 
         // Loop over incoming connections
-        let mut limited = 0;
+        let mut accepted = 0;
         loop {
             // Accept a new connection
             let (address, sink, stream) = match listener.accept().await {
@@ -170,23 +170,34 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             debug!(?address, "accepted incoming connection");
 
             // Cleanup the rate limiters periodically
-            if limited > CLEANUP_INTERVAL {
+            if accepted > CLEANUP_INTERVAL {
                 self.ip_rate_limiter.shrink_to_fit();
                 self.subnet_rate_limiter.shrink_to_fit();
-                limited = 0;
+                accepted = 0;
             }
+            accepted += 1;
 
-            // Drop the connection if the IP exceeds its rate limit
+            // Check whether the IP (and subnet) exceeds its rate limit
             let ip = address.ip();
-            if self.ip_rate_limiter.check_key(&ip).is_err() {
+            let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
                 self.handshakes_ip_rate_limited.inc();
                 debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
-                continue;
-            }
+                true
+            } else {
+                false
+            };
             let subnet = ip.subnet();
-            if self.subnet_rate_limiter.check_key(&subnet).is_err() {
+            let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
                 self.handshakes_subnet_rate_limited.inc();
                 debug!(ip = ?address.ip(), "subnet exceeded handshake rate limit");
+                true
+            } else {
+                false
+            };
+
+            // We wait to check whether the handshake is permitted until after updating both the ip
+            // and subnet rate limiters
+            if ip_limited || subnet_limited {
                 continue;
             }
 
@@ -229,11 +240,13 @@ mod tests {
         time::Duration,
     };
 
-    fn check_rate_limits(
+    fn check_rate_limits<CheckMetrics>(
         allowed_handshake_rate_per_ip: Quota,
         allowed_handshake_rate_per_subnet: Quota,
-        rate_limited_metric: &str,
-    ) {
+        check_metrics: CheckMetrics,
+    ) where
+        CheckMetrics: FnOnce(&str),
+    {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
@@ -306,11 +319,7 @@ mod tests {
             }
 
             let metrics = context.encode();
-            assert!(
-                metrics.contains(&format!("handshake_{rate_limited_metric}_total 3")),
-                "{}",
-                metrics
-            );
+            check_metrics(&metrics);
 
             listener_handle.abort();
             tracker_task.abort();
@@ -323,7 +332,18 @@ mod tests {
         check_rate_limits(
             Quota::per_hour(NZU32!(1)),
             Quota::per_hour(NZU32!(100)),
-            "ip_rate_limited",
+            |metrics| {
+                assert!(
+                    metrics.contains("handshake_ip_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshake_subnet_rate_limited_total 0"),
+                    "{}",
+                    metrics
+                );
+            },
         );
     }
 
@@ -332,7 +352,38 @@ mod tests {
         check_rate_limits(
             Quota::per_hour(NZU32!(100)),
             Quota::per_hour(NZU32!(1)),
-            "subnet_rate_limited",
+            |metrics| {
+                assert!(
+                    metrics.contains("handshake_subnet_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshake_ip_rate_limited_total 0"),
+                    "{}",
+                    metrics
+                );
+            },
+        );
+    }
+
+    #[test_traced("DEBUG")]
+    fn rate_limits_both() {
+        check_rate_limits(
+            Quota::per_hour(NZU32!(1)),
+            Quota::per_hour(NZU32!(1)),
+            |metrics| {
+                assert!(
+                    metrics.contains("handshake_ip_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshake_subnet_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+            },
         );
     }
 }
