@@ -17,7 +17,6 @@ use rand::{CryptoRng, Rng};
 use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
-    sync::Arc,
 };
 use tracing::debug;
 
@@ -39,10 +38,9 @@ pub struct Actor<
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
     in_flight_handshakes: Limiter,
-    ip_rate_limiter:
-        Arc<RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>>,
+    ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
     subnet_rate_limiter:
-        Arc<RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>>,
+        RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
     handshakes_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
     handshakes_subnet_rate_limited: Counter,
@@ -79,14 +77,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
             in_flight_handshakes: Limiter::new(cfg.max_concurrent_handshakes.get()),
-            ip_rate_limiter: Arc::new(RateLimiter::hashmap_with_clock(
+            ip_rate_limiter: RateLimiter::hashmap_with_clock(
                 cfg.allowed_handshake_rate_per_ip,
                 &context,
-            )),
-            subnet_rate_limiter: Arc::new(RateLimiter::hashmap_with_clock(
+            ),
+            subnet_rate_limiter: RateLimiter::hashmap_with_clock(
                 cfg.allowed_handshake_rate_per_subnet,
                 &context,
-            )),
+            ),
             handshakes_rate_limited,
             handshakes_ip_rate_limited,
             handshakes_subnet_rate_limited,
