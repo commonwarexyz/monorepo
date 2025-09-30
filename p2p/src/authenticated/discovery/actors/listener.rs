@@ -178,7 +178,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             // Drop the connection if the IP exceeds its rate limit
             let ip = address.ip();
-            let ip_permitted = if self.ip_rate_limiter.check_key(&ip).is_err() {
+            let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
                 self.handshakes_ip_rate_limited.inc();
                 debug!(?address, "ip exceeded handshake rate limit");
                 false
@@ -186,14 +186,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 true
             };
             let subnet = ip.subnet();
-            let subnet_permitted = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
+            let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
                 self.handshakes_subnet_rate_limited.inc();
                 debug!(?address, "subnet exceeded handshake rate limit");
                 false
             } else {
                 true
             };
-            if ip_permitted && subnet_permitted {
+            if ip_limited || subnet_limited {
                 continue;
             }
 
