@@ -598,7 +598,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::OperationPruned(start_loc));
         }
 
-        let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops.get()).unwrap());
+        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
         let mmr_size = Position::from(op_count);
 
         let proof = self
