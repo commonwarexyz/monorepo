@@ -6,8 +6,14 @@ use std::ops::{Add, Mul, Neg, Sub};
 const P: u64 = u64::wrapping_neg(1 << 32) + 1;
 
 /// An element of the [Goldilocks field](https://xn--2-umb.com/22/goldilocks/).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct F(u64);
+
+impl std::fmt::Debug for F {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016X}", self.0)
+    }
+}
 
 impl F {
     /// The zero element of the field.
@@ -61,6 +67,17 @@ impl F {
         let (subtraction, underflow) = self.0.overflowing_sub(b.0);
         if underflow {
             Self(subtraction.wrapping_add(P))
+        } else {
+            Self(subtraction)
+        }
+    }
+
+    const fn reduce_64(x: u64) -> Self {
+        // 2 * P > 2^64 - 1 (by a long margin)
+        // We thus need to subtract P at most once.
+        let (subtraction, underflow) = x.overflowing_sub(P);
+        if underflow {
+            Self(x)
         } else {
             Self(subtraction)
         }
@@ -136,6 +153,38 @@ impl F {
     ///
     /// That enables optimizations when doing NTTs, and things like that.
     pub const ROOT_OF_UNITY: Self = Self(0xee41f5320c4ea145);
+
+    /// Construct a 2^lg_k root of unity.
+    ///
+    /// This will fail for lg_k > 32.
+    pub fn root_of_unity(lg_k: u8) -> Option<Self> {
+        if lg_k > 32 {
+            return None;
+        }
+        let mut out = Self::ROOT_OF_UNITY;
+        for _ in 0..(32 - lg_k) {
+            out = out * out;
+        }
+        Some(out)
+    }
+
+    /// Return self / 2.
+    pub fn div_2(self) -> Self {
+        // Check the first bit of self
+        if self.0 & 1 == 0 {
+            // self is even, just divide by 2.
+            Self(self.0 >> 1)
+        } else {
+            // P is odd, so adding it creates an even number, and doesn't
+            // change the value mod P.
+            // Is (x + P) / 2 < P?
+            // x < P, so x + P < 2P, therefore (x + P) / 2 < P.
+            let (addition, carry) = self.0.overflowing_add(P);
+            // This is doing the above operation, treating carry .. addition as
+            // a 65 bit integer.
+            Self((u64::from(carry) << 63) | (addition >> 1))
+        }
+    }
 }
 
 impl Add for F {
@@ -167,6 +216,12 @@ impl Neg for F {
 
     fn neg(self) -> Self::Output {
         self.neg_inner()
+    }
+}
+
+impl From<u64> for F {
+    fn from(value: u64) -> Self {
+        Self::reduce_64(value)
     }
 }
 
@@ -237,6 +292,11 @@ mod test {
                 naive = naive * x;
             }
             assert_eq!(naive, x.exp(k as u64));
+        }
+
+        #[test]
+        fn test_div2(x in any_f()) {
+            assert_eq!((x + x).div_2(), x)
         }
     }
 }
