@@ -139,6 +139,7 @@ impl Record {
     /// - We have the socket address of the peer
     /// - It is not ourselves
     /// - We are not already connected
+    #[allow(unstable_name_collisions)]
     pub fn dialable(&self, allow_private_ips: bool) -> bool {
         match self.address {
             Address::Known(addr) => {
@@ -178,6 +179,7 @@ impl Record {
     }
 
     /// Returns `true` if the record is allowed to be used for connection.
+    #[allow(unstable_name_collisions)]
     pub fn allowed(&self, allow_private_ips: bool) -> bool {
         match self.address {
             Address::Blocked | Address::Myself(_) => false,

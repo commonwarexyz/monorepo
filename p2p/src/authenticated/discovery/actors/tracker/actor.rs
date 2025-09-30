@@ -123,6 +123,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let my_public_key = self.crypto.public_key();
         for info in infos {
             // Check if IP is allowed
+            #[allow(unstable_name_collisions)]
             if !self.allow_private_ips && !info.socket.ip().is_global() {
                 return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
             }

@@ -184,7 +184,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
                 continue;
             }
-            let subnet = ip.subnet_of();
+            let subnet = ip.subnet();
             if self.subnet_rate_limiter.check_key(&subnet).is_err() {
                 self.handshakes_subnet_rate_limited.inc();
                 debug!(ip = ?address.ip(), subnet = ?subnet, "subnet exceeded handshake rate limit");
