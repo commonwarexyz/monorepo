@@ -9,7 +9,7 @@ use commonware_runtime::{
     Clock, Handle, Listener, Metrics, Network, RwLock, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{IpAddrExt, Subnet};
+use commonware_utils::{IpAddrExt, Limiter, Reservation, Subnet};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -20,10 +20,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 use tracing::debug;
@@ -46,8 +43,7 @@ pub struct Actor<
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
-    max_concurrent_handshakes: u32,
-    in_flight_handshakes: Arc<AtomicU32>,
+    in_flight_handshakes: Limiter,
     ip_rate_limiter:
         Arc<RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>>,
     subnet_rate_limiter:
@@ -98,8 +94,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
-            max_concurrent_handshakes: cfg.max_concurrent_handshakes.get(),
-            in_flight_handshakes: Arc::new(AtomicU32::new(0)),
+            in_flight_handshakes: Limiter::new(cfg.max_concurrent_handshakes.get()),
             ip_rate_limiter: Arc::new(RateLimiter::hashmap_with_clock(
                 cfg.allowed_handshake_rate_per_ip,
                 &context,
@@ -140,7 +135,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         >,
         prioritized_ips: Arc<RwLock<HashMap<IpAddr, HashSet<C::PublicKey>>>>,
         handshakes_peer_rate_limited: Counter,
-        _in_flight: InFlightGuard,
+        _reservation: Reservation,
     ) {
         // Perform handshake
         let (peer, send, recv) = match listen(
@@ -239,18 +234,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 continue;
             }
 
-            let in_flight = loop {
-                let result = self.in_flight_handshakes.fetch_update(
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                    |current| (current < self.max_concurrent_handshakes).then_some(current + 1),
-                );
-                match result {
-                    Ok(_) => break InFlightGuard::new(self.in_flight_handshakes.clone()),
-                    Err(_) if prioritized_ip => {
+            let reservation = loop {
+                match self.in_flight_handshakes.try_acquire() {
+                    Some(reservation) => break reservation,
+                    None if prioritized_ip => {
                         self.context.sleep(Duration::from_millis(1)).await;
                     }
-                    Err(_) => {
+                    None => {
                         self.handshakes_rate_limited.inc();
                         debug!(?address, "maximum concurrent handshakes reached");
                         self.prioritized_ips.write().await.remove(&address.ip());
@@ -267,7 +257,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 let peer_rate_limiter = self.peer_rate_limiter.clone();
                 let prioritized_ips = self.prioritized_ips.clone();
                 let handshakes_peer_rate_limited = self.handshakes_peer_rate_limited.clone();
-                let in_flight = in_flight;
+                let reservation = reservation;
                 move |context| {
                     Self::handshake(
                         context,
@@ -280,27 +270,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                         peer_rate_limiter,
                         prioritized_ips,
                         handshakes_peer_rate_limited,
-                        in_flight,
+                        reservation,
                     )
                 }
             });
         }
-    }
-}
-
-struct InFlightGuard {
-    counter: Arc<AtomicU32>,
-}
-
-impl InFlightGuard {
-    fn new(counter: Arc<AtomicU32>) -> Self {
-        Self { counter }
-    }
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
