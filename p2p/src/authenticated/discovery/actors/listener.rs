@@ -40,7 +40,7 @@ pub struct Actor<
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
-    handshakes: Limiter,
+    handshake_limiter: Limiter,
     ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
     subnet_rate_limiter:
         RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
@@ -78,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
-            handshakes: Limiter::new(cfg.max_concurrent_handshakes),
+            handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             ip_rate_limiter: RateLimiter::hashmap_with_clock(
                 cfg.allowed_handshake_rate_per_ip,
                 &context,
@@ -192,7 +192,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             }
 
             // Attempt to reserve a slot for the handshake
-            let Some(reservation) = self.handshakes.try_acquire() else {
+            let Some(reservation) = self.handshake_limiter.try_acquire() else {
                 self.handshakes_dropped.inc();
                 debug!(?address, "maximum concurrent handshakes reached");
                 continue;
@@ -221,14 +221,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 mod tests {
     use super::*;
     use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _};
-    use commonware_runtime::{deterministic, Error as RuntimeError, Runner as _};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{deterministic, Error as RuntimeError, Runner as _, Stream};
+    use commonware_utils::NZU32;
     use futures::StreamExt as _;
     use std::{
         net::{IpAddr, Ipv4Addr},
         time::Duration,
     };
 
-    #[test]
+    #[test_traced("DEBUG")]
     fn increments_ip_rate_limit_metric() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
@@ -247,11 +249,9 @@ mod tests {
                 Config {
                     address,
                     stream_cfg,
-                    max_concurrent_handshakes: NonZeroU32::new(8).expect("non-zero"),
-                    allowed_handshake_rate_per_ip: Quota::per_hour(NonZeroU32::new(1).unwrap()),
-                    allowed_handshake_rate_per_subnet: Quota::per_hour(
-                        NonZeroU32::new(64).unwrap(),
-                    ),
+                    max_concurrent_handshakes: NZU32!(8),
+                    allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(1)),
+                    allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(64)),
                 },
             );
 
@@ -275,11 +275,10 @@ mod tests {
             let supervisor_task = context
                 .clone()
                 .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
-
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Allow a single handshake attempt from this IP.
-            let (sink, stream) = loop {
+            let (sink, mut stream) = loop {
                 match context.dial(address).await {
                     Ok(pair) => break pair,
                     Err(RuntimeError::ConnectionFailed) => {
@@ -288,17 +287,22 @@ mod tests {
                     Err(err) => panic!("unexpected dial error: {err:?}"),
                 }
             };
+
+            // Wait for some message or drop.
+            let buf = vec![0u8; 1];
+            let _ = stream.recv(buf).await;
             drop((sink, stream));
-            context.sleep(Duration::from_millis(10)).await;
 
             // Additional attempts should be rate limited immediately.
             for _ in 0..3 {
-                let (sink, stream) = context.dial(address).await.expect("dial");
+                let (sink, mut stream) = context.dial(address).await.expect("dial");
+
+                // Wait for some message or drop.
+                let buf = vec![0u8; 1];
+                let _ = stream.recv(buf).await;
                 drop((sink, stream));
-                context.sleep(Duration::from_millis(1)).await;
             }
 
-            context.sleep(Duration::from_millis(10)).await;
             let metrics = context.encode();
             assert!(
                 metrics.contains("handshake_ip_rate_limited_total 3"),
