@@ -89,6 +89,11 @@ impl From<Location> for u64 {
     }
 }
 
+/// Add two locations together.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl Add for Location {
     type Output = Self;
 
@@ -98,6 +103,11 @@ impl Add for Location {
     }
 }
 
+/// Add a location and a `u64`.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl Add<u64> for Location {
     type Output = Self;
 
@@ -107,6 +117,11 @@ impl Add<u64> for Location {
     }
 }
 
+/// Subtract two locations.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl Sub for Location {
     type Output = Self;
 
@@ -116,6 +131,11 @@ impl Sub for Location {
     }
 }
 
+/// Subtract a `u64` from a location.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl Sub<u64> for Location {
     type Output = Self;
 
@@ -154,6 +174,11 @@ impl PartialOrd<Location> for u64 {
     }
 }
 
+/// Add a `u64` to a location.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl AddAssign<u64> for Location {
     #[inline]
     fn add_assign(&mut self, rhs: u64) {
@@ -161,6 +186,11 @@ impl AddAssign<u64> for Location {
     }
 }
 
+/// Subtract a `u64` from a location.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl SubAssign<u64> for Location {
     #[inline]
     fn sub_assign(&mut self, rhs: u64) {
