@@ -244,7 +244,7 @@ impl<
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let update_result = self.any.update_return_loc(key, value).await?;
         if let Some(old_loc) = update_result {
-            self.status.set_bit(old_loc.as_u64() as usize, false);
+            self.status.set_bit(old_loc.as_u64(), false);
         }
         self.status.push(true);
 
@@ -260,7 +260,7 @@ impl<
         };
 
         self.status.push(false);
-        self.status.set_bit(old_loc.as_u64() as usize, false);
+        self.status.set_bit(old_loc.as_u64(), false);
 
         Ok(())
     }
@@ -307,7 +307,7 @@ impl<
                 .move_op_if_active(op, self.any.inactivity_floor_loc)
                 .await?;
             if let Some(old_loc) = old_loc {
-                self.status.set_bit(old_loc.as_u64() as usize, false);
+                self.status.set_bit(old_loc.as_u64(), false);
                 self.status.push(true);
             }
             self.any.inactivity_floor_loc += 1;
@@ -337,7 +337,7 @@ impl<
         self.status.sync(&mut grafter).await?;
 
         self.status
-            .prune_to_bit(self.any.inactivity_floor_loc.as_u64() as usize);
+            .prune_to_bit(self.any.inactivity_floor_loc.as_u64());
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -395,7 +395,7 @@ impl<
         Ok(MerkleizedBitMap::<H, N>::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
-            last_chunk.1 as u64,
+            last_chunk.1,
             &last_chunk_digest,
         ))
     }
@@ -448,7 +448,7 @@ impl<
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
             let bit_offset = i * chunk_bits;
-            let chunk = *self.status.get_chunk(bit_offset as usize);
+            let chunk = *self.status.get_chunk(bit_offset);
             chunks.push(chunk);
         }
 
@@ -553,7 +553,7 @@ impl<
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk(loc.as_u64() as usize);
+        let chunk = *self.status.get_chunk(loc.as_u64());
 
         let last_chunk = self.status.last_chunk();
         if last_chunk.1 != 0 {
@@ -588,7 +588,7 @@ impl<
 
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
-        if !MerkleizedBitMap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc.as_u64() as usize) {
+        if !MerkleizedBitMap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc.as_u64()) {
             debug!(
                 loc = info.loc.as_u64(),
                 "proof verification failed, operation is inactive"
@@ -677,7 +677,7 @@ impl<
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk(loc.as_u64() as usize);
+        let chunk = *self.status.get_chunk(loc.as_u64());
 
         let last_chunk = self.status.last_chunk();
         if last_chunk.1 != 0 {
@@ -716,7 +716,7 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
-        self.status.prune_to_bit(target_prune_loc.as_u64() as usize);
+        self.status.prune_to_bit(target_prune_loc.as_u64());
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -810,7 +810,7 @@ pub mod test {
 
             // Confirm all activity bits are false
             for i in 0..db.op_count() {
-                assert!(!db.status.get_bit(i as usize));
+                assert!(!db.status.get_bit(i));
             }
 
             db.destroy().await.unwrap();
@@ -905,8 +905,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
-                MerkleizedBitMap::<Sha256, 32>::leaf_pos(active_loc.as_u64() as usize),
-                MerkleizedBitMap::<Sha256, 32>::leaf_pos(info.loc.as_u64() as usize)
+                MerkleizedBitMap::<Sha256, 32>::leaf_pos(active_loc.as_u64()),
+                MerkleizedBitMap::<Sha256, 32>::leaf_pos(info.loc.as_u64())
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
@@ -1033,7 +1033,7 @@ pub mod test {
 
             let start = db.inactivity_floor_loc().as_u64();
             for i in start..db.status.len() as u64 {
-                if !db.status.get_bit(i as usize) {
+                if !db.status.get_bit(i) {
                     continue;
                 }
                 // Found an active operation! Create a proof for its active current key/value.

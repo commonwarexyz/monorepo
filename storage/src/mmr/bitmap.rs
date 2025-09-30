@@ -196,7 +196,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
     #[inline]
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> u64 {
         self.bitmap.len()
     }
 
@@ -219,7 +219,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     /// - Panics if the referenced bit is greater than the number of bits in the bitmap.
     ///
     /// - Panics if there are unprocessed updates.
-    pub fn prune_to_bit(&mut self, bit_offset: usize) {
+    pub fn prune_to_bit(&mut self, bit_offset: u64) {
         let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset);
         if chunk_loc < self.bitmap.pruned_chunks() {
             return;
@@ -240,7 +240,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
     /// last chunk is empty).
     #[inline]
-    pub fn last_chunk(&self) -> (&[u8; N], usize) {
+    pub fn last_chunk(&self) -> (&[u8; N], u64) {
         self.bitmap.last_chunk()
     }
 
@@ -250,7 +250,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     ///
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
-    pub fn get_chunk(&self, bit_offset: usize) -> &[u8; N] {
+    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
         self.bitmap.get_chunk(bit_offset)
     }
 
@@ -266,7 +266,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
     #[inline]
     #[cfg(test)]
-    pub(crate) fn leaf_pos(bit_offset: usize) -> Position {
+    pub(crate) fn leaf_pos(bit_offset: u64) -> Position {
         let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset);
         Position::from(Location::new(chunk_loc as u64))
     }
@@ -277,13 +277,13 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     ///
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
-    pub fn get_bit(&self, bit_offset: usize) -> bool {
+    pub fn get_bit(&self, bit_offset: u64) -> bool {
         self.bitmap.get_bit(bit_offset)
     }
 
     #[inline]
     /// Get the value of a bit from its chunk.
-    pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: usize) -> bool {
+    pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
         BitMap::<N>::get_bit_from_chunk(chunk, bit_offset)
     }
 
@@ -292,7 +292,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     /// # Warning
     ///
     /// The update will not impact the root until `sync` is called.
-    pub fn set_bit(&mut self, bit_offset: usize, bit: bool) {
+    pub fn set_bit(&mut self, bit_offset: u64, bit: bool) {
         // Apply the change to the inner bitmap
         self.bitmap.set_bit(bit_offset, bit);
 
@@ -382,7 +382,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         Ok(Self::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
-            next_bit as u64,
+            next_bit,
             &last_chunk_digest,
         ))
     }
@@ -419,14 +419,14 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         hasher: &mut impl Hasher<H>,
         bit_offset: u64,
     ) -> Result<(Proof<H::Digest>, [u8; N]), Error> {
-        assert!(bit_offset < self.len() as u64, "out of bounds");
+        assert!(bit_offset < self.len(), "out of bounds");
         assert!(
             !self.is_dirty(),
             "cannot compute proof with unprocessed updates"
         );
 
-        let chunk = *self.get_chunk(bit_offset as usize);
-        let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset as usize);
+        let chunk = *self.get_chunk(bit_offset);
+        let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset);
         let (last_chunk, next_bit) = self.bitmap.last_chunk();
 
         if chunk_loc as u64 == self.mmr.leaves() {
@@ -435,7 +435,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             // required in the proof: the mmr's root.
             return Ok((
                 Proof {
-                    size: self.len() as u64,
+                    size: self.len(),
                     digests: vec![self.mmr.root(hasher)],
                 },
                 chunk,
@@ -444,7 +444,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
         let range = Location::new(chunk_loc as u64)..Location::new((chunk_loc + 1) as u64);
         let mut proof = verification::range_proof(&self.mmr, range).await?;
-        proof.size = self.len() as u64;
+        proof.size = self.len();
         if next_bit == 0 {
             // Bitmap is chunk aligned.
             return Ok((proof, chunk));
@@ -473,13 +473,13 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             return false;
         }
 
-        let leaves = BitMap::<N>::raw_chunk_index(bit_len as usize);
+        let leaves = BitMap::<N>::raw_chunk_index(bit_len);
         let mut mmr_proof = Proof::<H::Digest> {
             size: Position::from(Location::new(leaves as u64)).into(),
             digests: proof.digests.clone(),
         };
 
-        let loc = BitMap::<N>::raw_chunk_index(bit_offset as usize);
+        let loc = BitMap::<N>::raw_chunk_index(bit_offset);
         if bit_len % Self::CHUNK_SIZE_BITS == 0 {
             return mmr_proof.verify_element_inclusion(
                 hasher,
@@ -875,7 +875,7 @@ mod tests {
             }
 
             // Repeat the test after pruning.
-            let start_bit = SHA256_SIZE * 8 * 2;
+            let start_bit = (SHA256_SIZE * 8 * 2) as u64;
             bitmap.prune_to_bit(start_bit);
             for bit_pos in (start_bit..bitmap.len()).rev() {
                 let bit = bitmap.get_bit(bit_pos);
@@ -892,7 +892,7 @@ mod tests {
         });
     }
 
-    fn flip_bit<const N: usize>(bit_offset: usize, chunk: &[u8; N]) -> [u8; N] {
+    fn flip_bit<const N: usize>(bit_offset: u64, chunk: &[u8; N]) -> [u8; N] {
         let byte_offset = BitMap::<N>::chunk_byte_offset(bit_offset);
         let mask = BitMap::<N>::chunk_byte_bitmask(bit_offset);
         let mut tmp = chunk.to_vec();
@@ -932,7 +932,7 @@ mod tests {
                 assert_eq!(bitmap.root(&mut hasher).await.unwrap(), root);
                 bitmap.prune_to_bit(prune_to_bit);
                 for i in prune_to_bit..bitmap.len() {
-                    let (proof, chunk) = bitmap.proof(&mut hasher, i as u64).await.unwrap();
+                    let (proof, chunk) = bitmap.proof(&mut hasher, i).await.unwrap();
 
                     // Proof should verify for the original chunk containing the bit.
                     assert!(
@@ -940,7 +940,7 @@ mod tests {
                             &mut hasher,
                             &proof,
                             &chunk,
-                            i as u64,
+                            i,
                             &root
                         ),
                         "failed to prove bit {i}",
@@ -953,7 +953,7 @@ mod tests {
                             &mut hasher,
                             &proof,
                             &corrupted,
-                            i as u64,
+                            i,
                             &root
                         ),
                         "proving bit {i} after flipping should have failed",
@@ -999,7 +999,7 @@ mod tests {
             // prune 10 chunks at a time and make sure replay will restore the bitmap every time.
             for i in (10..=FULL_CHUNK_COUNT).step_by(10) {
                 bitmap.prune_to_bit(
-                    i * MerkleizedBitMap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS as usize,
+                    (i * MerkleizedBitMap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS as usize) as u64,
                 );
                 bitmap
                     .write_pruned(context.clone(), PARTITION)
@@ -1019,7 +1019,7 @@ mod tests {
                     bitmap.push_chunk(&test_chunk(format!("test{j}").as_bytes()));
                 }
                 assert_eq!(bitmap.bitmap.pruned_chunks(), i);
-                assert_eq!(bitmap.len(), FULL_CHUNK_COUNT * 256);
+                assert_eq!(bitmap.len(), FULL_CHUNK_COUNT as u64 * 256);
                 bitmap.sync(&mut hasher).await.unwrap();
                 assert_eq!(bitmap.root(&mut hasher).await.unwrap(), chunk_aligned_root);
 

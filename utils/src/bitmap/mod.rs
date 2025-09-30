@@ -37,7 +37,7 @@ pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     /// The position within the last chunk where the next bit is to be appended.
     ///
     /// Invariant: This value is always in the range [0, N * 8).
-    next_bit: usize,
+    next_bit: u64,
 }
 
 impl<const N: usize> BitMap<N> {
@@ -66,7 +66,7 @@ impl<const N: usize> BitMap<N> {
     }
 
     // Create a new empty bitmap with the capacity to hold `size` bits without reallocating.
-    pub fn with_capacity(size: usize) -> Self {
+    pub fn with_capacity(size: u64) -> Self {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
         let num_chunks = Self::num_chunks_at_size(size).get();
@@ -80,7 +80,7 @@ impl<const N: usize> BitMap<N> {
     }
 
     /// Create a new bitmap with `size` bits, with all bits set to 0.
-    pub fn zeroes(size: usize) -> Self {
+    pub fn zeroes(size: u64) -> Self {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
         let num_chunks = Self::num_chunks_at_size(size).get();
@@ -90,12 +90,12 @@ impl<const N: usize> BitMap<N> {
         }
         Self {
             chunks,
-            next_bit: size % Self::CHUNK_SIZE_BITS,
+            next_bit: size % (Self::CHUNK_SIZE_BITS as u64),
         }
     }
 
     /// Create a new bitmap with `size` bits, with all bits set to 1.
-    pub fn ones(size: usize) -> Self {
+    pub fn ones(size: u64) -> Self {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
         let num_chunks = Self::num_chunks_at_size(size).get();
@@ -105,7 +105,7 @@ impl<const N: usize> BitMap<N> {
         }
         let mut result = Self {
             chunks,
-            next_bit: size % Self::CHUNK_SIZE_BITS,
+            next_bit: size % (Self::CHUNK_SIZE_BITS as u64),
         };
         // Clear trailing bits to maintain invariant
         result.clear_trailing_bits();
@@ -116,8 +116,8 @@ impl<const N: usize> BitMap<N> {
 
     /// Return the number of bits currently stored in the bitmap.
     #[inline]
-    pub fn len(&self) -> usize {
-        ((self.chunks.len() - 1) * Self::CHUNK_SIZE_BITS) + self.next_bit
+    pub fn len(&self) -> u64 {
+        ((self.chunks.len() as u64 - 1) * (Self::CHUNK_SIZE_BITS as u64)) + self.next_bit
     }
 
     /// Returns true if the bitmap is empty.
@@ -139,7 +139,7 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if the bit doesn't exist.
     #[inline]
-    pub fn get(&self, bit_offset: usize) -> bool {
+    pub fn get(&self, bit_offset: u64) -> bool {
         let chunk = self.get_chunk(bit_offset);
         Self::get_from_chunk(chunk, bit_offset)
     }
@@ -150,7 +150,7 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if the bit doesn't exist.
     #[inline]
-    fn get_chunk(&self, bit_offset: usize) -> &[u8; N] {
+    fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
         assert!(
             bit_offset < self.len(),
             "Bit offset {} out of bounds (len: {})",
@@ -176,7 +176,7 @@ impl<const N: usize> BitMap<N> {
     /// Get the value at the given global `bit_offset` from the `chunk`.
     /// Note `bit_offset` is an offset within the entire bitmap, not just the chunk.
     #[inline]
-    fn get_from_chunk(chunk: &[u8; N], bit_offset: usize) -> bool {
+    fn get_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
         let byte_offset = Self::chunk_byte_offset(bit_offset);
         let byte = chunk[byte_offset];
         let mask = Self::chunk_byte_bitmask(bit_offset);
@@ -186,7 +186,7 @@ impl<const N: usize> BitMap<N> {
     /// Return the last chunk of the bitmap and its size in bits.
     /// The size can be 0 (meaning the last chunk is empty).
     #[inline]
-    fn last_chunk(&self) -> (&[u8; N], usize) {
+    fn last_chunk(&self) -> (&[u8; N], u64) {
         (self.chunks.back().unwrap(), self.next_bit)
     }
 
@@ -201,7 +201,7 @@ impl<const N: usize> BitMap<N> {
 
     /// Add a single bit to the bitmap.
     pub fn push(&mut self, bit: bool) {
-        let chunk_byte = self.next_bit / 8;
+        let chunk_byte = (self.next_bit / 8) as usize;
         let next_bit = self.next_bit;
         let last_chunk = self.last_chunk_mut();
         if bit {
@@ -209,9 +209,9 @@ impl<const N: usize> BitMap<N> {
         }
         // If bit is false, just advance the next_bit -- the bit is already 0
         self.next_bit += 1;
-        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
+        assert!(self.next_bit <= (Self::CHUNK_SIZE_BITS as u64));
 
-        if self.next_bit == Self::CHUNK_SIZE_BITS {
+        if self.next_bit == (Self::CHUNK_SIZE_BITS as u64) {
             self.prepare_next_chunk();
         }
     }
@@ -227,7 +227,7 @@ impl<const N: usize> BitMap<N> {
         if self.next_bit == 0 {
             // Remove the last (empty) chunk
             self.chunks.pop_back();
-            self.next_bit = Self::CHUNK_SIZE_BITS - 1;
+            self.next_bit = Self::CHUNK_SIZE_BITS as u64 - 1;
         } else {
             self.next_bit -= 1;
         }
@@ -247,7 +247,7 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if `bit_offset` is out of bounds.
     #[inline]
-    pub fn flip(&mut self, bit_offset: usize) {
+    pub fn flip(&mut self, bit_offset: u64) {
         self.assert_offset(bit_offset);
         let chunk_index = Self::chunk_index(bit_offset);
         let byte_offset = Self::chunk_byte_offset(bit_offset);
@@ -271,7 +271,7 @@ impl<const N: usize> BitMap<N> {
     /// # Warning
     ///
     /// Panics if the bit doesn't exist.
-    pub fn set(&mut self, bit_offset: usize, bit: bool) {
+    pub fn set(&mut self, bit_offset: u64, bit: bool) {
         assert!(
             bit_offset < self.len(),
             "Bit offset {} out of bounds (len: {})",
@@ -316,12 +316,12 @@ impl<const N: usize> BitMap<N> {
             "cannot add byte when not byte aligned"
         );
 
-        let chunk_byte = self.next_bit / 8;
+        let chunk_byte = (self.next_bit / 8) as usize;
         self.last_chunk_mut()[chunk_byte] = byte;
         self.next_bit += 8;
-        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
+        assert!(self.next_bit <= (Self::CHUNK_SIZE_BITS as u64));
 
-        if self.next_bit == Self::CHUNK_SIZE_BITS {
+        if self.next_bit == (Self::CHUNK_SIZE_BITS as u64) {
             self.prepare_next_chunk();
         }
     }
@@ -361,7 +361,7 @@ impl<const N: usize> BitMap<N> {
         }
 
         // Clear whole bytes after the last valid bit
-        let last_byte_index = (next_bit - 1) / 8;
+        let last_byte_index = ((next_bit - 1) / 8) as usize;
         for byte in last_chunk.iter_mut().skip(last_byte_index + 1) {
             if *byte != 0 {
                 flipped_any = true;
@@ -408,19 +408,19 @@ impl<const N: usize> BitMap<N> {
 
     /// Returns the number of bits set to 1.
     #[inline]
-    pub fn count_ones(&self) -> usize {
+    pub fn count_ones(&self) -> u64 {
         // Thanks to the invariant that trailing bits are always 0,
         // we can simply count all set bits in all chunks
         self.chunks
             .iter()
             .flat_map(|chunk| chunk.iter())
-            .map(|byte| byte.count_ones() as usize)
+            .map(|byte| byte.count_ones() as u64)
             .sum()
     }
 
     /// Returns the number of bits set to 0.
     #[inline]
-    pub fn count_zeros(&self) -> usize {
+    pub fn count_zeros(&self) -> u64 {
         self.len() - self.count_ones()
     }
 
@@ -428,26 +428,26 @@ impl<const N: usize> BitMap<N> {
 
     // Returns the number of chunks in a bitmap with `size` bits.
     #[inline]
-    fn num_chunks_at_size(size: usize) -> NonZeroUsize {
-        NZUsize!((size / Self::CHUNK_SIZE_BITS) + 1)
+    fn num_chunks_at_size(size: u64) -> NonZeroUsize {
+        NZUsize!(((size / (Self::CHUNK_SIZE_BITS as u64)) + 1) as usize)
     }
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
     #[inline]
-    pub(super) fn chunk_byte_bitmask(bit_offset: usize) -> u8 {
+    pub(super) fn chunk_byte_bitmask(bit_offset: u64) -> u8 {
         1 << (bit_offset % 8)
     }
 
     /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
     #[inline]
-    pub(super) fn chunk_byte_offset(bit_offset: usize) -> usize {
-        (bit_offset / 8) % N
+    pub(super) fn chunk_byte_offset(bit_offset: u64) -> usize {
+        ((bit_offset / 8) % N as u64) as usize
     }
 
     /// Convert a bit offset into the index of the chunk it belongs to.
     #[inline]
-    pub(super) fn chunk_index(bit_offset: usize) -> usize {
-        bit_offset / Self::CHUNK_SIZE_BITS
+    pub(super) fn chunk_index(bit_offset: u64) -> usize {
+        (bit_offset / Self::CHUNK_SIZE_BITS as u64) as usize
     }
 
     /* Iterator */
@@ -506,7 +506,7 @@ impl<const N: usize> BitMap<N> {
 
     /// Asserts that the bit offset is within bounds.
     #[inline(always)]
-    fn assert_offset(&self, bit_offset: usize) {
+    fn assert_offset(&self, bit_offset: u64) {
         assert!(
             bit_offset < self.len(),
             "Bit offset {} out of bounds (len: {})",
@@ -554,11 +554,11 @@ impl<const N: usize> From<BitMap<N>> for Vec<bool> {
 impl<const N: usize> fmt::Debug for BitMap<N> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         // For very large BitMaps, only show a preview
-        const MAX_DISPLAY: usize = 64;
-        const HALF_DISPLAY: usize = MAX_DISPLAY / 2;
+        const MAX_DISPLAY: u64 = 64;
+        const HALF_DISPLAY: u64 = MAX_DISPLAY / 2;
 
         // Closure for writing a bit
-        let write_bit = |formatter: &mut Formatter<'_>, index: usize| -> core::fmt::Result {
+        let write_bit = |formatter: &mut Formatter<'_>, index: u64| -> core::fmt::Result {
             formatter.write_char(if self.get(index) { '1' } else { '0' })
         };
 
@@ -585,14 +585,14 @@ impl<const N: usize> fmt::Debug for BitMap<N> {
     }
 }
 
-impl<const N: usize> Index<usize> for BitMap<N> {
+impl<const N: usize> Index<u64> for BitMap<N> {
     type Output = bool;
 
     /// Allows accessing bits using the `[]` operator.
     ///
     /// Panics if out of bounds.
     #[inline]
-    fn index(&self, index: usize) -> &Self::Output {
+    fn index(&self, index: u64) -> &Self::Output {
         self.assert_offset(index);
         let value = self.get(index);
         if value {
@@ -659,13 +659,14 @@ impl<const N: usize> Write for BitMap<N> {
 impl<const N: usize> Read for BitMap<N> {
     type Cfg = RangeCfg;
 
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
+    // TODO: Use range
+    fn read_cfg(buf: &mut impl Buf, _range: &Self::Cfg) -> Result<Self, CodecError> {
         // Parse length in bits
-        let len = usize::read_cfg(buf, range)?;
+        let len = u64::read_cfg(buf, &())?;
 
         // If next_bit == 0, the last chunk is empty and was omitted during serialization
         let num_chunks_needed = Self::num_chunks_at_size(len).get();
-        let next_bit = len % Self::CHUNK_SIZE_BITS;
+        let next_bit = len % (Self::CHUNK_SIZE_BITS as u64);
         let last_chunk_omitted = next_bit == 0;
         let num_chunks_to_read = if last_chunk_omitted {
             num_chunks_needed - 1
@@ -727,17 +728,17 @@ impl<const N: usize> core::iter::Iterator for Iterator<'_, N> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.bitmap.len() {
+        if self.pos as u64 >= self.bitmap.len() {
             return None;
         }
 
-        let bit = self.bitmap.get(self.pos);
+        let bit = self.bitmap.get(self.pos as u64);
         self.pos += 1;
         Some(bit)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.bitmap.len() - self.pos;
+        let remaining = (self.bitmap.len() - self.pos as u64) as usize;
         (remaining, Some(remaining))
     }
 }
@@ -793,7 +794,7 @@ mod tests {
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 10);
         for i in 0..10 {
-            assert!(!bv.get(i));
+            assert!(!bv.get(i as u64));
         }
         assert_eq!(bv.count_ones(), 0);
         assert_eq!(bv.count_zeros(), 10);
@@ -820,7 +821,7 @@ mod tests {
         assert!(!bv.is_empty());
         assert_eq!(bv.len(), 10);
         for i in 0..10 {
-            assert!(bv.get(i));
+            assert!(bv.get(i as u64));
         }
         assert_eq!(bv.count_ones(), 10);
         assert_eq!(bv.count_zeros(), 0);
@@ -833,8 +834,8 @@ mod tests {
             let (last_chunk, next_bit) = bitmap.last_chunk();
 
             // Check that all bits >= next_bit in the last chunk are 0
-            for bit_idx in next_bit..(N * 8) {
-                let byte_idx = bit_idx / 8;
+            for bit_idx in next_bit..((N * 8) as u64) {
+                let byte_idx = (bit_idx / 8) as usize;
                 let bit_in_byte = bit_idx % 8;
                 let mask = 1u8 << bit_in_byte;
                 assert_eq!(last_chunk[byte_idx] & mask, 0);
@@ -1004,7 +1005,7 @@ mod tests {
 
         // All bits in the byte should be set
         for i in 0..8 {
-            assert!(bv.get(i));
+            assert!(bv.get(i as u64));
         }
 
         bv.push_byte(0x00);
@@ -1012,7 +1013,7 @@ mod tests {
 
         // All bits in the second byte should be clear
         for i in 8..16 {
-            assert!(!bv.get(i));
+            assert!(!bv.get(i as u64));
         }
     }
 
@@ -1131,7 +1132,7 @@ mod tests {
 
         assert_eq!(bv1.len(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get(i), expected_bit);
+            assert_eq!(bv1.get(i as u64), expected_bit);
         }
     }
 
@@ -1156,7 +1157,7 @@ mod tests {
 
         assert_eq!(bv1.len(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get(i), expected_bit);
+            assert_eq!(bv1.get(i as u64), expected_bit);
         }
     }
 
@@ -1181,7 +1182,7 @@ mod tests {
 
         assert_eq!(bv1.len(), 5);
         for (i, &expected_bit) in expected.iter().enumerate() {
-            assert_eq!(bv1.get(i), expected_bit);
+            assert_eq!(bv1.get(i as u64), expected_bit);
         }
     }
 
@@ -1491,7 +1492,7 @@ mod tests {
 
         // Verify the decoded bitmap has the same bits
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(decoded.get(i), expected);
+            assert_eq!(decoded.get(i as u64), expected);
         }
 
         // Test larger bitmap across multiple chunks
@@ -1507,7 +1508,7 @@ mod tests {
         // Verify all bits match
         assert_eq!(decoded.len(), 100);
         for i in 0..100 {
-            assert_eq!(decoded.get(i), i % 7 == 0);
+            assert_eq!(decoded.get(i as u64), i % 7 == 0);
         }
     }
 
@@ -1535,6 +1536,7 @@ mod tests {
 
         // All should have the same logical content
         for (i, &expected) in pattern.iter().enumerate() {
+            let i = i as u64;
             assert_eq!(decoded4.get(i), expected);
             assert_eq!(decoded8.get(i), expected);
             assert_eq!(decoded16.get(i), expected);
@@ -1744,7 +1746,7 @@ mod tests {
         assert_eq!(bv.count_ones(), 3);
         assert_eq!(bv.count_zeros(), 2);
         for (i, &expected) in [true, false, true, false, true].iter().enumerate() {
-            assert_eq!(bv.get(i), expected);
+            assert_eq!(bv.get(i as u64), expected);
         }
 
         // Test with array slice
@@ -1754,7 +1756,7 @@ mod tests {
         assert_eq!(bv.count_ones(), 2);
         assert_eq!(bv.count_zeros(), 2);
         for (i, &expected) in array.iter().enumerate() {
-            assert_eq!(bv.get(i), expected);
+            assert_eq!(bv.get(i as u64), expected);
         }
 
         // Test with empty slice
@@ -1768,7 +1770,7 @@ mod tests {
         let bv: BitMap<8> = large.clone().into();
         assert_eq!(bv.len(), 100);
         for (i, &expected) in large.iter().enumerate() {
-            assert_eq!(bv.get(i), expected);
+            assert_eq!(bv.get(i as u64), expected);
         }
     }
 
@@ -1839,7 +1841,7 @@ mod tests {
             assert_eq!(bv.count_ones(), 4);
             assert_eq!(bv.count_zeros(), 3);
             for (i, &expected) in pattern.iter().enumerate() {
-                assert_eq!(bv.get(i), expected);
+                assert_eq!(bv.get(i as u64), expected);
             }
         }
 
@@ -1847,14 +1849,14 @@ mod tests {
         assert_eq!(bv8.count_ones(), 4);
         assert_eq!(bv8.count_zeros(), 3);
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(bv8.get(i), expected);
+            assert_eq!(bv8.get(i as u64), expected);
         }
 
         assert_eq!(bv16.len(), 7);
         assert_eq!(bv16.count_ones(), 4);
         assert_eq!(bv16.count_zeros(), 3);
         for (i, &expected) in pattern.iter().enumerate() {
-            assert_eq!(bv16.get(i), expected);
+            assert_eq!(bv16.get(i as u64), expected);
         }
     }
 

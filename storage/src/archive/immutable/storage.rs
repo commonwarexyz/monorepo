@@ -216,7 +216,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     /// Initialize the section.
     async fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
-        let bits = BitMap::zeroes(self.items_per_section as usize);
+        let bits = BitMap::zeroes(self.items_per_section);
 
         // Store record
         let key = U64::new(ORDINAL_PREFIX, section);
@@ -247,8 +247,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
 
         // Update active bits
         let done = if let Record::Ordinal(Some(bits)) = record {
-            bits.set((index % self.items_per_section) as usize, true);
-            bits.count_ones() == self.items_per_section as usize
+            bits.set(index % self.items_per_section, true);
+            bits.count_ones() == self.items_per_section
         } else {
             false
         };

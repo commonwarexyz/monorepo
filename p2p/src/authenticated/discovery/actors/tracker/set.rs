@@ -24,7 +24,7 @@ impl<P: PublicKey> Set<P> {
         for (i, peer) in peers.iter().enumerate() {
             order.insert(peer.clone(), i);
         }
-        let knowledge = BitMap::zeroes(peers.len());
+        let knowledge = BitMap::zeroes(peers.len() as u64);
         Self {
             sorted: peers,
             order,
@@ -35,7 +35,7 @@ impl<P: PublicKey> Set<P> {
     /// Marks the given peer as known or unknown.
     pub fn update(&mut self, peer: &P, known: bool) -> bool {
         if let Some(idx) = self.order.get(peer) {
-            self.knowledge.set(*idx, known);
+            self.knowledge.set(*idx as u64, known);
             return true;
         }
         false

@@ -257,7 +257,7 @@ impl<
         mut bitmap: Option<&mut MerkleizedBitMap<H, N>>,
     ) -> Result<(), Error> {
         if let Some(ref bitmap) = bitmap {
-            assert_eq!(inactivity_floor_loc, bitmap.len() as u64);
+            assert_eq!(inactivity_floor_loc, bitmap.len());
         }
 
         let stream = log
@@ -285,7 +285,7 @@ impl<
                             if let Some(ref mut bitmap) = bitmap {
                                 // Mark previous location (if any) of the deleted key as inactive.
                                 if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc.as_u64() as usize, false);
+                                    bitmap.set_bit(old_loc.as_u64(), false);
                                 }
                             }
                         }
@@ -299,7 +299,7 @@ impl<
                             .await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc.as_u64() as usize, false);
+                                    bitmap.set_bit(old_loc.as_u64(), false);
                                 }
                                 bitmap.push(true);
                             }
@@ -309,7 +309,7 @@ impl<
                     if let Some(ref mut bitmap) = bitmap {
                         // If we reach this point and a bit hasn't been added for the operation, then it's
                         // an inactive operation and we need to tag it as such in the bitmap.
-                        if bitmap.len() as u64 == i {
+                        if bitmap.len() == i {
                             bitmap.push(false);
                         }
                     }
@@ -1424,7 +1424,7 @@ pub(super) mod test {
 
             // Check the bitmap state matches that of the snapshot.
             let items = db.log.size().await.unwrap();
-            assert_eq!(bitmap.len() as u64, items);
+            assert_eq!(bitmap.len(), items);
             let mut active_positions = HashSet::new();
             // This loop checks that the expected true bits are true in the bitmap.
             for pos in db.inactivity_floor_loc.as_u64()..items {
@@ -1438,7 +1438,7 @@ pub(super) mod test {
                     if *loc == pos {
                         // Found an active op.
                         active_positions.insert(pos);
-                        assert!(bitmap.get_bit(pos as usize));
+                        assert!(bitmap.get_bit(pos));
                         break;
                     }
                 }
@@ -1446,7 +1446,7 @@ pub(super) mod test {
             // This loop checks that the expected false bits are false in the bitmap.
             for pos in db.inactivity_floor_loc.as_u64()..items {
                 if !active_positions.contains(&pos) {
-                    assert!(!bitmap.get_bit(pos as usize));
+                    assert!(!bitmap.get_bit(pos));
                 }
             }
 
