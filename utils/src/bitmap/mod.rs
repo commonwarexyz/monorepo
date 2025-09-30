@@ -44,7 +44,7 @@ impl<const N: usize> BitMap<N> {
     const _CHUNK_SIZE_NON_ZERO_ASSERT: () = assert!(N > 0, "chunk size must be > 0");
 
     /// The size of a chunk in bits.
-    pub const CHUNK_SIZE_BITS: usize = N * 8;
+    pub const CHUNK_SIZE_BITS: u64 = (N * 8) as u64;
 
     /// A chunk of all 0s.
     const EMPTY_CHUNK: [u8; N] = [0u8; N];
@@ -90,7 +90,7 @@ impl<const N: usize> BitMap<N> {
         }
         Self {
             chunks,
-            next_bit: size % (Self::CHUNK_SIZE_BITS as u64),
+            next_bit: size % Self::CHUNK_SIZE_BITS,
         }
     }
 
@@ -105,7 +105,7 @@ impl<const N: usize> BitMap<N> {
         }
         let mut result = Self {
             chunks,
-            next_bit: size % (Self::CHUNK_SIZE_BITS as u64),
+            next_bit: size % Self::CHUNK_SIZE_BITS,
         };
         // Clear trailing bits to maintain invariant
         result.clear_trailing_bits();
@@ -117,7 +117,7 @@ impl<const N: usize> BitMap<N> {
     /// Return the number of bits currently stored in the bitmap.
     #[inline]
     pub fn len(&self) -> u64 {
-        ((self.chunks.len() as u64 - 1) * (Self::CHUNK_SIZE_BITS as u64)) + self.next_bit
+        ((self.chunks.len() as u64 - 1) * Self::CHUNK_SIZE_BITS) + self.next_bit
     }
 
     /// Returns true if the bitmap is empty.
@@ -209,9 +209,9 @@ impl<const N: usize> BitMap<N> {
         }
         // If bit is false, just advance the next_bit -- the bit is already 0
         self.next_bit += 1;
-        assert!(self.next_bit <= (Self::CHUNK_SIZE_BITS as u64));
+        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
 
-        if self.next_bit == (Self::CHUNK_SIZE_BITS as u64) {
+        if self.next_bit == Self::CHUNK_SIZE_BITS {
             self.prepare_next_chunk();
         }
     }
@@ -227,7 +227,7 @@ impl<const N: usize> BitMap<N> {
         if self.next_bit == 0 {
             // Remove the last (empty) chunk
             self.chunks.pop_back();
-            self.next_bit = Self::CHUNK_SIZE_BITS as u64 - 1;
+            self.next_bit = Self::CHUNK_SIZE_BITS - 1;
         } else {
             self.next_bit -= 1;
         }
@@ -319,9 +319,9 @@ impl<const N: usize> BitMap<N> {
         let chunk_byte = (self.next_bit / 8) as usize;
         self.last_chunk_mut()[chunk_byte] = byte;
         self.next_bit += 8;
-        assert!(self.next_bit <= (Self::CHUNK_SIZE_BITS as u64));
+        assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
 
-        if self.next_bit == (Self::CHUNK_SIZE_BITS as u64) {
+        if self.next_bit == Self::CHUNK_SIZE_BITS {
             self.prepare_next_chunk();
         }
     }
@@ -429,7 +429,7 @@ impl<const N: usize> BitMap<N> {
     // Returns the number of chunks in a bitmap with `size` bits.
     #[inline]
     fn num_chunks_at_size(size: u64) -> NonZeroUsize {
-        NZUsize!(((size / (Self::CHUNK_SIZE_BITS as u64)) + 1) as usize)
+        NZUsize!(((size / Self::CHUNK_SIZE_BITS) + 1) as usize)
     }
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
@@ -447,7 +447,7 @@ impl<const N: usize> BitMap<N> {
     /// Convert a bit offset into the index of the chunk it belongs to.
     #[inline]
     pub(super) fn chunk_index(bit_offset: u64) -> usize {
-        (bit_offset / Self::CHUNK_SIZE_BITS as u64) as usize
+        (bit_offset / Self::CHUNK_SIZE_BITS) as usize
     }
 
     /* Iterator */
@@ -668,7 +668,7 @@ impl<const N: usize> Read for BitMap<N> {
 
         // If next_bit == 0, the last chunk is empty and was omitted during serialization
         let num_chunks_needed = Self::num_chunks_at_size(len).get();
-        let next_bit = len % (Self::CHUNK_SIZE_BITS as u64);
+        let next_bit = len % Self::CHUNK_SIZE_BITS;
         let last_chunk_omitted = next_bit == 0;
         let num_chunks_to_read = if last_chunk_omitted {
             num_chunks_needed - 1

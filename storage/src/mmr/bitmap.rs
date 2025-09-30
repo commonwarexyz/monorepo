@@ -77,7 +77,7 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     /// The size of a chunk in bits.
-    pub const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS as u64;
+    pub const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
 
     /// Return a new empty bitmap.
     pub fn new() -> Self {
@@ -208,7 +208,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
     /// Return the number of bits that have been pruned from this bitmap.
     #[inline]
-    pub fn pruned_bits(&self) -> usize {
+    pub fn pruned_bits(&self) -> u64 {
         self.bitmap.pruned_bits()
     }
 

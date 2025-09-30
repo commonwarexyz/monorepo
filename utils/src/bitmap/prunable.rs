@@ -14,7 +14,7 @@ pub struct Prunable<const N: usize> {
 
 impl<const N: usize> Prunable<N> {
     /// The size of a chunk in bits.
-    pub const CHUNK_SIZE_BITS: usize = BitMap::<N>::CHUNK_SIZE_BITS;
+    pub const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
 
     /* Constructors */
 
@@ -39,7 +39,7 @@ impl<const N: usize> Prunable<N> {
     /// Return the number of bits in the bitmap, irrespective of any pruning.
     #[inline]
     pub fn len(&self) -> u64 {
-        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS as u64 + self.bitmap.len()
+        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS + self.bitmap.len()
     }
 
     /// Return true if the bitmap is empty.
@@ -62,8 +62,8 @@ impl<const N: usize> Prunable<N> {
 
     /// Return the number of pruned bits.
     #[inline]
-    pub fn pruned_bits(&self) -> usize {
-        self.pruned_chunks * Self::CHUNK_SIZE_BITS
+    pub fn pruned_bits(&self) -> u64 {
+        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS
     }
 
     /* Getters */
@@ -79,7 +79,7 @@ impl<const N: usize> Prunable<N> {
         assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
 
         // Adjust bit_offset to account for pruning
-        let adjusted_offset = bit_offset - self.pruned_bits() as u64;
+        let adjusted_offset = bit_offset - self.pruned_bits();
         self.bitmap.get(adjusted_offset)
     }
 
@@ -94,7 +94,7 @@ impl<const N: usize> Prunable<N> {
         assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
 
         // Adjust bit_offset to account for pruning
-        let adjusted_offset = bit_offset - self.pruned_bits() as u64;
+        let adjusted_offset = bit_offset - self.pruned_bits();
         self.bitmap.get_chunk(adjusted_offset)
     }
 
@@ -122,7 +122,7 @@ impl<const N: usize> Prunable<N> {
         assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
 
         // Adjust bit_offset to account for pruning
-        let adjusted_offset = bit_offset - self.pruned_bits() as u64;
+        let adjusted_offset = bit_offset - self.pruned_bits();
         self.bitmap.set(adjusted_offset, bit);
     }
 
