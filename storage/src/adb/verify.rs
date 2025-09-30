@@ -58,12 +58,12 @@ where
 
 /// Calculate the digests required to construct a [Proof] for a range of operations.
 pub fn digests_required_for_proof<D: Digest>(
-    op_count: u64,
+    op_count: Location,
     start_loc: Location,
     end_loc: Location,
 ) -> Vec<Position> {
-    let size = Position::from(Location::new(op_count));
-    proof::nodes_required_for_range_proof(size, start_loc..end_loc + 1)
+    let mmr_size = Position::from(op_count);
+    proof::nodes_required_for_range_proof(mmr_size, start_loc..end_loc + 1)
 }
 
 /// Create a [Proof] from a op_count and a list of digests.
@@ -325,13 +325,16 @@ mod tests {
 
     #[test_traced]
     fn test_create_proof() {
+        const OP_COUNT: Location = Location::new(15);
+
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
             let mut mmr = Mmr::new();
 
             // Build MMR with test operations
-            let operations: Vec<u64> = (0..15).collect();
+
+            let operations: Vec<u64> = (0..*OP_COUNT).collect();
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
@@ -340,13 +343,12 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // The size here is the number of leaves added (15 in this case)
-            let op_count = 15;
             let start_loc = Location::new(3u64);
             let end_loc = Location::new(7u64);
 
             // Get required digests
             let required_positions =
-                digests_required_for_proof::<Digest>(op_count, start_loc, end_loc);
+                digests_required_for_proof::<Digest>(OP_COUNT, start_loc, end_loc);
 
             // Fetch the actual digests
             let mut digests = Vec::new();
@@ -357,8 +359,8 @@ mod tests {
             }
 
             // Construct proof
-            let proof = create_proof(Location::new(op_count), digests.clone());
-            assert_eq!(proof.size, Position::from(Location::new(op_count)));
+            let proof = create_proof(OP_COUNT, digests.clone());
+            assert_eq!(proof.size, Position::from(OP_COUNT));
             assert_eq!(proof.digests.len(), digests.len());
 
             assert!(verify_proof(
