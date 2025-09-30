@@ -40,7 +40,7 @@ pub struct Actor<
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
-    in_flight_handshakes: Limiter,
+    handshakes: Limiter,
     ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
     subnet_rate_limiter:
         RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
@@ -78,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
-            in_flight_handshakes: Limiter::new(cfg.max_concurrent_handshakes.get()),
+            handshakes: Limiter::new(cfg.max_concurrent_handshakes.get()),
             ip_rate_limiter: RateLimiter::hashmap_with_clock(
                 cfg.allowed_handshake_rate_per_ip,
                 &context,
@@ -192,7 +192,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             }
 
             // Attempt to reserve a slot for the handshake
-            let Some(reservation) = self.in_flight_handshakes.try_acquire() else {
+            let Some(reservation) = self.handshakes.try_acquire() else {
                 self.handshakes_dropped.inc();
                 debug!(?address, "maximum concurrent handshakes reached");
                 continue;
