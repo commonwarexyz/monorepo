@@ -20,6 +20,9 @@ use std::{
 };
 use tracing::debug;
 
+/// Interval at which to cleanup the rate limiters.
+const CLEANUP_INTERVAL: u32 = 16_384;
+
 /// Configuration for the listener actor.
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
@@ -28,8 +31,6 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_ip: Quota,
     pub allowed_handshake_rate_per_subnet: Quota,
 }
-
-const CLEANUP_INTERVAL: u32 = 512;
 
 pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
@@ -43,10 +44,9 @@ pub struct Actor<
     ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
     subnet_rate_limiter:
         RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
-    handshakes_rate_limited: Counter,
+    handshakes_dropped: Counter,
     handshakes_ip_rate_limited: Counter,
     handshakes_subnet_rate_limited: Counter,
-    cleanup_counter: u32,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
@@ -54,11 +54,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
-        let handshakes_rate_limited = Counter::default();
+        let handshakes_dropped = Counter::default();
         context.register(
-            "handshake_rate_limited",
+            "handshake_dropped",
             "number of handshakes dropped because maximum concurrent handshakes was reached",
-            handshakes_rate_limited.clone(),
+            handshakes_dropped.clone(),
         );
         let handshakes_ip_rate_limited = Counter::default();
         context.register(
@@ -87,14 +87,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 cfg.allowed_handshake_rate_per_subnet,
                 &context,
             ),
-            handshakes_rate_limited,
+            handshakes_dropped,
             handshakes_ip_rate_limited,
             handshakes_subnet_rate_limited,
-            cleanup_counter: 0,
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     async fn handshake(
         context: E,
         address: SocketAddr,
@@ -146,7 +145,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     #[allow(clippy::type_complexity)]
     async fn run(
-        mut self,
+        self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
@@ -158,6 +157,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             .expect("failed to bind listener");
 
         // Loop over incoming connections as fast as our rate limiter allows
+        let mut limited = 0;
         loop {
             // Accept a new connection
             let (address, sink, stream) = match listener.accept().await {
@@ -167,35 +167,37 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                     continue;
                 }
             };
-            debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
+            debug!(?address, "accepted incoming connection");
 
-            let subnet = address.ip().subnet_of();
-
-            // Drop the connection if the IP exceeds its rate limit
-            if self.ip_rate_limiter.check_key(&address.ip()).is_err() {
-                self.handshakes_ip_rate_limited.inc();
-                debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
-                continue;
+            // Cleanup the rate limiters periodically
+            if limited > CLEANUP_INTERVAL {
+                self.ip_rate_limiter.shrink_to_fit();
+                self.subnet_rate_limiter.shrink_to_fit();
+                limited = 0;
             }
 
+            // Drop the connection if the IP exceeds its rate limit
+            let ip = address.ip();
+            if self.ip_rate_limiter.check_key(&ip).is_err() {
+                limited += 1;
+                self.handshakes_ip_rate_limited.inc();
+                debug!(?address, "ip exceeded handshake rate limit");
+                continue;
+            }
+            let subnet = ip.subnet_of();
             if self.subnet_rate_limiter.check_key(&subnet).is_err() {
+                limited += 1;
                 self.handshakes_subnet_rate_limited.inc();
-                debug!(ip = ?address.ip(), subnet = ?subnet, "subnet exceeded handshake rate limit");
+                debug!(?address, ?subnet, "subnet exceeded handshake rate limit");
                 continue;
             }
 
             // Attempt to reserve a slot for the handshake
             let Some(reservation) = self.in_flight_handshakes.try_acquire() else {
-                self.handshakes_rate_limited.inc();
+                self.handshakes_dropped.inc();
                 debug!(?address, "maximum concurrent handshakes reached");
                 continue;
             };
-
-            self.cleanup_counter = self.cleanup_counter.wrapping_add(1);
-            if self.cleanup_counter % CLEANUP_INTERVAL == 0 {
-                self.ip_rate_limiter.shrink_to_fit();
-                self.subnet_rate_limiter.shrink_to_fit();
-            }
 
             // Spawn a new handshaker to upgrade connection
             self.context.with_label("handshaker").spawn({
