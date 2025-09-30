@@ -44,3 +44,74 @@ impl Drop for Reservation {
         self.current.fetch_sub(1, Ordering::AcqRel);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NZU32;
+    use std::{
+        sync::{mpsc, Arc, Barrier},
+        thread,
+    };
+
+    #[test]
+    fn allows_reservations_up_to_max() {
+        let limiter = Limiter::new(NZU32!(2));
+
+        let first = limiter
+            .try_acquire()
+            .expect("first reservation should succeed");
+        let second = limiter
+            .try_acquire()
+            .expect("second reservation should succeed");
+
+        assert!(limiter.try_acquire().is_none());
+
+        drop(second);
+        let third = limiter
+            .try_acquire()
+            .expect("reservation after drop should succeed");
+
+        drop(third);
+        drop(first);
+    }
+
+    #[test]
+    fn does_not_exceed_max_under_contention() {
+        let limiter = Arc::new(Limiter::new(NZU32!(3)));
+        let thread_count = 16;
+        let barrier = Arc::new(Barrier::new(thread_count));
+        let (tx, rx) = mpsc::channel();
+
+        let mut handles = Vec::with_capacity(thread_count);
+        for _ in 0..thread_count {
+            let limiter = Arc::clone(&limiter);
+            let barrier = Arc::clone(&barrier);
+            let tx = tx.clone();
+
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                let reservation = limiter.try_acquire();
+                tx.send(reservation).expect("receiver alive");
+            }));
+        }
+        drop(tx);
+
+        for handle in handles {
+            handle.join().expect("thread join");
+        }
+
+        let mut reservations = Vec::new();
+        for reservation in rx {
+            let Some(reservation) = reservation else {
+                continue;
+            };
+            reservations.push(reservation);
+        }
+        assert_eq!(reservations.len(), 3);
+
+        assert!(limiter.try_acquire().is_none());
+        drop(reservations);
+        assert!(limiter.try_acquire().is_some());
+    }
+}
