@@ -8,9 +8,18 @@ pub struct Subnet {
     addr: IpAddr,
 }
 
+/// Mask an IPv4 address to the first 24 bits.
 #[inline]
-fn mask_ipv4_subnet(ip: Ipv4Addr) -> IpAddr {
+fn ipv4_subnet(ip: Ipv4Addr) -> IpAddr {
     IpAddr::V4(Ipv4Addr::from(u32::from(ip) & 0xFFFFFF00))
+}
+
+/// Mask an IPv6 address to the upper 64 bits.
+#[inline]
+fn ipv6_subnet(ip: Ipv6Addr) -> IpAddr {
+    IpAddr::V6(Ipv6Addr::from(
+        u128::from(ip) & 0xFFFF_FFFF_FFFF_FFFF_0000_0000_0000_0000,
+    ))
 }
 
 /// Extension trait providing subnet helpers for [`IpAddr`].
@@ -34,18 +43,17 @@ impl IpAddrExt for IpAddr {
     fn subnet(&self) -> Subnet {
         match self {
             IpAddr::V4(v4) => Subnet {
-                addr: mask_ipv4_subnet(*v4),
+                addr: ipv4_subnet(*v4),
             },
             IpAddr::V6(v6) => {
                 if let Some(mapped_v4) = v6.to_ipv4_mapped() {
                     return Subnet {
-                        addr: mask_ipv4_subnet(mapped_v4),
+                        addr: ipv4_subnet(mapped_v4),
                     };
                 }
 
-                let masked = u128::from(*v6) & !((1u128 << 64) - 1);
                 Subnet {
-                    addr: IpAddr::V6(Ipv6Addr::from(masked)),
+                    addr: ipv6_subnet(*v6),
                 }
             }
         }
