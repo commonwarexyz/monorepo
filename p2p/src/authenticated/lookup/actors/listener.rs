@@ -237,11 +237,13 @@ mod tests {
         time::Duration,
     };
 
-    fn check_rate_limits(
+    fn check_rate_limits<CheckMetrics>(
         allowed_handshake_rate_per_ip: Quota,
         allowed_handshake_rate_per_subnet: Quota,
-        rate_limited_metric: &str,
-    ) {
+        check_metrics: CheckMetrics,
+    ) where
+        CheckMetrics: FnOnce(&str),
+    {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
@@ -314,11 +316,7 @@ mod tests {
             }
 
             let metrics = context.encode();
-            assert!(
-                metrics.contains(&format!("handshake_{rate_limited_metric}_total 3")),
-                "{}",
-                metrics
-            );
+            check_metrics(&metrics);
 
             listener_handle.abort();
             tracker_task.abort();
@@ -331,7 +329,18 @@ mod tests {
         check_rate_limits(
             Quota::per_hour(NZU32!(1)),
             Quota::per_hour(NZU32!(100)),
-            "ip_rate_limited",
+            |metrics| {
+                assert!(
+                    metrics.contains("handshake_ip_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshake_subnet_rate_limited_total 0"),
+                    "{}",
+                    metrics
+                );
+            },
         );
     }
 
@@ -340,7 +349,38 @@ mod tests {
         check_rate_limits(
             Quota::per_hour(NZU32!(100)),
             Quota::per_hour(NZU32!(1)),
-            "subnet_rate_limited",
+            |metrics| {
+                assert!(
+                    metrics.contains("handshake_subnet_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshake_ip_rate_limited_total 0"),
+                    "{}",
+                    metrics
+                );
+            },
+        );
+    }
+
+    #[test_traced("DEBUG")]
+    fn rate_limits_both() {
+        check_rate_limits(
+            Quota::per_hour(NZU32!(1)),
+            Quota::per_hour(NZU32!(1)),
+            |metrics| {
+                assert!(
+                    metrics.contains("handshake_ip_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshake_subnet_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+            },
         );
     }
 }
