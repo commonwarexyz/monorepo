@@ -5,7 +5,7 @@ use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
     adb::{self, any::fixed},
-    mmr::{Proof, StandardHasher as Standard},
+    mmr::{Location, Proof, StandardHasher as Standard},
     store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -58,12 +58,12 @@ where
             operations.push(Operation::Update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(i as u64 + 1));
+                operations.push(Operation::CommitFloor(Location::from(i + 1)));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(count as u64));
+        operations.push(Operation::CommitFloor(Location::from(count)));
         operations
     }
 
@@ -99,14 +99,14 @@ where
         self.op_count()
     }
 
-    fn lower_bound_ops(&self) -> u64 {
+    fn lower_bound(&self) -> Location {
         self.inactivity_floor_loc()
     }
 
     fn historical_proof(
         &self,
         size: u64,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
         self.historical_proof(size, start_loc, max_ops)

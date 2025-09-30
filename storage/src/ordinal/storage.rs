@@ -170,7 +170,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                     let bits = bits.get(section).unwrap();
                     if let Some(bits) = bits {
                         let bit_index = offset as usize / Record::<V>::SIZE;
-                        if !bits.get(bit_index) {
+                        if !bits.get(bit_index as u64) {
                             offset += Record::<V>::SIZE as u64;
                             continue;
                         }
@@ -302,6 +302,16 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Get the next gap information for backfill operations.
     pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.intervals.next_gap(index)
+    }
+
+    /// Retrieve the first index in the [Ordinal].
+    pub fn first_index(&self) -> Option<u64> {
+        self.intervals.first_index()
+    }
+
+    /// Retrieve the last index in the [Ordinal].
+    pub fn last_index(&self) -> Option<u64> {
+        self.intervals.last_index()
     }
 
     /// Get up to the next `max` missing items after `start`.

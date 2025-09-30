@@ -2,7 +2,10 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::{index::Index, translator::TwoCap};
+use commonware_storage::{
+    index::{Cursor as _, Index as _, Unordered as Index},
+    translator::TwoCap,
+};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
