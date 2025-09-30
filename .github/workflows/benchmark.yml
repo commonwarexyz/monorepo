@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout default branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
         with:
           fetch-depth: 1
 
@@ -53,7 +53,7 @@ jobs:
             file_suffix: ""
             benchmark_name: "commonware-coding"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Install nightly Rust toolchain
         run: rustup toolchain install nightly
       - name: Run setup
@@ -67,7 +67,7 @@ jobs:
             -- --output-format bencher \
             | tee "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
       - name: Publish benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
+        uses: benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b # v1.20.7
         with:
           name: ${{ matrix.benchmark_name }}
           tool: 'cargo'
