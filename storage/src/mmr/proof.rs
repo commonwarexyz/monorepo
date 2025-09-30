@@ -947,7 +947,7 @@ mod tests {
                 assert!(proof.is_ok());
                 assert!(proof.unwrap().verify_element_inclusion(
                     &mut hasher,
-                    &elements[loc.as_u64() as usize],
+                    &elements[*loc as usize],
                     loc,
                     &root
                 ));
@@ -1186,7 +1186,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(node_digests.len(), mmr.size() as usize);
-        node_digests.sort_by_key(|(pos, _)| pos.as_u64());
+        node_digests.sort_by_key(|(pos, _)| *pos);
         for (i, (pos, d)) in node_digests.into_iter().enumerate() {
             assert_eq!(pos, i as u64);
             assert_eq!(mmr.get_node(pos).unwrap(), d);

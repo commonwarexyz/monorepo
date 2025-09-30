@@ -161,7 +161,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Store the pinned nodes in metadata
         let nodes_to_pin_positions = nodes_to_pin(Position::new(mmr_size));
         for (pos, digest) in nodes_to_pin_positions.zip(pinned_nodes.iter()) {
-            metadata.put(U64::new(NODE_PREFIX, pos.as_u64()), digest.to_vec());
+            metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
         }
 
         // Sync metadata to disk
@@ -348,8 +348,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 write_buffer: cfg.config.write_buffer,
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
-            cfg.lower_bound_pos.as_u64(),
-            cfg.upper_bound_pos.as_u64(),
+            *cfg.lower_bound_pos,
+            *cfg.upper_bound_pos,
         )
         .await?;
         let journal_size = journal.size().await?;
@@ -366,14 +366,14 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
-            cfg.lower_bound_pos.as_u64().to_be_bytes().into(),
+            (*cfg.lower_bound_pos).to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             let nodes_to_pin_persisted = nodes_to_pin(cfg.lower_bound_pos);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
-                metadata.put(U64::new(NODE_PREFIX, pos.as_u64()), digest.to_vec());
+                metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
         }
 
@@ -434,7 +434,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             return Ok(Some(node));
         }
 
-        match self.journal.read(position.as_u64()).await {
+        match self.journal.read(*position).await {
             Ok(item) => Ok(Some(item)),
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::JournalError(e)),
@@ -449,7 +449,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         journal: &Journal<E, H::Digest>,
         pos: Position,
     ) -> Result<H::Digest, Error> {
-        let pos = pos.as_u64();
+        let pos = *pos;
         if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, pos)) {
             debug!(pos, "read node from metadata");
             let digest = H::Digest::decode(bytes.as_ref());
@@ -622,13 +622,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
             );
             self.metadata
-                .put(U64::new(NODE_PREFIX, pos.as_u64()), digest.to_vec());
+                .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             pinned_nodes.insert(pos, digest);
         }
 
         let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        self.metadata
-            .put(key, prune_to_pos.as_u64().to_be_bytes().into());
+        self.metadata.put(key, (*prune_to_pos).to_be_bytes().into());
 
         self.metadata.sync().await.map_err(Error::MetadataError)?;
 
@@ -698,7 +697,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // event of a pruning failure.
         let pinned_nodes = self.update_metadata(pos).await?;
 
-        self.journal.prune(pos.as_u64()).await?;
+        self.journal.prune(*pos).await?;
         self.mem_mmr.add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
@@ -1502,7 +1501,7 @@ mod tests {
             .unwrap();
 
             // Add elements up to the end of the range to verify historical root
-            for elt in elements.iter().take(range.end.as_u64() as usize) {
+            for elt in elements.iter().take(*range.end as usize) {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
             let historical_size = ref_mmr.size();
@@ -1797,7 +1796,7 @@ mod tests {
             let lower_bound_pos = mmr.pruned_to_pos();
             let upper_bound_pos = Position::new(mmr.size() - 1);
             let mut expected_nodes = BTreeMap::new();
-            for i in lower_bound_pos.as_u64()..=upper_bound_pos.as_u64() {
+            for i in *lower_bound_pos..=*upper_bound_pos {
                 expected_nodes.insert(
                     Position::new(i),
                     mmr.get_node(Position::new(i)).await.unwrap().unwrap(),
@@ -1822,7 +1821,7 @@ mod tests {
             assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
             assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
             assert_eq!(sync_mmr.root(&mut hasher), original_root);
-            for pos in lower_bound_pos.as_u64()..=upper_bound_pos.as_u64() {
+            for pos in *lower_bound_pos..=*upper_bound_pos {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
@@ -1862,7 +1861,7 @@ mod tests {
             let upper_bound_pos = Position::new(original_size + 10); // Extend beyond existing data
 
             let mut expected_nodes = BTreeMap::new();
-            for pos in lower_bound_pos.as_u64()..original_size {
+            for pos in *lower_bound_pos..original_size {
                 let pos = Position::new(pos);
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
             }
@@ -1887,7 +1886,7 @@ mod tests {
             assert_eq!(sync_mmr.root(&mut hasher), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
-            for pos in lower_bound_pos.as_u64()..original_size {
+            for pos in *lower_bound_pos..original_size {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),

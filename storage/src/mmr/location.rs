@@ -2,7 +2,7 @@ use super::position::Position;
 use core::{
     convert::TryFrom,
     fmt,
-    ops::{Add, AddAssign, Range, Sub, SubAssign},
+    ops::{Add, AddAssign, Deref, Range, Sub, SubAssign},
 };
 use thiserror::Error;
 
@@ -75,10 +75,17 @@ impl From<usize> for Location {
     }
 }
 
+impl Deref for Location {
+    type Target = u64;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl From<Location> for u64 {
     #[inline]
     fn from(loc: Location) -> Self {
-        loc.as_u64()
+        *loc
     }
 }
 
@@ -175,7 +182,7 @@ impl TryFrom<Position> for Location {
     /// Panics if `pos` is too large (top 2 bits should be 0).
     #[inline]
     fn try_from(pos: Position) -> Result<Self, Self::Error> {
-        let pos_u64 = pos.as_u64();
+        let pos_u64 = *pos;
         if pos_u64 == 0 {
             return Ok(Self(0));
         }
@@ -211,7 +218,7 @@ impl TryFrom<Position> for Location {
 
 /// Error returned when attempting to interpret a non-leaf position as a [Location].
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
-#[error("Position({}) is not a leaf", pos.as_u64())]
+#[error("Position({}) is not a leaf", *pos)]
 pub struct NonLeafPositionError {
     pos: Position,
 }
@@ -233,7 +240,7 @@ pub trait LocationRangeExt {
 impl LocationRangeExt for Range<Location> {
     #[inline]
     fn to_usize_range(&self) -> Range<usize> {
-        self.start.as_u64() as usize..self.end.as_u64() as usize
+        *self.start as usize..*self.end as usize
     }
 }
 

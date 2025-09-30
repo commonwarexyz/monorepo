@@ -63,7 +63,7 @@ pub fn digests_required_for_proof<D: Digest>(
     end_loc: Location,
 ) -> Vec<Position> {
     let size = Position::from(Location::new(op_count));
-    proof::nodes_required_for_range_proof(size.as_u64(), start_loc..end_loc + 1)
+    proof::nodes_required_for_range_proof(*size, start_loc..end_loc + 1)
 }
 
 /// Create a [Proof] from a op_count and a list of digests.
@@ -72,7 +72,7 @@ pub fn digests_required_for_proof<D: Digest>(
 pub fn create_proof<D: Digest>(op_count: Location, digests: Vec<D>) -> Proof<D> {
     let size = Position::from(op_count);
     Proof::<D> {
-        size: size.as_u64(),
+        size: *size,
         digests,
     }
 }
@@ -366,7 +366,7 @@ mod tests {
                 &mut hasher,
                 &proof,
                 start_loc,
-                &operations[start_loc.as_u64() as usize..=end_loc.as_u64() as usize],
+                &operations[*start_loc as usize..=*end_loc as usize],
                 &root,
             ));
         });
@@ -539,7 +539,7 @@ mod tests {
             // Prepare operations for verification
             let selected_ops: Vec<(Location, u64)> = target_locations
                 .iter()
-                .map(|&loc| (loc, operations[loc.as_u64() as usize]))
+                .map(|&loc| (loc, operations[*loc as usize]))
                 .collect();
 
             // Verify the multi-proof

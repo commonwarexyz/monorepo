@@ -45,8 +45,8 @@ where
         init_journal(
             context.with_label("log"),
             journal_config,
-            lower_bound.as_u64(),
-            upper_bound.as_u64(),
+            *lower_bound,
+            *upper_bound,
         )
         .await
     }
@@ -141,7 +141,7 @@ where
             Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Just prune to the lower bound
-            journal.prune(lower_bound.as_u64()).await?;
+            journal.prune(*lower_bound).await?;
             Ok(journal)
         }
     }
@@ -663,7 +663,7 @@ mod tests {
             assert_eq!(sync_db.root(&mut hasher), root);
 
             // Verify that the operations in the overlapping range are present and correct
-            for i in lower_bound.as_u64()..original_db_op_count {
+            for i in *lower_bound..original_db_op_count {
                 let expected_op = target_db.read().await.log.read(i).await.unwrap();
                 let synced_op = sync_db.log.read(i).await.unwrap();
                 assert_eq!(expected_op, synced_op);
@@ -1222,12 +1222,12 @@ mod tests {
             }
 
             // Verify the expected operations are present in the synced database.
-            for i in synced_db.inactivity_floor_loc.as_u64()..synced_db.op_count() {
+            for i in *synced_db.inactivity_floor_loc..synced_db.op_count() {
                 let got = synced_db.log.read(i).await.unwrap();
                 let expected = target_db.log.read(i).await.unwrap();
                 assert_eq!(got, expected);
             }
-            for i in synced_db.mmr.oldest_retained_pos().unwrap().as_u64()..synced_db.mmr.size() {
+            for i in *synced_db.mmr.oldest_retained_pos().unwrap()..synced_db.mmr.size() {
                 let i = Position::new(i);
                 let got = synced_db.mmr.get_node(i).await.unwrap();
                 let expected = target_db.mmr.get_node(i).await.unwrap();
@@ -1438,14 +1438,14 @@ mod tests {
                     write_buffer: NZUsize!(64),
                     buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 },
-                lower_bound.as_u64(),
-                upper_bound.as_u64(),
+                *lower_bound,
+                *upper_bound,
             )
             .await
             .unwrap();
 
             // Populate log with operations from source db
-            for i in lower_bound.as_u64()..=upper_bound.as_u64() {
+            for i in *lower_bound..=*upper_bound {
                 let op = source_db.log.read(i).await.unwrap();
                 log.append(op).await.unwrap();
             }

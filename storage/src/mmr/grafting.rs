@@ -143,7 +143,7 @@ pub struct HasherFork<'a, H: CHasher> {
 /// find the node in the peak tree we are looking for, we return the position of the corresponding
 /// node reached in the base tree.
 fn destination_pos(peak_node_pos: Position, height: u32) -> Position {
-    let peak_node_pos = peak_node_pos.as_u64();
+    let peak_node_pos = *peak_node_pos;
     let leading_zeros = (peak_node_pos + 1).leading_zeros();
     assert!(leading_zeros >= height, "destination_pos > u64::MAX");
     let mut peak_pos = u64::MAX >> leading_zeros;
@@ -251,7 +251,7 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
         let dest_pos = self.destination_pos(Position::new(size));
-        self.hasher.root(dest_pos.as_u64(), peak_digests)
+        self.hasher.root(*dest_pos, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -302,7 +302,7 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
         let dest_pos = destination_pos(Position::new(size), self.height);
-        self.hasher.root(dest_pos.as_u64(), peak_digests)
+        self.hasher.root(*dest_pos, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -400,7 +400,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
             return digest;
         }
         self.hasher
-            .update_with_element(self.elements[index.as_u64() as usize]);
+            .update_with_element(self.elements[*index as usize]);
         self.hasher.update_with_digest(&digest);
 
         self.hasher.finalize()

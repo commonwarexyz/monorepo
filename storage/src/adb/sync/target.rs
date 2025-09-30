@@ -20,8 +20,8 @@ pub struct Target<D: Digest> {
 impl<D: Digest> Write for Target<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
-        self.lower_bound.as_u64().write(buf);
-        self.upper_bound.as_u64().write(buf);
+        (*self.lower_bound).write(buf);
+        (*self.upper_bound).write(buf);
     }
 }
 

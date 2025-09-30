@@ -165,7 +165,7 @@ impl Write for GetOperationsRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
         self.size.write(buf);
-        self.start_loc.as_u64().write(buf);
+        self.start_loc.write(buf);
         self.max_ops.get().write(buf);
     }
 }
@@ -174,7 +174,7 @@ impl EncodeSize for GetOperationsRequest {
     fn encode_size(&self) -> usize {
         self.request_id.encode_size()
             + self.size.encode_size()
-            + self.start_loc.as_u64().encode_size()
+            + self.start_loc.encode_size()
             + self.max_ops.get().encode_size()
     }
 }
@@ -199,7 +199,7 @@ impl Read for GetOperationsRequest {
 
 impl GetOperationsRequest {
     pub fn validate(&self) -> Result<(), crate::Error> {
-        if self.start_loc.as_u64() >= self.size {
+        if self.start_loc >= self.size {
             return Err(crate::Error::InvalidRequest(format!(
                 "start_loc >= size ({}) >= ({})",
                 self.start_loc, self.size

@@ -89,7 +89,7 @@ impl From<usize> for Position {
 impl From<Position> for u64 {
     #[inline]
     fn from(position: Position) -> Self {
-        position.as_u64()
+        *position
     }
 }
 
@@ -102,7 +102,7 @@ impl From<Location> for Position {
     #[inline]
     fn from(loc: Location) -> Self {
         // This will never underflow since 2*n >= count_ones(n).
-        let loc = loc.as_u64();
+        let loc = *loc;
         Self(loc.checked_mul(2).expect("leaf_loc overflow") - loc.count_ones() as u64)
     }
 }

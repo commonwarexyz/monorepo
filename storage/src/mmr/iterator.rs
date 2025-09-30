@@ -256,7 +256,7 @@ impl Iterator for PathIterator {
 /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
 /// whose size is less than the pruning boundary.
 pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position> {
-    PeakIterator::new(PeakIterator::to_nearest_size(start_pos.as_u64())).map(|(pos, _)| pos)
+    PeakIterator::new(PeakIterator::to_nearest_size(*start_pos)).map(|(pos, _)| pos)
 }
 
 #[cfg(test)]
@@ -283,10 +283,10 @@ mod tests {
             assert_eq!(leaf_loc_got, Location::new(leaf_loc_expected as u64));
             let leaf_pos_got = Position::from(leaf_loc_got);
             assert_eq!(leaf_pos_got, *leaf_pos);
-            for i in last_leaf_pos + 1..leaf_pos.as_u64() {
+            for i in last_leaf_pos + 1..**leaf_pos {
                 assert!(Location::try_from(Position::new(i)).is_err());
             }
-            last_leaf_pos = leaf_pos.as_u64();
+            last_leaf_pos = **leaf_pos;
         }
     }
 

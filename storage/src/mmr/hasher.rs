@@ -44,7 +44,7 @@ impl<H: CHasher> Standard<H> {
     }
 
     pub fn update_with_pos(&mut self, pos: Position) {
-        self.hasher.update(&pos.as_u64().to_be_bytes());
+        self.hasher.update(&(*pos).to_be_bytes());
     }
 
     pub fn update_with_digest(&mut self, digest: &H::Digest) {
