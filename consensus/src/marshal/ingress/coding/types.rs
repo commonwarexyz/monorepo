@@ -245,12 +245,12 @@ impl<B: Block<Commitment = CodingCommitment>, S: Scheme> CodedBlock<B, S> {
 
     /// Create a new [CodedBlock] from a [Block] and a configuration.
     pub fn new(inner: B, config: CodingConfig) -> Self {
-        let (commitment, chunks) = Self::encode(&inner, config);
+        let (commitment, shards) = Self::encode(&inner, config);
         Self {
             inner,
             config,
             commitment,
-            shards: chunks,
+            shards,
         }
     }
 
