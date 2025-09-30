@@ -182,13 +182,11 @@ impl TryFrom<Position> for Location {
     /// Panics if `pos` is too large (top 2 bits should be 0).
     #[inline]
     fn try_from(pos: Position) -> Result<Self, Self::Error> {
-        let pos_u64 = *pos;
-        if pos_u64 == 0 {
+        if *pos == 0 {
             return Ok(Self(0));
         }
 
-        let start =
-            u64::MAX >> (pos_u64.checked_add(1).expect("leaf pos overflow")).leading_zeros();
+        let start = u64::MAX >> (*pos.checked_add(1).expect("leaf pos overflow")).leading_zeros();
         let height = start.trailing_ones();
         assert!(height > 1, "leaf pos overflow");
         let mut two_h = 1 << (height - 1);
@@ -196,12 +194,12 @@ impl TryFrom<Position> for Location {
         let mut leaf_loc_floor = 0u64;
 
         while two_h > 1 {
-            if cur_node == pos_u64 {
+            if cur_node == *pos {
                 return Err(NonLeafPositionError { pos });
             }
             let left_pos = cur_node - two_h;
             two_h >>= 1;
-            if pos_u64 > left_pos {
+            if *pos > left_pos {
                 // The leaf is in the right subtree, so we must account for the leaves in the left
                 // subtree all of which precede it.
                 leaf_loc_floor += two_h;
