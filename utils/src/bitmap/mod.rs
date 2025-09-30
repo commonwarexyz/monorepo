@@ -657,7 +657,7 @@ impl<const N: usize> Write for BitMap<N> {
 }
 
 impl<const N: usize> Read for BitMap<N> {
-    type Cfg = u64; // Max bitmap lenth
+    type Cfg = u64; // Max bitmap length
 
     fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
         // Parse length in bits
