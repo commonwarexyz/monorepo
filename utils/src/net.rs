@@ -8,13 +8,19 @@ pub struct Subnet {
     addr: IpAddr,
 }
 
+#[inline]
+fn mask_ipv4_subnet(ip: Ipv4Addr) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::from(u32::from(ip) & 0xFFFFFF00))
+}
+
 /// Extension trait providing subnet helpers for [`IpAddr`].
 pub trait IpAddrExt {
     /// Return the canonical subnet representative for this IP address.
     ///
-    /// IPv4 addresses are truncated to the first 24 bits, while IPv6 addresses are truncated to the
-    /// upper 64 bits. This mirrors the network's default assumptions and matches common ISP subnet
-    /// sizes, allowing rate-limiting to operate on broader network groupings.
+    /// IPv4 addresses are truncated to the first 24 bits. Native IPv6 addresses are truncated to the
+    /// upper 64 bits, while IPv4-mapped IPv6 addresses follow the IPv4 truncation rules. This mirrors
+    /// the network's default assumptions and matches common ISP subnet sizes, allowing rate-limiting
+    /// to operate on broader network groupings.
     fn subnet(&self) -> Subnet;
 
     /// Determine if this IP address is globally routable.
@@ -28,9 +34,15 @@ impl IpAddrExt for IpAddr {
     fn subnet(&self) -> Subnet {
         match self {
             IpAddr::V4(v4) => Subnet {
-                addr: IpAddr::V4(Ipv4Addr::from(u32::from(*v4) & 0xFFFFFF00)),
+                addr: mask_ipv4_subnet(*v4),
             },
             IpAddr::V6(v6) => {
+                if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                    return Subnet {
+                        addr: mask_ipv4_subnet(mapped_v4),
+                    };
+                }
+
                 let masked = u128::from(*v6) & !((1u128 << 64) - 1);
                 Subnet {
                     addr: IpAddr::V6(Ipv6Addr::from(masked)),
@@ -151,6 +163,12 @@ mod tests {
             ip.subnet().addr,
             IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0))
         );
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_subnet_uses_ipv4_truncation() {
+        let ip = IpAddr::from_str("::ffff:192.168.1.123").unwrap();
+        assert_eq!(ip.subnet().addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0)));
     }
 
     #[test]
