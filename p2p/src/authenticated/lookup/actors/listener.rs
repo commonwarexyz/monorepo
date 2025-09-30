@@ -5,9 +5,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{
-    Clock, Handle, Listener, Metrics, Network, RwLock, SinkOf, Spawner, StreamOf,
-};
+use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{IpAddrExt, Limiter, Reservation, Subnet};
 use governor::{
@@ -17,11 +15,9 @@ use governor::{
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
-    collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
     sync::Arc,
-    time::Duration,
 };
 use tracing::debug;
 
@@ -32,7 +28,6 @@ pub struct Config<C: Signer> {
     pub max_concurrent_handshakes: NonZeroU32,
     pub allowed_handshake_rate_per_ip: Quota,
     pub allowed_handshake_rate_per_subnet: Quota,
-    pub allowed_handshake_rate_per_peer: Quota,
 }
 
 pub struct Actor<
@@ -48,15 +43,9 @@ pub struct Actor<
         Arc<RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>>,
     subnet_rate_limiter:
         Arc<RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>>,
-    peer_rate_limiter: Arc<
-        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    >,
-    prioritized_ips: Arc<RwLock<HashMap<IpAddr, HashSet<C::PublicKey>>>>,
-
     handshakes_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
     handshakes_subnet_rate_limited: Counter,
-    handshakes_peer_rate_limited: Counter,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
@@ -75,12 +64,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             "handshake_ip_rate_limited",
             "number of handshake attempts dropped because an IP exceeded its rate limit",
             handshakes_ip_rate_limited.clone(),
-        );
-        let handshakes_peer_rate_limited = Counter::default();
-        context.register(
-            "handshake_peer_rate_limited",
-            "number of handshake attempts dropped because a peer exceeded its rate limit",
-            handshakes_peer_rate_limited.clone(),
         );
         let handshakes_subnet_rate_limited = Counter::default();
         context.register(
@@ -103,16 +86,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 cfg.allowed_handshake_rate_per_subnet,
                 &context,
             )),
-            peer_rate_limiter: Arc::new(RateLimiter::hashmap_with_clock(
-                cfg.allowed_handshake_rate_per_peer,
-                &context,
-            )),
-            prioritized_ips: Arc::new(RwLock::new(HashMap::new())),
-
             handshakes_rate_limited,
             handshakes_ip_rate_limited,
             handshakes_subnet_rate_limited,
-            handshakes_peer_rate_limited,
         }
     }
 
@@ -125,16 +101,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream: StreamOf<E>,
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
-        peer_rate_limiter: Arc<
-            RateLimiter<
-                C::PublicKey,
-                HashMapStateStore<C::PublicKey>,
-                E,
-                NoOpMiddleware<E::Instant>,
-            >,
-        >,
-        prioritized_ips: Arc<RwLock<HashMap<IpAddr, HashSet<C::PublicKey>>>>,
-        handshakes_peer_rate_limited: Counter,
         _reservation: Reservation,
     ) {
         // Perform handshake
@@ -155,23 +121,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         };
         debug!(?peer, ?address, "completed handshake");
 
-        if peer_rate_limiter.check_key(&peer).is_err() {
-            handshakes_peer_rate_limited.inc();
-            debug!(?peer, ?address, "peer exceeded handshake rate limit");
-            return;
-        }
-
         // Attempt to claim the connection
         let Some(reservation) = tracker.listen(peer.clone()).await else {
             debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
         };
         debug!(?peer, ?address, "reserved connection");
-
-        {
-            let mut guard = prioritized_ips.write().await;
-            guard.entry(address.ip()).or_default().insert(peer.clone());
-        }
 
         // Start peer to handle messages
         supervisor.spawn((send, recv), reservation).await;
@@ -202,7 +157,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             .expect("failed to bind listener");
 
         // Loop over incoming connections
-        'accept: loop {
+        loop {
             // Accept a new connection
             let (address, sink, stream) = match listener.accept().await {
                 Ok((address, sink, stream)) => (address, sink, stream),
@@ -213,40 +168,24 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             };
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
-            let prioritized_ip = {
-                let guard = self.prioritized_ips.read().await;
-                guard.get(&address.ip()).is_some_and(|set| !set.is_empty())
-            };
-
             let subnet = address.ip().subnet_of();
 
             if self.ip_rate_limiter.check_key(&address.ip()).is_err() {
                 self.handshakes_ip_rate_limited.inc();
                 debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
-                self.prioritized_ips.write().await.remove(&address.ip());
                 continue;
             }
 
             if self.subnet_rate_limiter.check_key(&subnet).is_err() {
                 self.handshakes_subnet_rate_limited.inc();
                 debug!(ip = ?address.ip(), subnet = ?subnet, "subnet exceeded handshake rate limit");
-                self.prioritized_ips.write().await.remove(&address.ip());
                 continue;
             }
 
-            let reservation = loop {
-                match self.in_flight_handshakes.try_acquire() {
-                    Some(reservation) => break reservation,
-                    None if prioritized_ip => {
-                        self.context.sleep(Duration::from_millis(1)).await;
-                    }
-                    None => {
-                        self.handshakes_rate_limited.inc();
-                        debug!(?address, "maximum concurrent handshakes reached");
-                        self.prioritized_ips.write().await.remove(&address.ip());
-                        continue 'accept;
-                    }
-                }
+            let Some(reservation) = self.in_flight_handshakes.try_acquire() else {
+                self.handshakes_rate_limited.inc();
+                debug!(?address, "maximum concurrent handshakes reached");
+                continue;
             };
 
             // Spawn a new handshaker to upgrade connection
@@ -254,9 +193,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 let stream_cfg = self.stream_cfg.clone();
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();
-                let peer_rate_limiter = self.peer_rate_limiter.clone();
-                let prioritized_ips = self.prioritized_ips.clone();
-                let handshakes_peer_rate_limited = self.handshakes_peer_rate_limited.clone();
                 let reservation = reservation;
                 move |context| {
                     Self::handshake(
@@ -267,9 +203,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                         stream,
                         tracker,
                         supervisor,
-                        peer_rate_limiter,
-                        prioritized_ips,
-                        handshakes_peer_rate_limited,
                         reservation,
                     )
                 }
@@ -313,7 +246,6 @@ mod tests {
                     allowed_handshake_rate_per_subnet: Quota::per_hour(
                         NonZeroU32::new(64).unwrap(),
                     ),
-                    allowed_handshake_rate_per_peer: Quota::per_hour(NonZeroU32::new(16).unwrap()),
                 },
             );
 
