@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 34aab9f3276e3c85ac9cea9077e6f70149c528c0e8014202589d4c329df11edb # shrinks to p = PolynomialVector { data: Matrix { rows: 1, cols: 7, data: [F(0), F(0), F(1837643631774434), F(16537078335473711122), F(6106054549258277074), F(16315395533364748366), F(16539072960002206888)] } }
+cc 3a70531a76a2ac0efe00f2074fbd634cf82f2c372162c97cbcad6dd6f48114c0 # shrinks to p = PolynomialVector { data: Matrix { rows: 1, cols: 2, data: [F(0), F(1)] } }
+cc 4c92f7abe136e87509f8067c5baaa441c22b4370998cf97a05f4846bac34e4ee # shrinks to p = PolynomialVector { data: Matrix { rows: 2, cols: 1, data: [F(0), F(1)] } }
