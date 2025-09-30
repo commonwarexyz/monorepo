@@ -146,7 +146,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     #[allow(clippy::type_complexity)]
     async fn run(
-        mut self,
+        self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
