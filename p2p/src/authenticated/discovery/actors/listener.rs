@@ -30,6 +30,8 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
+const CLEANUP_INTERVAL: u32 = 512;
+
 pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
     C: Signer,
@@ -46,6 +48,7 @@ pub struct Actor<
     handshakes_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
     handshakes_subnet_rate_limited: Counter,
+    cleanup_counter: u32,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
@@ -89,6 +92,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             handshakes_rate_limited,
             handshakes_ip_rate_limited,
             handshakes_subnet_rate_limited,
+            cleanup_counter: 0,
         }
     }
 
@@ -133,7 +137,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     #[allow(clippy::type_complexity)]
     pub fn start(
-        self,
+        mut self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
@@ -188,6 +192,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 debug!(?address, "maximum concurrent handshakes reached");
                 continue;
             };
+
+            self.cleanup_counter = self.cleanup_counter.wrapping_add(1);
+            if self.cleanup_counter % CLEANUP_INTERVAL == 0 {
+                self.ip_rate_limiter.shrink_to_fit();
+                self.subnet_rate_limiter.shrink_to_fit();
+            }
 
             // Spawn a new handshaker to upgrade connection
             self.context.with_label("handshaker").spawn({
