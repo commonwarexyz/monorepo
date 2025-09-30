@@ -107,6 +107,11 @@ impl From<Location> for Position {
     }
 }
 
+/// Add two positions together.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl Add for Position {
     type Output = Self;
 
@@ -116,6 +121,11 @@ impl Add for Position {
     }
 }
 
+/// Add a position and a `u64`.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl Add<u64> for Position {
     type Output = Self;
 
@@ -125,6 +135,11 @@ impl Add<u64> for Position {
     }
 }
 
+/// Subtract two positions.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl Sub for Position {
     type Output = Self;
 
@@ -134,6 +149,11 @@ impl Sub for Position {
     }
 }
 
+/// Subtract a `u64` from a position.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl Sub<u64> for Position {
     type Output = Self;
 
@@ -172,6 +192,11 @@ impl PartialOrd<Position> for u64 {
     }
 }
 
+/// Add a `u64` to a position.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl AddAssign<u64> for Position {
     #[inline]
     fn add_assign(&mut self, rhs: u64) {
@@ -179,6 +204,11 @@ impl AddAssign<u64> for Position {
     }
 }
 
+/// Subtract a `u64` from a position.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl SubAssign<u64> for Position {
     #[inline]
     fn sub_assign(&mut self, rhs: u64) {

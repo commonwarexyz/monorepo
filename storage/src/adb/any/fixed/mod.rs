@@ -538,7 +538,7 @@ impl<
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         let op_count = Location::new(op_count);
-        let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops.get()).unwrap());
+        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
 
         let mmr_size = Position::from(op_count).as_u64();
         let proof = self
