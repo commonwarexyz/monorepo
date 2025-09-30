@@ -56,6 +56,11 @@ where
 
     /// Open subscriptions for [CodedBlock]s by commitment
     block_subscriptions: BTreeMap<CodingCommitment, BlockSubscription<CodedBlock<B, S>>>,
+
+    /// A temporary in-memory cache of reconstructed blocks by commitment.
+    ///
+    /// These blocks are evicted by marshal after they are delivered to the application.
+    reconstructed_blocks: BTreeMap<CodingCommitment, CodedBlock<B, S>>,
 }
 
 impl<S, H, B, P> ShardMailbox<S, H, B, P>
@@ -70,6 +75,7 @@ where
             mailbox,
             block_codec_cfg,
             block_subscriptions: BTreeMap::new(),
+            reconstructed_blocks: BTreeMap::new(),
         }
     }
 
@@ -143,6 +149,16 @@ where
         &mut self,
         commitment: CodingCommitment,
     ) -> Result<Option<CodedBlock<B, S>>, ReconstructionError<S>> {
+        if let Some(block) = self.reconstructed_blocks.get(&commitment) {
+            // Notify any subscribers that have been waiting for this block to be reconstructed
+            if let Some(mut sub) = self.block_subscriptions.remove(&commitment) {
+                for sub in sub.subscribers.drain(..) {
+                    let _ = sub.send(block.clone());
+                }
+            }
+            return Ok(Some(block.clone()));
+        }
+
         let shards = self.mailbox.get(None, commitment, None).await;
         let config = commitment.config();
 
@@ -220,6 +236,8 @@ where
             "Successfully reconstructed block from shards"
         );
 
+        self.reconstructed_blocks.insert(commitment, block.clone());
+
         // Notify any subscribers that have been waiting for this block to be reconstructed
         if let Some(mut sub) = self.block_subscriptions.remove(&commitment) {
             for sub in sub.subscribers.drain(..) {
@@ -273,6 +291,12 @@ where
         commitment: CodingCommitment,
         responder: oneshot::Sender<CodedBlock<B, S>>,
     ) -> Result<(), ReconstructionError<S>> {
+        if let Some(block) = self.reconstructed_blocks.get(&commitment) {
+            // If we already have the block reconstructed, send it immediately.
+            let _ = responder.send(block.clone());
+            return Ok(());
+        }
+
         match self.block_subscriptions.entry(commitment) {
             Entry::Vacant(entry) => {
                 entry.insert(BlockSubscription {
@@ -288,6 +312,11 @@ where
         self.try_reconstruct(commitment).await?;
 
         Ok(())
+    }
+
+    /// Evicts a reconstructed block from the local cache, if it is present.
+    pub fn evict_block(&mut self, commitment: &CodingCommitment) {
+        self.reconstructed_blocks.remove(commitment);
     }
 }
 

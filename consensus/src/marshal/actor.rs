@@ -524,6 +524,7 @@ where
 
                                 // Prune archives
                                 self.cache.prune(prune_round).await;
+                                shards.evict_block(&commitment);
 
                                 // Update the last processed round
                                 let round = finalization.round();
