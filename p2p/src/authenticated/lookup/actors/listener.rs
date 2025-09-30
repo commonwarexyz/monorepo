@@ -177,7 +177,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             }
             accepted += 1;
 
-            // Drop the connection if the IP exceeds its rate limit
+            // Check whether the IP (and subnet) exceeds its rate limit
             let ip = address.ip();
             let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
                 self.handshakes_ip_rate_limited.inc();
