@@ -157,7 +157,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             .expect("failed to bind listener");
 
         // Loop over incoming connections
-        let mut limited = 0;
+        let mut accepted = 0;
         loop {
             // Accept a new connection
             let (address, sink, stream) = match listener.accept().await {
@@ -170,23 +170,31 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             debug!(?address, "accepted incoming connection");
 
             // Cleanup the rate limiters periodically
-            if limited > CLEANUP_INTERVAL {
+            if accepted > CLEANUP_INTERVAL {
                 self.ip_rate_limiter.shrink_to_fit();
                 self.subnet_rate_limiter.shrink_to_fit();
-                limited = 0;
+                accepted = 0;
             }
+            accepted += 1;
 
             // Drop the connection if the IP exceeds its rate limit
             let ip = address.ip();
-            if self.ip_rate_limiter.check_key(&ip).is_err() {
+            let ip_permitted = if self.ip_rate_limiter.check_key(&ip).is_err() {
                 self.handshakes_ip_rate_limited.inc();
                 debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
-                continue;
-            }
+                false
+            } else {
+                true
+            };
             let subnet = ip.subnet();
-            if self.subnet_rate_limiter.check_key(&subnet).is_err() {
+            let subnet_permitted = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
                 self.handshakes_subnet_rate_limited.inc();
                 debug!(ip = ?address.ip(), "subnet exceeded handshake rate limit");
+                false
+            } else {
+                true
+            };
+            if ip_permitted && subnet_permitted {
                 continue;
             }
 
