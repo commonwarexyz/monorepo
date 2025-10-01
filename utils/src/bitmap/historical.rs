@@ -540,7 +540,10 @@ impl<const N: usize> Historical<N> {
         // Record appended chunks as Added (if they didn't exist before)
         // or Modified (if they partially existed and we're extending them)
         if !batch.appended_bits.is_empty() {
-            let start_chunk = Prunable::<N>::raw_chunk_index(batch.base_len);
+            // Appended bits start at: projected_len - appended_bits.len()
+            // (accounts for net pops that happened before the pushes)
+            let append_start_bit = batch.projected_len - batch.appended_bits.len() as u64;
+            let start_chunk = Prunable::<N>::raw_chunk_index(append_start_bit);
             let end_chunk = Prunable::<N>::raw_chunk_index(batch.projected_len.saturating_sub(1));
             for chunk_idx in start_chunk..=end_chunk {
                 // Only mark as Added/Modified if not already recorded (don't overwrite existing entries)
@@ -1842,10 +1845,9 @@ mod tests {
     // historical states produces bit-for-bit identical results to the saved states.
     fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
         // Test configuration
-        const NUM_COMMITS: u64 = 10;
-        const OPERATIONS_PER_COMMIT: usize = 5;
+        const NUM_COMMITS: u64 = 20;
+        const OPERATIONS_PER_COMMIT: usize = 32;
         const CHUNK_SIZE_BITS: u64 = 32; // 4 bytes * 8 bits
-        const MIN_BITS_FOR_PRUNING: u64 = 64; // Need at least 2 chunks to prune one
 
         // Operation probability thresholds (out of 100)
         // These define a probability distribution over different operations
@@ -1859,7 +1861,7 @@ mod tests {
         let mut checkpoints: Vec<(u64, Prunable<4>)> = Vec::new();
 
         // Perform random operations across multiple commits
-        for commit_num in 1..=NUM_COMMITS {
+        for commit_num in 0..NUM_COMMITS {
             let initial_len = ground_truth.len();
             let initial_pruned = ground_truth.pruned_chunks();
 
@@ -1882,7 +1884,7 @@ mod tests {
                             continue;
                         }
 
-                        // Operation: PUSH (40% probability)
+                        // Operation: PUSH (55% probability)
                         if op_choice < PROB_PUSH {
                             let bit_value = rng.gen_bool(0.5);
                             batch.push(bit_value);
@@ -1907,13 +1909,22 @@ mod tests {
                             ground_truth.pop();
                             current_len -= 1;
                         }
-                        // Operation: PRUNE first chunk (10% probability, if conditions met)
+                        // Operation: PRUNE to random chunk boundary (10% probability)
                         else if op_choice < PROB_PRUNE {
-                            // Safety: Only prune if we haven't pruned yet and have enough bits
-                            if current_len >= MIN_BITS_FOR_PRUNING && current_pruned == 0 {
-                                batch.prune_to_bit(CHUNK_SIZE_BITS);
-                                ground_truth.prune_to_bit(CHUNK_SIZE_BITS);
-                                current_pruned = 1;
+                            // Calculate the maximum chunk we can prune to (keep at least 1 chunk of data)
+                            let total_chunks = (current_len / CHUNK_SIZE_BITS) as usize;
+                            let max_prune_chunk = total_chunks.saturating_sub(1);
+
+                            // Only prune if there's at least one unpruned complete chunk we can prune
+                            if max_prune_chunk > current_pruned {
+                                // Randomly pick a chunk boundary to prune to (between current_pruned+1 and max)
+                                let prune_chunk =
+                                    rng.gen_range((current_pruned + 1)..=max_prune_chunk);
+                                let prune_to = (prune_chunk as u64) * CHUNK_SIZE_BITS;
+
+                                batch.prune_to_bit(prune_to);
+                                ground_truth.prune_to_bit(prune_to);
+                                current_pruned = prune_chunk;
                             }
                         }
                     }
@@ -1931,14 +1942,12 @@ mod tests {
             assert_eq!(
                 reconstructed.len(),
                 checkpoint.len(),
-                "Length mismatch at commit {}",
-                commit_num
+                "Length mismatch at commit {commit_num}"
             );
             assert_eq!(
                 reconstructed.pruned_chunks(),
                 checkpoint.pruned_chunks(),
-                "Pruned chunks mismatch at commit {}",
-                commit_num
+                "Pruned chunks mismatch at commit {commit_num}"
             );
 
             // Verify all accessible bits
@@ -1948,8 +1957,7 @@ mod tests {
                 let actual = reconstructed.get_bit(i);
                 assert_eq!(
                     actual, expected,
-                    "Bit {} mismatch at commit {} (expected {}, got {})",
-                    i, commit_num, expected, actual
+                    "Bit {i} mismatch at commit {commit_num} (expected {expected}, got {actual})"
                 );
             }
         }
