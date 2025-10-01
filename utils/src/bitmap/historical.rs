@@ -136,23 +136,59 @@ struct CommitDiff<const N: usize> {
 /// A batch records changes without modifying the underlying bitmap. When committed,
 /// these changes are applied atomically. If dropped without committing, all changes
 /// are discarded.
+///
+/// # De-duplication and Cancellation
+///
+/// **The batch de-duplicates during operations, not at commit time.**
+///
+/// Operations that cancel out are handled automatically:
+///
+/// ```text
+/// Example 1: push + pop = no-op
+///   push(true)  → appended_bits=[true], projected_len=11
+///   pop()       → appended_bits=[], projected_len=10
+///   Result: batch state unchanged from base!
+///
+/// Example 2: set_bit + set_bit = last write wins
+///   set_bit(5, true)   → modified_bits={5: true}
+///   set_bit(5, false)  → modified_bits={5: false}
+///   Result: only final value recorded
+///
+/// Example 3: set_bit + pop = cancels modification
+///   set_bit(9, true)  → modified_bits={9: true}
+///   pop()             → modified_bits={} (removed), projected_len=9
+///   Result: bit 9 no longer exists, modification discarded
+/// ```
+///
+/// The capture functions see only the **final delta**, not intermediate operations.
+///
+/// # Key Invariants
+///
+/// 1. **Base immutability**: `base_len` and `base_pruned_chunks` never change after batch creation
+/// 2. **Appended region**: Always occupies `[projected_len - appended_bits.len(), projected_len)`
+/// 3. **Modified region**: `modified_bits` only contains offsets in `[0, projected_len - appended_bits.len())`
+///    - These are modifications to the base bitmap, never to appended bits
+///    - Appended bits are modified by directly updating the `appended_bits` vector
+/// 4. **No overlap**: A bit is either in `modified_bits` OR `appended_bits`, never both
 struct Batch<const N: usize> {
-    /// Bitmap state when batch started.
+    /// Bitmap state when batch started (immutable).
     base_len: u64,
     base_pruned_chunks: usize,
 
-    /// What the bitmap will look like after commit.
+    /// What the bitmap will look like after commit (mutable).
     projected_len: u64,
     projected_pruned_chunks: usize,
 
-    /// Modifications to bits that existed at batch creation (bit_offset -> new_value).
+    /// Modifications to bits in the base region [0, base_len).
+    /// Maps: bit_offset -> new_value
     modified_bits: HashMap<u64, bool>,
 
-    /// New bits pushed after base_len (in order).
+    /// New bits pushed beyond the base region (in order).
+    /// Logical position: [projected_len - len(), projected_len)
     appended_bits: Vec<bool>,
 
-    /// Old chunk data for chunks being pruned (chunk_index -> old_data).
-    /// Captured for historical reconstruction.
+    /// Old chunk data for chunks being pruned.
+    /// Captured eagerly during `prune_to_bit()` for historical reconstruction.
     chunks_to_prune: HashMap<usize, [u8; N]>,
 }
 
@@ -503,27 +539,50 @@ impl<const N: usize> Historical<N> {
 
     /// Apply a batch's changes to the current bitmap.
     ///
-    /// Order matters: we apply length changes (pop/push), then modifications, then pruning.
+    /// # Order of Operations
+    ///
+    /// The order is chosen for correctness and clarity:
+    ///
+    /// 1. **Pop to target length**: Remove bits that were popped in the batch
+    ///    - Must happen BEFORE appends to establish the correct base length
+    ///    - Example: bitmap has 10 bits, batch pops 3 then pushes 2
+    ///      → First shrink to 7, then grow to 9 (not directly from 10 to 9)
+    ///    - After this step: `current.len() == projected_len - appended_bits.len()`
+    ///
+    /// 2. **Apply appends**: Push all bits from `appended_bits`
+    ///    - Grows the bitmap from base length to final length
+    ///    - After this step: `current.len() == projected_len`
+    ///
+    /// 3. **Apply modifications**: Set bits recorded in `modified_bits`
+    ///    - Must happen AFTER step 1 so all offsets in `modified_bits` are valid
+    ///      (after step 1: all offsets < current.len())
+    ///    - Could happen before step 2 (modifications only affect base region, which
+    ///      is already at correct length after step 1), but doing it after is clearer
+    ///    - `modified_bits` never contains appended bit offsets (those are modified
+    ///      directly in `appended_bits` vector via `set_bit()` during the batch)
+    ///
+    /// 4. **Apply pruning**: Remove chunks from the beginning
+    ///    - Must happen LAST to avoid invalidating bit offsets in steps 2-3
+    ///    - Pruning changes which bits are accessible but doesn't change values
     fn apply_batch_to_current(&mut self, batch: &Batch<N>) {
-        // Step 1: Adjust length to account for net pops/pushes.
-        // If there were net pops, shrink to the length before any appends were done.
+        // Step 1: Shrink to length before appends (handles net pops)
         let target_len_before_appends = batch.projected_len - batch.appended_bits.len() as u64;
 
         while self.current.len() > target_len_before_appends {
             self.current.pop();
         }
 
-        // Step 2: Apply appended bits.
+        // Step 2: Grow by appending new bits
         for &bit in &batch.appended_bits {
             self.current.push(bit);
         }
 
-        // Step 3: Apply modifications to existing bits.
+        // Step 3: Modify existing base bits (not appended bits)
         for (&bit_offset, &value) in &batch.modified_bits {
             self.current.set_bit(bit_offset, value);
         }
 
-        // Step 4: Apply pruning if any chunks were marked for pruning.
+        // Step 4: Prune chunks from the beginning
         if batch.projected_pruned_chunks > batch.base_pruned_chunks {
             let prune_to_bit =
                 batch.projected_pruned_chunks as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
@@ -533,8 +592,91 @@ impl<const N: usize> Historical<N> {
 
     /// Build a reverse diff from a batch before applying it.
     ///
-    /// The reverse diff captures the state before this commit, allowing us to reconstruct
-    /// historical states by "undoing" commits in reverse order.
+    /// # Purpose
+    ///
+    /// A reverse diff describes the state BEFORE this commit. When we later want to
+    /// reconstruct the historical state at this commit, we start with the current state
+    /// and apply reverse diffs backward, "undoing" each subsequent commit.
+    ///
+    /// # What We Capture
+    ///
+    /// We capture old chunk data for any chunks that will change. **Important**: We only
+    /// see the batch's final state, not intermediate operations.
+    ///
+    /// - **Modified chunks**: Chunks with bits in `modified_bits` (final modifications only)
+    /// - **Appended chunks**: Chunks created/extended by final `appended_bits` vector
+    /// - **Popped chunks**: Chunks that will be truncated (comparing `projected_len` vs `base_len`)
+    /// - **Pruned chunks**: Chunks in `chunks_to_prune` map
+    ///
+    /// # How De-duplication Works
+    ///
+    /// Because the batch de-duplicates during operations, we automatically capture the
+    /// minimal diff:
+    ///
+    /// ```text
+    /// Example: What capture sees after: push(A), push(B), pop(), set_bit(5, true)
+    ///
+    /// Batch final state:
+    ///   - appended_bits = [A]  (B was popped)
+    ///   - modified_bits = {5: true}
+    ///   - projected_len = base_len + 1
+    ///
+    /// Captured chunks:
+    ///   - Chunk containing bit 5: Modified (from modified_bits)
+    ///   - Chunk containing bit base_len: Modified or Added (from appended_bits)
+    ///
+    /// NOT captured:
+    ///   - Bit B: never in final state, so no chunk captured for it
+    /// ```
+    ///
+    /// # Capture Order and Precedence
+    ///
+    /// The capture order ensures correct handling when a chunk is affected by multiple operations:
+    ///
+    /// 1. **`capture_modified_chunks` first** (strictest invariants)
+    ///    - Captures chunks modified via explicit `set_bit()` calls
+    ///    - Uses `expect()` because modified bits MUST exist in base bitmap
+    ///    - Has "precedence" because it runs first with `or_insert_with()`
+    ///
+    /// 2. **`capture_appended_chunks` second**
+    ///    - Captures chunks created or extended by `push()` operations
+    ///    - Uses `or_insert_with()` → won't overwrite chunks from step 1
+    ///    - Gracefully handles both existing chunks (→ `Modified`) and new chunks (→ `Added`)
+    ///
+    /// 3. **`capture_popped_chunks` third**
+    ///    - Captures chunks truncated by `pop()` operations
+    ///    - Uses `or_insert_with()` → won't overwrite chunks from steps 1-2
+    ///    - Also uses `expect()` because popped bits MUST have existed
+    ///
+    /// 4. **`capture_pruned_chunks` last** (overwrites)
+    ///    - Captures chunks removed from the beginning via `prune_to_bit()`
+    ///    - Uses `insert()` to OVERWRITE previous entries
+    ///    - Pruned chunks MUST be marked `Pruned`, not `Modified`
+    ///
+    /// # Example: Overlapping Operations
+    ///
+    /// ```text
+    /// Start: len = 35 (chunk 1 has 3 bits: [32, 33, 34])
+    /// Batch:
+    ///   - set_bit(33, true)  → bit 33 goes in modified_bits
+    ///   - push(29)           → bits [35..63] fill chunk 1 and create chunk 2
+    ///
+    /// Chunk 1 is affected by BOTH modified_bits AND appended_bits.
+    ///
+    /// Capture sequence:
+    ///   1. capture_modified_chunks: Captures chunk 1 → Modified(old_chunk_1_data)
+    ///   2. capture_appended_chunks: Tries chunk 1, but already captured → skipped
+    ///   3. capture_appended_chunks: Captures chunk 2 → Added
+    ///
+    /// Result: Chunk 1 is Modified (correct), chunk 2 is Added (correct)
+    /// ```
+    ///
+    /// # Why This Order?
+    ///
+    /// - **Fail-fast on violations**: `capture_modified_chunks` runs first with strict checks
+    /// - **Avoid redundant work**: Once a chunk is captured, later steps skip it
+    /// - **Correct change types**: Each chunk gets the most specific classification
+    /// - **Pruning overrides all**: Pruned chunks must be marked `Pruned` regardless of other changes
     fn build_reverse_diff(&self, batch: &Batch<N>) -> CommitDiff<N> {
         let mut changes = BTreeMap::new();
 
@@ -589,18 +731,21 @@ impl<const N: usize> Historical<N> {
             return;
         }
 
-        // Determine which chunks the appended bits will occupy.
+        // Calculate which chunks will be affected by appends.
         // Note: append_start_bit accounts for any net pops before the pushes.
         let append_start_bit = batch.projected_len - batch.appended_bits.len() as u64;
         let start_chunk = Prunable::<N>::raw_chunk_index(append_start_bit);
         let end_chunk = Prunable::<N>::raw_chunk_index(batch.projected_len.saturating_sub(1));
 
         for chunk_idx in start_chunk..=end_chunk {
-            // Don't overwrite entries from modified_bits (they take precedence).
+            // Use or_insert_with so we don't overwrite chunks already captured
+            // by capture_modified_chunks (which runs first and takes precedence).
             changes.entry(chunk_idx).or_insert_with(|| {
                 if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
+                    // Chunk existed before: store its old data
                     ChunkChange::Modified(old_chunk)
                 } else {
+                    // Chunk is brand new: mark as Added
                     ChunkChange::Added
                 }
             });
@@ -632,11 +777,12 @@ impl<const N: usize> Historical<N> {
         // Capture all chunks between the new and old endpoints.
         for chunk_idx in new_last_chunk..=old_last_chunk {
             changes.entry(chunk_idx).or_insert_with(|| {
-                if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
-                    ChunkChange::Modified(old_chunk)
-                } else {
-                    ChunkChange::Added
-                }
+                // Popped chunks must have existed in the base bitmap at batch creation.
+                // If get_chunk_if_exists returns None, that's an invariant violation.
+                let old_chunk = self
+                    .get_chunk_if_exists(chunk_idx)
+                    .expect("chunk must exist in base bitmap for popped bits");
+                ChunkChange::Modified(old_chunk)
             });
         }
     }
@@ -958,13 +1104,25 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
             use std::collections::hash_map::Entry;
 
             if let Entry::Vacant(e) = batch.chunks_to_prune.entry(chunk_idx) {
-                if chunk_idx >= current_pruned {
-                    let bitmap_idx = chunk_idx - current_pruned;
-                    if bitmap_idx < self.historical.current.chunks_len() {
-                        let chunk_data = *self.historical.current.get_chunk_by_index(bitmap_idx);
-                        e.insert(chunk_data);
-                    }
-                }
+                // Invariant: chunk_idx should always be >= current_pruned because
+                // projected_pruned_chunks starts at base_pruned_chunks (= current_pruned)
+                assert!(
+                    chunk_idx >= current_pruned,
+                    "attempting to prune chunk {chunk_idx} which is already pruned (current pruned_chunks={})",
+                    current_pruned
+                );
+
+                let bitmap_idx = chunk_idx - current_pruned;
+
+                // Invariant: the chunk should exist in current bitmap
+                assert!(
+                    bitmap_idx < self.historical.current.chunks_len(),
+                    "attempting to prune non-existent chunk {chunk_idx} (bitmap_idx={bitmap_idx}, chunks_len={})",
+                    self.historical.current.chunks_len()
+                );
+
+                let chunk_data = *self.historical.current.get_chunk_by_index(bitmap_idx);
+                e.insert(chunk_data);
             }
         }
 
