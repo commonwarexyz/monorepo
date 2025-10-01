@@ -151,7 +151,7 @@ impl<C: Signer> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
             max_concurrent_handshakes: NZU32!(1_024),
-            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 90 concurrent handshakes per IP
+            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 80 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             ping_frequency: Duration::from_secs(5),
             allowed_ping_rate: Quota::per_second(NZU32!(2)),
