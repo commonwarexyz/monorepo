@@ -22,6 +22,11 @@ pub use prunable::Prunable;
 pub const DEFAULT_CHUNK_SIZE: usize = 32;
 
 /// A bitmap that stores data in chunks of N bytes.
+///
+/// # Panics
+///
+/// Operations panic if `bit_offset / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
+/// with N=32, this occurs at bit_offset >= 1,099,511,627,776.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
@@ -445,9 +450,19 @@ impl<const N: usize> BitMap<N> {
     }
 
     /// Convert a bit offset into the index of the chunk it belongs to.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chunk index overflows `usize`.
     #[inline]
     pub(super) fn chunk_index(bit_offset: u64) -> usize {
-        (bit_offset / Self::CHUNK_SIZE_BITS) as usize
+        let chunk_index = bit_offset / Self::CHUNK_SIZE_BITS;
+        assert!(
+            chunk_index <= usize::MAX as u64,
+            "chunk index overflow: {} exceeds usize::MAX",
+            chunk_index
+        );
+        chunk_index as usize
     }
 
     /* Iterator */
