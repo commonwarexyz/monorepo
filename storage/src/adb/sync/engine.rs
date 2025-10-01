@@ -204,7 +204,7 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let target_size = self.target.upper_bound.checked_add(1).unwrap().as_u64();
+        let target_size = self.target.upper_bound.checked_add(1).unwrap();
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
@@ -250,7 +250,7 @@ where
 
             // Calculate batch size for this gap
             let diff = end_loc.checked_sub(start_loc.into()).unwrap();
-            let gap_size = NZU64!(diff.as_u64() + 1);
+            let gap_size = NZU64!(*diff + 1);
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
@@ -344,7 +344,7 @@ where
             // Remove the batch of operations that contains the next operation to apply.
             let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
             // Skip operations that are before the next location.
-            let skip_count = (next_loc - range_start_loc.as_u64()) as usize;
+            let skip_count = (next_loc - *range_start_loc) as usize;
             let operations_count = operations.len() - skip_count;
             let remaining_operations = operations.into_iter().skip(skip_count);
             next_loc += operations_count as u64;
@@ -537,7 +537,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::Proof;
+    use crate::mmr::{Position, Proof};
     use commonware_cryptography::sha256;
     use futures::channel::oneshot;
 
@@ -552,7 +552,7 @@ mod tests {
                 start_loc: Location::new(0),
                 result: Ok(FetchResult {
                     proof: Proof {
-                        size: 0,
+                        size: Position::new(0),
                         digests: vec![],
                     },
                     operations: vec![],

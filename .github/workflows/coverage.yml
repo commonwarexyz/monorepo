@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 90
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Remove examples
@@ -45,11 +45,13 @@ jobs:
       run: |
         sed -i.bak '/fuzz/d' Cargo.toml
     - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@cargo-llvm-cov
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: cargo-llvm-cov@0.6.19
     - name: Generate coverage report
       run: cargo llvm-cov --workspace --lcov --output-path lcov.info -- --include-ignored
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v5
+      uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
       with:
         files: lcov.info
         fail_ci_if_error: true
