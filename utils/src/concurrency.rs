@@ -2,8 +2,8 @@
 
 use core::{
     hash::Hash,
-    num::NonZeroUsize,
-    sync::atomic::{AtomicUsize, Ordering},
+    num::NonZeroU32,
+    sync::atomic::{AtomicU32, Ordering},
 };
 use std::{
     collections::HashSet,
@@ -12,16 +12,16 @@ use std::{
 
 /// Limit the concurrency of some operation without blocking.
 pub struct Limiter {
-    max: usize,
-    current: Arc<AtomicUsize>,
+    max: u32,
+    current: Arc<AtomicU32>,
 }
 
 impl Limiter {
     /// Create a limiter that allows up to `max` concurrent reservations.
-    pub fn new(max: NonZeroUsize) -> Self {
+    pub fn new(max: NonZeroU32) -> Self {
         Self {
             max: max.get(),
-            current: Arc::new(AtomicUsize::new(0)),
+            current: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -40,7 +40,7 @@ impl Limiter {
 
 /// A reservation for a slot in the [Limiter].
 pub struct Reservation {
-    current: Arc<AtomicUsize>,
+    current: Arc<AtomicU32>,
 }
 
 impl Drop for Reservation {
@@ -51,13 +51,13 @@ impl Drop for Reservation {
 
 /// Limit the concurrency of some keyed operation without blocking.
 pub struct KeyedLimiter<K: Eq + Hash + Clone> {
-    max: usize,
+    max: u32,
     current: Arc<Mutex<HashSet<K>>>,
 }
 
 impl<K: Eq + Hash + Clone> KeyedLimiter<K> {
     /// Create a limiter that allows up to `max` concurrent reservations.
-    pub fn new(max: NonZeroUsize) -> Self {
+    pub fn new(max: NonZeroU32) -> Self {
         Self {
             max: max.get(),
             current: Arc::new(Mutex::new(HashSet::new())),
@@ -68,7 +68,7 @@ impl<K: Eq + Hash + Clone> KeyedLimiter<K> {
     /// the key is already reserved.
     pub fn try_acquire(&self, key: K) -> Option<KeyedReservation<K>> {
         let mut current = self.current.lock().unwrap();
-        if current.len() >= self.max {
+        if current.len() >= self.max as usize {
             return None;
         }
         if !current.insert(key.clone()) {
@@ -98,11 +98,11 @@ impl<K: Eq + Hash + Clone> Drop for KeyedReservation<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NZUsize;
+    use crate::NZU32;
 
     #[test]
     fn allows_reservations_up_to_max() {
-        let limiter = Limiter::new(NZUsize!(2));
+        let limiter = Limiter::new(NZU32!(2));
 
         let first = limiter
             .try_acquire()
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn allows_reservations_up_to_max_for_key() {
-        let limiter = KeyedLimiter::new(NZUsize!(2));
+        let limiter = KeyedLimiter::new(NZU32!(2));
 
         let first = limiter
             .try_acquire(0)
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn blocks_conflicting_reservations_for_key() {
-        let limiter = KeyedLimiter::new(NZUsize!(2));
+        let limiter = KeyedLimiter::new(NZU32!(2));
 
         let first = limiter
             .try_acquire(0)

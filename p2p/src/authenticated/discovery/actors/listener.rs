@@ -16,7 +16,7 @@ use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
     net::{IpAddr, SocketAddr},
-    num::NonZeroUsize,
+    num::NonZeroU32,
 };
 use tracing::debug;
 
@@ -27,7 +27,7 @@ const CLEANUP_INTERVAL: u32 = 16_384;
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
-    pub max_concurrent_handshakes: NonZeroUsize,
+    pub max_concurrent_handshakes: NonZeroU32,
     pub allowed_handshake_rate_per_ip: Quota,
     pub allowed_handshake_rate_per_subnet: Quota,
 }
