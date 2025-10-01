@@ -229,6 +229,10 @@ impl<const N: usize> Historical<N> {
     ///
     /// Returns [Error::NonMonotonicCommit] if the commit number is not
     /// greater than the previous commit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a batch is already active.
     pub fn with_batch<F>(&mut self, commit_number: u64, f: F) -> Result<(), Error>
     where
         F: FnOnce(&mut BatchGuard<'_, N>),
@@ -347,10 +351,13 @@ impl<const N: usize> Historical<N> {
                     return *old_data;
                 }
                 ChunkChange::Added => {
-                    // This chunk was added, so it didn't exist in the old state
-                    // This shouldn't happen if our logic is correct since we're only
-                    // reconstructing chunks up to target_len
-                    return [0u8; N];
+                    // This is a logic bug: we're reconstructing chunks up to target_len
+                    // (the length before the commit), so we shouldn't be asking for
+                    // chunks that were added in this commit.
+                    panic!(
+                        "attempted to reconstruct chunk {chunk_idx} marked as Added at target_len {}",
+                        diff.metadata.len
+                    );
                 }
                 ChunkChange::Pruned(old_data) => {
                     // This chunk was pruned, use the captured old data
@@ -364,18 +371,22 @@ impl<const N: usize> Historical<N> {
         let raw_chunk_idx = chunk_idx + target_pruned;
         let newer_pruned = newer_state.pruned_chunks();
 
-        if raw_chunk_idx < newer_pruned {
-            // This chunk is pruned in newer state but not in target state
-            // This shouldn't happen if our diff capture is correct
-            return [0u8; N];
-        }
+        // If a chunk was pruned between target state and
+        // newer state, we should have captured it in the diff.
+        assert!(
+            raw_chunk_idx >= newer_pruned,
+            "chunk {chunk_idx} is pruned in newer state"
+        );
 
+        // The chunk should either be in the diff (if it changed)
+        // or accessible in the newer state (if unchanged).
         let newer_chunk_idx = raw_chunk_idx - newer_pruned;
-        if newer_chunk_idx < newer_state.chunks_len() {
-            *newer_state.get_chunk_by_index(newer_chunk_idx)
-        } else {
-            [0u8; N]
-        }
+        assert!(
+            newer_chunk_idx < newer_state.chunks_len(),
+            "chunk {chunk_idx} is out of bounds in newer state"
+        );
+
+        *newer_state.get_chunk_by_index(newer_chunk_idx)
     }
 
     /// Check if a commit exists.
@@ -428,11 +439,15 @@ impl<const N: usize> Historical<N> {
         self.current.pruned_chunks()
     }
 
-    /// Remove all commits with numbers below the threshold.
+    /// Remove all commits with numbers below the commit number.
     ///
     /// Returns the number of commits removed.
-    pub fn prune_commits_before(&mut self, threshold: u64) -> usize {
-        let keys_to_remove: Vec<u64> = self.commits.range(..threshold).map(|(k, _)| *k).collect();
+    pub fn prune_commits_before(&mut self, commit_number: u64) -> usize {
+        let keys_to_remove: Vec<u64> = self
+            .commits
+            .range(..commit_number)
+            .map(|(k, _)| *k)
+            .collect();
         let count = keys_to_remove.len();
         for key in keys_to_remove {
             self.commits.remove(&key);
@@ -440,11 +455,15 @@ impl<const N: usize> Historical<N> {
         count
     }
 
-    /// Remove all commits with numbers at or below the threshold.
+    /// Remove all commits with numbers at or below the commit number.
     ///
     /// Returns the number of commits removed.
-    pub fn prune_commits_at_or_below(&mut self, threshold: u64) -> usize {
-        let keys_to_remove: Vec<u64> = self.commits.range(..=threshold).map(|(k, _)| *k).collect();
+    pub fn prune_commits_at_or_below(&mut self, commit_number: u64) -> usize {
+        let keys_to_remove: Vec<u64> = self
+            .commits
+            .range(..=commit_number)
+            .map(|(k, _)| *k)
+            .collect();
         let count = keys_to_remove.len();
         for key in keys_to_remove {
             self.commits.remove(&key);
@@ -626,11 +645,11 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         // Check if bit is in appended range
         if bit_offset >= batch.base_len {
             let append_offset = (bit_offset - batch.base_len) as usize;
-            if append_offset < batch.appended_bits.len() {
-                return batch.appended_bits[append_offset];
-            } else {
-                panic!("bit offset {} out of range", bit_offset);
-            }
+            assert!(
+                append_offset < batch.appended_bits.len(),
+                "bit offset {bit_offset} out of range"
+            );
+            return batch.appended_bits[append_offset];
         }
 
         // Check if bit was modified in batch
@@ -640,9 +659,10 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
 
         // Check if bit was pruned in batch
         let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
-        if chunk_idx < batch.projected_pruned_chunks {
-            panic!("bit pruned: {}", bit_offset);
-        }
+        assert!(
+            chunk_idx >= batch.projected_pruned_chunks,
+            "bit pruned: {bit_offset}"
+        );
 
         // Fall through to current bitmap
         self.historical.current.get_bit(bit_offset)
@@ -656,9 +676,10 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
 
         // Check if chunk is in pruned range
-        if chunk_idx < batch.projected_pruned_chunks {
-            panic!("chunk pruned at bit offset: {}", bit_offset);
-        }
+        assert!(
+            chunk_idx >= batch.projected_pruned_chunks,
+            "chunk pruned at bit offset: {bit_offset}"
+        );
 
         let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
 
@@ -730,15 +751,17 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         let batch = self.historical.active_batch.as_mut().unwrap();
 
         // Check bounds
-        if bit_offset >= batch.projected_len {
-            panic!("bit offset {} out of range", bit_offset);
-        }
+        assert!(
+            bit_offset < batch.projected_len,
+            "bit offset {bit_offset} out of range"
+        );
 
         // Check not pruned
         let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
-        if chunk_idx < batch.projected_pruned_chunks {
-            panic!("cannot set pruned bit");
-        }
+        assert!(
+            chunk_idx >= batch.projected_pruned_chunks,
+            "cannot set pruned bit"
+        );
 
         // Record modification
         batch.modified_bits.insert(bit_offset, value);
@@ -781,9 +804,7 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
     pub fn pop(&mut self) -> bool {
         let batch = self.historical.active_batch.as_mut().unwrap();
 
-        if batch.projected_len == 0 {
-            panic!("cannot pop from empty bitmap");
-        }
+        assert!(batch.projected_len > 0, "cannot pop from empty bitmap");
 
         batch.projected_len -= 1;
         let bit_offset = batch.projected_len;
