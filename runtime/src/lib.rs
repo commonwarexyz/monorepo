@@ -143,6 +143,17 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// If this function is used to spawn multiple tasks from the same context (including child
     /// tasks), the runtime will panic to prevent accidental misuse.
+    ///
+    /// `spawn_ref` installs a fresh child list for the new task. Clones created before the call keep
+    /// pointing at the previous list, so children spawned from those clones run independently (they
+    /// are not aborted when the parent finishes). If you want child supervision to apply, obtain the
+    /// `spawn_ref` closure first and then clone/label inside the task:
+    ///
+    /// ```ignore
+    /// context.spawn_ref()(async move {
+    ///     context.clone().spawn_child(|_| async move { /* ... */ });
+    /// });
+    /// ```
     fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
     where
         F: Future<Output = T> + Send + 'static,
