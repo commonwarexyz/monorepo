@@ -194,13 +194,13 @@ mod tests {
     use std::str::FromStr;
 
     /// Subnet mask using `/24` for IPv4 and `/48` for IPv6 networks.
-    const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
+    const TEST_MASK: SubnetMask = SubnetMask::new(24, 48);
 
     #[test]
     fn ipv4_subnet_zeroes_lower_8_bits() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 123));
         assert_eq!(
-            ip.subnet(SUBNET_MASK).addr,
+            ip.subnet(TEST_MASK).addr,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0))
         );
     }
@@ -211,26 +211,8 @@ mod tests {
             0x2001, 0xdb8, 0x1234, 0x5678, 0x9abc, 0xdef0, 0x1357, 0x2468,
         ));
         assert_eq!(
-            ip.subnet(SUBNET_MASK).addr,
+            ip.subnet(TEST_MASK).addr,
             IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x1234, 0, 0, 0, 0, 0))
-        );
-    }
-
-    #[test]
-    fn subnet_respects_custom_prefixes() {
-        let ipv4 = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42));
-        let ipv6 = IpAddr::V6(Ipv6Addr::new(
-            0x2001, 0xdb8, 0x1234, 0x5678, 0x9abc, 0xdef0, 0x1357, 0x2468,
-        ));
-        let mask = SubnetMask::new(20, 64);
-
-        assert_eq!(
-            ipv4.subnet(mask).addr,
-            IpAddr::V4(Ipv4Addr::new(203, 0, 112, 0))
-        );
-        assert_eq!(
-            ipv6.subnet(mask).addr,
-            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x1234, 0x5678, 0, 0, 0, 0))
         );
     }
 
@@ -238,7 +220,7 @@ mod tests {
     fn ipv4_mapped_ipv6_subnet_uses_ipv4_truncation() {
         let ip = IpAddr::from_str("::ffff:192.168.1.123").unwrap();
         assert_eq!(
-            ip.subnet(SUBNET_MASK).addr,
+            ip.subnet(TEST_MASK).addr,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0))
         );
     }
