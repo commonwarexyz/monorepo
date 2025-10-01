@@ -160,7 +160,7 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
-//! let p2p_cfg = discovery::Config::aggressive(
+//! let p2p_cfg = discovery::Config::local(
 //!     signer.clone(),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),

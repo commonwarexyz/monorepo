@@ -98,7 +98,7 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
-//! let p2p_cfg = lookup::Config::aggressive(
+//! let p2p_cfg = lookup::Config::local(
 //!     my_sk.clone(),
 //!     application_namespace,
 //!     my_addr,

@@ -162,8 +162,9 @@ impl<C: Signer> Config<C> {
     /// can be useful when running local demos.
     ///
     /// # Warning
+    ///
     /// It is not recommended to use this configuration in production.
-    pub fn aggressive(
+    pub fn local(
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,

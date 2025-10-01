@@ -128,8 +128,9 @@ impl<C: Signer> Config<C> {
     /// can be useful when running local demos.
     ///
     /// # Warning
+    ///
     /// It is not recommended to use this configuration in production.
-    pub fn aggressive(
+    pub fn local(
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
@@ -181,7 +182,7 @@ impl<C: Signer> Config<C> {
             ping_frequency: Duration::from_secs(1),
             allowed_ping_rate: Quota::per_second(NZU32!(5)),
             dial_frequency: Duration::from_millis(200),
-            query_frequency: Duration::from_millis(5_000),
+            query_frequency: Duration::from_secs(5),
             tracked_peer_sets: 4,
         }
     }
