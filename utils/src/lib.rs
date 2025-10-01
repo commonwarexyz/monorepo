@@ -27,7 +27,7 @@ pub mod channels;
 #[cfg(feature = "std")]
 pub mod net;
 #[cfg(feature = "std")]
-pub use net::{IpAddrExt, Subnet};
+pub use net::IpAddrExt;
 #[cfg(feature = "std")]
 pub mod time;
 #[cfg(feature = "std")]

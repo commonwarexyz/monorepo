@@ -8,29 +8,64 @@ pub struct Subnet {
     addr: IpAddr,
 }
 
-/// Mask an IPv4 address to the upper 24 bits.
-#[inline]
-fn ipv4_subnet(ip: Ipv4Addr) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::from(u32::from(ip) & 0xFFFFFF00))
+/// Prefix lengths (in bits) used to derive canonical subnets for IPv4 and IPv6 addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SubnetMask {
+    ipv4_bits: u8,
+    ipv6_bits: u8,
 }
 
-/// Mask an IPv6 address to the upper 48 bits.
+impl SubnetMask {
+    /// Create a new [`SubnetMask`]. Values greater than the address width are clamped when applied.
+    pub const fn new(ipv4_bits: u8, ipv6_bits: u8) -> Self {
+        Self {
+            ipv4_bits,
+            ipv6_bits,
+        }
+    }
+
+    /// Desired IPv4 prefix length in bits.
+    #[inline]
+    const fn ipv4_bits(self) -> u8 {
+        self.ipv4_bits
+    }
+
+    /// Desired IPv6 prefix length in bits.
+    #[inline]
+    const fn ipv6_bits(self) -> u8 {
+        self.ipv6_bits
+    }
+}
+
+/// Mask an IPv4 address according to `prefix` bits.
 #[inline]
-fn ipv6_subnet(ip: Ipv6Addr) -> IpAddr {
-    IpAddr::V6(Ipv6Addr::from(
-        u128::from(ip) & 0xFFFF_FFFF_FFFF_0000_0000_0000_0000_0000,
-    ))
+fn ipv4_subnet(ip: Ipv4Addr, prefix: u8) -> IpAddr {
+    let prefix = prefix.min(32);
+    let shift = 32 - u32::from(prefix);
+    let mask = (!0u32).checked_shl(shift).unwrap_or(0);
+
+    IpAddr::V4(Ipv4Addr::from(u32::from(ip) & mask))
+}
+
+/// Mask an IPv6 address according to `prefix` bits.
+#[inline]
+fn ipv6_subnet(ip: Ipv6Addr, prefix: u8) -> IpAddr {
+    let prefix = prefix.min(128);
+    let shift = 128 - u32::from(prefix);
+    let mask = (!0u128).checked_shl(shift).unwrap_or(0);
+
+    IpAddr::V6(Ipv6Addr::from(u128::from(ip) & mask))
 }
 
 /// Extension trait providing subnet helpers for [`IpAddr`].
 pub trait IpAddrExt {
     /// Return the canonical subnet representative for this IP address.
     ///
-    /// IPv4 addresses are truncated to the first 24 bits. Native IPv6 addresses are truncated to the
-    /// upper 48 bits, while IPv4-mapped IPv6 addresses follow the IPv4 truncation rules. This mirrors
-    /// the network's default assumptions and matches common ISP subnet sizes, allowing rate-limiting
-    /// to operate on broader network groupings.
-    fn subnet(&self) -> Subnet;
+    /// IPv4 addresses are truncated using `mask.ipv4_bits()`. Native IPv6 addresses are truncated
+    /// using `mask.ipv6_bits()`, while IPv4-mapped IPv6 addresses follow the IPv4 truncation rules.
+    /// This mirrors common ISP subnet sizes and allows rate-limiting to operate on configurable
+    /// network groupings.
+    fn subnet(&self, mask: SubnetMask) -> Subnet;
 
     /// Determine if this IP address is globally routable.
     ///
@@ -40,20 +75,20 @@ pub trait IpAddrExt {
 }
 
 impl IpAddrExt for IpAddr {
-    fn subnet(&self) -> Subnet {
+    fn subnet(&self, mask: SubnetMask) -> Subnet {
         match self {
             IpAddr::V4(v4) => Subnet {
-                addr: ipv4_subnet(*v4),
+                addr: ipv4_subnet(*v4, mask.ipv4_bits()),
             },
             IpAddr::V6(v6) => {
                 if let Some(mapped_v4) = v6.to_ipv4_mapped() {
                     return Subnet {
-                        addr: ipv4_subnet(mapped_v4),
+                        addr: ipv4_subnet(mapped_v4, mask.ipv4_bits()),
                     };
                 }
 
                 Subnet {
-                    addr: ipv6_subnet(*v6),
+                    addr: ipv6_subnet(*v6, mask.ipv6_bits()),
                 }
             }
         }
@@ -158,10 +193,16 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    /// Subnet mask using `/24` for IPv4 and `/48` for IPv6 networks.
+    const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
+
     #[test]
     fn ipv4_subnet_zeroes_lower_8_bits() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 123));
-        assert_eq!(ip.subnet().addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0)));
+        assert_eq!(
+            ip.subnet(SUBNET_MASK).addr,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0))
+        );
     }
 
     #[test]
@@ -170,15 +211,36 @@ mod tests {
             0x2001, 0xdb8, 0x1234, 0x5678, 0x9abc, 0xdef0, 0x1357, 0x2468,
         ));
         assert_eq!(
-            ip.subnet().addr,
+            ip.subnet(SUBNET_MASK).addr,
             IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x1234, 0, 0, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn subnet_respects_custom_prefixes() {
+        let ipv4 = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42));
+        let ipv6 = IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0xdb8, 0x1234, 0x5678, 0x9abc, 0xdef0, 0x1357, 0x2468,
+        ));
+        let mask = SubnetMask::new(20, 64);
+
+        assert_eq!(
+            ipv4.subnet(mask).addr,
+            IpAddr::V4(Ipv4Addr::new(203, 0, 112, 0))
+        );
+        assert_eq!(
+            ipv6.subnet(mask).addr,
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x1234, 0x5678, 0, 0, 0, 0))
         );
     }
 
     #[test]
     fn ipv4_mapped_ipv6_subnet_uses_ipv4_truncation() {
         let ip = IpAddr::from_str("::ffff:192.168.1.123").unwrap();
-        assert_eq!(ip.subnet().addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0)));
+        assert_eq!(
+            ip.subnet(SUBNET_MASK).addr,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0))
+        );
     }
 
     #[test]
