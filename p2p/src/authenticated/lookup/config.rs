@@ -58,6 +58,9 @@ pub struct Config<C: Signer> {
     pub max_concurrent_handshakes: NonZeroU32,
 
     /// Quota for handshake attempts originating from a single IP address.
+    ///
+    /// To cap the number of handshakes concurrently attempted for a single
+    /// IP, set this to [Config::handshake_timeout].
     pub allowed_handshake_rate_per_ip: Quota,
 
     /// Quota for handshake attempts originating from a single IP subnet.
@@ -111,7 +114,7 @@ impl<C: Signer> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
             max_concurrent_handshakes: NZU32!(512),
-            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(1)),
+            allowed_handshake_rate_per_ip: Quota::with_period(Duration::from_secs(5)).unwrap(), // 1 concurrent handshake per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             ping_frequency: Duration::from_secs(50),
             allowed_ping_rate: Quota::per_minute(NZU32!(2)),
@@ -147,7 +150,7 @@ impl<C: Signer> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
             max_concurrent_handshakes: NZU32!(1_024),
-            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(4)),
+            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 90 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             ping_frequency: Duration::from_secs(5),
             allowed_ping_rate: Quota::per_second(NZU32!(2)),
@@ -173,7 +176,7 @@ impl<C: Signer> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(4)),
             max_concurrent_handshakes: NZU32!(1_024),
-            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)),
+            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             ping_frequency: Duration::from_secs(1),
             allowed_ping_rate: Quota::per_second(NZU32!(5)),
