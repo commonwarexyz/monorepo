@@ -6,7 +6,7 @@ use crate::authenticated::discovery::{
     types::{self, PeerInfo},
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{Clock, Metrics as RuntimeMetrics};
 use commonware_utils::SystemTimeExt;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
@@ -33,7 +33,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
+pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
     // ---------- Configuration ----------
@@ -64,7 +64,7 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,

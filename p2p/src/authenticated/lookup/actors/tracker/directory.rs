@@ -1,7 +1,7 @@
 use super::{ingress::ReleaserHandle, metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::lookup::metrics;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{Clock, Metrics as RuntimeMetrics};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -26,7 +26,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
+pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: usize,
@@ -54,7 +54,7 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
     pub fn init(
         context: E,
