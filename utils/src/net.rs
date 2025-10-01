@@ -18,11 +18,19 @@ pub struct SubnetMask {
 impl SubnetMask {
     /// Create a new [`SubnetMask`]. Values greater than the address width are clamped when applied.
     pub const fn new(ipv4_bits: u8, ipv6_bits: u8) -> Self {
-        let ipv4_bits = if ipv4_bits > 32 { 32 } else { ipv4_bits };
-        let ipv6_bits = if ipv6_bits > 128 { 128 } else { ipv6_bits };
+        let ipv4_bits = Self::clamp(ipv4_bits, 32);
+        let ipv6_bits = Self::clamp(ipv6_bits, 128);
         Self {
             ipv4_mask: Self::mask_ipv4(ipv4_bits),
             ipv6_mask: Self::mask_ipv6(ipv6_bits),
+        }
+    }
+
+    const fn clamp(bits: u8, max: u8) -> u8 {
+        if bits > max {
+            max
+        } else {
+            bits
         }
     }
 
