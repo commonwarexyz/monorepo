@@ -84,9 +84,12 @@
 
 use super::Prunable;
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, HashMap},
+    vec::Vec,
+};
 #[cfg(feature = "std")]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Errors that can occur in Historical bitmap operations.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -136,7 +139,7 @@ struct Batch<const N: usize> {
     projected_pruned_chunks: usize,
 
     /// Bits that were modified (exist in base and were changed).
-    modified_bits: BTreeMap<u64, bool>,
+    modified_bits: HashMap<u64, bool>,
 
     /// Bits appended beyond base_len.
     appended_bits: Vec<bool>,
@@ -210,7 +213,7 @@ impl<const N: usize> Historical<N> {
             base_pruned_chunks: self.current.pruned_chunks(),
             projected_len: self.current.len(),
             projected_pruned_chunks: self.current.pruned_chunks(),
-            modified_bits: BTreeMap::new(),
+            modified_bits: HashMap::new(),
             appended_bits: Vec::new(),
             chunks_to_prune: BTreeMap::new(),
         };
