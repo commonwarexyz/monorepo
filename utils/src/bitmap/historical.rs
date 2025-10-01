@@ -91,6 +91,9 @@ use alloc::{
 #[cfg(feature = "std")]
 use std::collections::{BTreeMap, HashMap};
 
+const DEFAULT_BATCH_BITS_CAPACITY: usize = 16;
+const DEFAULT_BATCH_CHUNKS_CAPACITY: usize = 4;
+
 /// Errors that can occur in Historical bitmap operations.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -218,9 +221,11 @@ impl<const N: usize> Historical<N> {
             base_pruned_chunks: self.current.pruned_chunks(),
             projected_len: self.current.len(),
             projected_pruned_chunks: self.current.pruned_chunks(),
-            modified_bits: HashMap::new(),
+            // Pre-allocate capacity to avoid reallocation
+            modified_bits: HashMap::with_capacity(DEFAULT_BATCH_BITS_CAPACITY),
             appended_bits: Vec::new(),
-            chunks_to_prune: HashMap::new(),
+            // Pre-allocate capacity to avoid reallocation
+            chunks_to_prune: HashMap::with_capacity(DEFAULT_BATCH_CHUNKS_CAPACITY),
         };
 
         self.active_batch = Some(batch);
@@ -556,21 +561,17 @@ impl<const N: usize> Historical<N> {
         batch: &Batch<N>,
         changes: &mut BTreeMap<usize, ChunkChange<N>>,
     ) {
-        #[cfg(not(feature = "std"))]
-        let mut affected_chunks = alloc::collections::BTreeSet::new();
-        #[cfg(feature = "std")]
-        let mut affected_chunks = std::collections::BTreeSet::new();
-
-        // Collect unique chunk indices from all modified bits
         for &bit_offset in batch.modified_bits.keys() {
-            affected_chunks.insert(Prunable::<N>::raw_chunk_index(bit_offset));
-        }
-
-        // Store the original chunk data for each affected chunk
-        for &chunk_idx in &affected_chunks {
-            if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
-                changes.insert(chunk_idx, ChunkChange::Modified(old_chunk));
-            }
+            let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
+            changes.entry(chunk_idx).or_insert_with(|| {
+                // modified_bits only contains bits from the base region that existed
+                // at batch creation. Since current hasn't changed yet (we're still
+                // building the diff), the chunk MUST exist.
+                let old_chunk = self
+                    .get_chunk_if_exists(chunk_idx)
+                    .expect("chunk must exist for modified bit");
+                ChunkChange::Modified(old_chunk)
+            });
         }
     }
 
