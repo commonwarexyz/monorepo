@@ -630,4 +630,27 @@ mod tests {
             handle.register(7).await.unwrap();
         });
     }
+
+    #[test]
+    fn deregistrar_drains_backlog_when_control_full() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // mailbox has capacity for only 1 element
+            let (control_tx, mut control_rx) =
+                mpsc::channel::<Control<crate::simulated::Receiver<Pk>>>(1);
+            let (deregistrar, mut handle) = Deregistrar::new(context.clone(), control_tx);
+            deregistrar.start();
+
+            // the first deregister request should go through directly to the mailbox
+            handle.deregister(1);
+            // the second deregister request should be queued in the backlog
+            handle.deregister(2);
+
+            let first = control_rx.next().await.unwrap();
+            assert!(matches!(first, Control::Deregister { subchannel } if subchannel == 1));
+
+            let second = control_rx.next().await.unwrap();
+            assert!(matches!(second, Control::Deregister { subchannel } if subchannel == 2));
+        });
+    }
 }
