@@ -107,7 +107,7 @@ where
     /// ## Panics
     ///
     /// Panics if the number of `participants` is not equal to the number of [Shard]s in the `block`
-    pub async fn broadcast_shards(&mut self, block: CodedBlock<B, S>, participants: Vec<P>) {
+    pub async fn broadcast_shards(&mut self, mut block: CodedBlock<B, S>, participants: Vec<P>) {
         assert_eq!(
             participants.len(),
             block.shards().len(),
@@ -277,7 +277,11 @@ where
             .set(start.elapsed().as_millis() as i64);
 
         // Attempt to decode the block from the encoded blob
-        let block = CodedBlock::<B, S>::decode_cfg(decoded.as_slice(), &self.block_codec_cfg)?;
+        let inner = B::read_cfg(&mut decoded.as_slice(), &self.block_codec_cfg)?;
+
+        // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
+        // integrity, so shards can be lazily re-constructed if need be.
+        let block = CodedBlock::new_trusted(inner, commitment);
 
         debug!(
             %commitment,

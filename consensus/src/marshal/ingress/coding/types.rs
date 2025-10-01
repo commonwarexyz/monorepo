@@ -229,8 +229,10 @@ pub struct CodedBlock<B: Block, S: Scheme> {
     config: CodingConfig,
     /// The erasure coding commitment.
     commitment: S::Commitment,
-    /// The coded shards, along with corresponding coding proofs.
-    shards: Vec<S::Shard>,
+    /// The coded shards.
+    ///
+    /// These shards are optional to enable lazy construction.
+    shards: Option<Vec<S::Shard>>,
 }
 
 impl<B: Block<Commitment = CodingCommitment>, S: Scheme> CodedBlock<B, S> {
@@ -250,7 +252,17 @@ impl<B: Block<Commitment = CodingCommitment>, S: Scheme> CodedBlock<B, S> {
             inner,
             config,
             commitment,
-            shards,
+            shards: Some(shards),
+        }
+    }
+
+    /// Create a new [CodedBlock] from a [Block] and trusted [CodingCommitment].
+    pub fn new_trusted(inner: B, commitment: CodingCommitment) -> Self {
+        Self {
+            inner,
+            config: commitment.config(),
+            commitment: commitment.inner(),
+            shards: None,
         }
     }
 
@@ -260,8 +272,18 @@ impl<B: Block<Commitment = CodingCommitment>, S: Scheme> CodedBlock<B, S> {
     }
 
     /// Returns a refernce to the shards in this coded block.
-    pub fn shards(&self) -> &[S::Shard] {
-        &self.shards
+    pub fn shards(&mut self) -> &[S::Shard] {
+        match self.shards {
+            Some(ref shards) => shards,
+            None => {
+                let (commitment, shards) = Self::encode(&self.inner, self.config);
+
+                assert_eq!(commitment, self.commitment);
+
+                self.shards = Some(shards);
+                self.shards.as_ref().unwrap()
+            }
+        }
     }
 
     /// Returns a [Shard] at the given index, if the index is valid.
@@ -269,7 +291,7 @@ impl<B: Block<Commitment = CodingCommitment>, S: Scheme> CodedBlock<B, S> {
         Some(Shard::new(
             self.commitment(),
             index,
-            DistributionShard::Strong(self.shards.get(index)?.clone()),
+            DistributionShard::Strong(self.shards.as_ref()?.get(index)?.clone()),
         ))
     }
 
@@ -345,7 +367,7 @@ impl<B: Block, S: Scheme> Read for CodedBlock<B, S> {
             inner,
             config,
             commitment,
-            shards,
+            shards: Some(shards),
         })
     }
 }
