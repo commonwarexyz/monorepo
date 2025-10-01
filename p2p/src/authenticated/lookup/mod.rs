@@ -49,7 +49,7 @@
 //!
 //! There are five primary rate limits:
 //!
-//! - `max_concurrent_handshakes`: The maximum number of concurrent handshake attempts allowed.
+//! - `max_concurrent_handshakes`: The maximum number of concurrent handshake attempts allowed (at most 1 per IP).
 //! - `allowed_handshake_rate_per_ip`: The rate limit for handshake attempts originating from a single IP address.
 //! - `allowed_handshake_rate_per_subnet`: The rate limit for handshake attempts originating from a single IP subnet.
 //! - `allowed_connection_rate_per_peer`: The rate limit for connections to a single peer (incoming or outgoing).
