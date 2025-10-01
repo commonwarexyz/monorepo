@@ -239,7 +239,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::GetLoc { loc_offset } => {
                     let op_count = db.op_count();
                     if op_count > 0 {
-                        let loc = mmr::location::Location::new((*loc_offset as u64) % op_count);
+                        let loc = Location::new((*loc_offset as u64) % op_count.as_u64());
                         let _ = db.get_loc(loc).await;
                     }
                 }
@@ -282,7 +282,7 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
-                        let size = ((*size as u64) % op_count) + 1;
+                        let size = Location::new((*size as u64) % op_count.as_u64()) + 1;
                         // Skip invalid cases
                         if db.op_count() == 0 || map.is_empty() {
                             continue;
