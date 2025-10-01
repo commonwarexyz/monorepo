@@ -8,17 +8,17 @@ pub struct Subnet {
     addr: IpAddr,
 }
 
-/// Mask an IPv4 address to the first 24 bits.
+/// Mask an IPv4 address to the upper 24 bits.
 #[inline]
 fn ipv4_subnet(ip: Ipv4Addr) -> IpAddr {
     IpAddr::V4(Ipv4Addr::from(u32::from(ip) & 0xFFFFFF00))
 }
 
-/// Mask an IPv6 address to the upper 64 bits.
+/// Mask an IPv6 address to the upper 48 bits.
 #[inline]
 fn ipv6_subnet(ip: Ipv6Addr) -> IpAddr {
     IpAddr::V6(Ipv6Addr::from(
-        u128::from(ip) & 0xFFFF_FFFF_FFFF_FFFF_0000_0000_0000_0000,
+        u128::from(ip) & 0xFFFF_FFFF_FFFF_0000_0000_0000_0000_0000,
     ))
 }
 
@@ -27,7 +27,7 @@ pub trait IpAddrExt {
     /// Return the canonical subnet representative for this IP address.
     ///
     /// IPv4 addresses are truncated to the first 24 bits. Native IPv6 addresses are truncated to the
-    /// upper 64 bits, while IPv4-mapped IPv6 addresses follow the IPv4 truncation rules. This mirrors
+    /// upper 48 bits, while IPv4-mapped IPv6 addresses follow the IPv4 truncation rules. This mirrors
     /// the network's default assumptions and matches common ISP subnet sizes, allowing rate-limiting
     /// to operate on broader network groupings.
     fn subnet(&self) -> Subnet;
@@ -165,11 +165,13 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_subnet_truncates_lower_64_bits() {
-        let ip = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    fn ipv6_subnet_truncates_lower_48_bits() {
+        let ip = IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0xdb8, 0x1234, 0x5678, 0x9abc, 0xdef0, 0x1357, 0x2468,
+        ));
         assert_eq!(
             ip.subnet().addr,
-            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0))
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x1234, 0, 0, 0, 0, 0))
         );
     }
 
