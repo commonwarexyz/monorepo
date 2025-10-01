@@ -30,6 +30,7 @@ commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true, features = ["std"] }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
+rayon = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 tracing = { workspace = true }
