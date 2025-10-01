@@ -1,22 +1,9 @@
-//! A historical wrapper around [`Prunable`] that maintains snapshots via diff-based batching.
+//! A historical wrapper around [Prunable] that maintains snapshots via diff-based batching.
 //!
-//! The Historical bitmap maintains exactly ONE full [`Prunable`] bitmap (the current/HEAD state).
-//! All historical states and batch mutations are represented as lightweight diffs, never full clones.
+//! The Historical bitmap maintains one full [Prunable] bitmap (the current/head state).
+//! All historical states and batch mutations are represented as diffs, not full bitmap clones.
 //!
-//! # Architecture
-//!
-//! - **Current State**: Single `Prunable<N>` representing the latest committed state
-//! - **Batches**: Diff layers that track modifications without cloning the bitmap
-//! - **History**: Reverse diffs that allow reconstructing past states from current
-//!
-//! # Key Features
-//!
-//! - **Memory Efficient**: Only one full bitmap stored; all other state is diffs
-//! - **Read-Through Semantics**: Batch reads see modifications or fall through to current
-//! - **Full Abort Support**: Batches can be dropped without committing
-//! - **Monotonic Commits**: Commit numbers must be strictly increasing
-//!
-//! # Usage Examples
+//! # Examples
 //!
 //! ## Basic Batching
 //!
@@ -111,7 +98,6 @@ pub enum Error {
 
 /// Metadata about a historical state.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Fields will be used when implementing historical reconstruction
 struct CommitMetadata {
     /// Total length in bits at this commit.
     len: u64,
