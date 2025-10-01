@@ -159,13 +159,13 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn ipv4_subnet_truncates_last_octet() {
+    fn ipv4_subnet_zeroes_lower_8_bits() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 123));
         assert_eq!(ip.subnet().addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0)));
     }
 
     #[test]
-    fn ipv6_subnet_truncates_lower_48_bits() {
+    fn ipv6_subnet_zeroes_lower_80_bits() {
         let ip = IpAddr::V6(Ipv6Addr::new(
             0x2001, 0xdb8, 0x1234, 0x5678, 0x9abc, 0xdef0, 0x1357, 0x2468,
         ));
