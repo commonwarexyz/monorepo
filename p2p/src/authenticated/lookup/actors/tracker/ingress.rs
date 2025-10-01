@@ -240,3 +240,46 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
         let _ = self.sender.send(Message::Block { public_key }).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
+    use commonware_runtime::{deterministic::Runner, Runner as _};
+    use futures::StreamExt;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn releaser_drains_backlog_when_mailbox_full() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            // mailbox has capacity for only 1 element
+            let (sender, mut receiver) = mpsc::channel(1);
+            let (releaser, mut handle) = Releaser::new(context.clone(), sender);
+            releaser.start();
+
+            let metadata_a = Metadata::Dialer(
+                PrivateKey::from_seed(1).public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1337),
+            );
+            let metadata_b = Metadata::Listener(PrivateKey::from_seed(2).public_key());
+
+            // the first release request should go through directly to the mailbox
+            handle.release(metadata_a.clone());
+            // the second release request should be queued in the backlog
+            handle.release(metadata_b.clone());
+
+            let first = receiver.next().await.unwrap();
+            assert!(matches!(
+                first,
+                Message::Release { ref metadata } if metadata.public_key() == metadata_a.public_key()
+            ));
+
+            let second = receiver.next().await.unwrap();
+            assert!(matches!(
+                second,
+                Message::Release { ref metadata } if metadata.public_key() == metadata_b.public_key()
+            ));
+        });
+    }
+}
