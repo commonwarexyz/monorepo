@@ -129,23 +129,28 @@ struct CommitDiff<const N: usize> {
 }
 
 /// An active batch that tracks mutations as a diff layer.
+///
+/// A batch records changes without modifying the underlying bitmap. When committed,
+/// these changes are applied atomically. If dropped without committing, all changes
+/// are discarded.
 struct Batch<const N: usize> {
-    /// State when batch started.
+    /// Bitmap state when batch started.
     base_len: u64,
     base_pruned_chunks: usize,
 
-    /// Projected state if batch is committed.
+    /// What the bitmap will look like after commit.
     projected_len: u64,
     projected_pruned_chunks: usize,
 
-    /// Bits that were modified (exist in base and were changed).
+    /// Modifications to bits that existed at batch creation (bit_offset -> new_value).
     modified_bits: HashMap<u64, bool>,
 
-    /// Bits appended beyond base_len.
+    /// New bits pushed after base_len (in order).
     appended_bits: Vec<bool>,
 
-    /// Chunks that will be pruned if batch commits (captures old data for reverse diff).
-    chunks_to_prune: BTreeMap<usize, [u8; N]>,
+    /// Old chunk data for chunks being pruned (chunk_index -> old_data).
+    /// Captured for historical reconstruction.
+    chunks_to_prune: HashMap<usize, [u8; N]>,
 }
 
 /// A historical bitmap that maintains one actual bitmap plus diffs for history and batching.
@@ -215,7 +220,7 @@ impl<const N: usize> Historical<N> {
             projected_pruned_chunks: self.current.pruned_chunks(),
             modified_bits: HashMap::new(),
             appended_bits: Vec::new(),
-            chunks_to_prune: BTreeMap::new(),
+            chunks_to_prune: HashMap::new(),
         };
 
         self.active_batch = Some(batch);
@@ -492,26 +497,28 @@ impl<const N: usize> Historical<N> {
     }
 
     /// Apply a batch's changes to the current bitmap.
+    ///
+    /// Order matters: we apply length changes (pop/push), then modifications, then pruning.
     fn apply_batch_to_current(&mut self, batch: &Batch<N>) {
-        // Calculate the target length before appending (accounting for any net pops)
+        // Step 1: Adjust length to account for net pops/pushes.
+        // If there were net pops, shrink to the length before any appends were done.
         let target_len_before_appends = batch.projected_len - batch.appended_bits.len() as u64;
 
-        // Pop down to the target length before appends
         while self.current.len() > target_len_before_appends {
             self.current.pop();
         }
 
-        // Apply appended bits (these fill in positions from target_len_before_appends to projected_len)
+        // Step 2: Apply appended bits.
         for &bit in &batch.appended_bits {
             self.current.push(bit);
         }
 
-        // Apply modifications to existing bits
+        // Step 3: Apply modifications to existing bits.
         for (&bit_offset, &value) in &batch.modified_bits {
             self.current.set_bit(bit_offset, value);
         }
 
-        // Apply pruning
+        // Step 4: Apply pruning if any chunks were marked for pruning.
         if batch.projected_pruned_chunks > batch.base_pruned_chunks {
             let prune_to_bit =
                 batch.projected_pruned_chunks as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
@@ -569,8 +576,9 @@ impl<const N: usize> Historical<N> {
 
     /// Capture chunks affected by appended bits.
     ///
-    /// Appended bits may extend existing chunks (Modified) or create new chunks (Added).
-    /// We only capture data for chunks that existed before the batch.
+    /// When bits are appended, they may:
+    /// - Extend an existing partial chunk (mark as Modified with old data)
+    /// - Create entirely new chunks (mark as Added)
     fn capture_appended_chunks(
         &self,
         batch: &Batch<N>,
@@ -580,16 +588,15 @@ impl<const N: usize> Historical<N> {
             return;
         }
 
-        // Calculate the bit range where appended bits will go
-        // (accounts for any net pops that happened before the pushes)
+        // Determine which chunks the appended bits will occupy.
+        // Note: append_start_bit accounts for any net pops before the pushes.
         let append_start_bit = batch.projected_len - batch.appended_bits.len() as u64;
         let start_chunk = Prunable::<N>::raw_chunk_index(append_start_bit);
         let end_chunk = Prunable::<N>::raw_chunk_index(batch.projected_len.saturating_sub(1));
 
         for chunk_idx in start_chunk..=end_chunk {
-            // Don't overwrite existing entries (e.g., from modified_bits)
+            // Don't overwrite entries from modified_bits (they take precedence).
             changes.entry(chunk_idx).or_insert_with(|| {
-                // If chunk existed before, capture its old value; otherwise mark as Added
                 if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
                     ChunkChange::Modified(old_chunk)
                 } else {
@@ -601,19 +608,19 @@ impl<const N: usize> Historical<N> {
 
     /// Capture chunks affected by pop operations.
     ///
-    /// When bits are popped, we need to store the original chunk data for any chunks
-    /// that will be removed or truncated by the length reduction.
+    /// When bits are popped (projected_len < base_len), we need to capture the original
+    /// data of chunks that will be truncated or fully removed. This allows reconstruction
+    /// to restore the bits that were popped.
     fn capture_popped_chunks(
         &self,
         batch: &Batch<N>,
         changes: &mut BTreeMap<usize, ChunkChange<N>>,
     ) {
-        // Only process if we have net pops (projected_len < base_len)
         if batch.projected_len >= batch.base_len || batch.base_len == 0 {
-            return;
+            return; // No net pops
         }
 
-        // Calculate the chunk range that will be affected by the length reduction
+        // Identify the range of chunks affected by length reduction.
         let old_last_chunk = Prunable::<N>::raw_chunk_index(batch.base_len - 1);
         let new_last_chunk = if batch.projected_len > 0 {
             Prunable::<N>::raw_chunk_index(batch.projected_len - 1)
@@ -621,10 +628,9 @@ impl<const N: usize> Historical<N> {
             0
         };
 
-        // Capture all chunks from the new end to the old end
+        // Capture all chunks between the new and old endpoints.
         for chunk_idx in new_last_chunk..=old_last_chunk {
             changes.entry(chunk_idx).or_insert_with(|| {
-                // Capture original chunk data, or mark as Added if it didn't exist
                 if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
                     ChunkChange::Modified(old_chunk)
                 } else {
@@ -636,8 +642,8 @@ impl<const N: usize> Historical<N> {
 
     /// Capture chunks that will be pruned.
     ///
-    /// The batch already contains the old chunk data in `chunks_to_prune`, so we just
-    /// copy those entries into the reverse diff.
+    /// The batch's `prune_to_bit` method already captured the old chunk data,
+    /// so we simply copy it into the reverse diff.
     fn capture_pruned_chunks(
         &self,
         batch: &Batch<N>,
@@ -706,23 +712,21 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
 
     /// Get a bit value with read-through semantics.
     ///
-    /// Checks the batch's modifications first, then falls through to current bitmap.
+    /// Returns the bit's value as it would be after committing this batch.
+    /// Priority: appended bits > modified bits > original bitmap.
     ///
     /// # Panics
     ///
-    /// Panics if the bit offset is out of bounds (>= projected length after pops)
-    /// or if the bit has been pruned in this batch.
+    /// Panics if the bit offset is out of bounds or if the bit has been pruned.
     pub fn get_bit(&self, bit_offset: u64) -> bool {
         let batch = self.historical.active_batch.as_ref().unwrap();
 
-        // Check bounds (including pops)
         assert!(
             bit_offset < batch.projected_len,
             "bit offset {bit_offset} out of bounds (len: {})",
             batch.projected_len
         );
 
-        // Check if bit was pruned in batch
         let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
         assert!(
             chunk_idx >= batch.projected_pruned_chunks,
@@ -730,18 +734,18 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
             batch.projected_pruned_chunks
         );
 
-        // Check if bit is in appended range
+        // Priority 1: Check if bit is in appended region.
         if bit_offset >= batch.base_len {
             let append_offset = (bit_offset - batch.base_len) as usize;
             return batch.appended_bits[append_offset];
         }
 
-        // Check if bit was modified in batch
+        // Priority 2: Check if bit was modified in this batch.
         if let Some(&value) = batch.modified_bits.get(&bit_offset) {
             return value;
         }
 
-        // Fall through to current bitmap
+        // Priority 3: Fall through to original bitmap.
         self.historical.current.get_bit(bit_offset)
     }
 
@@ -844,14 +848,12 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
     pub fn set_bit(&mut self, bit_offset: u64, value: bool) -> &mut Self {
         let batch = self.historical.active_batch.as_mut().unwrap();
 
-        // Check bounds
         assert!(
             bit_offset < batch.projected_len,
             "cannot set bit {bit_offset}: out of bounds (len: {})",
             batch.projected_len
         );
 
-        // Check not pruned
         let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
         assert!(
             chunk_idx >= batch.projected_pruned_chunks,
@@ -859,16 +861,16 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
             batch.projected_pruned_chunks
         );
 
-        // Determine the start of the appended region
-        // Appended bits start at: projected_len - appended_bits.len()
+        // Determine which region this bit belongs to.
+        // Appended region: bits pushed in this batch, starting at projected_len - appended_bits.len()
         let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
 
-        // If the bit is in the appended region, update appended_bits directly
         if bit_offset >= appended_start {
+            // Bit is in the appended region: update the appended_bits vector directly.
             let append_offset = (bit_offset - appended_start) as usize;
             batch.appended_bits[append_offset] = value;
         } else {
-            // Bit is in the base region, record as modification
+            // Bit is in the base region: record as a modification.
             batch.modified_bits.insert(bit_offset, value);
         }
 
@@ -904,7 +906,7 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
 
     /// Pop the last bit from the bitmap.
     ///
-    /// Returns the value of the popped bit, respecting any modifications made in this batch.
+    /// Returns the value of the popped bit, accounting for any modifications in this batch.
     ///
     /// # Panics
     ///
@@ -918,21 +920,20 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         batch.projected_len -= 1;
         let bit_offset = batch.projected_len;
 
-        // Determine if the bit being popped is in the appended region
-        // Appended region starts at: (projected_len before pop) - appended_bits.len()
-        let appended_start_before_pop = old_projected_len - batch.appended_bits.len() as u64;
+        // Determine which region the popped bit came from.
+        // The appended region contains bits pushed in this batch: [appended_start, old_projected_len)
+        let appended_start = old_projected_len - batch.appended_bits.len() as u64;
 
-        // Check if popping from appended region
-        if bit_offset >= appended_start_before_pop {
+        if bit_offset >= appended_start {
+            // Popping from appended region: remove from appended_bits vector.
             batch.appended_bits.pop().unwrap()
         } else {
-            // Popping from base region - check if it was modified in batch
+            // Popping from base region: check if it was modified in this batch.
             if let Some(&modified_value) = batch.modified_bits.get(&bit_offset) {
-                // Remove the modification since we're popping this bit
                 batch.modified_bits.remove(&bit_offset);
                 modified_value
             } else {
-                // Not modified, read original value
+                // Not modified in batch, return original value.
                 self.historical.current.get_bit(bit_offset)
             }
         }
@@ -951,9 +952,9 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         let current_pruned = self.historical.current.pruned_chunks();
         for chunk_idx in batch.projected_pruned_chunks..chunk_num {
             #[cfg(not(feature = "std"))]
-            use alloc::collections::btree_map::Entry;
+            use alloc::collections::hash_map::Entry;
             #[cfg(feature = "std")]
-            use std::collections::btree_map::Entry;
+            use std::collections::hash_map::Entry;
 
             if let Entry::Vacant(e) = batch.chunks_to_prune.entry(chunk_idx) {
                 if chunk_idx >= current_pruned {
