@@ -172,7 +172,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::Get { loc_offset } => {
                     let op_count = db.op_count();
                     if op_count > 0 {
-                        let loc = (*loc_offset as u64) % op_count;
+                        let loc = (*loc_offset as u64) % op_count.as_u64();
                         let _ = db.get(loc.into()).await;
                     }
                 }
@@ -218,7 +218,7 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
-                        let start_loc = (*start_offset as u64) % op_count;
+                        let start_loc = (*start_offset as u64) % op_count.as_u64();
                         let max_ops_value = ((*max_ops as u64) % 100) + 1;
                         if let Ok((proof, ops)) = db.proof(Location::new(start_loc), NZU64!(max_ops_value)).await {
                             let root = db.root(&mut hasher);
@@ -237,11 +237,11 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
-                        let size = ((*size_offset as u64) % op_count) + 1;
+                        let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                         let start_loc = (*start_offset as u64) % size;
                         let max_ops_value = ((*max_ops as u64) % 100) + 1;
                         let _ = db
-                            .historical_proof(size, Location::new(start_loc), NZU64!(max_ops_value))
+                            .historical_proof(Location::new(size), Location::new(start_loc), NZU64!(max_ops_value))
                             .await;
                     }
                 }

@@ -180,7 +180,7 @@ fn fuzz(input: FuzzInput) {
 
                     let _ = mmr.pop(count as usize).await;
                     let new_len = mmr.leaves();
-                    leaves.truncate(new_len as usize);
+                    leaves.truncate(new_len.as_u64() as usize);
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
@@ -192,7 +192,7 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     mmr.process_updates(&mut hasher);
-                    let location = location % mmr.leaves();
+                    let location = location % mmr.leaves().as_u64();
                     let location = Location::new(location);
                     let position = Position::from(location);
 
@@ -252,7 +252,7 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
                     // Ensure the size represents a valid MMR structure
-                    let valid_size = PeakIterator::to_nearest_size(size.min(mmr.size()));
+                    let valid_size = PeakIterator::to_nearest_size(Position::new(size));
                     let start_element_pos = Position::from(start_loc);
                     if (start_loc > end_loc)
                         || start_element_pos < mmr.pruned_to_pos()
@@ -291,7 +291,7 @@ fn fuzz(input: FuzzInput) {
                 MmrJournaledOperation::PruneToPos { pos } => {
                     mmr.process_updates(&mut hasher);
                     if mmr.size() > 0 {
-                        let safe_pos = pos % (mmr.size() + 1);
+                        let safe_pos = pos % (mmr.size() + 1).as_u64();
                         mmr.prune_to_pos(&mut hasher, safe_pos.into())
                             .await
                             .unwrap();
@@ -309,8 +309,8 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::GetLeaves => {
-                    let leaves = mmr.leaves();
-                    assert!(leaves <= mmr.size());
+                    let leaves = mmr.leaves().as_u64();
+                    assert!(leaves <= mmr.size().as_u64());
                 }
 
                 MmrJournaledOperation::GetLastLeafPos => {
@@ -363,7 +363,7 @@ fn fuzz(input: FuzzInput) {
                 MmrJournaledOperation::InitFromPinnedNodes { size } => {
                     if mmr.size() > 0 {
                         // Ensure limited_size doesn't exceed current MMR size
-                        let limited_size = ((size % mmr.size()).max(1)).min(mmr.size());
+                        let limited_size = ((size % mmr.size().as_u64()).max(1)).min(*mmr.size());
 
                         // Create a reasonable number of pinned nodes - use a simple heuristic
                         // For small MMRs, we need fewer pinned nodes; for larger ones, we need more
@@ -376,7 +376,7 @@ fn fuzz(input: FuzzInput) {
                         if let Ok(new_mmr) = Mmr::<_, Sha256>::init_from_pinned_nodes(
                             context.clone(),
                             pinned_nodes.clone(),
-                            limited_size,
+                            limited_size.into(),
                             test_config("pinned"),
                         )
                         .await

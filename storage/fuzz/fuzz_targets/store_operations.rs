@@ -4,6 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
+    mmr::Location,
     store::{Config, Store},
     translator::TwoCap,
 };
@@ -157,8 +158,8 @@ fn fuzz(input: FuzzInput) {
                 Operation::GetLoc { loc_offset } => {
                     let op_count = store.op_count();
                     if op_count > 0 {
-                        let loc = (*loc_offset as u64) % op_count;
-                        let _ = store.get_loc(loc).await;
+                        let loc = (*loc_offset as u64) % op_count.as_u64();
+                        let _ = store.get_loc(Location::new(loc)).await;
                     }
                 }
 
