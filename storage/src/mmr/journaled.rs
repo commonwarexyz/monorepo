@@ -93,7 +93,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
 
     /// The size of the journal irrespective of any pruned nodes or any un-synced nodes currently
     /// cached in the memory resident MMR.
-    journal_size: u64,
+    journal_size: Position,
 
     /// Stores all "pinned nodes" (pruned nodes required for proving & root generation) for the MMR,
     /// and the corresponding pruning boundary used to generate them. The metadata remains empty
@@ -130,7 +130,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     pub async fn init_from_pinned_nodes(
         context: E,
         pinned_nodes: Vec<H::Digest>,
-        mmr_size: u64,
+        mmr_size: Position,
         config: Config,
     ) -> Result<Self, Error> {
         // Destroy any existing journal data
@@ -145,7 +145,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             write_buffer: config.write_buffer,
         };
         let journal =
-            init_journal_at_size(context.with_label("mmr_journal"), journal_cfg, mmr_size).await?;
+            init_journal_at_size(context.with_label("mmr_journal"), journal_cfg, *mmr_size).await?;
 
         // Initialize metadata
         let metadata_cfg = MConfig {
@@ -159,9 +159,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.put(pruning_boundary_key, mmr_size.to_be_bytes().into());
 
         // Store the pinned nodes in metadata
-        let nodes_to_pin_positions = nodes_to_pin(Position::new(mmr_size));
+        let nodes_to_pin_positions = nodes_to_pin(mmr_size);
         for (pos, digest) in nodes_to_pin_positions.zip(pinned_nodes.iter()) {
-            metadata.put(U64::new(NODE_PREFIX, pos.as_u64()), digest.to_vec());
+            metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
         }
 
         // Sync metadata to disk
@@ -170,7 +170,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Create in-memory MMR in fully pruned state
         let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: Position::new(mmr_size),
+            pruned_to_pos: mmr_size,
             pinned_nodes,
             pool: config.thread_pool,
         });
@@ -180,7 +180,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             journal,
             journal_size: mmr_size,
             metadata,
-            pruned_to_pos: Position::new(mmr_size),
+            pruned_to_pos: mmr_size,
         })
     }
 
@@ -194,7 +194,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         };
         let mut journal =
             Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let mut journal_size = journal.size().await?;
+        let mut journal_size = Position::new(journal.size().await?);
 
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition,
@@ -252,30 +252,30 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let mut orphaned_leaf: Option<H::Digest> = None;
         if last_valid_size != journal_size {
             warn!(
-                last_valid_size,
+                ?last_valid_size,
                 "encountered invalid MMR structure, recovering from last valid size"
             );
             // Check if there is an intact leaf following the last valid size, from which we can
             // recover its missing parents.
-            let recovered_item = journal.read(last_valid_size).await;
+            let recovered_item = journal.read(*last_valid_size).await;
             if let Ok(item) = recovered_item {
                 orphaned_leaf = Some(item);
             }
-            journal.rewind(last_valid_size).await?;
+            journal.rewind(*last_valid_size).await?;
             journal.sync().await?;
             journal_size = last_valid_size
         }
 
         // Initialize the mem_mmr in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
-        for pos in nodes_to_pin(Position::new(journal_size)) {
+        for pos in nodes_to_pin(journal_size) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: Position::new(journal_size),
+            pruned_to_pos: journal_size,
             pinned_nodes,
             pool: cfg.thread_pool,
         });
@@ -293,7 +293,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         if let Some(leaf) = orphaned_leaf {
             // Recover the orphaned leaf and any missing parents.
             let pos = s.mem_mmr.size();
-            warn!(pos, "recovering orphaned leaf");
+            warn!(?pos, "recovering orphaned leaf");
             s.mem_mmr.add_leaf_digest(hasher, leaf);
             assert_eq!(pos, journal_size);
             s.sync(hasher).await?;
@@ -348,11 +348,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 write_buffer: cfg.config.write_buffer,
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
-            cfg.lower_bound_pos.as_u64(),
-            cfg.upper_bound_pos.as_u64(),
+            *cfg.lower_bound_pos,
+            *cfg.upper_bound_pos,
         )
         .await?;
-        let journal_size = journal.size().await?;
+        let journal_size = Position::new(journal.size().await?);
         assert!(journal_size <= cfg.upper_bound_pos + 1);
 
         // Open the metadata.
@@ -366,19 +366,19 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
-            cfg.lower_bound_pos.as_u64().to_be_bytes().into(),
+            (*cfg.lower_bound_pos).to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             let nodes_to_pin_persisted = nodes_to_pin(cfg.lower_bound_pos);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
-                metadata.put(U64::new(NODE_PREFIX, pos.as_u64()), digest.to_vec());
+                metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
         }
 
         // Create the in-memory MMR with the pinned nodes required for its size.
-        let nodes_to_pin_mem = nodes_to_pin(Position::new(journal_size));
+        let nodes_to_pin_mem = nodes_to_pin(journal_size);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
             let digest =
@@ -387,7 +387,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
         let mut mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: Position::new(journal_size),
+            pruned_to_pos: journal_size,
             pinned_nodes: mem_pinned_nodes,
             pool: cfg.config.thread_pool,
         });
@@ -410,12 +410,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
-    pub fn size(&self) -> u64 {
+    pub fn size(&self) -> Position {
         self.mem_mmr.size()
     }
 
     /// Return the total number of leaves in the MMR.
-    pub fn leaves(&self) -> u64 {
+    pub fn leaves(&self) -> Location {
         self.mem_mmr.leaves()
     }
 
@@ -434,7 +434,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             return Ok(Some(node));
         }
 
-        match self.journal.read(position.as_u64()).await {
+        match self.journal.read(*position).await {
             Ok(item) => Ok(Some(item)),
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::JournalError(e)),
@@ -449,29 +449,28 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         journal: &Journal<E, H::Digest>,
         pos: Position,
     ) -> Result<H::Digest, Error> {
-        let pos = pos.as_u64();
-        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, pos)) {
-            debug!(pos, "read node from metadata");
+        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
+            debug!(?pos, "read node from metadata");
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
                 error!(
-                    pos,
+                    ?pos,
                     err = %digest.expect_err("digest is Err in else branch"),
                     "could not convert node from metadata bytes to digest"
                 );
-                return Err(Error::MissingNode(Position::new(pos)));
+                return Err(Error::MissingNode(pos));
             };
             return Ok(digest);
         }
 
         // If a node isn't found in the metadata, it might still be in the journal.
-        debug!(pos, "reading node from journal");
-        let node = journal.read(pos).await;
+        debug!(?pos, "reading node from journal");
+        let node = journal.read(*pos).await;
         match node {
             Ok(node) => Ok(node),
             Err(JError::ItemPruned(_)) => {
-                error!(pos, "node is missing from metadata and journal");
-                Err(Error::MissingNode(Position::new(pos)))
+                error!(?pos, "node is missing from metadata and journal");
+                Err(Error::MissingNode(pos))
             }
             Err(e) => Err(Error::JournalError(e)),
         }
@@ -530,17 +529,16 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             }
             new_size -= 1;
             if new_size < self.pruned_to_pos {
-                return Err(Error::ElementPruned(Position::new(new_size)));
+                return Err(Error::ElementPruned(new_size));
             }
             if PeakIterator::check_validity(new_size) {
                 leaves_to_pop -= 1;
             }
         }
 
-        self.journal.rewind(new_size).await?;
+        self.journal.rewind(*new_size).await?;
         self.journal.sync().await?;
         self.journal_size = new_size;
-        let new_size = Position::new(new_size);
 
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
@@ -583,7 +581,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.process_updates(h);
 
         // Write the nodes cached in the memory-resident MMR to the journal.
-        for pos in self.journal_size..self.size() {
+        for pos in *self.journal_size..*self.size() {
             let pos = Position::new(pos);
             let node = *self.mem_mmr.get_node_unchecked(pos);
             self.journal.append(node).await?;
@@ -622,13 +620,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
             );
             self.metadata
-                .put(U64::new(NODE_PREFIX, pos.as_u64()), digest.to_vec());
+                .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             pinned_nodes.insert(pos, digest);
         }
 
         let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        self.metadata
-            .put(key, prune_to_pos.as_u64().to_be_bytes().into());
+        self.metadata.put(key, (*prune_to_pos).to_be_bytes().into());
 
         self.metadata.sync().await.map_err(Error::MetadataError)?;
 
@@ -660,7 +657,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// MMR had `size` nodes.
     pub async fn historical_range_proof(
         &self,
-        size: u64,
+        size: Position,
         range: Range<Location>,
     ) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
@@ -671,7 +668,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// blob.
     pub async fn prune_all(&mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
         if self.size() != 0 {
-            self.prune_to_pos(h, Position::new(self.size())).await?;
+            self.prune_to_pos(h, self.size()).await?;
             return Ok(());
         }
         Ok(())
@@ -698,7 +695,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // event of a pruning failure.
         let pinned_nodes = self.update_metadata(pos).await?;
 
-        self.journal.prune(pos.as_u64()).await?;
+        self.journal.prune(*pos).await?;
         self.mem_mmr.add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
@@ -751,7 +748,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // write_count nodes have been written.
         let mut written_count = 0usize;
         self.mem_mmr.sync(hasher);
-        for i in self.journal_size..self.size() {
+        for i in *self.journal_size..*self.size() {
             let node = *self.mem_mmr.get_node_unchecked(Position::new(i));
             self.journal.append(node).await?;
             written_count += 1;
@@ -790,7 +787,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 }
 
 impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Mmr<E, H> {
-    fn size(&self) -> u64 {
+    fn size(&self) -> Position {
         self.size()
     }
 
@@ -1026,8 +1023,8 @@ mod tests {
                 let pos = mmr.add(&mut hasher, leaves.last().unwrap()).await.unwrap();
                 positions.push(pos);
             }
-            assert_eq!(mmr.size(), 502);
-            assert_eq!(mmr.journal_size, 0);
+            assert_eq!(mmr.size(), Position::new(502));
+            assert_eq!(mmr.journal_size, Position::new(0));
 
             // Generate & verify proof from element that is not yet flushed to the journal.
             const TEST_ELEMENT: usize = 133;
@@ -1044,7 +1041,7 @@ mod tests {
 
             // Sync the MMR, make sure it flushes the in-mem MMR as expected.
             mmr.sync(&mut hasher).await.unwrap();
-            assert_eq!(mmr.journal_size, 502);
+            assert_eq!(mmr.journal_size, Position::new(502));
             assert_eq!(mmr.mem_mmr.oldest_retained_pos(), None);
 
             // Now that the element is flushed from the in-mem MMR, confirm its proof is still is
@@ -1233,25 +1230,22 @@ mod tests {
                 .add(&mut hasher, &test_digest(LEAF_COUNT))
                 .await
                 .unwrap();
-            assert!(pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
+            assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
             pruned_mmr.close(&mut hasher).await.unwrap();
             let mut pruned_mmr = Mmr::init(context.clone(), &mut hasher, cfg_pruned.clone())
                 .await
                 .unwrap();
             assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
-            assert_eq!(pruned_mmr.oldest_retained_pos(), Some(Position::new(size)));
+            assert_eq!(pruned_mmr.oldest_retained_pos(), Some(size));
             assert_eq!(pruned_mmr.pruned_to_pos(), size);
 
             // Make sure pruning to older location is a no-op.
-            assert!(pruned_mmr
-                .prune_to_pos(&mut hasher, Position::new(size - 1))
-                .await
-                .is_ok());
+            assert!(pruned_mmr.prune_to_pos(&mut hasher, size - 1).await.is_ok());
             assert_eq!(pruned_mmr.pruned_to_pos(), size);
 
             // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
             // retained nodes.
-            while pruned_mmr.size() % cfg_pruned.items_per_blob != 0 {
+            while *pruned_mmr.size() % cfg_pruned.items_per_blob != 0 {
                 pruned_mmr
                     .add(&mut hasher, &test_digest(LEAF_COUNT))
                     .await
@@ -1294,7 +1288,7 @@ mod tests {
                     .await
                     .unwrap();
                 let start_size = mmr.size();
-                let prune_pos = std::cmp::min(i as u64 * 50, start_size);
+                let prune_pos = std::cmp::min(i as u64 * 50, *start_size);
                 let prune_pos = Position::new(prune_pos);
                 if i % 5 == 0 {
                     mmr.simulate_pruning_failure(&mut hasher, prune_pos)
@@ -1321,7 +1315,7 @@ mod tests {
                     mmr.add(&mut hasher, last_leaf).await.unwrap();
                 }
                 let end_size = mmr.size();
-                let total_to_write = (end_size - start_size) as usize;
+                let total_to_write = (*end_size - *start_size) as usize;
                 let partial_write_limit = i % total_to_write;
                 mmr.simulate_partial_sync(&mut hasher, partial_write_limit)
                     .await
@@ -1502,7 +1496,7 @@ mod tests {
             .unwrap();
 
             // Add elements up to the end of the range to verify historical root
-            for elt in elements.iter().take(range.end.as_u64() as usize) {
+            for elt in elements.iter().take(*range.end as usize) {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
             let historical_size = ref_mmr.size();
@@ -1540,7 +1534,7 @@ mod tests {
 
             // Test single element proof at historical position
             let single_proof = mmr
-                .historical_range_proof(1, Location::new(0)..Location::new(1))
+                .historical_range_proof(Position::new(1), Location::new(0)..Location::new(1))
                 .await
                 .unwrap();
 
@@ -1589,7 +1583,7 @@ mod tests {
             original_mmr.sync(&mut hasher).await.unwrap();
             let original_size = original_mmr.size();
             original_mmr
-                .prune_to_pos(&mut hasher, Position::new(original_size))
+                .prune_to_pos(&mut hasher, original_size)
                 .await
                 .unwrap();
 
@@ -1599,7 +1593,7 @@ mod tests {
 
             // Get the pinned nodes
             let pinned_nodes_map = original_mmr.get_pinned_nodes();
-            let pinned_nodes: Vec<_> = nodes_to_pin(Position::new(original_size))
+            let pinned_nodes: Vec<_> = nodes_to_pin(original_size)
                 .map(|pos| pinned_nodes_map[&pos])
                 .collect();
 
@@ -1656,10 +1650,7 @@ mod tests {
             // Size and other metadata should be unchanged
             assert_eq!(new_mmr.size(), original_size + 1); // +1 for element we just added
             assert_eq!(new_mmr.pruned_to_pos(), original_size);
-            assert_eq!(
-                new_mmr.oldest_retained_pos(),
-                Some(Position::new(original_size))
-            ); // Element we just added is the oldest retained
+            assert_eq!(new_mmr.oldest_retained_pos(), Some(original_size)); // Element we just added is the oldest retained
 
             // Proofs generated from the journaled MMR should be the same as the proofs generated from the original MMR
             let proof = new_mmr.proof(Location::new(NUM_ELEMENTS)).await.unwrap();
@@ -1684,8 +1675,8 @@ mod tests {
             // === TEST 1: Empty MMR (size 0) ===
             let mut empty_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
                 context.clone(),
-                vec![], // No pinned nodes
-                0,      // Size 0
+                vec![],           // No pinned nodes
+                Position::new(0), // Size 0
                 Config {
                     journal_partition: "empty_journal".into(),
                     metadata_partition: "empty_metadata".into(),
@@ -1714,7 +1705,7 @@ mod tests {
             single_mem_mmr.add(&mut hasher, &test_digest(42));
             let single_size = single_mem_mmr.size();
             let single_root = single_mem_mmr.root(&mut hasher);
-            let single_pinned = single_mem_mmr.node_digests_to_pin(Position::new(single_size));
+            let single_pinned = single_mem_mmr.node_digests_to_pin(single_size);
 
             let single_journaled_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
                 context.clone(),
@@ -1795,9 +1786,9 @@ mod tests {
 
             // Sync with lower_bound ≤ existing_size ≤ upper_bound should reuse data
             let lower_bound_pos = mmr.pruned_to_pos();
-            let upper_bound_pos = Position::new(mmr.size() - 1);
+            let upper_bound_pos = mmr.size() - 1;
             let mut expected_nodes = BTreeMap::new();
-            for i in lower_bound_pos.as_u64()..=upper_bound_pos.as_u64() {
+            for i in *lower_bound_pos..=*upper_bound_pos {
                 expected_nodes.insert(
                     Position::new(i),
                     mmr.get_node(Position::new(i)).await.unwrap().unwrap(),
@@ -1822,7 +1813,7 @@ mod tests {
             assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
             assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
             assert_eq!(sync_mmr.root(&mut hasher), original_root);
-            for pos in lower_bound_pos.as_u64()..=upper_bound_pos.as_u64() {
+            for pos in *lower_bound_pos..=*upper_bound_pos {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
@@ -1859,10 +1850,10 @@ mod tests {
 
             // Sync with boundaries that extend beyond existing data (partial overlap).
             let lower_bound_pos = original_pruned_to;
-            let upper_bound_pos = Position::new(original_size + 10); // Extend beyond existing data
+            let upper_bound_pos = original_size + 10; // Extend beyond existing data
 
             let mut expected_nodes = BTreeMap::new();
-            for pos in lower_bound_pos.as_u64()..original_size {
+            for pos in *lower_bound_pos..*original_size {
                 let pos = Position::new(pos);
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
             }
@@ -1887,7 +1878,7 @@ mod tests {
             assert_eq!(sync_mmr.root(&mut hasher), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
-            for pos in lower_bound_pos.as_u64()..original_size {
+            for pos in *lower_bound_pos..*original_size {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),

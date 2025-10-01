@@ -151,15 +151,13 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
-    pub fn size(&self) -> u64 {
-        self.nodes.len() as u64 + self.pruned_to_pos.as_u64()
+    pub fn size(&self) -> Position {
+        Position::new(self.nodes.len() as u64 + *self.pruned_to_pos)
     }
 
     /// Return the total number of leaves in the MMR.
-    pub fn leaves(&self) -> u64 {
-        Location::try_from(Position::new(self.size()))
-            .expect("invalid mmr size")
-            .as_u64()
+    pub fn leaves(&self) -> Location {
+        Location::try_from(self.size()).expect("invalid mmr size")
     }
 
     /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
@@ -194,7 +192,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return the position of the element given its index in the current nodes vector.
     fn index_to_pos(&self, index: usize) -> Position {
-        Position::new(index as u64 + self.pruned_to_pos.as_u64())
+        self.pruned_to_pos + (index as u64)
     }
 
     /// Returns the requested node, assuming it is either retained or known to exist in the
@@ -229,9 +227,7 @@ impl<H: CHasher> Mmr<H> {
             pos >= self.pruned_to_pos,
             "pos precedes oldest retained position"
         );
-        (pos.checked_sub(self.pruned_to_pos.as_u64())
-            .unwrap()
-            .as_u64()) as usize
+        *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
     }
 
     /// Add `element` to the MMR and return its position in the MMR. The element can be an arbitrary
@@ -241,7 +237,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// Panics if there are unprocessed batch updates.
     pub fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
-        let leaf_pos = Position::new(self.size());
+        let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
         self.add_leaf_digest(hasher, digest);
 
@@ -252,7 +248,7 @@ impl<H: CHasher> Mmr<H> {
     /// until `sync` is called. The element can be an arbitrary byte slice, and need not be
     /// converted to a digest first.
     pub fn add_batched(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
-        let leaf_pos = Position::new(self.size());
+        let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
 
         // Compute the new parent nodes if any, and insert them into the MMR
@@ -264,7 +260,7 @@ impl<H: CHasher> Mmr<H> {
 
         let mut height = 1;
         for _ in nodes_needing_parents {
-            let new_node_pos = Position::new(self.size());
+            let new_node_pos = self.size();
             // The digest we push here doesn't matter as it will be updated later.
             self.nodes.push_back(self.dirty_digest);
             self.dirty_nodes.insert((new_node_pos, height));
@@ -292,7 +288,7 @@ impl<H: CHasher> Mmr<H> {
 
         // Compute the new parent nodes if any, and insert them into the MMR.
         for sibling_pos in nodes_needing_parents {
-            let new_node_pos = Position::new(self.size());
+            let new_node_pos = self.size();
             let sibling_digest = self.get_node_unchecked(sibling_pos);
             digest = hasher.node_digest(new_node_pos, sibling_digest, &digest);
             self.nodes.push_back(digest);
@@ -316,18 +312,18 @@ impl<H: CHasher> Mmr<H> {
 
         let mut new_size = self.size() - 1;
         loop {
-            if Position::new(new_size) < self.pruned_to_pos {
-                return Err(ElementPruned(Position::new(new_size)));
+            if new_size < self.pruned_to_pos {
+                return Err(ElementPruned(new_size));
             }
             if PeakIterator::check_validity(new_size) {
                 break;
             }
             new_size -= 1;
         }
-        let num_to_drain = (self.size() - new_size) as usize;
+        let num_to_drain = *(self.size() - new_size) as usize;
         self.nodes.drain(self.nodes.len() - num_to_drain..);
 
-        Ok(Position::new(self.size()))
+        Ok(self.size())
     }
 
     /// Change the digest of any retained leaf. This is useful if you want to use the MMR
@@ -734,11 +730,11 @@ impl<H: CHasher> Mmr<H> {
         );
 
         // Create the "old_nodes" of the MMR in the fully pruned state.
-        let old_nodes = self.node_digests_to_pin(Position::new(self.size()));
+        let old_nodes = self.node_digests_to_pin(self.size());
 
         Self::init(Config {
             nodes: vec![],
-            pruned_to_pos: Position::new(self.size()),
+            pruned_to_pos: self.size(),
             pinned_nodes: old_nodes,
             #[cfg(feature = "std")]
             pool: None,
@@ -808,7 +804,7 @@ mod tests {
                 "empty iterator should have no peaks"
             );
             assert_eq!(mmr.size(), 0);
-            assert_eq!(mmr.leaves(), 0);
+            assert_eq!(mmr.leaves(), Location::new(0));
             assert_eq!(mmr.last_leaf_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert_eq!(mmr.get_node(Position::new(0)), None);
@@ -816,7 +812,10 @@ mod tests {
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
-            assert_eq!(mmr.root(&mut hasher), hasher.root(0, [].iter()));
+            assert_eq!(
+                mmr.root(&mut hasher),
+                hasher.root(Position::new(0), [].iter())
+            );
 
             let clone = mmr.clone_pruned();
             assert_eq!(clone.size(), 0);
@@ -838,7 +837,7 @@ mod tests {
                 leaves.push(mmr.add(&mut hasher, &element));
                 let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
-                assert!(peaks.len() <= mmr.size() as usize);
+                assert!(peaks.len() as u64 <= mmr.size());
                 let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
                 assert!(nodes_needing_parents.len() <= peaks.len());
             }
@@ -905,7 +904,7 @@ mod tests {
             // verify root
             let root = mmr.root(&mut hasher);
             let peak_digests = [digest14, digest17, mmr.nodes[18]];
-            let expected_root = hasher.root(19, peak_digests.iter());
+            let expected_root = hasher.root(Position::new(19), peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests
@@ -933,7 +932,7 @@ mod tests {
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(Location::new(8)..Location::new(mmr.leaves())).is_ok(),
+                mmr.range_proof(Location::new(8)..mmr.leaves()).is_ok(),
                 "attempts to range_prove over all elements following oldest retained should succeed"
             );
 
@@ -958,10 +957,10 @@ mod tests {
             mmr.prune_to_pos(Position::new(17)); // prune up to the second peak
             let clone = mmr.clone_pruned();
             assert_eq!(clone.oldest_retained_pos(), None);
-            assert_eq!(clone.pruned_to_pos().as_u64(), clone.size());
+            assert_eq!(clone.pruned_to_pos(), clone.size());
             mmr.prune_all();
             assert_eq!(mmr.oldest_retained_pos(), None);
-            assert_eq!(mmr.pruned_to_pos().as_u64(), mmr.size());
+            assert_eq!(mmr.pruned_to_pos(), mmr.size());
             assert_eq!(mmr.size(), clone.size());
             assert_eq!(mmr.root(&mut hasher), clone.root(&mut hasher));
         });
@@ -998,9 +997,9 @@ mod tests {
                 );
                 let old_size = mmr.size();
                 mmr.add(&mut hasher, &element);
-                for size in old_size + 1..mmr.size() {
+                for size in *old_size + 1..*mmr.size() {
                     assert!(
-                        !PeakIterator::check_validity(size),
+                        !PeakIterator::check_validity(Position::new(size)),
                         "mmr of size {size} should be invalid",
                     );
                 }
@@ -1062,13 +1061,13 @@ mod tests {
         });
     }
 
-    fn compute_big_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256>) -> Vec<u64> {
+    fn compute_big_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256>) -> Vec<Position> {
         let mut leaves = Vec::new();
         let mut c_hasher = Sha256::default();
         for i in 0u64..199 {
             c_hasher.update(&i.to_be_bytes());
             let element = c_hasher.finalize();
-            leaves.push(mmr.add(hasher, &element).as_u64());
+            leaves.push(mmr.add(hasher, &element));
         }
         mmr.sync(hasher);
 
@@ -1132,23 +1131,23 @@ mod tests {
             // to its previous state then we update the leaf to its original value.
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
-                mmr.update_leaf(&mut hasher, Position::new(leaves[leaf]), &element);
+                mmr.update_leaf(&mut hasher, leaves[leaf], &element);
                 let updated_root = mmr.root(&mut hasher);
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
                 hasher.inner().update(&leaf.to_be_bytes());
                 let element = hasher.inner().finalize();
-                mmr.update_leaf(&mut hasher, Position::new(leaves[leaf]), &element);
+                mmr.update_leaf(&mut hasher, leaves[leaf], &element);
                 let restored_root = mmr.root(&mut hasher);
                 assert_eq!(root, restored_root);
             }
 
             // Confirm the tree has all the hashes necessary to update any element after pruning.
-            mmr.prune_to_pos(Position::new(leaves[150]));
+            mmr.prune_to_pos(leaves[150]);
             for &leaf_pos in &leaves[150..=190] {
-                mmr.prune_to_pos(Position::new(leaf_pos));
-                mmr.update_leaf(&mut hasher, Position::new(leaf_pos), &element);
+                mmr.prune_to_pos(leaf_pos);
+                mmr.update_leaf(&mut hasher, leaf_pos, &element);
             }
         });
     }
@@ -1214,14 +1213,14 @@ mod tests {
         });
     }
 
-    fn do_batch_update(hasher: &mut Standard<Sha256>, mmr: &mut Mmr<Sha256>, leaves: &[u64]) {
+    fn do_batch_update(hasher: &mut Standard<Sha256>, mmr: &mut Mmr<Sha256>, leaves: &[Position]) {
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let root = mmr.root(hasher);
 
         // Change a handful of leaves using a batch update.
         let mut updates = Vec::new();
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-            updates.push((Position::new(leaves[leaf]), &element));
+            updates.push((leaves[leaf], &element));
         }
         mmr.update_leaf_batched(hasher, &updates);
 
@@ -1237,7 +1236,7 @@ mod tests {
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
             hasher.inner().update(&leaf.to_be_bytes());
             let element = hasher.inner().finalize();
-            updates.push((Position::new(leaves[leaf]), element));
+            updates.push((leaves[leaf], element));
         }
         mmr.update_leaf_batched(hasher, &updates);
 

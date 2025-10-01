@@ -153,7 +153,7 @@ mod tests {
         let requester = Generator::new();
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            size: 100,
+            op_count: Location::new(100),
             start_loc: Location::new(10),
             max_ops: NZU64!(50),
         };
@@ -162,7 +162,7 @@ mod tests {
         // Invalid start_loc
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            size: 100,
+            op_count: Location::new(100),
             start_loc: Location::new(100),
             max_ops: NZU64!(50),
         };
@@ -174,7 +174,7 @@ mod tests {
         // start_loc beyond size
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            size: 100,
+            op_count: Location::new(100),
             start_loc: Location::new(150),
             max_ops: NZU64!(50),
         };
