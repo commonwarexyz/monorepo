@@ -57,7 +57,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         let handshakes_concurrent_rate_limited = Counter::default();
         context.register(
             "handshake_concurrent_rate_limited",
-            "number of handshakes dropped because maximum concurrent handshakes was reached",
+            "number of handshake attempts dropped because maximum concurrent handshakes was reached",
             handshakes_concurrent_rate_limited.clone(),
         );
         let handshakes_ip_rate_limited = Counter::default();
