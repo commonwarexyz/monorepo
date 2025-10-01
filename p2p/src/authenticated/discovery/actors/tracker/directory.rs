@@ -1,6 +1,7 @@
-use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
+use super::{
+    ingress::ReleaserHandle, metrics::Metrics, record::Record, set::Set, Metadata, Reservation,
+};
 use crate::authenticated::discovery::{
-    actors::tracker::ingress::Releaser,
     metrics,
     types::{self, PeerInfo},
 };
@@ -55,8 +56,8 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
 
     // ---------- Message-Passing ----------
-    /// The releaser for the tracker actor.
-    releaser: Releaser<E, C>,
+    /// Handle for issuing reservation releases back to the tracker.
+    releaser: ReleaserHandle<C>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
@@ -70,7 +71,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         bootstrappers: Vec<(C, SocketAddr)>,
         myself: PeerInfo<C>,
         cfg: Config,
-        releaser: Releaser<E, C>,
+        releaser: ReleaserHandle<C>,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
         let mut peers = HashMap::new();
@@ -217,7 +218,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn dial(&mut self, peer: &C) -> Option<Reservation<E, C>> {
+    pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
         let socket = self.peers.get(peer)?.socket()?;
         self.reserve(Metadata::Dialer(peer.clone(), socket))
     }
@@ -225,7 +226,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C) -> Option<Reservation<E, C>> {
+    pub fn listen(&mut self, peer: &C) -> Option<Reservation<C>> {
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
@@ -320,7 +321,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Attempt to reserve a peer.
     ///
     /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
-    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<E, C>> {
+    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
 
         // Not reservable
@@ -346,11 +347,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Reserve
         if record.reserve() {
             self.metrics.reserved.inc();
-            return Some(Reservation::new(
-                self.context.clone(),
-                metadata,
-                self.releaser.clone(),
-            ));
+            return Some(Reservation::new(metadata, self.releaser.clone()));
         }
         None
     }

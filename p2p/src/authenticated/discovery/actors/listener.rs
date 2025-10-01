@@ -71,8 +71,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let (peer, send, recv) = match listen(
             context,
@@ -105,8 +105,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     #[allow(clippy::type_complexity)]
     pub fn start(
         self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -116,8 +116,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     #[allow(clippy::type_complexity)]
     async fn run(
         self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Start listening for incoming connections
         let mut listener = self

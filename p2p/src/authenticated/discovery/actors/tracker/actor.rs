@@ -1,13 +1,11 @@
 use super::{
     directory::{self, Directory},
-    ingress::{Message, Oracle},
+    ingress::{Message, Oracle, Releaser},
     Config, Error,
 };
-use crate::authenticated::{
-    discovery::{actors::tracker::ingress::Releaser, types},
-    ip, Mailbox,
-};
+use crate::authenticated::{discovery::types, ip, Mailbox};
 use commonware_cryptography::Signer;
+use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
@@ -45,11 +43,18 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
 
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
-    receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
+    receiver: mpsc::Receiver<Message<C::PublicKey>>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C::PublicKey>,
+
+    /// Background worker to handle a backlog of release messages when the
+    /// primary mailbox is saturated.
+    ///
+    /// The reason we need this is because we try to release a reservation on
+    /// drop, which can't handle backpressure since `Drop` must be synchronous.
+    releaser: Option<Releaser<E, C::PublicKey>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -58,11 +63,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (
-        Self,
-        Mailbox<Message<E, C::PublicKey>>,
-        Oracle<E, C::PublicKey>,
-    ) {
+    ) -> (Self, Mailbox<Message<C::PublicKey>>, Oracle<C::PublicKey>) {
         // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
@@ -79,7 +80,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         // Create the mailboxes
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(sender.clone());
-        let releaser = Releaser::new(sender.clone());
+        let (releaser, releaser_handle) = Releaser::new(context.clone(), sender.clone());
         let oracle = Oracle::new(sender);
 
         // Create the directory
@@ -88,7 +89,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             cfg.bootstrappers,
             myself,
             directory_cfg,
-            releaser,
+            releaser_handle,
         );
 
         (
@@ -102,6 +103,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
                 directory,
+                releaser: Some(releaser),
             },
             mailbox,
             oracle,
@@ -150,7 +152,22 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        self.context.spawn_ref()(async move {
+            let releaser_task = self
+                .releaser
+                .take()
+                .expect("tracker releaser already started")
+                .start();
+
+            let run_task = self.run();
+
+            select! {
+                _ = releaser_task => {
+                    debug!("tracker releaser exited");
+                },
+                _ = run_task => {}
+            }
+        })
     }
 
     async fn run(mut self) {
@@ -280,10 +297,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
         PrivateKeyExt as _, Signer,
     };
-    use commonware_runtime::{
-        deterministic::{self, Context},
-        Clock, Runner,
-    };
+    use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_utils::{BitVec as UtilsBitVec, NZU32};
     use futures::future::Either;
     use governor::Quota;
@@ -351,11 +365,11 @@ mod tests {
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
     // sent an initialization.
     async fn connect_to_peer(
-        mailbox: &mut Mailbox<Message<Context, PublicKey>>,
+        mailbox: &mut Mailbox<Message<PublicKey>>,
         peer: &PublicKey,
         peer_mailbox: &Mailbox<peer::Message<PublicKey>>,
         peer_receiver: &mut mpsc::Receiver<peer::Message<PublicKey>>,
-    ) -> tracker::Reservation<Context, PublicKey> {
+    ) -> tracker::Reservation<PublicKey> {
         let res = mailbox
             .listen(peer.clone())
             .await
@@ -374,8 +388,8 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
-        oracle: Oracle<deterministic::Context, PublicKey>,
+        mailbox: Mailbox<Message<PublicKey>>,
+        oracle: Oracle<PublicKey>,
         ip_namespace: Vec<u8>,
         tracker_pk: PublicKey,
         tracker_signer: PrivateKey,
@@ -393,8 +407,9 @@ mod tests {
 
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
+        actor.start();
+
         let ip_namespace = union(&ip_namespace_base, super::NAMESPACE_SUFFIX_IP);
-        runner_context.spawn(|_| actor.run());
 
         TestHarness {
             mailbox,
