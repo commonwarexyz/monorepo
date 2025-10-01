@@ -20,7 +20,7 @@ mod prunable;
 pub use prunable::Prunable;
 
 mod historical;
-pub use historical::Historical;
+pub use historical::{BatchGuard, Error, Historical};
 
 pub const DEFAULT_CHUNK_SIZE: usize = 32;
 

@@ -98,36 +98,16 @@
 use super::Prunable;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::fmt;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
 /// Errors that can occur in Historical bitmap operations.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HistoricalError {
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Error {
     /// Commit numbers must be strictly monotonically increasing.
+    #[error("commit number ({attempted}) <= previous commit ({previous})")]
     NonMonotonicCommit { previous: u64, attempted: u64 },
 }
-
-impl fmt::Display for HistoricalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HistoricalError::NonMonotonicCommit {
-                previous,
-                attempted,
-            } => {
-                write!(
-                    f,
-                    "commit number {} must be greater than previous commit {}",
-                    attempted, previous
-                )
-            }
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for HistoricalError {}
 
 /// Metadata about a historical state.
 #[derive(Clone, Debug)]
@@ -152,7 +132,6 @@ enum ChunkChange<const N: usize> {
 
 /// A reverse diff that describes the state before a commit.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Fields will be used when implementing historical reconstruction
 struct CommitDiff<const N: usize> {
     /// Metadata about the state before this commit.
     metadata: CommitMetadata,
@@ -213,7 +192,7 @@ impl<const N: usize> Historical<N> {
 
     /// Start a new batch for making mutations.
     ///
-    /// The returned [`BatchGuard`] must be either committed or dropped. All mutations
+    /// The returned [BatchGuard] must be either committed or dropped. All mutations
     /// are applied to the guard's diff layer and do not affect the current bitmap
     /// until commit.
     ///
@@ -262,9 +241,9 @@ impl<const N: usize> Historical<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`HistoricalError::NonMonotonicCommit`] if the commit number is not
+    /// Returns [Error::NonMonotonicCommit] if the commit number is not
     /// greater than the previous commit.
-    pub fn with_batch<F>(&mut self, commit_number: u64, f: F) -> Result<(), HistoricalError>
+    pub fn with_batch<F>(&mut self, commit_number: u64, f: F) -> Result<(), Error>
     where
         F: FnOnce(&mut BatchGuard<'_, N>),
     {
@@ -869,13 +848,13 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
     ///
     /// # Errors
     ///
-    /// Returns [`HistoricalError::NonMonotonicCommit`] if the commit number is not
+    /// Returns [Error::NonMonotonicCommit] if the commit number is not
     /// greater than the previous commit.
-    pub fn commit(mut self, commit_number: u64) -> Result<(), HistoricalError> {
+    pub fn commit(mut self, commit_number: u64) -> Result<(), Error> {
         // Validate commit number is monotonically increasing
         if let Some(&max_commit) = self.historical.commits.keys().next_back() {
             if commit_number <= max_commit {
-                return Err(HistoricalError::NonMonotonicCommit {
+                return Err(Error::NonMonotonicCommit {
                     previous: max_commit,
                     attempted: commit_number,
                 });
@@ -1026,7 +1005,7 @@ mod tests {
             .unwrap_err();
 
         match err {
-            HistoricalError::NonMonotonicCommit {
+            Error::NonMonotonicCommit {
                 previous,
                 attempted,
             } => {
@@ -1042,7 +1021,7 @@ mod tests {
             .unwrap_err();
 
         match err {
-            HistoricalError::NonMonotonicCommit {
+            Error::NonMonotonicCommit {
                 previous,
                 attempted,
             } => {
