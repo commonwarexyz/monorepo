@@ -1025,7 +1025,7 @@ pub mod test {
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
-            for i in start..db.status.len() as u64 {
+            for i in start..db.status.len() {
                 if !db.status.get_bit(i) {
                     continue;
                 }
