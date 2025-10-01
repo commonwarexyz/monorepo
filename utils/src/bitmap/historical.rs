@@ -425,26 +425,31 @@ impl<const N: usize> Historical<N> {
     }
 
     /// Number of bits in the current bitmap.
+    #[inline]
     pub fn len(&self) -> u64 {
         self.current.len()
     }
 
     /// Returns true if the current bitmap is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.current.is_empty()
     }
 
     /// Get the value of a bit in the current bitmap.
+    #[inline]
     pub fn get_bit(&self, bit_offset: u64) -> bool {
         self.current.get_bit(bit_offset)
     }
 
     /// Get the chunk containing a bit in the current bitmap.
+    #[inline]
     pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
         self.current.get_chunk(bit_offset)
     }
 
     /// Number of pruned chunks in the current bitmap.
+    #[inline]
     pub fn pruned_chunks(&self) -> usize {
         self.current.pruned_chunks()
     }
@@ -674,6 +679,7 @@ pub struct BatchGuard<'a, const N: usize> {
 
 impl<'a, const N: usize> BatchGuard<'a, N> {
     /// Get the length of the bitmap as it would be after committing this batch.
+    #[inline]
     pub fn len(&self) -> u64 {
         self.historical
             .active_batch
@@ -683,11 +689,13 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
     }
 
     /// Returns true if the bitmap would be empty after committing this batch.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Get the number of pruned chunks after this batch.
+    #[inline]
     pub fn pruned_chunks(&self) -> usize {
         self.historical
             .active_batch
@@ -718,7 +726,8 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
         assert!(
             chunk_idx >= batch.projected_pruned_chunks,
-            "bit {bit_offset} is pruned"
+            "cannot get bit {bit_offset}: chunk {chunk_idx} is pruned (pruned up to chunk {})",
+            batch.projected_pruned_chunks
         );
 
         // Check if bit is in appended range
@@ -758,7 +767,8 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         // Check if chunk is in pruned range
         assert!(
             chunk_idx >= batch.projected_pruned_chunks,
-            "chunk pruned at bit offset: {bit_offset}"
+            "cannot get chunk at bit offset {bit_offset}: chunk {chunk_idx} is pruned (pruned up to chunk {})",
+            batch.projected_pruned_chunks
         );
 
         let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
@@ -837,14 +847,16 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         // Check bounds
         assert!(
             bit_offset < batch.projected_len,
-            "bit offset {bit_offset} out of range"
+            "cannot set bit {bit_offset}: out of bounds (len: {})",
+            batch.projected_len
         );
 
         // Check not pruned
         let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
         assert!(
             chunk_idx >= batch.projected_pruned_chunks,
-            "cannot set pruned bit"
+            "cannot set bit {bit_offset}: chunk {chunk_idx} is pruned (pruned up to chunk {})",
+            batch.projected_pruned_chunks
         );
 
         // Determine the start of the appended region
@@ -1894,7 +1906,7 @@ mod tests {
         // Test configuration
         const NUM_COMMITS: u64 = 20;
         const OPERATIONS_PER_COMMIT: usize = 32;
-        const CHUNK_SIZE_BITS: u64 = 32; // 4 bytes * 8 bits
+        const CHUNK_SIZE_BITS: u64 = Prunable::<4>::CHUNK_SIZE_BITS;
 
         // Operation probability thresholds (out of 100)
         // These define a probability distribution over different operations
