@@ -4,7 +4,6 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
-    iterator::PeakIterator,
     journaled::{Config, Mmr, SyncConfig},
     location::Location,
     Position, StandardHasher as Standard,
@@ -20,36 +19,17 @@ const ITEMS_PER_BLOB: u64 = 7;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum MmrJournaledOperation {
-    Add {
-        data: Vec<u8>,
-    },
-    AddBatched {
-        data: Vec<u8>,
-    },
-    Pop {
-        count: u8,
-    },
-    GetNode {
-        pos: u64,
-    },
-    Proof {
-        location: u64,
-    },
-    RangeProof {
-        start_loc: u64,
-        end_loc: u64,
-    },
-    HistoricalRangeProof {
-        size: u64,
-        start_loc: u64,
-        end_loc: u64,
-    },
+    Add { data: Vec<u8> },
+    AddBatched { data: Vec<u8> },
+    Pop { count: u8 },
+    GetNode { pos: u64 },
+    Proof { location: u64 },
+    RangeProof { start_loc: u8, end_loc: u8 },
+    HistoricalRangeProof { start_loc: u8, end_loc: u8 },
     Sync,
     ProcessUpdates,
     PruneAll,
-    PruneToPos {
-        pos: u64,
-    },
+    PruneToPos { pos: u64 },
     GetRoot,
     GetSize,
     GetLeaves,
@@ -59,13 +39,8 @@ enum MmrJournaledOperation {
     GetOldestRetainedPos,
     Close,
     Reinit,
-    InitFromPinnedNodes {
-        size: u64,
-    },
-    InitSync {
-        lower_bound: u64,
-        upper_bound: u64,
-    },
+    InitFromPinnedNodes { size: u64 },
+    InitSync { lower_bound: u64, upper_bound: u64 },
 }
 
 #[derive(Debug)]
@@ -214,61 +189,51 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::RangeProof { start_loc, end_loc } => {
-                    let start_loc = start_loc.clamp(0, u8::MAX as u64);
-                    let end_loc = end_loc.clamp(1, u8::MAX as u64);
+                    let start_loc = start_loc.clamp(0, u8::MAX - 1);
+                    let end_loc = end_loc.clamp(start_loc + 1, u8::MAX) as u64;
+                    let start_loc = start_loc as u64;
+
                     if mmr.leaves() == 0 {
                         continue;
                     }
                     let range = Location::new(start_loc)..Location::new(end_loc);
                     let start_pos = Position::from(range.start);
+
                     if start_loc >= mmr.leaves()
-                        || start_pos < mmr.pruned_to_pos()
-                        || start_loc > end_loc
-                        || end_loc == 0
                         || end_loc >= mmr.leaves()
+                        || start_pos < mmr.pruned_to_pos()
+                        || start_pos >= mmr.size()
                     {
                         continue;
                     }
                     mmr.process_updates(&mut hasher);
                     if let Ok(proof) = mmr.range_proof(range.clone()).await {
-                        let original_size = mmr.size();
-                        let historical_proof = mmr
-                            .historical_range_proof(original_size, range)
-                            .await
-                            .unwrap();
+                        let historical_proof = mmr.range_proof(range).await.unwrap();
                         assert_eq!(proof.size, historical_proof.size);
                         assert_eq!(proof.digests, historical_proof.digests);
                     }
                 }
 
-                MmrJournaledOperation::HistoricalRangeProof {
-                    size,
-                    start_loc,
-                    end_loc,
-                } => {
-                    let start_loc = start_loc.clamp(0, u8::MAX as u64);
-                    let end_loc = end_loc.clamp(1, u8::MAX as u64);
+                MmrJournaledOperation::HistoricalRangeProof { start_loc, end_loc } => {
+                    let start_loc = start_loc.clamp(0, u8::MAX - 1);
+                    let end_loc = end_loc.clamp(start_loc + 1, u8::MAX) as u64;
+                    let start_loc = start_loc as u64;
+
                     if mmr.leaves() == 0 {
                         continue;
                     }
                     // Ensure the size represents a valid MMR structure
-                    let valid_size = PeakIterator::to_nearest_size(Position::new(size));
-                    let start_element_pos = Position::from(start_loc);
-                    if (start_loc > end_loc)
-                        || start_element_pos < mmr.pruned_to_pos()
-                        || start_loc >= mmr.leaves()
-                        || (start_loc >= valid_size)
-                        || (end_loc >= valid_size)
-                        || (valid_size == 0)
-                        || end_loc >= mmr.size()
-                        || end_loc == 0
-                        || start_element_pos >= mmr.size()
+                    let start_pos = Position::from(start_loc);
+                    if start_loc >= mmr.leaves()
+                        || end_loc >= mmr.leaves()
+                        || start_pos < mmr.pruned_to_pos()
+                        || start_pos >= mmr.size()
                     {
                         continue;
                     }
                     let range = Location::new(start_loc)..Location::new(end_loc);
                     mmr.process_updates(&mut hasher);
-                    let _ = mmr.historical_range_proof(valid_size, range).await;
+                    let _ = mmr.historical_range_proof(mmr.size(), range).await;
                 }
 
                 MmrJournaledOperation::Sync => {
