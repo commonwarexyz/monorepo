@@ -45,6 +45,19 @@
 //! appropriate mitigations (such as ensuring no attacker-controlled data is compressed
 //! alongside sensitive information).
 //!
+//! ## Rate Limiting
+//!
+//! There are five primary rate limits:
+//!
+//! - `max_concurrent_handshakes`: The maximum number of concurrent handshake attempts allowed.
+//! - `allowed_handshake_rate_per_ip`: The rate limit for handshake attempts originating from a single IP address.
+//! - `allowed_handshake_rate_per_subnet`: The rate limit for handshake attempts originating from a single IP subnet.
+//! - `allowed_connection_rate_per_peer`: The rate limit for connections to a single peer (incoming or outgoing).
+//! - `rate` (per channel): The rate limit for messages sent on a single channel.
+//!
+//! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
+//! must be mitigated with an external proxy (that limits inbound connection attempts to authorized IPs)._
+//!
 //! # Example
 //!
 //! ```rust
@@ -85,7 +98,7 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
-//! let p2p_cfg = lookup::Config::aggressive(
+//! let p2p_cfg = lookup::Config::local(
 //!     my_sk.clone(),
 //!     application_namespace,
 //!     my_addr,
