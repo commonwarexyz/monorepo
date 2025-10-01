@@ -65,8 +65,10 @@ where
     /// These blocks are evicted by marshal after they are delivered to the application.
     reconstructed_blocks: BTreeMap<CodingCommitment, CodedBlock<B, S>>,
 
-    block_broadcast_duration: Gauge,
-    shard_broadcast_duration: Gauge,
+    /// Transient caches for progressive block reconstruction.
+    checking_data: BTreeMap<CodingCommitment, S::CheckingData>,
+    checked_shards: BTreeMap<CodingCommitment, BTreeMap<usize, S::CheckedShard>>,
+
     erasure_decode_duration: Gauge,
 }
 
@@ -82,20 +84,6 @@ where
         mailbox: buffered::Mailbox<P, Shard<S, H>>,
         block_codec_cfg: B::Cfg,
     ) -> Self {
-        let block_broadcast_duration = Gauge::default();
-        context.register(
-            "block_broadcast_duration",
-            "Duration of proposer broadcast in milliseconds",
-            block_broadcast_duration.clone(),
-        );
-
-        let shard_broadcast_duration = Gauge::default();
-        context.register(
-            "shard_broadcast_duration",
-            "Duration of individual shard broadcast in milliseconds",
-            shard_broadcast_duration.clone(),
-        );
-
         let erasure_decode_duration = Gauge::default();
         context.register(
             "erasure_decode_duration",
@@ -108,8 +96,8 @@ where
             block_codec_cfg,
             block_subscriptions: BTreeMap::new(),
             reconstructed_blocks: BTreeMap::new(),
-            block_broadcast_duration,
-            shard_broadcast_duration,
+            checking_data: BTreeMap::new(),
+            checked_shards: BTreeMap::new(),
             erasure_decode_duration,
         }
     }
@@ -126,15 +114,12 @@ where
             "number of participants must equal number of shards"
         );
 
-        let start = Instant::now();
         for (index, peer) in participants.into_iter().enumerate() {
             let message = block
                 .shard(index)
                 .expect("peer index impossibly out of bounds");
             let _peers = self.mailbox.broadcast(Recipients::One(peer), message).await;
         }
-        self.block_broadcast_duration
-            .set(start.elapsed().as_millis() as i64);
     }
 
     /// Broadcasts a local [Shard] of a block to all peers, if the [Shard] is present
@@ -172,10 +157,7 @@ where
             // Broadcast the weak shard to all peers for reconstruction.
             let reshard = Shard::new(commitment, index, DistributionShard::Weak(reshard));
 
-            let start = Instant::now();
             let _peers = self.mailbox.broadcast(Recipients::All, reshard).await;
-            self.shard_broadcast_duration
-                .set(start.elapsed().as_millis() as i64);
 
             debug!(%commitment, index, "broadcasted local shard to all peers");
         } else {
@@ -211,24 +193,32 @@ where
         // NOTE: Byzantine peers may send us strong shards as well, but we don't care about those;
         // `Scheme::reshard` verifies the shard against the commitment, and if it doesn't check out,
         // it will be ignored.
-        let Some(checking_data) = shards.iter().find_map(|s| {
-            if let DistributionShard::Strong(shard) = s.deref() {
-                S::reshard(
-                    &config,
-                    &commitment.inner(),
-                    s.index() as u16,
-                    shard.clone(),
-                )
-                .map(|(checking_data, _, _)| checking_data)
-                .ok()
-            } else {
-                None
+        let checking_data = match self.checking_data.entry(commitment) {
+            Entry::Vacant(entry) => {
+                let Some(checking_data) = shards.iter().find_map(|s| {
+                    if let DistributionShard::Strong(shard) = s.deref() {
+                        S::reshard(
+                            &config,
+                            &commitment.inner(),
+                            s.index() as u16,
+                            shard.clone(),
+                        )
+                        .map(|(checking_data, _, _)| checking_data)
+                        .ok()
+                    } else {
+                        None
+                    }
+                }) else {
+                    debug!(%commitment, "No strong shards present to form checking data");
+                    return Ok(None);
+                };
+                entry.insert(checking_data.clone());
+                checking_data
             }
-        }) else {
-            debug!(%commitment, "No strong shards present to form checking data");
-            return Ok(None);
+            Entry::Occupied(entry) => entry.get().clone(),
         };
 
+        let cached_checked_shards = self.checked_shards.entry(commitment).or_default();
         let checked_shards = shards
             .into_iter()
             .filter_map(|s| {
@@ -238,18 +228,33 @@ where
                         // Any strong shards, at this point, were sent from the proposer.
                         // We use the reshard interface to produce our checked shard rather
                         // than taking two hops.
-                        S::reshard(&config, &commitment.inner(), index, shard)
-                            .map(|(_, checked, _)| checked)
-                            .ok()
+                        match cached_checked_shards.entry(index as usize) {
+                            Entry::Vacant(entry) => {
+                                let (_, checked, _) =
+                                    S::reshard(&config, &commitment.inner(), index, shard).ok()?;
+                                entry.insert(checked.clone());
+                                Some(checked)
+                            }
+                            Entry::Occupied(entry) => Some(entry.get().clone()),
+                        }
                     }
-                    DistributionShard::Weak(re_shard) => S::check(
-                        &config,
-                        &commitment.inner(),
-                        &checking_data,
-                        index,
-                        re_shard,
-                    )
-                    .ok(),
+                    DistributionShard::Weak(re_shard) => {
+                        match cached_checked_shards.entry(index as usize) {
+                            Entry::Vacant(entry) => {
+                                let checked = S::check(
+                                    &config,
+                                    &commitment.inner(),
+                                    &checking_data,
+                                    index,
+                                    re_shard,
+                                )
+                                .ok()?;
+                                entry.insert(checked.clone());
+                                Some(checked)
+                            }
+                            Entry::Occupied(entry) => Some(entry.get().clone()),
+                        }
+                    }
                 }
             })
             .collect::<Vec<_>>();
@@ -282,6 +287,8 @@ where
         );
 
         self.reconstructed_blocks.insert(commitment, block.clone());
+        self.checking_data.remove(&commitment);
+        self.checked_shards.remove(&commitment);
 
         // Notify any subscribers that have been waiting for this block to be reconstructed
         if let Some(mut sub) = self.block_subscriptions.remove(&commitment) {
@@ -362,6 +369,11 @@ where
     /// Evicts a reconstructed block from the local cache, if it is present.
     pub fn evict_block(&mut self, commitment: &CodingCommitment) {
         self.reconstructed_blocks.remove(commitment);
+    }
+
+    /// Checks if a reconstructed block is present in the local cache.
+    pub fn has_block(&self, commitment: &CodingCommitment) -> bool {
+        self.reconstructed_blocks.contains_key(commitment)
     }
 }
 

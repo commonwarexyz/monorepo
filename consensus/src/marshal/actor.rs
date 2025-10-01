@@ -460,7 +460,17 @@ where
                                 }
                             }
                         }
+                        Message::Notarize { notarization } => {
+                            let commitment = notarization.proposal.payload;
+                            if !shards.has_block(&commitment) {
+                                let start = Instant::now();
+                                let _ = shards.try_reconstruct(commitment).await;
+                                    let elapsed = start.elapsed();
+                                tracing::info!(?elapsed, "Attempted reconstruction");
+                            }
+                        }
                         Message::Notarization { notarization } => {
+                            tracing::warn!(?notarization, "Received notarization");
                             let round = notarization.round();
                             let commitment = notarization.proposal.payload;
 
