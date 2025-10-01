@@ -435,17 +435,15 @@ impl crate::Spawner for Context {
         // Get metrics
         let (_, metric) = spawn_metrics!(self, future);
 
+        // Give spawned task its own empty children list
+        let children = Arc::new(Mutex::new(Vec::new()));
+        self.children = children.clone();
+
         // Set up the task
         let executor = self.executor.clone();
 
         move |f: F| {
-            let (f, handle) = Handle::init_future(
-                f,
-                metric,
-                executor.cfg.catch_panics,
-                // Give spawned task its own empty children list
-                Arc::new(Mutex::new(Vec::new())),
-            );
+            let (f, handle) = Handle::init_future(f, metric, executor.cfg.catch_panics, children);
 
             // Spawn the task
             executor.runtime.spawn(f);
