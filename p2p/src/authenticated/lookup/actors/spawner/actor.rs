@@ -26,7 +26,7 @@ pub struct Actor<
     ping_frequency: std::time::Duration,
     allowed_ping_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<E, Si, St, C>>,
+    receiver: mpsc::Receiver<Message<Si, St, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -41,7 +41,7 @@ impl<
         C: PublicKey,
     > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, Si, St, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -82,7 +82,7 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
@@ -90,7 +90,7 @@ impl<
 
     async fn run(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: Mailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
         while let Some(msg) = self.receiver.next().await {

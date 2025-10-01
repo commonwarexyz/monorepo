@@ -8,6 +8,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
+use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
@@ -21,7 +22,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
 
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
-    receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
+    receiver: mpsc::Receiver<Message<C::PublicKey>>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -30,6 +31,13 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
     mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
+
+    /// Background worker to handle a backlog of release messages when the
+    /// primary mailbox is saturated.
+    ///
+    /// The reason we need this is because we try to release a reservation on
+    /// drop, which can't handle backpressure since `Drop` must be synchronous.
+    releaser: Option<Releaser<E, C::PublicKey>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -38,11 +46,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (
-        Self,
-        Mailbox<Message<E, C::PublicKey>>,
-        Oracle<E, C::PublicKey>,
-    ) {
+    ) -> (Self, Mailbox<Message<C::PublicKey>>, Oracle<C::PublicKey>) {
         // General initialization
         let directory_cfg = directory::Config {
             max_sets: cfg.tracked_peer_sets,
@@ -53,12 +57,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         // Create the mailboxes
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(sender.clone());
-        let releaser = Releaser::new(sender.clone());
+        let (releaser, releaser_handle) = Releaser::new(context.clone(), sender.clone());
         let oracle = Oracle::new(sender);
 
         // Create the directory
         let myself = (cfg.crypto.public_key(), cfg.address);
-        let directory = Directory::init(context.clone(), myself, directory_cfg, releaser);
+        let directory = Directory::init(context.clone(), myself, directory_cfg, releaser_handle);
 
         (
             Self {
@@ -66,6 +70,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 receiver,
                 directory,
                 mailboxes: HashMap::new(),
+                releaser: Some(releaser),
             },
             mailbox,
             oracle,
@@ -74,7 +79,22 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        self.context.spawn_ref()(self.run())
+        self.context.spawn_ref()(async move {
+            let releaser_task = self
+                .releaser
+                .take()
+                .expect("tracker releaser already started")
+                .start();
+
+            let run_task = self.run();
+
+            select! {
+                _ = releaser_task => {
+                    debug!("tracker releaser exited");
+                },
+                _ = run_task => {}
+            }
+        })
     }
 
     async fn run(mut self) {
@@ -189,19 +209,23 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
-        oracle: Oracle<deterministic::Context, PublicKey>,
+        mailbox: Mailbox<Message<PublicKey>>,
+        oracle: Oracle<PublicKey>,
+        _tracker: Handle<()>,
     }
 
     fn setup_actor(
         runner_context: deterministic::Context,
         cfg_to_clone: Config<PrivateKey>, // Pass by value to allow cloning
     ) -> TestHarness {
-        // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
-        runner_context.spawn(|_| actor.run());
+        let tracker_task = actor.start();
 
-        TestHarness { mailbox, oracle }
+        TestHarness {
+            mailbox,
+            oracle,
+            _tracker: tracker_task,
+        }
     }
 
     #[test]

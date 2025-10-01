@@ -199,7 +199,8 @@ impl<C: PublicKey> Mailbox<Message<C>> {
     }
 }
 
-/// Owns the release worker for reservations.
+/// Owns the worker that drains deferred release requests when the main tracker
+/// mailbox is full.
 pub struct Releaser<E: Spawner, C: PublicKey> {
     context: E,
     sender: mpsc::Sender<Message<C>>,
