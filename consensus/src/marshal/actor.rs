@@ -9,9 +9,9 @@ use super::{
     },
 };
 use crate::{
-    marshal::ingress::{
-        coding::{mailbox::ShardMailbox, types::CodedBlock},
-        mailbox::Identifier as BlockID,
+    marshal::{
+        coding::{self, CodedBlock},
+        ingress::mailbox::Identifier as BlockID,
     },
     threshold_simplex::types::{Finalization, Notarization},
     types::{CodingCommitment, Round},
@@ -19,9 +19,7 @@ use crate::{
 };
 use commonware_codec::{Decode, Encode};
 use commonware_coding::Scheme;
-use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Hasher, PublicKey,
-};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Committable, PublicKey};
 use commonware_macros::select;
 use commonware_resolver::Resolver;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
@@ -49,14 +47,6 @@ struct BlockSubscription<B: Block> {
     _aborter: Aborter,
 }
 
-/// A struct that holds multiple subscriptions for a shard's validity check.
-struct ShardValiditySubscription {
-    /// The subscribers that are waiting for the chunk
-    subscribers: Vec<oneshot::Sender<bool>>,
-    /// Aborter that aborts the waiter future when dropped
-    _aborter: Aborter,
-}
-
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
 /// of blocks.
@@ -69,20 +59,19 @@ struct ShardValiditySubscription {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<B, E, V, S, P>
+pub struct Actor<B, E, V, S>
 where
     B: Block<Commitment = CodingCommitment>,
     E: Rng + Spawner + Metrics + Clock + GClock + Storage,
     V: Variant,
     S: Scheme,
-    P: PublicKey,
 {
     // ---------- Context ----------
     context: ContextCell<E>,
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<V, B, S, P>>,
+    mailbox: mpsc::Receiver<Message<V, B>>,
 
     // ---------- Configuration ----------
     // Identity
@@ -105,8 +94,6 @@ where
     last_processed_round: Round,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
-    // Outstanding subscriptions for shard validity checks
-    shard_validity_subscriptions: BTreeMap<(B::Commitment, usize), ShardValiditySubscription>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -123,16 +110,15 @@ where
     processed_height: Gauge,
 }
 
-impl<B, E, V, S, P> Actor<B, E, V, S, P>
+impl<B, E, V, S> Actor<B, E, V, S>
 where
     B: Block<Commitment = CodingCommitment>,
     E: Rng + Spawner + Metrics + Clock + GClock + Storage,
     V: Variant,
     S: Scheme,
-    P: PublicKey,
 {
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B, S, P>) {
+    pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -248,7 +234,6 @@ where
                 partition_prefix: config.partition_prefix,
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
-                shard_validity_subscriptions: BTreeMap::new(),
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
@@ -260,28 +245,28 @@ where
     }
 
     /// Start the actor.
-    pub fn start<R, H>(
+    pub fn start<R, P>(
         mut self,
         application: impl Reporter<Activity = B>,
-        buffer: ShardMailbox<S, H, B, P>,
+        buffer: coding::Mailbox<V, B, S, P>,
         resolver: (mpsc::Receiver<handler::Message<CodedBlock<B, S>>>, R),
     ) -> Handle<()>
     where
         R: Resolver<Key = handler::Request<CodedBlock<B, S>>>,
-        H: Hasher,
+        P: PublicKey,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
-    async fn run<R, H>(
+    async fn run<R, P>(
         mut self,
         application: impl Reporter<Activity = B>,
-        mut shards: ShardMailbox<S, H, B, P>,
+        mut shards: coding::Mailbox<V, B, S, P>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<CodedBlock<B, S>>>, R),
     ) where
         R: Resolver<Key = handler::Request<CodedBlock<B, S>>>,
-        H: Hasher,
+        P: PublicKey,
     {
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
@@ -299,7 +284,6 @@ where
 
         // Create a local pool for waiter futures
         let mut block_waiters = AbortablePool::<(B::Commitment, B)>::default();
-        let mut shard_validity_waiters = AbortablePool::<((B::Commitment, usize), bool)>::default();
 
         // Handle messages
         loop {
@@ -307,10 +291,6 @@ where
             self.block_subscriptions.retain(|_, bs| {
                 bs.subscribers.retain(|tx| !tx.is_canceled());
                 !bs.subscribers.is_empty()
-            });
-            self.shard_validity_subscriptions.retain(|_, cs| {
-                cs.subscribers.retain(|tx| !tx.is_canceled());
-                !cs.subscribers.is_empty()
             });
 
             // Select messages
@@ -321,16 +301,6 @@ where
                         continue; // Aborted future
                     };
                     self.notify_block_subscribers(commitment, &block).await;
-                },
-                result = shard_validity_waiters.next_completed() => {
-                    let Ok(((commitment, index), valid)) = result else {
-                        continue; // Aborted future
-                    };
-
-                    self.notify_shard_validity_subscribers(commitment, index, valid).await;
-                    if valid {
-                        shards.try_broadcast_shard(commitment, index).await;
-                    }
                 },
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
@@ -381,9 +351,6 @@ where
                                 }
                             }
                         }
-                        Message::Broadcast { block, peers } => {
-                            shards.broadcast_shards(block, peers).await;
-                        }
                         Message::Subscribe { round, commitment, response } => {
                             // Check for block locally
                             if let Some(block) = self.find_block(&mut shards, commitment).await {
@@ -418,8 +385,7 @@ where
                                     entry.get_mut().subscribers.push(response);
                                 }
                                 Entry::Vacant(entry) => {
-                                    let (tx, rx) = oneshot::channel();
-                                    shards.subscribe_block(commitment, tx).await.expect("Reconstruction error not yet handled");
+                                    let rx = shards.subscribe_block(commitment).await;
                                     let aborter = block_waiters.push(async move {
                                         (commitment, rx.await.expect("buffer subscriber closed").into_inner())
                                     });
@@ -428,45 +394,6 @@ where
                                         _aborter: aborter,
                                     });
                                 }
-                            }
-                        }
-                        Message::VerifyShard { commitment, index, response } => {
-                            // Check for shard locally
-                            if let Some(shard) = shards.get_shard(commitment, index).await {
-                                let valid = shard.verify();
-                                let _ = response.send(valid);
-                                if valid {
-                                    shards.try_broadcast_shard(commitment, index).await;
-                                }
-                                continue;
-                            }
-
-                            match self.shard_validity_subscriptions.entry((commitment, index)) {
-                                Entry::Occupied(mut entry) => {
-                                    entry.get_mut().subscribers.push(response);
-                                }
-                                Entry::Vacant(entry) => {
-                                    let (tx, rx) = oneshot::channel();
-                                    shards.subscribe_shard(commitment, index, tx).await;
-                                    let aborter = shard_validity_waiters.push(async move {
-                                        let shard = rx.await.expect("shard subscriber closed");
-                                        let valid = shard.verify();
-                                        ((commitment, index), valid)
-                                    });
-                                    entry.insert(ShardValiditySubscription {
-                                        subscribers: vec![response],
-                                        _aborter: aborter,
-                                    });
-                                }
-                            }
-                        }
-                        Message::Notarize { notarization } => {
-                            let commitment = notarization.proposal.payload;
-                            if !shards.has_block(&commitment) {
-                                let start = Instant::now();
-                                let _ = shards.try_reconstruct(commitment).await;
-                                    let elapsed = start.elapsed();
-                                tracing::info!(?elapsed, "Attempted reconstruction");
                             }
                         }
                         Message::Notarization { notarization } => {
@@ -534,7 +461,7 @@ where
 
                                 // Prune archives
                                 self.cache.prune(prune_round).await;
-                                shards.evict_block(&commitment);
+                                shards.finalized(commitment).await;
 
                                 // Update the last processed round
                                 let round = finalization.round();
@@ -734,23 +661,6 @@ where
         }
     }
 
-    // Notify any subscribers waiting for shard validity.
-    async fn notify_shard_validity_subscribers(
-        &mut self,
-        commitment: B::Commitment,
-        index: usize,
-        valid: bool,
-    ) {
-        if let Some(mut cs) = self
-            .shard_validity_subscriptions
-            .remove(&(commitment, index))
-        {
-            for subscriber in cs.subscribers.drain(..) {
-                let _ = subscriber.send(valid);
-            }
-        }
-    }
-
     // -------------------- Prunable Storage --------------------
 
     /// Add a notarized block to the prunable archive.
@@ -855,15 +765,17 @@ where
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
-    async fn find_block<H: Hasher>(
+    async fn find_block<P: PublicKey>(
         &mut self,
-        buffer: &mut ShardMailbox<S, H, B, P>,
+        buffer: &mut coding::Mailbox<V, B, S, P>,
         commitment: B::Commitment,
     ) -> Option<CodedBlock<B, S>> {
         // Check shard mailbox.
         if let Some(block) = buffer
             .try_reconstruct(commitment)
             .await
+            .await
+            .expect("mailbox closed")
             .expect("reconstruction error not yet handled")
         {
             return Some(block);

@@ -116,13 +116,13 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// the data.
     type ReShard: Clone + Eq + Codec + Send + Sync + 'static;
     /// Data which can assist in checking shards.
-    type CheckingData: Clone + Send;
+    type CheckingData: Clone + Send + Sync;
     /// A shard that has been checked for inclusion in the commitment.
     ///
     /// This allows excluding [Scheme::ReShard]s which are invalid, and shouldn't
     /// be considered as progress towards meeting the minimum number of shards.
     type CheckedShard: Clone + Send;
-    type Error: std::fmt::Debug;
+    type Error: std::fmt::Debug + Send;
 
     /// Encode a piece of data, returning a commitment, along with shards, and proofs.
     ///

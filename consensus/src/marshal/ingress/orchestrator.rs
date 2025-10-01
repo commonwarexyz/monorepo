@@ -1,4 +1,4 @@
-use crate::{marshal::ingress::coding::types::CodedBlock, Block};
+use crate::{marshal::coding::CodedBlock, Block};
 use commonware_coding::Scheme;
 use futures::{
     channel::{mpsc, oneshot},
