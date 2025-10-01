@@ -7,7 +7,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{concurrency::KeyedLimiter, IpAddrExt, Subnet};
+use commonware_utils::{concurrency::Limiter, IpAddrExt, Subnet};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -40,7 +40,7 @@ pub struct Actor<
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
-    handshake_limiter: KeyedLimiter<IpAddr>,
+    handshake_limiter: Limiter,
     ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
     subnet_rate_limiter:
         RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
@@ -78,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
-            handshake_limiter: KeyedLimiter::new(cfg.max_concurrent_handshakes),
+            handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             ip_rate_limiter: RateLimiter::hashmap_with_clock(
                 cfg.allowed_handshake_rate_per_ip,
                 &context,
@@ -202,7 +202,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             }
 
             // Attempt to reserve a slot for the handshake
-            let Some(reservation) = self.handshake_limiter.try_acquire(ip) else {
+            let Some(reservation) = self.handshake_limiter.try_acquire() else {
                 self.handshakes_dropped.inc();
                 debug!(?address, "maximum concurrent handshakes reached");
                 continue;
