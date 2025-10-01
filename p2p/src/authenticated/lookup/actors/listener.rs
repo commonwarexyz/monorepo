@@ -20,7 +20,7 @@ use std::{
 };
 use tracing::debug;
 
-/// Interval at which to cleanup the rate limiters.
+/// Interval at which to prune tracked IPs and Subnets.
 const CLEANUP_INTERVAL: u32 = 16_384;
 
 /// Configuration for the listener actor.
@@ -44,7 +44,7 @@ pub struct Actor<
     ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
     subnet_rate_limiter:
         RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
-    handshakes_dropped: Counter,
+    handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
     handshakes_subnet_rate_limited: Counter,
 }
@@ -54,11 +54,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
-        let handshakes_dropped = Counter::default();
+        let handshakes_concurrent_rate_limited = Counter::default();
         context.register(
-            "handshake_dropped",
+            "handshake_concurrent_rate_limited",
             "number of handshakes dropped because maximum concurrent handshakes was reached",
-            handshakes_dropped.clone(),
+            handshakes_concurrent_rate_limited.clone(),
         );
         let handshakes_ip_rate_limited = Counter::default();
         context.register(
@@ -87,7 +87,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 cfg.allowed_handshake_rate_per_subnet,
                 &context,
             ),
-            handshakes_dropped,
+            handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
             handshakes_subnet_rate_limited,
         }
@@ -201,9 +201,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 continue;
             }
 
-            // Attempt to reserve a slot for the handshake
+            // Check whether there are too many ongoing handshakes
             let Some(reservation) = self.handshake_limiter.try_acquire() else {
-                self.handshakes_dropped.inc();
+                self.handshakes_concurrent_rate_limited.inc();
                 debug!(?address, "maximum concurrent handshakes reached");
                 continue;
             };
