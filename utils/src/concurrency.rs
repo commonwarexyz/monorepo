@@ -1,23 +1,27 @@
 //! Utilities for managing concurrency.
 
 use core::{
-    num::NonZeroU32,
-    sync::atomic::{AtomicU32, Ordering},
+    hash::Hash,
+    num::NonZeroUsize,
+    sync::atomic::{AtomicUsize, Ordering},
 };
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 /// Limit the concurrency of some operation without blocking.
 pub struct Limiter {
-    max: u32,
-    current: Arc<AtomicU32>,
+    max: usize,
+    current: Arc<AtomicUsize>,
 }
 
 impl Limiter {
     /// Create a limiter that allows up to `max` concurrent reservations.
-    pub fn new(max: NonZeroU32) -> Self {
+    pub fn new(max: NonZeroUsize) -> Self {
         Self {
             max: max.get(),
-            current: Arc::new(AtomicU32::new(0)),
+            current: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -36,7 +40,7 @@ impl Limiter {
 
 /// A reservation for a slot in the [Limiter].
 pub struct Reservation {
-    current: Arc<AtomicU32>,
+    current: Arc<AtomicUsize>,
 }
 
 impl Drop for Reservation {
@@ -45,10 +49,56 @@ impl Drop for Reservation {
     }
 }
 
+/// Limit the concurrency of some keyed operation without blocking.
+pub struct KeyedLimiter<K: Eq + Hash + Clone> {
+    max: usize,
+    current: Arc<Mutex<HashSet<K>>>,
+}
+
+impl<K: Eq + Hash + Clone> KeyedLimiter<K> {
+    /// Create a limiter that allows up to `max` concurrent reservations.
+    pub fn new(max: NonZeroUsize) -> Self {
+        Self {
+            max: max.get(),
+            current: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Attempt to reserve a slot for a given key. Returns `None` when the limiter is saturated or
+    /// the key is already reserved.
+    pub fn try_acquire(&self, key: K) -> Option<KeyedReservation<K>> {
+        let mut current = self.current.lock().unwrap();
+        if current.len() >= self.max {
+            return None;
+        }
+        if !current.insert(key.clone()) {
+            return None;
+        }
+        drop(current);
+
+        Some(KeyedReservation {
+            key,
+            current: self.current.clone(),
+        })
+    }
+}
+
+/// A reservation for a slot in the [KeyedLimiter].
+pub struct KeyedReservation<K: Eq + Hash + Clone> {
+    key: K,
+    current: Arc<Mutex<HashSet<K>>>,
+}
+
+impl<K: Eq + Hash + Clone> Drop for KeyedReservation<K> {
+    fn drop(&mut self) {
+        self.current.lock().unwrap().remove(&self.key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NZU32;
+    use crate::NZUsize;
     use std::{
         sync::{mpsc, Arc, Barrier},
         thread,
@@ -56,7 +106,7 @@ mod tests {
 
     #[test]
     fn allows_reservations_up_to_max() {
-        let limiter = Limiter::new(NZU32!(2));
+        let limiter = Limiter::new(NZUsize!(2));
 
         let first = limiter
             .try_acquire()
@@ -78,7 +128,7 @@ mod tests {
 
     #[test]
     fn does_not_exceed_max_under_contention() {
-        let limiter = Arc::new(Limiter::new(NZU32!(3)));
+        let limiter = Arc::new(Limiter::new(NZUsize!(3)));
         let thread_count = 16;
         let barrier = Arc::new(Barrier::new(thread_count));
         let (tx, rx) = mpsc::channel();
@@ -113,5 +163,43 @@ mod tests {
         assert!(limiter.try_acquire().is_none());
         drop(reservations);
         assert!(limiter.try_acquire().is_some());
+    }
+
+    #[test]
+    fn allows_reservations_up_to_max_for_key() {
+        let limiter = KeyedLimiter::new(NZUsize!(2));
+
+        let first = limiter
+            .try_acquire(0)
+            .expect("first reservation should succeed");
+        let second = limiter
+            .try_acquire(1)
+            .expect("second reservation should succeed");
+        assert!(limiter.try_acquire(2).is_none());
+
+        drop(second);
+        let third = limiter
+            .try_acquire(2)
+            .expect("third reservation should succeed");
+
+        drop(third);
+        drop(first);
+    }
+
+    #[test]
+    fn blocks_conflicting_reservations_for_key() {
+        let limiter = KeyedLimiter::new(NZUsize!(2));
+
+        let first = limiter
+            .try_acquire(0)
+            .expect("first reservation should succeed");
+        assert!(limiter.try_acquire(0).is_none());
+
+        drop(first);
+        let second = limiter
+            .try_acquire(0)
+            .expect("second reservation should succeed");
+
+        drop(second);
     }
 }
