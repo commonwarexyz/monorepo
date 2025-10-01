@@ -155,7 +155,7 @@ fn main() {
     };
 
     // Configure network
-    let p2p_cfg = authenticated::discovery::Config::aggressive(
+    let p2p_cfg = authenticated::discovery::Config::local(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

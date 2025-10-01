@@ -210,7 +210,7 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
-    let p2p_cfg = discovery::Config::aggressive(
+    let p2p_cfg = discovery::Config::local(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
