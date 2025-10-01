@@ -1,11 +1,9 @@
 use crate::{
-    marshal::ingress::coding::types::CodedBlock,
-    threshold_simplex::types::{Activity, Finalization, Notarization, Notarize},
+    threshold_simplex::types::{Activity, Finalization, Notarization},
     types::Round,
     Block, Reporter,
 };
-use commonware_coding::Scheme;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use commonware_storage::archive;
 use futures::{
     channel::{mpsc, oneshot},
@@ -52,7 +50,7 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<V: Variant, B: Block, S: Scheme, P: PublicKey> {
+pub(crate) enum Message<V: Variant, B: Block> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve the (height, commitment) of a block by its identifier.
     /// The block must be finalized; returns `None` if the block is not finalized.
@@ -82,28 +80,8 @@ pub(crate) enum Message<V: Variant, B: Block, S: Scheme, P: PublicKey> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<B>,
     },
-    /// A request to broadcast a block to all peers.
-    Broadcast {
-        /// The erasure coded block to broadcast.
-        block: CodedBlock<B, S>,
-        /// The peers to broadcast the shards to.
-        peers: Vec<P>,
-    },
-    /// A request to verify a a shard's inclusion within a commitment.
-    VerifyShard {
-        /// The commitment to verify against.
-        commitment: B::Commitment,
-        /// The index of the shard to verify.
-        index: usize,
-        /// The response channel to send the result to.
-        response: oneshot::Sender<bool>,
-    },
 
     // -------------------- Consensus Engine Messages --------------------
-    /// A notarize vote from the consensus engine.
-    Notarize {
-        notarization: Notarize<V, B::Commitment>,
-    },
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
@@ -118,13 +96,13 @@ pub(crate) enum Message<V: Variant, B: Block, S: Scheme, P: PublicKey> {
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, B: Block, S: Scheme, P: PublicKey> {
-    sender: mpsc::Sender<Message<V, B, S, P>>,
+pub struct Mailbox<V: Variant, B: Block> {
+    sender: mpsc::Sender<Message<V, B>>,
 }
 
-impl<V: Variant, B: Block, S: Scheme, P: PublicKey> Mailbox<V, B, S, P> {
+impl<V: Variant, B: Block> Mailbox<V, B> {
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<V, B, S, P>>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Message<V, B>>) -> Self {
         Self { sender }
     }
 
@@ -181,18 +159,6 @@ impl<V: Variant, B: Block, S: Scheme, P: PublicKey> Mailbox<V, B, S, P> {
         }
     }
 
-    /// Broadcast indicates that an erasure coded block should be sent to a given set of peers.
-    pub async fn broadcast(&mut self, block: CodedBlock<B, S>, peers: Vec<P>) {
-        if self
-            .sender
-            .send(Message::Broadcast { block, peers })
-            .await
-            .is_err()
-        {
-            error!("failed to send broadcast message to actor: receiver dropped");
-        }
-    }
-
     /// Subscribe is a request to retrieve a block by its commitment.
     ///
     /// If the block is found available locally, the block will be returned immediately.
@@ -222,43 +188,13 @@ impl<V: Variant, B: Block, S: Scheme, P: PublicKey> Mailbox<V, B, S, P> {
         }
         rx
     }
-
-    /// Verify a shard's inclusion within a commitment.
-    ///
-    /// If the shard is available locally, the result will be returned immediately.
-    ///
-    /// If the shard is not available locally, the request will be registered and the caller will
-    /// be notified when the shard is available.
-    ///
-    /// The oneshot receiver should be dropped to cancel the request.
-    pub async fn verify_shard(
-        &mut self,
-        commitment: B::Commitment,
-        index: usize,
-    ) -> oneshot::Receiver<bool> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::VerifyShard {
-                commitment,
-                index,
-                response: tx,
-            })
-            .await
-            .is_err()
-        {
-            error!("failed to send verify shard message to actor: receiver dropped");
-        }
-        rx
-    }
 }
 
-impl<V: Variant, B: Block, S: Scheme, P: PublicKey> Reporter for Mailbox<V, B, S, P> {
+impl<V: Variant, B: Block> Reporter for Mailbox<V, B> {
     type Activity = Activity<V, B::Commitment>;
 
     async fn report(&mut self, activity: Self::Activity) {
         let message = match activity {
-            Activity::Notarize(notarization) => Message::Notarize { notarization },
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
             _ => {

@@ -2,9 +2,9 @@
 //! hiding details of erasure coded broadcast and shard verification.
 
 use crate::{
-    marshal::{self, ingress::coding::types::CodedBlock},
+    marshal::coding::{self, types::CodedBlock},
     threshold_simplex::types::Context,
-    types::{CodingCommitment, Round, View},
+    types::{CodingCommitment, View},
     Application, Automaton, Block, Epochable, Relay, Reporter, Supervisor, Viewable,
 };
 use commonware_coding::{Config as CodingConfig, Scheme};
@@ -31,7 +31,7 @@ where
 {
     context: E,
     application: A,
-    marshal: marshal::Mailbox<V, B, S, P>,
+    coding: coding::mailbox::Mailbox<V, B, S, P>,
     identity: P,
     supervisor: Z,
     last_built: Arc<Mutex<Option<(View, CodedBlock<B, S>)>>>,
@@ -54,7 +54,7 @@ where
     pub fn new(
         context: E,
         application: A,
-        marshal: marshal::Mailbox<V, B, S, P>,
+        coding: coding::mailbox::Mailbox<V, B, S, P>,
         identity: P,
         supervisor: Z,
     ) -> Self {
@@ -82,7 +82,7 @@ where
         Self {
             context,
             application,
-            marshal,
+            coding,
             identity,
             supervisor,
             last_built: Arc::new(Mutex::new(None)),
@@ -112,9 +112,9 @@ where
     }
 
     async fn propose(&mut self, context: Context<Self::Digest>) -> oneshot::Receiver<Self::Digest> {
-        let (parent_view, parent_commitment) = context.parent;
+        let (_, parent_commitment) = context.parent;
         let genesis = self.application.genesis(context.epoch()).await;
-        let mut marshal = self.marshal.clone();
+        let mut coding = self.coding.clone();
         let mut application = self.application.clone();
         let last_built = self.last_built.clone();
 
@@ -143,16 +143,10 @@ where
                 let parent_block = if parent_commitment == genesis.commitment() {
                     genesis
                 } else {
-                    let block_request = marshal
-                        .subscribe(
-                            Some(Round::new(context.epoch(), parent_view)),
-                            parent_commitment,
-                        )
-                        .await
-                        .await;
+                    let block_request = coding.subscribe_block(parent_commitment).await.await;
 
                     if let Ok(block) = block_request {
-                        block
+                        block.into_inner()
                     } else {
                         warn!("propose job aborted");
                         return;
@@ -214,7 +208,7 @@ where
             return rx;
         }
 
-        let mut marshal = self.marshal.clone();
+        let mut coding = self.coding.clone();
         let self_index = self
             .supervisor
             .is_participant(context.view(), &self.identity)
@@ -223,7 +217,7 @@ where
         #[allow(clippy::async_yields_async)]
         self.context
             .with_label("verify")
-            .spawn(move |_| async move { marshal.verify_shard(payload, self_index as usize).await })
+            .spawn(move |_| async move { coding.verify_shard(payload, self_index as usize).await })
             .await
             .expect("failed to spawn verify task")
     }
@@ -259,7 +253,7 @@ where
             height = block.height(),
             "requested broadcast of built block"
         );
-        self.marshal.broadcast(block, participants).await;
+        self.coding.broadcast(block, participants).await;
     }
 }
 
