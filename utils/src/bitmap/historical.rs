@@ -478,14 +478,14 @@ impl<const N: usize> Historical<N> {
 
     /// Apply a batch's changes to the current bitmap.
     fn apply_batch_to_current(&mut self, batch: &Batch<N>) {
-        // Apply modifications to existing bits
-        for (&bit_offset, &value) in &batch.modified_bits {
-            self.current.set_bit(bit_offset, value);
-        }
-
-        // Apply appends
+        // Apply appended bits
         for &bit in &batch.appended_bits {
             self.current.push(bit);
+        }
+
+        // Apply modifications
+        for (&bit_offset, &value) in &batch.modified_bits {
+            self.current.set_bit(bit_offset, value);
         }
 
         // Apply pruning
@@ -763,8 +763,14 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
             "cannot set pruned bit"
         );
 
-        // Record modification
-        batch.modified_bits.insert(bit_offset, value);
+        // If the bit is in the appended region, update appended_bits directly
+        if bit_offset >= batch.base_len {
+            let append_offset = (bit_offset - batch.base_len) as usize;
+            batch.appended_bits[append_offset] = value;
+        } else {
+            // Bit is in the base region, record as modification
+            batch.modified_bits.insert(bit_offset, value);
+        }
 
         self
     }
@@ -1646,5 +1652,81 @@ mod tests {
         assert!(state_3.get_bit(3));
         assert!(state_3.get_bit(4));
         assert!(state_3.get_bit(5));
+    }
+
+    // Regression test for issue: modifying an appended bit in the same batch causes panic
+    #[test]
+    fn test_modify_appended_bit_same_batch() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Append a bit and then modify it in the same batch
+        historical
+            .with_batch(1, |batch| {
+                batch.push(true); // Append bit 0
+                batch.set_bit(0, false); // Modify that appended bit
+            })
+            .unwrap();
+
+        assert_eq!(historical.len(), 1);
+        assert!(!historical.get_bit(0)); // Should be false after modification
+    }
+
+    // Regression test for issue: push, modify, then pop leaves dangling modification
+    #[test]
+    fn test_push_modify_pop_same_batch() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // This should work: push a bit, modify it, then pop it
+        historical
+            .with_batch(1, |batch| {
+                batch.push(true); // Append bit 0
+                batch.set_bit(0, false); // Modify that appended bit
+                batch.pop(); // Remove bit 0
+            })
+            .unwrap();
+
+        // Should result in empty bitmap (the push/pop cancel out)
+        assert_eq!(historical.len(), 0);
+    }
+
+    // Regression test for issue: reconstructing a less-pruned state from a more-pruned state
+    #[test]
+    fn test_reconstruct_less_pruned_state() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Commit 1: 64 bits, no pruning (chunks 0 and 1)
+        historical
+            .with_batch(1, |batch| {
+                batch.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]); // chunk 0: bits 0-31
+                batch.push_chunk(&[0x11, 0x22, 0x33, 0x44]); // chunk 1: bits 32-63
+            })
+            .unwrap();
+
+        assert_eq!(historical.len(), 64);
+        assert_eq!(historical.pruned_chunks(), 0);
+
+        // Commit 2: Prune first chunk
+        historical
+            .with_batch(2, |batch| {
+                batch.prune_to_bit(32);
+            })
+            .unwrap();
+
+        // Current state: 64 bits, 1 pruned chunk
+        assert_eq!(historical.len(), 64);
+        assert_eq!(historical.pruned_chunks(), 1);
+
+        // Reconstruct commit 1: should have 64 bits, 0 pruned chunks, and both chunks intact
+        let state_at_1 = historical.get_at_commit(1).unwrap();
+        assert_eq!(state_at_1.len(), 64);
+        assert_eq!(state_at_1.pruned_chunks(), 0);
+
+        // Verify chunk 0 data is restored
+        let chunk0 = state_at_1.get_chunk(0);
+        assert_eq!(chunk0, &[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // Verify chunk 1 data is still correct
+        let chunk1 = state_at_1.get_chunk(32);
+        assert_eq!(chunk1, &[0x11, 0x22, 0x33, 0x44]);
     }
 }
