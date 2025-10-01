@@ -48,8 +48,8 @@ where
                 write_buffer: config.log_write_buffer,
                 buffer_pool: config.buffer_pool.clone(),
             },
-            lower_bound_loc.as_u64(),
-            upper_bound_loc.as_u64(),
+            *lower_bound_loc,
+            *upper_bound_loc,
             config.log_items_per_section,
         )
         .await?;
@@ -121,7 +121,7 @@ where
 
             // Use Variable journal's section-based pruning
             let items_per_section = config.log_items_per_section.get();
-            let lower_section = lower_bound.as_u64() / items_per_section;
+            let lower_section = *lower_bound / items_per_section;
             variable_journal
                 .prune(lower_section)
                 .await
@@ -318,7 +318,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     lower_bound: target_oldest_retained_loc,
-                    upper_bound: Location::new(target_op_count - 1), // target_op_count is the count, operations are 0-indexed
+                    upper_bound: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -402,7 +402,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     lower_bound: target_oldest_retained_loc,
-                    upper_bound: Location::new(target_op_count - 1),
+                    upper_bound: target_op_count - 1,
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -458,7 +458,7 @@ mod tests {
                 target: Target {
                     root: target_root,
                     lower_bound,
-                    upper_bound: Location::new(upper_bound),
+                    upper_bound,
                 },
                 context,
                 resolver: target_db.clone(),
@@ -523,14 +523,14 @@ mod tests {
             // Capture the state after first commit
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Add more operations to create the extended target
             let additional_ops = create_test_ops(25);
             apply_ops(&mut target_db, additional_ops.clone()).await;
             target_db.commit(None).await.unwrap();
-            let final_upper_bound = Location::new(target_db.op_count() - 1);
+            let final_upper_bound = target_db.op_count() - 1;
             let final_root = target_db.root(&mut hasher);
 
             // Wrap target database for shared mutable access
@@ -659,7 +659,7 @@ mod tests {
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
             let lower_bound = target_db.oldest_retained_loc;
-            let upper_bound = Location::new(target_db.op_count() - 1); // exclude final op
+            let upper_bound = target_db.op_count() - 1; // exclude final op
 
             // Add final op after capturing the range
             apply_ops(&mut target_db, target_ops[29..].to_vec()).await;
@@ -727,7 +727,7 @@ mod tests {
             let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
             let lower_bound = target_db.oldest_retained_loc;
-            let upper_bound = Location::new(target_db.op_count() - 1); // Up to the last operation
+            let upper_bound = target_db.op_count() - 1; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
@@ -788,7 +788,7 @@ mod tests {
             let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
             let lower_bound = target_db.oldest_retained_loc;
-            let upper_bound = Location::new(target_db.op_count() - 1);
+            let upper_bound = target_db.op_count() - 1;
 
             // Sync should complete immediately without fetching
             let resolver = Arc::new(commonware_runtime::RwLock::new(target_db));
@@ -836,7 +836,7 @@ mod tests {
             // Capture initial target state
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
@@ -897,7 +897,7 @@ mod tests {
             // Capture initial target state
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
@@ -958,7 +958,7 @@ mod tests {
             // Capture initial target state
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Apply more operations to the target database
@@ -972,7 +972,7 @@ mod tests {
             // Capture final target state
             let mut hasher = test_hasher();
             let final_lower_bound = target_db.oldest_retained_loc;
-            let final_upper_bound = Location::new(target_db.op_count() - 1);
+            let final_upper_bound = target_db.op_count() - 1;
             let final_root = target_db.root(&mut hasher);
 
             // Assert we're actually updating the bounds
@@ -1038,7 +1038,7 @@ mod tests {
             // Capture initial target state
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc;
-            let initial_upper_bound = Location::new(target_db.op_count() - 1);
+            let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
@@ -1097,7 +1097,7 @@ mod tests {
             // Capture target state
             let mut hasher = test_hasher();
             let lower_bound = target_db.oldest_retained_loc;
-            let upper_bound = Location::new(target_db.op_count() - 1);
+            let upper_bound = target_db.op_count() - 1;
             let root = target_db.root(&mut hasher);
 
             // Create client with target that will complete immediately

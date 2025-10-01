@@ -89,7 +89,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         }
     }
 
-    pub fn size(&self) -> u64 {
+    pub fn size(&self) -> Position {
         self.mmr.size()
     }
 
@@ -490,7 +490,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             // required in the proof: the mmr's root.
             return Ok((
                 Proof {
-                    size: self.len(),
+                    size: Position::new(self.len()),
                     digests: vec![self.mmr.root(hasher)],
                 },
                 chunk,
@@ -499,7 +499,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
         let range = chunk_loc..chunk_loc + 1;
         let mut proof = verification::range_proof(&self.mmr, range).await?;
-        proof.size = self.len();
+        proof.size = Position::new(self.len());
         if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.
             return Ok((proof, chunk));
@@ -522,7 +522,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         bit_offset: u64,
         root: &H::Digest,
     ) -> bool {
-        let bit_len = proof.size;
+        let bit_len = *proof.size;
         if bit_offset >= bit_len {
             debug!(bit_len, bit_offset, "tried to verify non-existent bit");
             return false;
@@ -530,7 +530,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
         let leaves = BitMap::<N>::raw_chunk_index(bit_len);
         let mut mmr_proof = Proof::<H::Digest> {
-            size: Position::from(Location::new(leaves as u64)).into(),
+            size: Position::from(Location::from(leaves)),
             digests: proof.digests.clone(),
         };
 
@@ -607,7 +607,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 }
 
 impl<H: CHasher, const N: usize> Storage<H::Digest> for MerkleizedBitMap<H, N> {
-    fn size(&self) -> u64 {
+    fn size(&self) -> Position {
         self.size()
     }
 
@@ -667,7 +667,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher = StandardHasher::new();
             let proof = Proof {
-                size: 100,
+                size: Position::new(100),
                 digests: Vec::new(),
             };
             assert!(

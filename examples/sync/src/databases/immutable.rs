@@ -107,7 +107,7 @@ where
         self.root(hasher)
     }
 
-    fn op_count(&self) -> u64 {
+    fn op_count(&self) -> Location {
         self.op_count()
     }
 
@@ -117,11 +117,11 @@ where
 
     fn historical_proof(
         &self,
-        size: u64,
+        op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(size, start_loc, max_ops)
+        self.historical_proof(op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {

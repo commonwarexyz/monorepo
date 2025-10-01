@@ -3,6 +3,11 @@
 use super::BitMap;
 
 /// A prunable bitmap that stores data in chunks of N bytes.
+///
+/// # Panics
+///
+/// Operations panic if `bit_offset / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
+/// with N=32, this occurs at bit_offset >= 1,099,511,627,776.
 #[derive(Clone, Debug)]
 pub struct Prunable<const N: usize> {
     /// The underlying BitMap storing the actual bits.
@@ -208,6 +213,10 @@ impl<const N: usize> Prunable<N> {
 
     /// Convert a bit offset into the number of the chunk it belongs to,
     /// ignoring any pruning.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bit_offset / CHUNK_SIZE_BITS > usize::MAX`.
     #[inline]
     pub fn raw_chunk_index(bit_offset: u64) -> usize {
         BitMap::<N>::chunk_index(bit_offset)

@@ -93,7 +93,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
 
     /// The total number of operations appended (including those that have been pruned).  The next
     /// appended operation will have this value as its location.
-    size: u64,
+    size: Location,
 
     /// The number of operations to put in each section of the operations log.
     log_items_per_section: u64,
@@ -193,7 +193,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             last_offset = offset;
             last_op = next_op;
             warn!(
-                location = mmr.leaves(),
+                location = ?mmr.leaves(),
                 section, offset, "adding missing operation to MMR/location map"
             );
             mmr.add_batched(hasher, &encoded_op).await?;
@@ -218,11 +218,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         locations: &mut FJournal<E, u32>,
         log: &mut VJournal<E, Operation<V>>,
         last_log_op: Operation<V>,
-        op_count: u64,
+        op_count: Location,
         last_offset: u32,
         log_items_per_section: u64,
-    ) -> Result<u64, Error> {
-        let mut first_uncommitted: Option<(u64, u32)> = None;
+    ) -> Result<Location, Error> {
+        let mut first_uncommitted: Option<(Location, u32)> = None;
         let mut op_index = op_count - 1;
         let mut op = last_log_op;
         let mut offset = last_offset;
@@ -249,8 +249,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 break;
             }
             op_index -= 1;
-            offset = locations.read(op_index).await?;
-            let section = op_index / log_items_per_section;
+            offset = locations.read(*op_index).await?;
+            let section = *op_index / log_items_per_section;
             op = log.get(section, offset).await?;
         }
 
@@ -260,12 +260,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         };
 
         // Rewind the log and MMR to the last commit point.
-        let ops_to_rewind = (op_count - rewind_size) as usize;
-        warn!(ops_to_rewind, rewind_size, "rewinding log to last commit");
-        locations.rewind(rewind_size).await?;
+        let ops_to_rewind = (*op_count - *rewind_size) as usize;
+        warn!(ops_to_rewind, ?rewind_size, "rewinding log to last commit");
+        locations.rewind(*rewind_size).await?;
         locations.sync().await?;
         mmr.pop(ops_to_rewind).await?; // sync is handled by pop
-        let section = rewind_size / log_items_per_section;
+        let section = *rewind_size / log_items_per_section;
         log.rewind_to_offset(section, rewind_offset).await?;
         log.sync(section).await?;
 
@@ -348,7 +348,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             return Ok(Self {
                 mmr,
                 log,
-                size: 0,
+                size: Location::new(0),
                 locations,
                 log_items_per_section,
                 hasher,
@@ -378,16 +378,16 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations,
             log_items_per_section,
             hasher,
-            last_commit_loc: size.checked_sub(1).map(Location::new),
+            last_commit_loc: size.checked_sub(1),
         })
     }
 
     /// Get the value at location `loc` in the database.
     pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
         assert!(loc < self.size);
-        let offset = self.locations.read(loc.as_u64()).await?;
+        let offset = self.locations.read(*loc).await?;
 
-        let section = loc.as_u64() / self.log_items_per_section;
+        let section = *loc / self.log_items_per_section;
         let op = self.log.get(section, offset).await?;
 
         Ok(op.into_value())
@@ -395,7 +395,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Get the number of operations (appends + commits) that have been applied to the db since
     /// inception.
-    pub fn op_count(&self) -> u64 {
+    pub fn op_count(&self) -> Location {
         self.size
     }
 
@@ -406,7 +406,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Returns the section of the operations log where we are currently writing new operations.
     fn current_section(&self) -> u64 {
-        self.size / self.log_items_per_section
+        *self.size / self.log_items_per_section
     }
 
     /// Return the oldest location that remains retrievable.
@@ -440,27 +440,27 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )?;
 
         // Prune the log first since it's always the source of truth.
-        let section = loc.as_u64() / self.log_items_per_section;
+        let section = *loc / self.log_items_per_section;
         if !self.log.prune(section).await? {
             return Ok(());
         }
 
-        let prune_loc = section * self.log_items_per_section;
-        debug!(size = self.size, loc = prune_loc, "pruned log");
+        let prune_loc = Location::new(section * self.log_items_per_section);
+        debug!(size = ?self.size, loc = ?prune_loc, "pruned log");
 
         // Prune locations and the MMR to the corresponding positions.
         try_join!(
             self.mmr
-                .prune_to_pos(&mut self.hasher, Position::from(Location::from(prune_loc)))
+                .prune_to_pos(&mut self.hasher, Position::from(prune_loc))
                 .map_err(Error::Mmr),
-            self.locations.prune(prune_loc).map_err(Error::Journal),
+            self.locations.prune(*prune_loc).map_err(Error::Journal),
         )?;
 
         Ok(())
     }
 
     /// Append a value to the db, returning its location which can be used to retrieve it.
-    pub async fn append(&mut self, value: V) -> Result<u64, Error> {
+    pub async fn append(&mut self, value: V) -> Result<Location, Error> {
         let loc = self.size;
         let section = self.current_section();
         let operation = Operation::Append(value);
@@ -499,10 +499,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<u64, Error> {
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Location, Error> {
         let loc = self.size;
         let section = self.current_section();
-        self.last_commit_loc = Some(Location::new(loc));
+        self.last_commit_loc = Some(loc);
 
         let operation = Operation::Commit(metadata);
         let encoded_operation = operation.encode();
@@ -534,7 +534,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         try_join!(log_loc_fut, mmr_fut)?;
         self.size += 1;
 
-        debug!(size = self.size, "committed db");
+        debug!(size = ?self.size, "committed db");
 
         Ok(loc)
     }
@@ -559,8 +559,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let Some(loc) = self.last_commit_loc else {
             return Ok(None);
         };
-        let offset = self.locations.read(loc.as_u64()).await?;
-        let section = loc.as_u64() / self.log_items_per_section;
+        let offset = self.locations.read(*loc).await?;
+        let section = *loc / self.log_items_per_section;
         let op = self.log.get(section, offset).await?;
         let Operation::Commit(metadata) = op else {
             return Ok(None);
@@ -600,21 +600,18 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// operations.
     pub async fn historical_proof(
         &self,
-        op_count: u64,
+        op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
-        let end_loc = std::cmp::min(
-            Location::new(op_count),
-            start_loc.checked_add(max_ops.get()).unwrap(),
-        );
-        let mmr_size = Position::from(Location::new(op_count));
+        let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops.get()).unwrap());
+        let mmr_size = Position::from(op_count);
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size.as_u64(), start_loc..end_loc)
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc).as_u64() as usize);
-        for loc in start_loc.as_u64()..end_loc.as_u64() {
+        let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
+        for loc in *start_loc..*end_loc {
             let offset = self.locations.read(loc).await?;
             let section = loc / self.log_items_per_section;
             let value = self.log.get(section, offset).await?;
@@ -680,7 +677,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.locations.sync().map_err(Error::Journal),
         )?;
-        let section = loc.as_u64() / self.log_items_per_section;
+        let section = *loc / self.log_items_per_section;
         assert!(
             self.log.prune(section).await?,
             "nothing was pruned, so could not simulate failure"
@@ -790,10 +787,10 @@ mod test {
             let v2 = vec![2u8; 20];
 
             let loc1 = db.append(v1.clone()).await.unwrap();
-            assert_eq!(db.get(Location::new(loc1)).await.unwrap().unwrap(), v1);
+            assert_eq!(db.get(loc1).await.unwrap().unwrap(), v1);
 
             let loc2 = db.append(v2.clone()).await.unwrap();
-            assert_eq!(db.get(Location::new(loc2)).await.unwrap().unwrap(), v2);
+            assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
 
             // Make sure closing/reopening gets us back to the same state.
             db.commit(None).await.unwrap();
@@ -809,8 +806,8 @@ mod test {
             assert_eq!(db.op_count(), 3);
             assert_eq!(db.root(&mut hasher), root);
 
-            assert_eq!(db.get(Location::new(loc1)).await.unwrap().unwrap(), v1);
-            assert_eq!(db.get(Location::new(loc2)).await.unwrap().unwrap(), v2);
+            assert_eq!(db.get(loc1).await.unwrap().unwrap(), v1);
+            assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
 
             db.append(v2).await.unwrap();
             db.append(v1).await.unwrap();
@@ -965,7 +962,7 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.last_commit_loc(), Some(Location::new(op_count - 1)));
+            assert_eq!(db.last_commit_loc(), Some(op_count - 1));
             db.close().await.unwrap();
 
             async fn apply_more_ops(db: &mut Db) {
@@ -980,7 +977,7 @@ mod test {
                 context: deterministic::Context,
                 root: <Sha256 as CHasher>::Digest,
                 hasher: &mut Standard<Sha256>,
-                op_count: u64,
+                op_count: Location,
             ) {
                 let mut db = open_db(context.clone()).await;
                 apply_more_ops(&mut db).await;
@@ -1024,7 +1021,7 @@ mod test {
                 let db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
                 assert_eq!(db.root(hasher), root);
-                assert_eq!(db.last_commit_loc(), Some(Location::new(op_count - 1)));
+                assert_eq!(db.last_commit_loc(), Some(op_count - 1));
             }
 
             recover_from_failure(context.clone(), root, &mut hasher, op_count).await;
@@ -1054,7 +1051,7 @@ mod test {
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > op_count);
             assert_ne!(db.root(&mut hasher), root);
-            assert_eq!(db.last_commit_loc(), Some(Location::new(db.op_count() - 1)));
+            assert_eq!(db.last_commit_loc(), Some(db.op_count() - 1));
 
             db.destroy().await.unwrap();
         });
@@ -1185,7 +1182,7 @@ mod test {
                 );
 
                 // Check that we got the expected number of operations
-                let expected_ops = std::cmp::min(max_ops, db.op_count() - start_loc);
+                let expected_ops = std::cmp::min(max_ops, *db.op_count() - start_loc);
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
@@ -1284,7 +1281,7 @@ mod test {
             assert!(db.oldest_retained_loc().await.unwrap().unwrap() <= PRUNE_LOC);
 
             // Test that we can't get pruned values
-            for i in 0..oldest_retained.unwrap().as_u64() {
+            for i in 0..*oldest_retained.unwrap() {
                 let result = db.get(Location::new(i)).await;
                 // Should either return None (for commit ops) or encounter pruned data
                 match result {
@@ -1319,7 +1316,7 @@ mod test {
                 );
 
                 // Check that we got operations
-                let expected_ops = std::cmp::min(max_ops, db.op_count() - start_loc.as_u64());
+                let expected_ops = std::cmp::min(max_ops, *db.op_count() - *start_loc);
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
@@ -1343,7 +1340,7 @@ mod test {
             );
 
             // Test edge case: prune everything except the last few operations
-            let almost_all = Location::new(db.op_count() - 5);
+            let almost_all = db.op_count() - 5;
             db.prune(almost_all).await.unwrap();
 
             let final_oldest = db.oldest_retained_loc().await.unwrap().unwrap();
@@ -1402,7 +1399,7 @@ mod test {
             );
             assert_eq!(
                 db.last_commit_loc(),
-                Some(Location::new(committed_size - 1)),
+                Some(committed_size - 1),
                 "Last commit location should be correct"
             );
 
@@ -1416,7 +1413,7 @@ mod test {
             );
 
             // Verify we can read the new value
-            assert_eq!(db.get(Location::new(loc)).await.unwrap(), Some(new_value));
+            assert_eq!(db.get(loc).await.unwrap(), Some(new_value));
 
             // Test with multiple trailing appends to ensure robustness
             db.commit(None).await.unwrap();
@@ -1446,7 +1443,7 @@ mod test {
             );
             assert_eq!(
                 db.last_commit_loc(),
-                Some(Location::new(new_committed_size - 1)),
+                Some(new_committed_size - 1),
                 "Last commit location should be correct after multiple appends"
             );
 
