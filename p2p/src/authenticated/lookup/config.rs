@@ -1,7 +1,7 @@
 use commonware_cryptography::Signer;
 use commonware_utils::NZU32;
 use governor::Quota;
-use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
+use std::{net::SocketAddr, num::NonZeroUsize, time::Duration};
 
 /// Configuration for the peer-to-peer instance.
 ///
@@ -55,7 +55,7 @@ pub struct Config<C: Signer> {
     pub allowed_connection_rate_per_peer: Quota,
 
     /// Maximum number of concurrent handshake attempts allowed.
-    pub max_concurrent_handshakes: NonZeroU32,
+    pub max_concurrent_handshakes: NonZeroUsize,
 
     /// Quota for handshake attempts originating from a single IP address.
     pub allowed_handshake_rate_per_ip: Quota,

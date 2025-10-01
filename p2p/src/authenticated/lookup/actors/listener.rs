@@ -7,7 +7,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{concurrency::Limiter, IpAddrExt, Subnet};
+use commonware_utils::{concurrency::KeyedLimiter, IpAddrExt, Subnet};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -16,7 +16,7 @@ use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
     net::{IpAddr, SocketAddr},
-    num::NonZeroU32,
+    num::NonZeroUsize,
 };
 use tracing::debug;
 
@@ -27,7 +27,7 @@ const CLEANUP_INTERVAL: u32 = 16_384;
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
-    pub max_concurrent_handshakes: NonZeroU32,
+    pub max_concurrent_handshakes: NonZeroUsize,
     pub allowed_handshake_rate_per_ip: Quota,
     pub allowed_handshake_rate_per_subnet: Quota,
 }
@@ -40,7 +40,7 @@ pub struct Actor<
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
-    handshake_limiter: Limiter,
+    handshake_limiter: KeyedLimiter<IpAddr>,
     ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
     subnet_rate_limiter:
         RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
@@ -78,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
-            handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
+            handshake_limiter: KeyedLimiter::new(cfg.max_concurrent_handshakes),
             ip_rate_limiter: RateLimiter::hashmap_with_clock(
                 cfg.allowed_handshake_rate_per_ip,
                 &context,
@@ -202,7 +202,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             }
 
             // Attempt to reserve a slot for the handshake
-            let Some(reservation) = self.handshake_limiter.try_acquire() else {
+            let Some(reservation) = self.handshake_limiter.try_acquire(ip) else {
                 self.handshakes_dropped.inc();
                 debug!(?address, "maximum concurrent handshakes reached");
                 continue;
