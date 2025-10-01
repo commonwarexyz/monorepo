@@ -186,27 +186,19 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 
     /// Broadcast indicates that a block should be sent to all peers.
-    pub async fn broadcast(&mut self, block: B) {
-        if self
-            .sender
+    pub async fn broadcast(&mut self, block: B) -> Result<(), Error> {
+        self.sender
             .send(Message::Broadcast { block })
             .await
-            .is_err()
-        {
-            error!("failed to send broadcast message to actor: receiver dropped");
-        }
+            .map_err(|_| Error::Closed)
     }
 
     /// Notifies the actor that a block has been verified.
-    pub async fn verified(&mut self, round: Round, block: B) {
-        if self
-            .sender
+    pub async fn verified(&mut self, round: Round, block: B) -> Result<(), Error> {
+        self.sender
             .send(Message::Verified { round, block })
             .await
-            .is_err()
-        {
-            error!("failed to send verified message to actor: receiver dropped");
-        }
+            .map_err(|_| Error::Closed)
     }
 }
 

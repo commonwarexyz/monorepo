@@ -76,7 +76,7 @@ mod tests {
         resolver::p2p as resolver,
     };
     use crate::{
-        marshal::ingress::mailbox::Identifier,
+        marshal::ingress::mailbox::{Error as MailboxError, Identifier},
         threshold_simplex::types::{
             finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
             Notarization, Proposal,
@@ -390,8 +390,8 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.broadcast(block.clone()).await;
-                actor.verified(round, block.clone()).await;
+                actor.broadcast(block.clone()).await.unwrap();
+                actor.verified(round, block.clone()).await.unwrap();
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
                 // the block before continuing.
@@ -476,7 +476,10 @@ mod tests {
 
             let subscription_rx = actor.subscribe(Some(Round::from((0, 1))), commitment).await;
 
-            actor.verified(Round::from((0, 1)), block.clone()).await;
+            actor
+                .verified(Round::from((0, 1)), block.clone())
+                .await
+                .unwrap();
 
             let proposal = Proposal {
                 round: Round::new(0, 1),
@@ -534,8 +537,14 @@ mod tests {
                 .subscribe(Some(Round::from((0, 1))), commitment1)
                 .await;
 
-            actor.verified(Round::from((0, 1)), block1.clone()).await;
-            actor.verified(Round::from((0, 2)), block2.clone()).await;
+            actor
+                .verified(Round::from((0, 1)), block1.clone())
+                .await
+                .unwrap();
+            actor
+                .verified(Round::from((0, 2)), block2.clone())
+                .await
+                .unwrap();
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
                 let proposal = Proposal {
@@ -601,8 +610,14 @@ mod tests {
 
             drop(sub1_rx);
 
-            actor.verified(Round::from((0, 1)), block1.clone()).await;
-            actor.verified(Round::from((0, 2)), block2.clone()).await;
+            actor
+                .verified(Round::from((0, 1)), block1.clone())
+                .await
+                .unwrap();
+            actor
+                .verified(Round::from((0, 2)), block2.clone())
+                .await
+                .unwrap();
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
                 let proposal = Proposal {
@@ -660,7 +675,7 @@ mod tests {
             let sub5_rx = actor.subscribe(None, block5.digest()).await;
 
             // Block1: Broadcasted by the actor
-            actor.broadcast(block1.clone()).await;
+            actor.broadcast(block1.clone()).await.unwrap();
             context.sleep(Duration::from_millis(20)).await;
 
             // Block1: delivered
@@ -669,7 +684,10 @@ mod tests {
             assert_eq!(received1.height(), 1);
 
             // Block2: Verified by the actor
-            actor.verified(Round::from((0, 2)), block2.clone()).await;
+            actor
+                .verified(Round::from((0, 2)), block2.clone())
+                .await
+                .unwrap();
 
             // Block2: delivered
             let received2 = sub2_rx.await.unwrap();
@@ -684,7 +702,10 @@ mod tests {
             };
             let notarization3 = make_notarization(proposal3.clone(), &shares, QUORUM);
             actor.report(Activity::Notarization(notarization3)).await;
-            actor.verified(Round::from((0, 3)), block3.clone()).await;
+            actor
+                .verified(Round::from((0, 3)), block3.clone())
+                .await
+                .unwrap();
 
             // Block3: delivered
             let received3 = sub3_rx.await.unwrap();
@@ -702,7 +723,10 @@ mod tests {
                 QUORUM,
             );
             actor.report(Activity::Finalization(finalization4)).await;
-            actor.verified(Round::from((0, 4)), block4.clone()).await;
+            actor
+                .verified(Round::from((0, 4)), block4.clone())
+                .await
+                .unwrap();
 
             // Block4: delivered
             let received4 = sub4_rx.await.unwrap();
@@ -711,7 +735,7 @@ mod tests {
 
             // Block5: Broadcasted by a remote node (different actor)
             let remote_actor = &mut actors[1].clone();
-            remote_actor.broadcast(block5.clone()).await;
+            remote_actor.broadcast(block5.clone()).await.unwrap();
             context.sleep(Duration::from_millis(20)).await;
 
             // Block5: delivered
@@ -750,7 +774,7 @@ mod tests {
             let block = B::new::<Sha256>(parent, 1, 1);
             let digest = block.digest();
             let round = Round::new(0, 1);
-            actor.verified(round, block.clone()).await;
+            actor.verified(round, block.clone()).await.unwrap();
 
             let proposal = Proposal {
                 round,
@@ -806,7 +830,10 @@ mod tests {
             let parent0 = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent0, 1, 1);
             let d1 = block1.digest();
-            actor.verified(Round::new(0, 1), block1.clone()).await;
+            actor
+                .verified(Round::new(0, 1), block1.clone())
+                .await
+                .unwrap();
             let f1 = make_finalization(
                 Proposal {
                     round: Round::new(0, 1),
@@ -822,7 +849,10 @@ mod tests {
 
             let block2 = B::new::<Sha256>(d1, 2, 2);
             let d2 = block2.digest();
-            actor.verified(Round::new(0, 2), block2.clone()).await;
+            actor
+                .verified(Round::new(0, 2), block2.clone())
+                .await
+                .unwrap();
             let f2 = make_finalization(
                 Proposal {
                     round: Round::new(0, 2),
@@ -838,7 +868,10 @@ mod tests {
 
             let block3 = B::new::<Sha256>(d2, 3, 3);
             let d3 = block3.digest();
-            actor.verified(Round::new(0, 3), block3.clone()).await;
+            actor
+                .verified(Round::new(0, 3), block3.clone())
+                .await
+                .unwrap();
             let f3 = make_finalization(
                 Proposal {
                     round: Round::new(0, 3),
@@ -880,7 +913,7 @@ mod tests {
             let block = B::new::<Sha256>(parent, 1, 1);
             let commitment = block.digest();
             let round = Round::new(0, 1);
-            actor.verified(round, block.clone()).await;
+            actor.verified(round, block.clone()).await.unwrap();
             let proposal = Proposal {
                 round,
                 parent: 0,
@@ -935,7 +968,7 @@ mod tests {
             let ver_block = B::new::<Sha256>(parent, 1, 1);
             let ver_commitment = ver_block.digest();
             let round1 = Round::new(0, 1);
-            actor.verified(round1, ver_block.clone()).await;
+            actor.verified(round1, ver_block.clone()).await.unwrap();
             let got = actor
                 .get_block(&ver_commitment)
                 .await
@@ -947,7 +980,7 @@ mod tests {
             let fin_block = B::new::<Sha256>(ver_commitment, 2, 2);
             let fin_commitment = fin_block.digest();
             let round2 = Round::new(0, 2);
-            actor.verified(round2, fin_block.clone()).await;
+            actor.verified(round2, fin_block.clone()).await.unwrap();
             let proposal = Proposal {
                 round: round2,
                 parent: 1,
@@ -967,6 +1000,80 @@ mod tests {
             let missing = Sha256::hash(b"definitely-missing");
             let missing_block = actor.get_block(&missing).await.unwrap();
             assert!(missing_block.is_none());
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_mailbox_error_propagation_on_actor_drop() {
+        // Test that when the actor is dropped, sending to the mailbox returns an error
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Initialize config
+            let (schemes, _peers, identity, _shares) = setup_validators_and_shares(&mut context);
+            let genesis_parent = Sha256Digest::from([0u8; 32]);
+            let genesis_timestamp = UNIX_EPOCH.epoch_millis();
+            let genesis = Block::new::<Sha256>(genesis_parent, 0, genesis_timestamp);
+            let secret = schemes[0].clone();
+            let config: Config<V, B> = Config {
+                identity,
+                genesis,
+                mailbox_size: 10,
+                namespace: NAMESPACE.to_vec(),
+                view_retention_timeout: 10,
+                max_repair: 10,
+                codec_config: (),
+                partition_prefix: format!("validator-{}", secret.public_key()),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                freezer_table_initial_size: 64,
+                freezer_table_resize_frequency: 10,
+                freezer_table_resize_chunk_size: 10,
+                freezer_journal_target_size: 1024,
+                freezer_journal_compression: None,
+                freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                immutable_items_per_section: NZU64!(10),
+            };
+            let (actor, mut mailbox) = actor::Actor::init(context.clone(), config).await;
+
+            // Drop the actor to close the mailbox receiver
+            drop(actor);
+
+            // GetInfo
+            let res = mailbox.get_info(Identifier::Latest).await;
+            assert!(
+                matches!(res, Err(MailboxError::Closed)),
+                "get info should return Closed"
+            );
+
+            // GetBlock
+            let res = mailbox.get_block(Identifier::Latest).await;
+            assert!(
+                matches!(res, Err(MailboxError::Closed)),
+                "get block should return Closed"
+            );
+
+            // Broadcast
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
+            let res = mailbox.broadcast(block.clone()).await;
+            assert!(
+                matches!(res, Err(MailboxError::Closed)),
+                "broadcast should return Closed"
+            );
+
+            // Verified
+            let res = mailbox.verified(Round::new(0, 1), block.clone()).await;
+            assert!(
+                matches!(res, Err(MailboxError::Closed)),
+                "verified should return Closed"
+            );
+
+            // Subscribe returns a receiver which should error when awaited
+            let rx = mailbox
+                .subscribe(Some(Round::new(0, 1)), block.digest())
+                .await;
+            assert!(rx.await.is_err(), "subscribe rx should error");
         })
     }
 }
