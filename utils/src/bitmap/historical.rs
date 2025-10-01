@@ -328,7 +328,7 @@ impl<const N: usize> Historical<N> {
         // Handle the last chunk (may be partial)
         let last_chunk_data = self.get_chunk_from_diff_or_newer(&newer_state, diff, raw_last_chunk);
 
-        if last_chunk_bits < Prunable::<N>::CHUNK_SIZE_BITS as u64 {
+        if last_chunk_bits < Prunable::<N>::CHUNK_SIZE_BITS {
             // Partial chunk, push bits one by one
             for bit_idx in 0..last_chunk_bits as usize {
                 let byte_idx = bit_idx / 8;
@@ -515,95 +515,16 @@ impl<const N: usize> Historical<N> {
     }
 
     /// Build a reverse diff from a batch before applying it.
+    ///
+    /// The reverse diff captures the state before this commit, allowing us to reconstruct
+    /// historical states by "undoing" commits in reverse order.
     fn build_reverse_diff(&self, batch: &Batch<N>) -> CommitDiff<N> {
         let mut changes = BTreeMap::new();
 
-        // Capture old values of modified chunks
-        #[cfg(not(feature = "std"))]
-        let mut affected_chunks = alloc::collections::BTreeSet::new();
-        #[cfg(feature = "std")]
-        let mut affected_chunks = std::collections::BTreeSet::new();
-
-        for &bit_offset in batch.modified_bits.keys() {
-            affected_chunks.insert(Prunable::<N>::raw_chunk_index(bit_offset));
-        }
-
-        for &chunk_idx in &affected_chunks {
-            // Get the chunk value before batch modifications
-            let current_pruned = self.current.pruned_chunks();
-            if chunk_idx >= current_pruned {
-                let bitmap_idx = chunk_idx - current_pruned;
-                if bitmap_idx < self.current.chunks_len() {
-                    let old_chunk = *self.current.get_chunk_by_index(bitmap_idx);
-                    changes.insert(chunk_idx, ChunkChange::Modified(old_chunk));
-                }
-            }
-        }
-
-        // Record appended chunks as Added (if they didn't exist before)
-        // or Modified (if they partially existed and we're extending them)
-        if !batch.appended_bits.is_empty() {
-            // Appended bits start at: projected_len - appended_bits.len()
-            // (accounts for net pops that happened before the pushes)
-            let append_start_bit = batch.projected_len - batch.appended_bits.len() as u64;
-            let start_chunk = Prunable::<N>::raw_chunk_index(append_start_bit);
-            let end_chunk = Prunable::<N>::raw_chunk_index(batch.projected_len.saturating_sub(1));
-            for chunk_idx in start_chunk..=end_chunk {
-                // Only mark as Added/Modified if not already recorded (don't overwrite existing entries)
-                changes.entry(chunk_idx).or_insert_with(|| {
-                    // Check if chunk existed before at all
-                    let current_pruned = self.current.pruned_chunks();
-                    if chunk_idx >= current_pruned {
-                        let bitmap_idx = chunk_idx - current_pruned;
-                        if bitmap_idx < self.current.chunks_len() {
-                            // Chunk existed, capture its old value as Modified
-                            let old_chunk = *self.current.get_chunk_by_index(bitmap_idx);
-                            ChunkChange::Modified(old_chunk)
-                        } else {
-                            // Chunk is entirely new
-                            ChunkChange::Added
-                        }
-                    } else {
-                        // Chunk was pruned, which shouldn't happen for appends
-                        ChunkChange::Added
-                    }
-                });
-            }
-        }
-
-        // Handle length reduction (pop operations)
-        // If projected_len < base_len, we need to capture chunks that will be affected
-        if batch.projected_len < batch.base_len && batch.base_len > 0 {
-            let old_last_chunk = Prunable::<N>::raw_chunk_index(batch.base_len - 1);
-            let start_chunk = if batch.projected_len > 0 {
-                Prunable::<N>::raw_chunk_index(batch.projected_len - 1)
-            } else {
-                0
-            };
-
-            // Capture chunks that are being removed or truncated
-            for chunk_idx in start_chunk..=old_last_chunk {
-                changes.entry(chunk_idx).or_insert_with(|| {
-                    let current_pruned = self.current.pruned_chunks();
-                    if chunk_idx >= current_pruned {
-                        let bitmap_idx = chunk_idx - current_pruned;
-                        if bitmap_idx < self.current.chunks_len() {
-                            let old_chunk = *self.current.get_chunk_by_index(bitmap_idx);
-                            ChunkChange::Modified(old_chunk)
-                        } else {
-                            ChunkChange::Added
-                        }
-                    } else {
-                        ChunkChange::Added
-                    }
-                });
-            }
-        }
-
-        // Record pruned chunks with their old values
-        for (&chunk_idx, &chunk_data) in &batch.chunks_to_prune {
-            changes.insert(chunk_idx, ChunkChange::Pruned(chunk_data));
-        }
+        self.capture_modified_chunks(batch, &mut changes);
+        self.capture_appended_chunks(batch, &mut changes);
+        self.capture_popped_chunks(batch, &mut changes);
+        self.capture_pruned_chunks(batch, &mut changes);
 
         CommitDiff {
             metadata: CommitMetadata {
@@ -612,6 +533,129 @@ impl<const N: usize> Historical<N> {
             },
             changes,
         }
+    }
+
+    /// Capture chunks affected by bit modifications.
+    ///
+    /// For each chunk containing modified bits, we store its original value so we can
+    /// restore it when reconstructing historical states.
+    fn capture_modified_chunks(
+        &self,
+        batch: &Batch<N>,
+        changes: &mut BTreeMap<usize, ChunkChange<N>>,
+    ) {
+        #[cfg(not(feature = "std"))]
+        let mut affected_chunks = alloc::collections::BTreeSet::new();
+        #[cfg(feature = "std")]
+        let mut affected_chunks = std::collections::BTreeSet::new();
+
+        // Collect unique chunk indices from all modified bits
+        for &bit_offset in batch.modified_bits.keys() {
+            affected_chunks.insert(Prunable::<N>::raw_chunk_index(bit_offset));
+        }
+
+        // Store the original chunk data for each affected chunk
+        for &chunk_idx in &affected_chunks {
+            if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
+                changes.insert(chunk_idx, ChunkChange::Modified(old_chunk));
+            }
+        }
+    }
+
+    /// Capture chunks affected by appended bits.
+    ///
+    /// Appended bits may extend existing chunks (Modified) or create new chunks (Added).
+    /// We only capture data for chunks that existed before the batch.
+    fn capture_appended_chunks(
+        &self,
+        batch: &Batch<N>,
+        changes: &mut BTreeMap<usize, ChunkChange<N>>,
+    ) {
+        if batch.appended_bits.is_empty() {
+            return;
+        }
+
+        // Calculate the bit range where appended bits will go
+        // (accounts for any net pops that happened before the pushes)
+        let append_start_bit = batch.projected_len - batch.appended_bits.len() as u64;
+        let start_chunk = Prunable::<N>::raw_chunk_index(append_start_bit);
+        let end_chunk = Prunable::<N>::raw_chunk_index(batch.projected_len.saturating_sub(1));
+
+        for chunk_idx in start_chunk..=end_chunk {
+            // Don't overwrite existing entries (e.g., from modified_bits)
+            changes.entry(chunk_idx).or_insert_with(|| {
+                // If chunk existed before, capture its old value; otherwise mark as Added
+                if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
+                    ChunkChange::Modified(old_chunk)
+                } else {
+                    ChunkChange::Added
+                }
+            });
+        }
+    }
+
+    /// Capture chunks affected by pop operations.
+    ///
+    /// When bits are popped, we need to store the original chunk data for any chunks
+    /// that will be removed or truncated by the length reduction.
+    fn capture_popped_chunks(
+        &self,
+        batch: &Batch<N>,
+        changes: &mut BTreeMap<usize, ChunkChange<N>>,
+    ) {
+        // Only process if we have net pops (projected_len < base_len)
+        if batch.projected_len >= batch.base_len || batch.base_len == 0 {
+            return;
+        }
+
+        // Calculate the chunk range that will be affected by the length reduction
+        let old_last_chunk = Prunable::<N>::raw_chunk_index(batch.base_len - 1);
+        let new_last_chunk = if batch.projected_len > 0 {
+            Prunable::<N>::raw_chunk_index(batch.projected_len - 1)
+        } else {
+            0
+        };
+
+        // Capture all chunks from the new end to the old end
+        for chunk_idx in new_last_chunk..=old_last_chunk {
+            changes.entry(chunk_idx).or_insert_with(|| {
+                // Capture original chunk data, or mark as Added if it didn't exist
+                if let Some(old_chunk) = self.get_chunk_if_exists(chunk_idx) {
+                    ChunkChange::Modified(old_chunk)
+                } else {
+                    ChunkChange::Added
+                }
+            });
+        }
+    }
+
+    /// Capture chunks that will be pruned.
+    ///
+    /// The batch already contains the old chunk data in `chunks_to_prune`, so we just
+    /// copy those entries into the reverse diff.
+    fn capture_pruned_chunks(
+        &self,
+        batch: &Batch<N>,
+        changes: &mut BTreeMap<usize, ChunkChange<N>>,
+    ) {
+        for (&chunk_idx, &chunk_data) in &batch.chunks_to_prune {
+            changes.insert(chunk_idx, ChunkChange::Pruned(chunk_data));
+        }
+    }
+
+    /// Get chunk data from current state if it exists.
+    ///
+    /// Returns `Some(chunk_data)` if the chunk exists in the current bitmap,
+    /// or `None` if it's out of bounds or pruned.
+    fn get_chunk_if_exists(&self, chunk_idx: usize) -> Option<[u8; N]> {
+        let current_pruned = self.current.pruned_chunks();
+        if chunk_idx >= current_pruned {
+            let bitmap_idx = chunk_idx - current_pruned;
+            if bitmap_idx < self.current.chunks_len() {
+                return Some(*self.current.get_chunk_by_index(bitmap_idx));
+            }
+        }
+        None
     }
 }
 
