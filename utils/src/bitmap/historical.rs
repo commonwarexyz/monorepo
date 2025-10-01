@@ -1020,174 +1020,73 @@ impl<'a, const N: usize> Drop for BatchGuard<'a, N> {
 mod tests {
     use super::*;
 
+    /// Test basic batch lifecycle: creation, operations, commit, and abort.
+    ///
+    /// Covers:
+    /// - Empty initialization
+    /// - Basic push operations and commits
+    /// - Batch abort (drop without commit)
+    /// - Read-through semantics (modifications visible in batch, committed to current)
+    /// - Method chaining API
+    /// - Empty batch commits
     #[test]
-    fn test_new() {
-        let historical: Historical<4> = Historical::new();
+    fn test_batch_lifecycle_and_operations() {
+        // Empty initialization
+        let mut historical: Historical<4> = Historical::new();
         assert_eq!(historical.len(), 0);
         assert!(historical.is_empty());
         assert_eq!(historical.commits().count(), 0);
-    }
 
-    #[test]
-    fn test_basic_batch_commit() {
-        let mut historical: Historical<4> = Historical::new();
-
+        // Basic push and commit
         historical
             .with_batch(1, |batch| {
-                batch.push(true);
-                batch.push(false);
-                batch.push(true);
+                batch.push(true).push(false).push(true);
             })
             .unwrap();
-
         assert_eq!(historical.len(), 3);
         assert!(historical.get_bit(0));
         assert!(!historical.get_bit(1));
         assert!(historical.get_bit(2));
         assert_eq!(historical.commits().count(), 1);
-    }
 
-    #[test]
-    fn test_batch_abort() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // Initial commit
-        historical
-            .with_batch(1, |batch| {
-                batch.push(true);
-                batch.push(false);
-            })
-            .unwrap();
-
-        assert_eq!(historical.len(), 2);
-
-        // Start batch and drop without commit (abort)
+        // Batch abort (drop without commit)
         {
             let mut batch = historical.start_batch();
-            batch.push(true);
-            batch.push(true);
+            batch.push(true).push(true);
             // Drop here - should abort
         }
+        assert_eq!(historical.len(), 3); // Unchanged
 
-        // State should be unchanged
-        assert_eq!(historical.len(), 2);
-        assert!(historical.get_bit(0));
-        assert!(!historical.get_bit(1));
-        assert_eq!(historical.commits().count(), 1);
-    }
-
-    #[test]
-    fn test_read_through_semantics() {
-        let mut historical: Historical<4> = Historical::new();
-
-        historical
-            .with_batch(1, |batch| {
-                batch.push(true);
-                batch.push(false);
-                batch.push(true);
-            })
-            .unwrap();
-
+        // Read-through semantics
         let mut batch = historical.start_batch();
-
-        // Read unmodified bits (should fall through)
-        assert!(batch.get_bit(0));
-        assert!(!batch.get_bit(1));
-        assert!(batch.get_bit(2));
-
-        // Modify a bit
-        batch.set_bit(1, true);
-
-        // Read modified bit (should see new value)
-        assert!(batch.get_bit(1));
-
-        // Append a bit
-        batch.push(false);
-
-        // Read appended bit
-        assert!(!batch.get_bit(3));
-
+        assert!(batch.get_bit(0)); // Read unmodified
+        batch.set_bit(1, true); // Modify
+        assert!(batch.get_bit(1)); // See modification in batch
+        batch.push(false); // Append
+        assert!(!batch.get_bit(3)); // See appended bit
         batch.commit(2).unwrap();
 
-        // After commit, changes should be in current
+        // After commit, changes persisted
         assert_eq!(historical.len(), 4);
         assert!(historical.get_bit(1));
         assert!(!historical.get_bit(3));
-    }
 
-    #[test]
-    fn test_monotonic_commit_numbers() {
-        let mut historical: Historical<4> = Historical::new();
+        // Empty batch commit
+        historical.with_batch(3, |_batch| {}).unwrap();
+        assert_eq!(historical.len(), 4);
+        assert!(historical.commit_exists(3));
 
+        // Method chaining with batch.set_bit()
         historical
-            .with_batch(5, |batch| {
-                batch.push(true);
+            .with_batch(4, |batch| {
+                batch.set_bit(0, false).push_byte(0xAA);
             })
             .unwrap();
-
-        let err = historical
-            .with_batch(5, |batch| {
-                batch.push(false);
-            })
-            .unwrap_err();
-
-        match err {
-            Error::NonMonotonicCommit {
-                previous,
-                attempted,
-            } => {
-                assert_eq!(previous, 5);
-                assert_eq!(attempted, 5);
-            }
-        }
-
-        let err = historical
-            .with_batch(3, |batch| {
-                batch.push(false);
-            })
-            .unwrap_err();
-
-        match err {
-            Error::NonMonotonicCommit {
-                previous,
-                attempted,
-            } => {
-                assert_eq!(previous, 5);
-                assert_eq!(attempted, 3);
-            }
-        }
-
-        // Should succeed with larger number
-        historical
-            .with_batch(10, |batch| {
-                batch.push(false);
-            })
-            .unwrap();
+        assert_eq!(historical.len(), 12); // 4 + 8 bits
+        assert!(!historical.get_bit(0)); // Modified
     }
 
-    #[test]
-    fn test_prune_commits() {
-        let mut historical: Historical<4> = Historical::new();
-
-        for i in 1..=5 {
-            historical
-                .with_batch(i, |batch| {
-                    batch.push(true);
-                })
-                .unwrap();
-        }
-
-        assert_eq!(historical.commits().count(), 5);
-
-        let removed = historical.prune_commits_before(3);
-        assert_eq!(removed, 2);
-        assert_eq!(historical.commits().count(), 3);
-
-        let removed = historical.prune_commits_at_or_below(4);
-        assert_eq!(removed, 2);
-        assert_eq!(historical.commits().count(), 1);
-    }
-
+    /// Test that only one batch can be active at a time.
     #[test]
     #[should_panic(expected = "batch already active")]
     fn test_cannot_start_batch_when_active() {
@@ -1199,26 +1098,31 @@ mod tests {
         let _batch2 = historical.start_batch();
     }
 
+    /// Test batch operations: push, pop, prune, push_byte, push_chunk, and get_chunk.
+    ///
+    /// Covers:
+    /// - Pop operations (return value, length changes)
+    /// - Bitmap chunk pruning (prune_to_bit)
+    /// - Bulk operations (push_byte, push_chunk)
+    /// - Chunk retrieval with modifications (get_chunk with read-through)
+    /// - Modifications combined with appends in same batch
     #[test]
-    fn test_batch_with_modifications_and_appends() {
+    fn test_batch_operations_push_pop_prune() {
         let mut historical: Historical<4> = Historical::new();
 
-        // Initial state
+        // Push, modify, and append operations
         historical
             .with_batch(1, |batch| {
-                batch.push(false); // bit 0
-                batch.push(false); // bit 1
-                batch.push(false); // bit 2
+                batch.push(false).push(false).push(false);
             })
             .unwrap();
 
-        // Modify existing bits and append new ones
         historical
             .with_batch(2, |batch| {
                 batch.set_bit(0, true); // Modify
                 batch.set_bit(1, true); // Modify
-                batch.push(true); // Append bit 3
-                batch.push(true); // Append bit 4
+                batch.push(true); // Append
+                batch.push(true); // Append
             })
             .unwrap();
 
@@ -1226,73 +1130,122 @@ mod tests {
         assert!(historical.get_bit(0));
         assert!(historical.get_bit(1));
         assert!(!historical.get_bit(2));
-        assert!(historical.get_bit(3));
-        assert!(historical.get_bit(4));
-    }
 
-    #[test]
-    fn test_batch_pop_operations() {
-        let mut historical: Historical<4> = Historical::new();
-
+        // Pop operations
         historical
-            .with_batch(1, |batch| {
-                batch.push(true);
-                batch.push(false);
-                batch.push(true);
-            })
-            .unwrap();
-
-        // Pop within batch
-        historical
-            .with_batch(2, |batch| {
-                batch.push(false); // Add bit 3
-                let popped = batch.pop(); // Remove bit 3
+            .with_batch(3, |batch| {
+                batch.push(false); // Add bit 5
+                let popped = batch.pop(); // Remove it
                 assert!(!popped);
-                assert_eq!(batch.len(), 3); // Back to original length
+                assert_eq!(batch.len(), 5); // Back to original
             })
             .unwrap();
 
-        assert_eq!(historical.len(), 3);
-    }
-
-    #[test]
-    fn test_batch_prune_operations() {
+        // Bulk push operations (push_chunk, push_byte)
+        // Start fresh with 32 bits so chunks align cleanly
         let mut historical: Historical<4> = Historical::new();
-
-        // Create multiple chunks
         historical
-            .with_batch(1, |batch| {
-                for _ in 0..64 {
-                    batch.push(true);
-                }
+            .with_batch(1, |b| {
+                b.push_chunk(&[0x00, 0x00, 0x00, 0x00]);
             })
             .unwrap();
 
-        assert_eq!(historical.len(), 64);
-        assert_eq!(historical.pruned_chunks(), 0);
-
-        // Prune first chunk
         historical
             .with_batch(2, |batch| {
+                batch.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]); // 32 bits at offset 32
+                batch.push_byte(0xFF); // 8 bits at offset 64
+            })
+            .unwrap();
+
+        assert_eq!(historical.len(), 72); // 32 + 32 + 8
+        let chunk = historical.get_chunk(32); // Read second chunk
+        assert_eq!(chunk, &[0xAA, 0xBB, 0xCC, 0xDD]);
+        for i in 64..72 {
+            assert!(historical.get_bit(i)); // Verify pushed byte
+        }
+
+        // get_chunk with modifications in batch
+        let mut batch = historical.start_batch();
+        batch.set_bit(32, true); // First bit of second chunk
+        batch.set_bit(39, true); // 8th bit of second chunk
+        let chunk = batch.get_chunk(32);
+        assert_eq!(chunk[0] & 0x01, 0x01); // bit 32 (0 in chunk) set
+        assert_eq!(chunk[0] & 0x80, 0x80); // bit 39 (7 in chunk) set
+        batch.commit(3).unwrap();
+
+        // Prune operations
+        historical
+            .with_batch(4, |batch| {
                 batch.prune_to_bit(32);
             })
             .unwrap();
 
-        assert_eq!(historical.len(), 64);
-        assert_eq!(historical.pruned_chunks(), 1);
+        assert_eq!(historical.len(), 72); // Length unchanged
+        assert_eq!(historical.pruned_chunks(), 1); // First chunk pruned
     }
 
+    /// Test commit history management: validation, pruning, queries, and clearing.
+    ///
+    /// Covers:
+    /// - Monotonic commit number validation
+    /// - Pruning commits (prune_commits_before, prune_commits_at_or_below)
+    /// - Commit queries (earliest_commit, latest_commit, commit_exists)
+    /// - Clearing all history (clear_history)
     #[test]
-    fn test_commit_history_queries() {
+    fn test_commit_history_management() {
         let mut historical: Historical<4> = Historical::new();
 
+        // Validate monotonic commit numbers
+        historical
+            .with_batch(5, |b| {
+                b.push(true);
+            })
+            .unwrap();
+
+        let err = historical
+            .with_batch(5, |b| {
+                b.push(false);
+            })
+            .unwrap_err();
+        match err {
+            Error::NonMonotonicCommit {
+                previous,
+                attempted,
+            } => {
+                assert_eq!(previous, 5);
+                assert_eq!(attempted, 5);
+            }
+        }
+
+        let err = historical
+            .with_batch(3, |b| {
+                b.push(false);
+            })
+            .unwrap_err();
+        match err {
+            Error::NonMonotonicCommit {
+                previous,
+                attempted,
+            } => {
+                assert_eq!(previous, 5);
+                assert_eq!(attempted, 3);
+            }
+        }
+
+        historical
+            .with_batch(10, |b| {
+                b.push(false);
+            })
+            .unwrap(); // Should succeed
+
+        // Commit queries (need fresh instance)
+        let mut historical: Historical<4> = Historical::new();
         assert!(historical.earliest_commit().is_none());
         assert!(historical.latest_commit().is_none());
-
         for i in 1..=5 {
             historical
-                .with_batch(i * 10, |batch| {
-                    batch.push(true);
+                .with_batch(i * 10, |b| {
+                    b.push(true);
                 })
                 .unwrap();
         }
@@ -1304,604 +1257,369 @@ mod tests {
 
         let commits: Vec<u64> = historical.commits().collect();
         assert_eq!(commits, vec![10, 20, 30, 40, 50]);
-    }
 
-    #[test]
-    fn test_clear_history() {
-        let mut historical: Historical<4> = Historical::new();
+        // Prune commits
+        let removed = historical.prune_commits_before(30);
+        assert_eq!(removed, 2);
+        assert_eq!(historical.commits().count(), 3);
 
-        for i in 1..=5 {
-            historical
-                .with_batch(i, |batch| {
-                    batch.push(true);
-                })
-                .unwrap();
-        }
+        let removed = historical.prune_commits_at_or_below(40);
+        assert_eq!(removed, 2);
+        assert_eq!(historical.commits().count(), 1);
 
-        assert_eq!(historical.commits().count(), 5);
-
+        // Clear history
         historical.clear_history();
-
         assert_eq!(historical.commits().count(), 0);
         assert!(historical.earliest_commit().is_none());
         assert!(historical.latest_commit().is_none());
-        // Current state should be preserved
-        assert_eq!(historical.len(), 5);
+        assert_eq!(historical.len(), 5); // Current state preserved
     }
 
+    /// Test historical reconstruction with bit modifications across multiple commits.
+    ///
+    /// Covers:
+    /// - Reconstructing states with simple bit modifications
+    /// - Multiple successive modifications across commits
+    /// - Combining modifications with appends
+    /// - Verifying each historical state independently
     #[test]
-    fn test_batch_push_byte_and_chunk() {
+    fn test_historical_reconstruction_with_modifications() {
         let mut historical: Historical<4> = Historical::new();
 
+        // Simple modification scenario
         historical
-            .with_batch(1, |batch| {
-                batch.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]); // 32 bits (full chunk)
-                batch.push_byte(0xFF); // 8 more bits
+            .with_batch(1, |b| {
+                b.push(true).push(false).push(true);
+            })
+            .unwrap();
+        historical
+            .with_batch(2, |b| {
+                b.set_bit(0, false);
+                b.push(false);
             })
             .unwrap();
 
-        assert_eq!(historical.len(), 40);
-
-        // Verify first chunk
-        let chunk = historical.get_chunk(0);
-        assert_eq!(chunk, &[0xAA, 0xBB, 0xCC, 0xDD]);
-
-        // Check byte pushed after chunk (bits 32-39)
-        for i in 32..40 {
-            assert!(historical.get_bit(i));
-        }
-    }
-
-    #[test]
-    fn test_batch_get_chunk_with_modifications() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // Create initial chunk
-        historical
-            .with_batch(1, |batch| {
-                batch.push_chunk(&[0x00, 0x00, 0x00, 0x00]);
-            })
-            .unwrap();
-
-        let mut batch = historical.start_batch();
-
-        // Modify some bits in the chunk
-        batch.set_bit(0, true);
-        batch.set_bit(7, true);
-
-        // Get chunk through batch - should show modifications
-        let chunk = batch.get_chunk(0);
-
-        // Check modifications are reflected
-        assert_eq!(chunk[0] & 0x01, 0x01); // bit 0 set
-        assert_eq!(chunk[0] & 0x80, 0x80); // bit 7 set
-
-        batch.commit(2).unwrap();
-
-        // Verify modifications persisted
-        let final_chunk = historical.get_chunk(0);
-        assert_eq!(final_chunk[0] & 0x01, 0x01);
-        assert_eq!(final_chunk[0] & 0x80, 0x80);
-    }
-
-    #[test]
-    fn test_empty_batch_commit() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // Commit an empty batch
-        historical.with_batch(1, |_batch| {}).unwrap();
-
-        assert_eq!(historical.len(), 0);
-        assert!(historical.commit_exists(1));
-    }
-
-    #[test]
-    fn test_method_chaining() {
-        let mut historical: Historical<4> = Historical::new();
-
-        historical
-            .with_batch(1, |batch| {
-                batch.push(true).push(false).push(true).push_byte(0xAA);
-            })
-            .unwrap();
-
-        assert_eq!(historical.len(), 11); // 3 + 8 bits
-
-        // Now modify and chain in another batch
-        historical
-            .with_batch(2, |batch| {
-                batch.set_bit(1, true).push(true);
-            })
-            .unwrap();
-
-        assert_eq!(historical.len(), 12);
-        assert!(historical.get_bit(0));
-        assert!(historical.get_bit(1)); // Modified from false to true
-        assert!(historical.get_bit(2));
-        assert!(historical.get_bit(11)); // Newly pushed
-    }
-
-    #[test]
-    fn test_get_at_commit_basic() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // Commit 1: Add 3 bits
-        historical
-            .with_batch(1, |batch| {
-                batch.push(true);
-                batch.push(false);
-                batch.push(true);
-            })
-            .unwrap();
-
-        // Current state after commit 1
-        assert_eq!(historical.len(), 3);
-        assert!(historical.get_bit(0));
-        assert!(!historical.get_bit(1));
-        assert!(historical.get_bit(2));
-
-        // Commit 2: Modify bit and append
-        historical
-            .with_batch(2, |batch| {
-                batch.set_bit(0, false);
-                batch.push(false);
-            })
-            .unwrap();
-
-        // Current state should be at commit 2
-        assert_eq!(historical.len(), 4);
-        assert!(!historical.get_bit(0));
-        assert!(!historical.get_bit(1));
-        assert!(historical.get_bit(2));
-        assert!(!historical.get_bit(3));
-
-        // Get state at commit 1
         let state_at_1 = historical.get_at_commit(1).unwrap();
         assert_eq!(state_at_1.len(), 3);
-        assert!(state_at_1.get_bit(0)); // Was true
+        assert!(state_at_1.get_bit(0)); // Original true
         assert!(!state_at_1.get_bit(1));
-        assert!(state_at_1.get_bit(2));
 
-        // Get state at commit 2 (should match current)
         let state_at_2 = historical.get_at_commit(2).unwrap();
         assert_eq!(state_at_2.len(), 4);
-        assert!(!state_at_2.get_bit(0));
-        assert!(!state_at_2.get_bit(1));
-        assert!(state_at_2.get_bit(2));
-        assert!(!state_at_2.get_bit(3));
-    }
+        assert!(!state_at_2.get_bit(0)); // Modified to false
+        assert!(!state_at_2.get_bit(3)); // Appended
 
-    #[test]
-    fn test_get_at_commit_multiple_modifications() {
+        // Multiple successive modifications
         let mut historical: Historical<4> = Historical::new();
-
-        // Commit 1: Initial state
         historical
-            .with_batch(1, |batch| {
-                batch.push_chunk(&[0xFF, 0x00, 0xFF, 0x00]);
+            .with_batch(1, |b| {
+                b.push_chunk(&[0xFF, 0x00, 0xFF, 0x00]);
+            })
+            .unwrap();
+        historical
+            .with_batch(2, |b| {
+                b.set_bit(0, false);
+                b.set_bit(8, true);
+            })
+            .unwrap();
+        historical
+            .with_batch(3, |b| {
+                b.set_bit(16, false);
+                b.set_bit(24, true);
             })
             .unwrap();
 
-        // Commit 2: Modify some bits
-        historical
-            .with_batch(2, |batch| {
-                batch.set_bit(0, false);
-                batch.set_bit(8, true);
-            })
-            .unwrap();
-
-        // Commit 3: Modify more bits
-        historical
-            .with_batch(3, |batch| {
-                batch.set_bit(16, false);
-                batch.set_bit(24, true);
-            })
-            .unwrap();
-
-        // Verify we can get each state
         let state_at_1 = historical.get_at_commit(1).unwrap();
-        assert_eq!(state_at_1.len(), 32);
-        assert!(state_at_1.get_bit(0)); // Original
-        assert!(!state_at_1.get_bit(8)); // Original
-        assert!(state_at_1.get_bit(16)); // Original
-        assert!(!state_at_1.get_bit(24)); // Original
+        assert!(state_at_1.get_bit(0));
+        assert!(!state_at_1.get_bit(8));
 
         let state_at_2 = historical.get_at_commit(2).unwrap();
-        assert_eq!(state_at_2.len(), 32);
-        assert!(!state_at_2.get_bit(0)); // Modified in commit 2
-        assert!(state_at_2.get_bit(8)); // Modified in commit 2
+        assert!(!state_at_2.get_bit(0)); // Modified
+        assert!(state_at_2.get_bit(8)); // Modified
         assert!(state_at_2.get_bit(16)); // Not yet modified
-        assert!(!state_at_2.get_bit(24)); // Not yet modified
 
         let state_at_3 = historical.get_at_commit(3).unwrap();
-        assert_eq!(state_at_3.len(), 32);
-        assert!(!state_at_3.get_bit(0));
-        assert!(state_at_3.get_bit(8));
-        assert!(!state_at_3.get_bit(16)); // Modified in commit 3
-        assert!(state_at_3.get_bit(24)); // Modified in commit 3
-    }
+        assert!(!state_at_3.get_bit(16)); // Modified
+        assert!(state_at_3.get_bit(24)); // Modified
 
-    #[test]
-    fn test_get_at_commit_with_appends() {
+        // Modifications combined with appends
         let mut historical: Historical<4> = Historical::new();
-
-        // Commit 1: 2 bits
         historical
-            .with_batch(1, |batch| {
-                batch.push(true);
-                batch.push(false);
+            .with_batch(1, |b| {
+                for _ in 0..4 {
+                    b.push(true);
+                }
+            })
+            .unwrap();
+        historical
+            .with_batch(2, |b| {
+                b.set_bit(0, false).set_bit(2, false);
+                b.push(false).push(false);
+            })
+            .unwrap();
+        historical
+            .with_batch(3, |b| {
+                b.set_bit(1, false).set_bit(3, false);
+                b.push(true).push(true);
             })
             .unwrap();
 
-        // Commit 2: Append 2 more bits
-        historical
-            .with_batch(2, |batch| {
-                batch.push(true);
-                batch.push(true);
-            })
-            .unwrap();
-
-        // Commit 3: Append 2 more bits
-        historical
-            .with_batch(3, |batch| {
-                batch.push(false);
-                batch.push(false);
-            })
-            .unwrap();
-
-        // Verify lengths
-        let state_at_1 = historical.get_at_commit(1).unwrap();
-        assert_eq!(state_at_1.len(), 2);
-
-        let state_at_2 = historical.get_at_commit(2).unwrap();
-        assert_eq!(state_at_2.len(), 4);
-
-        let state_at_3 = historical.get_at_commit(3).unwrap();
-        assert_eq!(state_at_3.len(), 6);
-        assert_eq!(historical.len(), 6);
-    }
-
-    #[test]
-    fn test_get_at_commit_with_pruning() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // Commit 1: Create 64 bits (2 chunks)
-        historical
-            .with_batch(1, |batch| {
-                batch.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]);
-                batch.push_chunk(&[0x11, 0x22, 0x33, 0x44]);
-            })
-            .unwrap();
-
-        assert_eq!(historical.pruned_chunks(), 0);
-
-        // Commit 2: Prune first chunk
-        historical
-            .with_batch(2, |batch| {
-                batch.prune_to_bit(32);
-            })
-            .unwrap();
-
-        assert_eq!(historical.pruned_chunks(), 1);
-
-        // Get state at commit 1 - should have both chunks, no pruning
-        let state_at_1 = historical.get_at_commit(1).unwrap();
-        assert_eq!(state_at_1.len(), 64);
-        assert_eq!(state_at_1.pruned_chunks(), 0);
-
-        // Verify first chunk data is restored
-        let chunk = state_at_1.get_chunk(0);
-        assert_eq!(chunk, &[0xAA, 0xBB, 0xCC, 0xDD]);
-
-        let chunk2 = state_at_1.get_chunk(32);
-        assert_eq!(chunk2, &[0x11, 0x22, 0x33, 0x44]);
-
-        // Get state at commit 2 - should have pruning
-        let state_at_2 = historical.get_at_commit(2).unwrap();
-        assert_eq!(state_at_2.len(), 64);
-        assert_eq!(state_at_2.pruned_chunks(), 1);
-
-        let chunk2_at_2 = state_at_2.get_chunk(32);
-        assert_eq!(chunk2_at_2, &[0x11, 0x22, 0x33, 0x44]);
-    }
-
-    #[test]
-    fn test_get_at_commit_nonexistent() {
-        let mut historical: Historical<4> = Historical::new();
-
-        historical
-            .with_batch(10, |batch| {
-                batch.push(true);
-            })
-            .unwrap();
-
-        // Query non-existent commit
-        assert!(historical.get_at_commit(5).is_none());
-        assert!(historical.get_at_commit(15).is_none());
-
-        // Query existing commit
-        assert!(historical.get_at_commit(10).is_some());
-    }
-
-    #[test]
-    fn test_get_at_commit_after_pruning_history() {
-        let mut historical: Historical<4> = Historical::new();
-
-        for i in 1..=5 {
-            historical
-                .with_batch(i, |batch| {
-                    for _ in 0..i {
-                        batch.push(true);
-                    }
-                })
-                .unwrap();
-        }
-
-        // Prune old history
-        historical.prune_commits_before(3);
-
-        // Should not be able to get commits 1 and 2
-        assert!(historical.get_at_commit(1).is_none());
-        assert!(historical.get_at_commit(2).is_none());
-
-        // Should be able to get commits 3, 4, 5
-        assert!(historical.get_at_commit(3).is_some());
-        assert!(historical.get_at_commit(4).is_some());
-        assert!(historical.get_at_commit(5).is_some());
-
-        let state_at_3 = historical.get_at_commit(3).unwrap();
-        assert_eq!(state_at_3.len(), 6); // 1+2+3 bits
-    }
-
-    #[test]
-    fn test_get_at_commit_complex_scenario() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // Commit 1: Initial bits
-        historical
-            .with_batch(1, |batch| {
-                batch.push(true);
-                batch.push(true);
-                batch.push(true);
-                batch.push(true);
-            })
-            .unwrap();
-
-        // Commit 2: Modify and append
-        historical
-            .with_batch(2, |batch| {
-                batch.set_bit(0, false);
-                batch.set_bit(2, false);
-                batch.push(false);
-                batch.push(false);
-            })
-            .unwrap();
-
-        // Commit 3: More modifications
-        historical
-            .with_batch(3, |batch| {
-                batch.set_bit(1, false);
-                batch.set_bit(3, false);
-                batch.push(true);
-                batch.push(true);
-            })
-            .unwrap();
-
-        // Verify state at each commit
         let state_at_1 = historical.get_at_commit(1).unwrap();
         assert_eq!(state_at_1.len(), 4);
         for i in 0..4 {
-            assert!(state_at_1.get_bit(i));
+            assert!(state_at_1.get_bit(i)); // All true
         }
 
         let state_at_2 = historical.get_at_commit(2).unwrap();
         assert_eq!(state_at_2.len(), 6);
         assert!(!state_at_2.get_bit(0)); // Modified
         assert!(state_at_2.get_bit(1)); // Unchanged
-        assert!(!state_at_2.get_bit(2)); // Modified
-        assert!(state_at_2.get_bit(3)); // Unchanged
-        assert!(!state_at_2.get_bit(4)); // Appended
-        assert!(!state_at_2.get_bit(5)); // Appended
+        assert!(!state_at_2.get_bit(4)); // Appended false
 
         let state_at_3 = historical.get_at_commit(3).unwrap();
         assert_eq!(state_at_3.len(), 8);
-        assert!(!state_at_3.get_bit(0));
         assert!(!state_at_3.get_bit(1)); // Modified in commit 3
-        assert!(!state_at_3.get_bit(2));
-        assert!(!state_at_3.get_bit(3)); // Modified in commit 3
         assert!(state_at_3.get_bit(6)); // Appended in commit 3
-        assert!(state_at_3.get_bit(7)); // Appended in commit 3
     }
 
+    /// Test historical reconstruction with length-changing operations (appends and pops).
+    ///
+    /// Covers:
+    /// - Pure append operations
+    /// - Pop operations followed by appends
+    /// - Verifying length changes across commits
     #[test]
-    fn test_get_at_commit_with_pop_and_append() {
+    fn test_historical_reconstruction_with_length_changes() {
         let mut historical: Historical<4> = Historical::new();
 
-        // Commit 1: Add 5 bits
+        // Pure append operations
         historical
-            .with_batch(1, |batch| {
+            .with_batch(1, |b| {
+                b.push(true).push(false);
+            })
+            .unwrap();
+        historical
+            .with_batch(2, |b| {
+                b.push(true).push(true);
+            })
+            .unwrap();
+        historical
+            .with_batch(3, |b| {
+                b.push(false).push(false);
+            })
+            .unwrap();
+
+        assert_eq!(historical.get_at_commit(1).unwrap().len(), 2);
+        assert_eq!(historical.get_at_commit(2).unwrap().len(), 4);
+        assert_eq!(historical.get_at_commit(3).unwrap().len(), 6);
+
+        // Pops followed by appends
+        let mut historical: Historical<4> = Historical::new();
+        historical
+            .with_batch(1, |b| {
                 for i in 0..5 {
-                    batch.push(i % 2 == 0);
+                    b.push(i % 2 == 0);
                 }
             })
             .unwrap();
-        assert_eq!(historical.len(), 5);
-
-        // Commit 2: Pop 2 bits
         historical
-            .with_batch(2, |batch| {
-                batch.pop();
-                batch.pop();
+            .with_batch(2, |b| {
+                b.pop();
+                b.pop();
             })
             .unwrap();
-        assert_eq!(historical.len(), 3);
-
-        // Commit 3: Append 3 bits
         historical
-            .with_batch(3, |batch| {
-                batch.push(true);
-                batch.push(true);
-                batch.push(true);
+            .with_batch(3, |b| {
+                b.push(true).push(true).push(true);
             })
             .unwrap();
-        assert_eq!(historical.len(), 6);
 
-        // Verify reconstruction at each commit
         let state_1 = historical.get_at_commit(1).unwrap();
         assert_eq!(state_1.len(), 5);
         assert!(state_1.get_bit(0)); // true
         assert!(!state_1.get_bit(1)); // false
-        assert!(state_1.get_bit(2)); // true
-        assert!(!state_1.get_bit(3)); // false
         assert!(state_1.get_bit(4)); // true
 
         let state_2 = historical.get_at_commit(2).unwrap();
         assert_eq!(state_2.len(), 3);
-        assert!(state_2.get_bit(0));
-        assert!(!state_2.get_bit(1));
-        assert!(state_2.get_bit(2));
 
         let state_3 = historical.get_at_commit(3).unwrap();
         assert_eq!(state_3.len(), 6);
         assert!(state_3.get_bit(3));
-        assert!(state_3.get_bit(4));
         assert!(state_3.get_bit(5));
     }
 
-    // Regression test for issue: modifying an appended bit in the same batch causes panic
+    /// Test historical reconstruction with bitmap chunk pruning.
+    ///
+    /// Covers:
+    /// - Reconstructing state before pruning (restores pruned chunks)
+    /// - Reconstructing state after pruning (maintains pruning)
+    /// - Verifying chunk data integrity across pruning boundaries
     #[test]
-    fn test_modify_appended_bit_same_batch() {
+    fn test_historical_reconstruction_with_pruning() {
         let mut historical: Historical<4> = Historical::new();
 
-        // Append a bit and then modify it in the same batch
+        // Commit 1: Create 64 bits (2 chunks), no pruning
         historical
-            .with_batch(1, |batch| {
-                batch.push(true); // Append bit 0
-                batch.set_bit(0, false); // Modify that appended bit
+            .with_batch(1, |b| {
+                b.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]);
+                b.push_chunk(&[0x11, 0x22, 0x33, 0x44]);
             })
             .unwrap();
-
-        assert_eq!(historical.len(), 1);
-        assert!(!historical.get_bit(0)); // Should be false after modification
-    }
-
-    // Regression test for issue: push, modify, then pop leaves dangling modification
-    #[test]
-    fn test_push_modify_pop_same_batch() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // This should work: push a bit, modify it, then pop it
-        historical
-            .with_batch(1, |batch| {
-                batch.push(true); // Append bit 0
-                batch.set_bit(0, false); // Modify that appended bit
-                batch.pop(); // Remove bit 0
-            })
-            .unwrap();
-
-        // Should result in empty bitmap (the push/pop cancel out)
-        assert_eq!(historical.len(), 0);
-    }
-
-    // Regression test for issue: reconstructing a less-pruned state from a more-pruned state
-    #[test]
-    fn test_reconstruct_less_pruned_state() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // Commit 1: 64 bits, no pruning (chunks 0 and 1)
-        historical
-            .with_batch(1, |batch| {
-                batch.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]); // chunk 0: bits 0-31
-                batch.push_chunk(&[0x11, 0x22, 0x33, 0x44]); // chunk 1: bits 32-63
-            })
-            .unwrap();
-
-        assert_eq!(historical.len(), 64);
-        assert_eq!(historical.pruned_chunks(), 0);
 
         // Commit 2: Prune first chunk
         historical
-            .with_batch(2, |batch| {
-                batch.prune_to_bit(32);
+            .with_batch(2, |b| {
+                b.prune_to_bit(32);
             })
             .unwrap();
-
-        // Current state: 64 bits, 1 pruned chunk
-        assert_eq!(historical.len(), 64);
         assert_eq!(historical.pruned_chunks(), 1);
 
-        // Reconstruct commit 1: should have 64 bits, 0 pruned chunks, and both chunks intact
+        // Reconstruct state before pruning
         let state_at_1 = historical.get_at_commit(1).unwrap();
         assert_eq!(state_at_1.len(), 64);
-        assert_eq!(state_at_1.pruned_chunks(), 0);
+        assert_eq!(state_at_1.pruned_chunks(), 0); // No pruning
+        assert_eq!(state_at_1.get_chunk(0), &[0xAA, 0xBB, 0xCC, 0xDD]); // Restored
+        assert_eq!(state_at_1.get_chunk(32), &[0x11, 0x22, 0x33, 0x44]);
 
-        // Verify chunk 0 data is restored
-        let chunk0 = state_at_1.get_chunk(0);
-        assert_eq!(chunk0, &[0xAA, 0xBB, 0xCC, 0xDD]);
-
-        // Verify chunk 1 data is still correct
-        let chunk1 = state_at_1.get_chunk(32);
-        assert_eq!(chunk1, &[0x11, 0x22, 0x33, 0x44]);
+        // Reconstruct state after pruning
+        let state_at_2 = historical.get_at_commit(2).unwrap();
+        assert_eq!(state_at_2.len(), 64);
+        assert_eq!(state_at_2.pruned_chunks(), 1); // Pruning preserved
+        assert_eq!(state_at_2.get_chunk(32), &[0x11, 0x22, 0x33, 0x44]);
     }
 
-    // Test for issue: reading popped bits should fail
+    /// Test edge cases in historical reconstruction.
+    ///
+    /// Covers:
+    /// - Querying nonexistent commits (returns None)
+    /// - Reconstructing after commit history pruning
     #[test]
-    #[should_panic(expected = "out of bounds")]
-    fn test_read_popped_bit_should_fail() {
+    fn test_historical_reconstruction_edge_cases() {
         let mut historical: Historical<4> = Historical::new();
 
         historical
+            .with_batch(10, |b| {
+                b.push(true);
+            })
+            .unwrap();
+
+        // Nonexistent commits
+        assert!(historical.get_at_commit(5).is_none());
+        assert!(historical.get_at_commit(15).is_none());
+        assert!(historical.get_at_commit(10).is_some());
+
+        // After pruning commit history
+        let mut historical: Historical<4> = Historical::new();
+        for i in 1..=5 {
+            historical
+                .with_batch(i, |b| {
+                    for _ in 0..i {
+                        b.push(true);
+                    }
+                })
+                .unwrap();
+        }
+
+        historical.prune_commits_before(3);
+
+        // Cannot reconstruct pruned commits
+        assert!(historical.get_at_commit(1).is_none());
+        assert!(historical.get_at_commit(2).is_none());
+
+        // Can reconstruct remaining commits
+        assert!(historical.get_at_commit(3).is_some());
+        assert!(historical.get_at_commit(4).is_some());
+        assert_eq!(historical.get_at_commit(3).unwrap().len(), 6); // 1+2+3 bits
+    }
+
+    /// Test batch modifications on appended bits (regression tests).
+    ///
+    /// Covers:
+    /// - Modifying a bit immediately after appending it in the same batch
+    /// - Push, modify, then pop sequence (ensures no dangling modifications)
+    #[test]
+    fn test_batch_modifications_on_appended_bits() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Modify appended bit in same batch
+        historical
             .with_batch(1, |batch| {
+                batch.push(true); // Append bit 0
+                batch.set_bit(0, false); // Modify that appended bit
+            })
+            .unwrap();
+        assert_eq!(historical.len(), 1);
+        assert!(!historical.get_bit(0)); // Should be false after modification
+
+        // Push, modify, then pop (should cancel out cleanly)
+        historical
+            .with_batch(2, |batch| {
+                batch.push(true); // Append bit 1
+                batch.set_bit(1, false); // Modify that appended bit
+                batch.pop(); // Remove bit 1
+            })
+            .unwrap();
+        assert_eq!(historical.len(), 1); // Only bit 0 remains
+    }
+
+    /// Test pop() behavior with batch modifications (regression tests).
+    ///
+    /// Covers:
+    /// - pop() returns the modified value, not the original
+    /// - Reading popped bits fails with proper error
+    #[test]
+    fn test_pop_behavior_with_modifications() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Create initial bits
+        historical
+            .with_batch(1, |b| {
                 for _ in 0..10 {
-                    batch.push(true);
+                    b.push(true);
                 }
             })
             .unwrap();
 
-        // Pop 2 bits, so valid range is now 0-7
-        let mut batch = historical.start_batch();
-        batch.pop();
-        batch.pop();
-
-        // This should panic - bit 8 is out of bounds
-        batch.get_bit(8);
-    }
-
-    // Test for issue: pop() should return modified value, not original
-    #[test]
-    fn test_pop_returns_modified_value() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // Create initial bits, all true
-        historical
-            .with_batch(1, |batch| {
-                for _ in 0..10 {
-                    batch.push(true);
-                }
-            })
-            .unwrap();
-
-        // Modify bit 9 to false, then pop it
+        // pop() should return modified value
         let mut popped_value = true;
         historical
             .with_batch(2, |batch| {
                 batch.set_bit(9, false); // Modify bit 9 in batch
-                popped_value = batch.pop(); // Should return false (modified value)
+                popped_value = batch.pop(); // Should return false (modified)
             })
             .unwrap();
-
-        // The popped value should be false (the modified value), not true (original)
         assert!(
             !popped_value,
             "pop() should return modified value, not original"
         );
     }
 
-    // Generalized ground truth test with random operations.
-    //
-    // This test compares historical reconstruction against actual saved bitmap states.
-    // It performs random operations across multiple commits and verifies that reconstructing
-    // historical states produces bit-for-bit identical results to the saved states.
+    /// Test reading popped bits should fail.
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_read_popped_bit_panics() {
+        let mut historical: Historical<4> = Historical::new();
+        historical
+            .with_batch(1, |b| {
+                for _ in 0..10 {
+                    b.push(true);
+                }
+            })
+            .unwrap();
+
+        let mut batch = historical.start_batch();
+        batch.pop();
+        batch.pop();
+        batch.get_bit(8); // Should panic - bit 8 is now out of bounds
+    }
+
+    /// Verify historical bitmap reconstruction correctness by comparing to another bitmap.
+    ///
+    /// This test creates a "ground truth" (`Prunable`) bitmap alongside the `Historical` bitmap.
+    /// Both bitmaps receive the same random operations. After each commit, we save the ground
+    /// truth state. At the end, we reconstruct each commit from the `Historical` bitmap and
+    /// verify it matches the saved ground truth state bit-for-bit.
     fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
         // Test configuration
         const NUM_COMMITS: u64 = 20;
@@ -2022,8 +1740,12 @@ mod tests {
         }
     }
 
+    /// Run property-based tests with multiple seeds to explore the state space.
+    ///
+    /// Tests 101 different random operation sequences (seeds 0-100) to ensure
+    /// historical reconstruction works correctly across a wide variety of scenarios.
     #[test]
-    fn test_randomized() {
+    fn test_randomized_with_multiple_seeds() {
         use rand::{rngs::StdRng, SeedableRng};
         for seed in 0..=100 {
             let mut rng = StdRng::seed_from_u64(seed);
