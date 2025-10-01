@@ -179,12 +179,13 @@ struct Batch<const N: usize> {
     projected_len: u64,
     projected_pruned_chunks: usize,
 
-    /// Modifications to bits in the base region [0, base_len).
+    /// Modifications to bits that existed in the bitmap (not appended bits).
+    /// Contains offsets in [0, projected_len - appended_bits.len()).
     /// Maps: bit_offset -> new_value
     modified_bits: HashMap<u64, bool>,
 
-    /// New bits pushed beyond the base region (in order).
-    /// Logical position: [projected_len - len(), projected_len)
+    /// New bits pushed in this batch (in order).
+    /// Logical position: [projected_len - appended_bits.len(), projected_len)
     appended_bits: Vec<bool>,
 
     /// Old chunk data for chunks being pruned.
@@ -363,6 +364,13 @@ impl<const N: usize> Historical<N> {
         // (accounting for pruning)
         let raw_first_chunk = target_pruned;
         let raw_last_chunk = Prunable::<N>::raw_chunk_index(target_len - 1);
+
+        // Edge case: If all bits are pruned (target_len <= pruned bits),
+        // raw_last_chunk will be < raw_first_chunk. Return empty bitmap.
+        if raw_last_chunk < raw_first_chunk {
+            return result;
+        }
+
         let last_chunk_bits = ((target_len - 1) % Prunable::<N>::CHUNK_SIZE_BITS) + 1;
 
         // Reconstruct complete chunks (all but the last)
@@ -882,8 +890,10 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         );
 
         // Priority 1: Check if bit is in appended region.
-        if bit_offset >= batch.base_len {
-            let append_offset = (bit_offset - batch.base_len) as usize;
+        // Must use appended_start, not base_len, to handle net pops + appends.
+        let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
+        if bit_offset >= appended_start {
+            let append_offset = (bit_offset - appended_start) as usize;
             return batch.appended_bits[append_offset];
         }
 
@@ -924,11 +934,12 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
 
         let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
 
-        // Check if chunk has any modifications
+        // Check if chunk has any modifications or appended bits
+        let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
         let chunk_has_mods = (chunk_start_bit..chunk_start_bit + Prunable::<N>::CHUNK_SIZE_BITS)
             .any(|bit| {
                 batch.modified_bits.contains_key(&bit)
-                    || (bit >= batch.base_len && bit < batch.projected_len)
+                    || (bit >= appended_start && bit < batch.projected_len)
             });
 
         if chunk_has_mods {
@@ -951,6 +962,9 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
             [0u8; N]
         };
 
+        // Calculate appended region boundary
+        let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
+
         // Apply batch modifications
         for bit_in_chunk in 0..Prunable::<N>::CHUNK_SIZE_BITS {
             let bit_offset = chunk_start + bit_in_chunk;
@@ -970,9 +984,9 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
                 } else {
                     chunk[byte_idx] &= !mask;
                 }
-            } else if bit_offset >= batch.base_len {
+            } else if bit_offset >= appended_start {
                 // This is an appended bit
-                let append_offset = (bit_offset - batch.base_len) as usize;
+                let append_offset = (bit_offset - appended_start) as usize;
                 if append_offset < batch.appended_bits.len() {
                     let value = batch.appended_bits[append_offset];
                     if value {
@@ -1087,8 +1101,21 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
     }
 
     /// Prune chunks up to the chunk containing the given bit offset.
+    ///
+    /// Note: `bit_offset` can equal `projected_len` when pruning at a chunk boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bit_offset` is > the projected length of the batch.
     pub fn prune_to_bit(&mut self, bit_offset: u64) -> &mut Self {
         let batch = self.historical.active_batch.as_mut().unwrap();
+
+        assert!(
+            bit_offset <= batch.projected_len,
+            "cannot prune to bit {bit_offset}: beyond projected length ({})",
+            batch.projected_len
+        );
+
         let chunk_num = Prunable::<N>::raw_chunk_index(bit_offset);
 
         if chunk_num <= batch.projected_pruned_chunks {
@@ -1772,6 +1799,214 @@ mod tests {
         batch.pop();
         batch.pop();
         batch.get_bit(8); // Should panic - bit 8 is now out of bounds
+    }
+
+    /// Test pruning beyond bitmap length should fail.
+    #[test]
+    #[should_panic(expected = "beyond projected length")]
+    fn test_prune_beyond_length_panics() {
+        let mut historical: Historical<4> = Historical::new();
+        historical
+            .with_batch(1, |b| {
+                for _ in 0..10 {
+                    b.push(true);
+                }
+            })
+            .unwrap();
+
+        let mut batch = historical.start_batch();
+        batch.pop(); // projected_len = 9
+        batch.prune_to_bit(100); // Should panic - bit 100 is beyond projected length
+    }
+
+    /// Test that batch reads correctly see appended bits after pops.
+    ///
+    /// This tests the scenario where:
+    /// 1. We start with a bitmap of length N
+    /// 2. Pop some bits (reducing length to M < N)
+    /// 3. Push new bits (growing length back toward N)
+    /// 4. Read those newly pushed bits within the same batch
+    ///
+    /// The bug was that `get_bit` and `get_chunk` checked `bit_offset >= base_len`
+    /// to identify appended bits, but after net pops, the appended region actually
+    /// starts at `projected_len - appended_bits.len()`, which is less than `base_len`.
+    /// This caused reads to fall through to the stale underlying bitmap instead of
+    /// reading from the batch's `appended_bits` vector.
+    #[test]
+    fn test_read_appended_bits_after_pops() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Setup: Create bitmap with 10 bits, all set to true
+        historical
+            .with_batch(1, |b| {
+                for _ in 0..10 {
+                    b.push(true);
+                }
+            })
+            .unwrap();
+
+        // Start batch: pop 3 bits, then push 2 bits with value false
+        let mut batch = historical.start_batch();
+        batch.pop(); // projected_len = 9
+        batch.pop(); // projected_len = 8
+        batch.pop(); // projected_len = 7
+        batch.push(false); // projected_len = 8, appended_bits = [false]
+        batch.push(false); // projected_len = 9, appended_bits = [false, false]
+
+        // The appended region is now [7, 9), not [10, 12)
+        // Verify get_bit sees the new false values, not the old true values
+        assert_eq!(
+            batch.get_bit(7),
+            false,
+            "get_bit should read from appended_bits"
+        );
+        assert_eq!(
+            batch.get_bit(8),
+            false,
+            "get_bit should read from appended_bits"
+        );
+
+        // Verify get_chunk also reconstructs correctly
+        let chunk = batch.get_chunk(0); // Chunk containing bits 0..31
+        assert_eq!(chunk[0] & 0x80, 0, "bit 7 should be false in chunk");
+        assert_eq!(chunk[1] & 0x01, 0, "bit 8 should be false in chunk");
+
+        // Also verify we can modify appended bits
+        batch.set_bit(7, true);
+        assert_eq!(
+            batch.get_bit(7),
+            true,
+            "set_bit should update appended_bits"
+        );
+
+        // Commit and verify the final state
+        batch.commit(2).unwrap();
+        assert_eq!(historical.len(), 9);
+        assert_eq!(historical.get_bit(7), true);
+        assert_eq!(historical.get_bit(8), false);
+    }
+
+    /// Test historical reconstruction when current state has MORE pruning than target.
+    ///
+    /// This tests the scenario where:
+    /// 1. We commit a state with some unpruned data
+    /// 2. We prune that data in a later commit
+    /// 3. We try to reconstruct the earlier state (which needs the now-pruned data)
+    ///
+    /// The diff system should have captured the pruned chunk data as `ChunkChange::Pruned`,
+    /// allowing reconstruction even though that chunk no longer exists in current state.
+    #[test]
+    fn test_reconstruct_less_pruned_from_more_pruned() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Commit 1: Create 64 bits (2 chunks) with pattern
+        historical
+            .with_batch(1, |b| {
+                for i in 0..64 {
+                    b.push(i < 32); // First chunk all true, second chunk all false
+                }
+            })
+            .unwrap();
+        assert_eq!(historical.len(), 64);
+        assert_eq!(historical.pruned_chunks(), 0);
+
+        // Commit 2: Prune first chunk
+        historical
+            .with_batch(2, |b| {
+                b.prune_to_bit(32); // Prune chunk 0
+            })
+            .unwrap();
+        assert_eq!(historical.len(), 64);
+        assert_eq!(historical.pruned_chunks(), 1);
+
+        // Now reconstruct commit 1 (which has chunk 0 unpruned)
+        // This requires getting chunk 0 from the diff, not from current state
+        let reconstructed = historical
+            .get_at_commit(1)
+            .expect("should be able to reconstruct less-pruned state");
+
+        assert_eq!(reconstructed.len(), 64);
+        assert_eq!(reconstructed.pruned_chunks(), 0, "commit 1 had no pruning");
+
+        // Verify the data is correct
+        for i in 0..32 {
+            assert_eq!(
+                reconstructed.get_bit(i),
+                true,
+                "first chunk should be all true"
+            );
+        }
+        for i in 32..64 {
+            assert_eq!(
+                reconstructed.get_bit(i),
+                false,
+                "second chunk should be all false"
+            );
+        }
+    }
+
+    /// Test historical reconstruction when all non-pruned bits are in pruned chunks.
+    ///
+    /// This tests the scenario where:
+    /// 1. We have a bitmap with some bits (e.g., 32 bits = 1 chunk)
+    /// 2. We prune all chunks (e.g., prune chunk 0, so only pruned metadata remains)
+    /// 3. We commit this state
+    /// 4. We try to reconstruct this historical state via `get_at_commit`
+    ///
+    /// The bug was that `apply_reverse_diff` always computed `raw_last_chunk` from
+    /// `target_len - 1`, but when `target_len <= target_pruned * CHUNK_SIZE_BITS`,
+    /// this gives a chunk index that's less than `raw_first_chunk` (the first
+    /// unpruned chunk). The code then tried to access this pruned chunk from
+    /// `newer_state`, causing a panic. The fix is to detect this case early and
+    /// return an empty bitmap with the correct pruning metadata.
+    #[test]
+    fn test_reconstruct_fully_pruned_commit() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Commit 1: Create 32 bits (1 complete chunk)
+        historical
+            .with_batch(1, |b| {
+                for i in 0..32 {
+                    b.push(i % 2 == 0); // Alternating pattern
+                }
+            })
+            .unwrap();
+        assert_eq!(historical.len(), 32);
+        assert_eq!(historical.pruned_chunks(), 0);
+
+        // Commit 2: Prune the entire chunk
+        historical
+            .with_batch(2, |b| {
+                b.prune_to_bit(32); // Prune chunk 0 (bits 0..32)
+            })
+            .unwrap();
+        assert_eq!(historical.len(), 32);
+        assert_eq!(historical.pruned_chunks(), 1);
+
+        // The bitmap now has 32 bits but they're all in pruned chunks
+        // Try to reconstruct commit 2 - this should not panic
+        let reconstructed = historical
+            .get_at_commit(2)
+            .expect("should be able to reconstruct fully pruned commit");
+
+        assert_eq!(reconstructed.len(), 32, "length should match");
+        assert_eq!(
+            reconstructed.pruned_chunks(),
+            1,
+            "should have 1 pruned chunk"
+        );
+
+        // Also test reconstruction of commit 1 (before pruning)
+        let before_prune = historical
+            .get_at_commit(1)
+            .expect("should be able to reconstruct pre-prune state");
+
+        assert_eq!(before_prune.len(), 32);
+        assert_eq!(before_prune.pruned_chunks(), 0);
+        // Verify the alternating pattern
+        for i in 0..32 {
+            assert_eq!(before_prune.get_bit(i), i % 2 == 0);
+        }
     }
 
     /// Verify historical bitmap reconstruction correctness by comparing to another bitmap.
