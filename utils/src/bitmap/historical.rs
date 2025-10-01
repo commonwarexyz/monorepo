@@ -318,14 +318,12 @@ impl<const N: usize> Historical<N> {
 
         // Reconstruct complete chunks (all but the last)
         for raw_chunk_idx in raw_first_chunk..raw_last_chunk {
-            let chunk_data =
-                self.get_chunk_from_diff_or_newer(&newer_state, diff, raw_chunk_idx, target_pruned);
+            let chunk_data = self.get_chunk_from_diff_or_newer(&newer_state, diff, raw_chunk_idx);
             result.push_chunk(&chunk_data);
         }
 
         // Handle the last chunk (may be partial)
-        let last_chunk_data =
-            self.get_chunk_from_diff_or_newer(&newer_state, diff, raw_last_chunk, target_pruned);
+        let last_chunk_data = self.get_chunk_from_diff_or_newer(&newer_state, diff, raw_last_chunk);
 
         if last_chunk_bits < Prunable::<N>::CHUNK_SIZE_BITS as u64 {
             // Partial chunk, push bits one by one
@@ -351,7 +349,6 @@ impl<const N: usize> Historical<N> {
         newer_state: &Prunable<N>,
         diff: &CommitDiff<N>,
         raw_chunk_idx: usize,
-        _target_pruned: usize,
     ) -> [u8; N] {
         // Check if this chunk has a recorded change
         if let Some(change) = diff.changes.get(&raw_chunk_idx) {
@@ -488,12 +485,20 @@ impl<const N: usize> Historical<N> {
 
     /// Apply a batch's changes to the current bitmap.
     fn apply_batch_to_current(&mut self, batch: &Batch<N>) {
-        // Apply appended bits
+        // Calculate the target length before appending (accounting for any net pops)
+        let target_len_before_appends = batch.projected_len - batch.appended_bits.len() as u64;
+
+        // Pop down to the target length before appends
+        while self.current.len() > target_len_before_appends {
+            self.current.pop();
+        }
+
+        // Apply appended bits (these fill in positions from target_len_before_appends to projected_len)
         for &bit in &batch.appended_bits {
             self.current.push(bit);
         }
 
-        // Apply modifications
+        // Apply modifications to existing bits
         for (&bit_offset, &value) in &batch.modified_bits {
             self.current.set_bit(bit_offset, value);
         }
@@ -503,11 +508,6 @@ impl<const N: usize> Historical<N> {
             let prune_to_bit =
                 batch.projected_pruned_chunks as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
             self.current.prune_to_bit(prune_to_bit);
-        }
-
-        // Handle pops (if projected_len < final_len after appends)
-        while self.current.len() > batch.projected_len {
-            self.current.pop();
         }
     }
 
@@ -797,9 +797,13 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
             "cannot set pruned bit"
         );
 
+        // Determine the start of the appended region
+        // Appended bits start at: projected_len - appended_bits.len()
+        let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
+
         // If the bit is in the appended region, update appended_bits directly
-        if bit_offset >= batch.base_len {
-            let append_offset = (bit_offset - batch.base_len) as usize;
+        if bit_offset >= appended_start {
+            let append_offset = (bit_offset - appended_start) as usize;
             batch.appended_bits[append_offset] = value;
         } else {
             // Bit is in the base region, record as modification
@@ -848,23 +852,27 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
 
         assert!(batch.projected_len > 0, "cannot pop from empty bitmap");
 
+        let old_projected_len = batch.projected_len;
         batch.projected_len -= 1;
         let bit_offset = batch.projected_len;
 
+        // Determine if the bit being popped is in the appended region
+        // Appended region starts at: (projected_len before pop) - appended_bits.len()
+        let appended_start_before_pop = old_projected_len - batch.appended_bits.len() as u64;
+
         // Check if popping from appended region
-        if bit_offset >= batch.base_len {
+        if bit_offset >= appended_start_before_pop {
             batch.appended_bits.pop().unwrap()
         } else {
             // Popping from base region - check if it was modified in batch
-            let value = if let Some(&modified_value) = batch.modified_bits.get(&bit_offset) {
+            if let Some(&modified_value) = batch.modified_bits.get(&bit_offset) {
                 // Remove the modification since we're popping this bit
                 batch.modified_bits.remove(&bit_offset);
                 modified_value
             } else {
                 // Not modified, read original value
                 self.historical.current.get_bit(bit_offset)
-            };
-            value
+            }
         }
     }
 
@@ -1827,69 +1835,12 @@ mod tests {
         );
     }
 
-    // Test reconstruction after pruning
-    #[test]
-    fn test_ground_truth_with_pruning() {
-        let mut historical: Historical<4> = Historical::new();
-        let mut ground_truth = Prunable::<4>::new();
-
-        // Commit 1: Add 96 bits
-        historical
-            .with_batch(1, |batch| {
-                for i in 0..96 {
-                    let bit = i % 2 == 1;
-                    batch.push(bit);
-                    ground_truth.push(bit);
-                }
-            })
-            .unwrap();
-
-        let checkpoint_1 = ground_truth.clone();
-
-        // Commit 2: Prune first chunk
-        historical
-            .with_batch(2, |batch| {
-                batch.prune_to_bit(32);
-                ground_truth.prune_to_bit(32);
-            })
-            .unwrap();
-
-        // Commit 3: Pop 10 bits
-        historical
-            .with_batch(3, |batch| {
-                for _ in 0..10 {
-                    batch.pop();
-                    ground_truth.pop();
-                }
-            })
-            .unwrap();
-
-        // Reconstruct commit 1 (before pruning)
-        let reconstructed_1 = historical.get_at_commit(1).unwrap();
-        assert_eq!(reconstructed_1.len(), checkpoint_1.len());
-        assert_eq!(
-            reconstructed_1.pruned_chunks(),
-            checkpoint_1.pruned_chunks()
-        );
-
-        // Check each bit
-        for i in 0..checkpoint_1.len() {
-            let expected = checkpoint_1.get_bit(i);
-            let actual = reconstructed_1.get_bit(i);
-            assert_eq!(
-                actual, expected,
-                "Bit {} mismatch: expected {}, got {}",
-                i, expected, actual
-            );
-        }
-    }
-
     // Generalized ground truth test with random operations.
     //
-    // This test compares historical reconstruction against actual saved bitmap states (ground truth).
+    // This test compares historical reconstruction against actual saved bitmap states.
     // It performs random operations across multiple commits and verifies that reconstructing
     // historical states produces bit-for-bit identical results to the saved states.
-    fn test_ground_truth_with_rng<R: rand::Rng>(rng: &mut R) {
+    fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
         // Test configuration
         const NUM_COMMITS: u64 = 10;
         const OPERATIONS_PER_COMMIT: usize = 5;
@@ -2004,189 +1955,12 @@ mod tests {
         }
     }
 
-    // TODO: Generalized property-based tests expose bugs in historical reconstruction.
-    // Multiple seeds (0, 1, etc.) trigger bit mismatches when comparing reconstructed
-    // states against ground truth. These failures indicate issues with how reverse diffs
-    // are captured or applied during reconstruction.
-    //
-    // Example failures:
-    // - Seed 0: Bit 11 mismatch at commit 4
-    // - Seed 1: Bit 10 mismatch at commit 6
-    //
-    // These tests should be enabled once the underlying reconstruction bugs are fixed.
     #[test]
-    #[ignore]
-    fn test_ground_truth_seed_0() {
+    fn test_randomized() {
         use rand::{rngs::StdRng, SeedableRng};
-        let mut rng = StdRng::seed_from_u64(0);
-        test_ground_truth_with_rng(&mut rng);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_ground_truth_seeds_0_to_10() {
-        use rand::{rngs::StdRng, SeedableRng};
-        for seed in 0..=10 {
+        for seed in 0..=100 {
             let mut rng = StdRng::seed_from_u64(seed);
-            test_ground_truth_with_rng(&mut rng);
-        }
-    }
-
-    // Test historical reconstruction against ground truth (actual saved bitmap state)
-    #[test]
-    fn test_historical_matches_ground_truth() {
-        let mut historical: Historical<4> = Historical::new();
-        let mut ground_truth = Prunable::<4>::new();
-
-        // Phase 1: Build initial state (both bitmaps in sync)
-        historical
-            .with_batch(1, |batch| {
-                for i in 0..64 {
-                    let bit = i % 3 == 0;
-                    batch.push(bit);
-                    ground_truth.push(bit);
-                }
-            })
-            .unwrap();
-
-        // Verify sync
-        assert_eq!(historical.len(), ground_truth.len());
-        assert_eq!(historical.len(), 64);
-
-        // Phase 2: Modify some bits (both bitmaps)
-        historical
-            .with_batch(2, |batch| {
-                batch.set_bit(10, true);
-                ground_truth.set_bit(10, true);
-                batch.set_bit(20, false);
-                ground_truth.set_bit(20, false);
-                batch.set_bit(30, true);
-                ground_truth.set_bit(30, true);
-            })
-            .unwrap();
-
-        // Save checkpoint 1 (commit 2)
-        let checkpoint_2 = ground_truth.clone();
-
-        // Phase 3: Append more bits
-        historical
-            .with_batch(3, |batch| {
-                for i in 0..32 {
-                    let bit = i % 2 == 1;
-                    batch.push(bit);
-                    ground_truth.push(bit);
-                }
-            })
-            .unwrap();
-
-        assert_eq!(historical.len(), 96);
-        assert_eq!(ground_truth.len(), 96);
-
-        // Save checkpoint 2 (commit 3)
-        let checkpoint_3 = ground_truth.clone();
-
-        // Phase 4: Prune some chunks
-        historical
-            .with_batch(4, |batch| {
-                batch.prune_to_bit(32);
-                ground_truth.prune_to_bit(32);
-            })
-            .unwrap();
-
-        assert_eq!(historical.pruned_chunks(), 1);
-        assert_eq!(ground_truth.pruned_chunks(), 1);
-
-        // Save checkpoint 3 (commit 4)
-        let checkpoint_4 = ground_truth.clone();
-
-        // Phase 5: Pop some bits
-        historical
-            .with_batch(5, |batch| {
-                for _ in 0..10 {
-                    batch.pop();
-                    ground_truth.pop();
-                }
-            })
-            .unwrap();
-
-        assert_eq!(historical.len(), 86);
-        assert_eq!(ground_truth.len(), 86);
-
-        // Phase 6: More modifications
-        historical
-            .with_batch(6, |batch| {
-                batch.set_bit(50, false);
-                ground_truth.set_bit(50, false);
-                batch.set_bit(60, true);
-                ground_truth.set_bit(60, true);
-                batch.set_bit(70, false);
-                ground_truth.set_bit(70, false);
-            })
-            .unwrap();
-
-        // Now verify historical reconstruction matches ground truth at each checkpoint
-
-        // Verify commit 2
-        let reconstructed_2 = historical.get_at_commit(2).unwrap();
-        assert_eq!(reconstructed_2.len(), checkpoint_2.len());
-        assert_eq!(
-            reconstructed_2.pruned_chunks(),
-            checkpoint_2.pruned_chunks()
-        );
-        for i in 0..checkpoint_2.len() {
-            assert_eq!(
-                reconstructed_2.get_bit(i),
-                checkpoint_2.get_bit(i),
-                "Bit {} mismatch at commit 2",
-                i
-            );
-        }
-
-        // Verify commit 3
-        let reconstructed_3 = historical.get_at_commit(3).unwrap();
-        assert_eq!(reconstructed_3.len(), checkpoint_3.len());
-        assert_eq!(
-            reconstructed_3.pruned_chunks(),
-            checkpoint_3.pruned_chunks()
-        );
-        for i in 0..checkpoint_3.len() {
-            assert_eq!(
-                reconstructed_3.get_bit(i),
-                checkpoint_3.get_bit(i),
-                "Bit {} mismatch at commit 3",
-                i
-            );
-        }
-
-        // Verify commit 4 (with pruning)
-        let reconstructed_4 = historical.get_at_commit(4).unwrap();
-        assert_eq!(reconstructed_4.len(), checkpoint_4.len());
-        assert_eq!(
-            reconstructed_4.pruned_chunks(),
-            checkpoint_4.pruned_chunks()
-        );
-        // Can only check bits after pruned region
-        let start_bit = reconstructed_4.pruned_chunks() as u64 * Prunable::<4>::CHUNK_SIZE_BITS;
-        for i in start_bit..checkpoint_4.len() {
-            assert_eq!(
-                reconstructed_4.get_bit(i),
-                checkpoint_4.get_bit(i),
-                "Bit {} mismatch at commit 4",
-                i
-            );
-        }
-
-        // Verify current state matches ground truth
-        assert_eq!(historical.len(), ground_truth.len());
-        assert_eq!(historical.pruned_chunks(), ground_truth.pruned_chunks());
-        let start_bit = historical.pruned_chunks() as u64 * Prunable::<4>::CHUNK_SIZE_BITS;
-        for i in start_bit..historical.len() {
-            assert_eq!(
-                historical.get_bit(i),
-                ground_truth.get_bit(i),
-                "Bit {} mismatch in current state",
-                i
-            );
+            test_randomized_helper(&mut rng);
         }
     }
 }
