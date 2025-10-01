@@ -14,9 +14,9 @@ use alloc::vec::Vec;
 /// ```
 #[derive(Default)]
 pub struct PeakIterator {
-    size: u64,     // number of nodes in the MMR at the point the iterator was initialized
-    node_pos: u64, // position of the current node
-    two_h: u64,    // 2^(height+1) of the current node
+    size: Position, // number of nodes in the MMR at the point the iterator was initialized
+    node_pos: Position, // position of the current node
+    two_h: u64,     // 2^(height+1) of the current node
 }
 
 impl PeakIterator {
@@ -26,7 +26,7 @@ impl PeakIterator {
     ///
     /// Iteration will panic if size is not a valid MMR size. If used on untrusted input, call
     /// check_validity first.
-    pub fn new(size: u64) -> PeakIterator {
+    pub fn new(size: Position) -> PeakIterator {
         if size == 0 {
             return PeakIterator::default();
         }
@@ -38,7 +38,7 @@ impl PeakIterator {
         let two_h = 1 << start.trailing_ones();
         PeakIterator {
             size,
-            node_pos: start - 1,
+            node_pos: Position::new(start - 1),
             two_h,
         }
     }
@@ -50,7 +50,7 @@ impl PeakIterator {
     /// # Panics
     ///
     /// Panics if size is too large (specifically, the topmost bit should be 0).
-    pub fn last_leaf_pos(size: u64) -> Position {
+    pub fn last_leaf_pos(size: Position) -> Position {
         if size == 0 {
             return Position::new(0);
         }
@@ -66,7 +66,7 @@ impl PeakIterator {
     /// The implementation verifies that (1) the size won't result in overflow and (2) peaks in the
     /// MMR of the given size have strictly decreasing height, which is a necessary condition for
     /// MMR validity.
-    pub fn check_validity(size: u64) -> bool {
+    pub fn check_validity(size: Position) -> bool {
         if size == 0 {
             return true;
         }
@@ -106,7 +106,7 @@ impl PeakIterator {
     //
     // TODO(https://github.com/commonwarexyz/monorepo/issues/820): This is an O(log2(n)^2)
     // implementation but it's reasonably straightforward to make it O(log2(n)).
-    pub fn to_nearest_size(mut size: u64) -> u64 {
+    pub fn to_nearest_size(mut size: Position) -> Position {
         while !PeakIterator::check_validity(size) {
             // A size-0 MMR is always valid so this loop must terminate before underflow.
             size -= 1;
@@ -122,10 +122,7 @@ impl Iterator for PeakIterator {
         while self.two_h > 1 {
             if self.node_pos < self.size {
                 // found a peak
-                let peak_item = (
-                    Position::new(self.node_pos),
-                    self.two_h.trailing_zeros() - 1,
-                );
+                let peak_item = (self.node_pos, self.two_h.trailing_zeros() - 1);
                 // move to the right sibling
                 self.node_pos += self.two_h - 1;
                 assert!(self.node_pos >= self.size); // sibling shouldn't be in the MMR if MMR is valid
@@ -256,7 +253,7 @@ impl Iterator for PathIterator {
 /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
 /// whose size is less than the pruning boundary.
 pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position> {
-    PeakIterator::new(PeakIterator::to_nearest_size(start_pos.as_u64())).map(|(pos, _)| pos)
+    PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
 }
 
 #[cfg(test)]
@@ -278,15 +275,15 @@ mod tests {
         }
 
         let mut last_leaf_pos = 0;
-        for (leaf_loc_expected, leaf_pos) in loc_to_pos.iter().enumerate() {
-            let leaf_loc_got = Location::try_from(*leaf_pos).unwrap();
+        for (leaf_loc_expected, leaf_pos) in loc_to_pos.into_iter().enumerate() {
+            let leaf_loc_got = Location::try_from(leaf_pos).unwrap();
             assert_eq!(leaf_loc_got, Location::new(leaf_loc_expected as u64));
             let leaf_pos_got = Position::from(leaf_loc_got);
             assert_eq!(leaf_pos_got, *leaf_pos);
-            for i in last_leaf_pos + 1..leaf_pos.as_u64() {
+            for i in last_leaf_pos + 1..*leaf_pos {
                 assert!(Location::try_from(Position::new(i)).is_err());
             }
-            last_leaf_pos = leaf_pos.as_u64();
+            last_leaf_pos = *leaf_pos;
         }
     }
 
@@ -295,7 +292,7 @@ mod tests {
         // Build an MMR one node at a time and check that the validity check is correct for all
         // sizes up to the current size.
         let mut mmr = Mmr::new();
-        let mut size_to_check = 0;
+        let mut size_to_check = Position::new(0);
         let mut hasher = Standard::<Sha256>::new();
         let digest = [1u8; 32];
         for _i in 0..10000 {
@@ -314,8 +311,10 @@ mod tests {
         }
 
         // Test overflow boundaries.
-        assert!(!PeakIterator::check_validity(u64::MAX));
-        assert!(PeakIterator::check_validity(u64::MAX >> 1));
-        assert!(!PeakIterator::check_validity((u64::MAX >> 1) + 1));
+        assert!(!PeakIterator::check_validity(Position::new(u64::MAX)));
+        assert!(PeakIterator::check_validity(Position::new(u64::MAX >> 1)));
+        assert!(!PeakIterator::check_validity(Position::new(
+            (u64::MAX >> 1) + 1
+        )));
     }
 }

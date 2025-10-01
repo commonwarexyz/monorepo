@@ -53,7 +53,7 @@ pub struct Proof<D: Digest> {
     /// The total number of nodes in the MMR for MMR proofs, though other authenticated data
     /// structures may override the meaning of this field. For example the authenticated
     /// [crate::mmr::bitmap::Bitmap] stores the number of bits in the bitmap within this field.
-    pub size: u64,
+    pub size: Position,
     /// The digests necessary for proving the inclusion of an element, or range of elements, in the
     /// MMR.
     pub digests: Vec<D>,
@@ -67,14 +67,14 @@ impl<D: Digest> PartialEq for Proof<D> {
 
 impl<D: Digest> EncodeSize for Proof<D> {
     fn encode_size(&self) -> usize {
-        UInt(self.size).encode_size() + self.digests.encode_size()
+        UInt(*self.size).encode_size() + self.digests.encode_size()
     }
 }
 
 impl<D: Digest> Write for Proof<D> {
     fn write(&self, buf: &mut impl BufMut) {
         // Write the number of nodes in the MMR as a varint
-        UInt(self.size).write(buf);
+        UInt(*self.size).write(buf);
 
         // Write the digests
         self.digests.write(buf);
@@ -87,7 +87,7 @@ impl<D: Digest> Read for Proof<D> {
 
     fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         // Read the number of nodes in the MMR
-        let size = UInt::<u64>::read(buf)?.into();
+        let size = Position::new(UInt::<u64>::read(buf)?.into());
 
         // Read the digests
         let range = ..=max_len;
@@ -101,7 +101,7 @@ impl<D: Digest> Default for Proof<D> {
     /// (`size == 0`) MMR.
     fn default() -> Self {
         Self {
-            size: 0,
+            size: Position::new(0),
             digests: vec![],
         }
     }
@@ -141,7 +141,7 @@ impl<D: Digest> Proof<D> {
     {
         if !PeakIterator::check_validity(self.size) {
             #[cfg(feature = "std")]
-            debug!(size = self.size, "invalid proof size");
+            debug!(size = ?self.size, "invalid proof size");
             return false;
         }
 
@@ -172,7 +172,8 @@ impl<D: Digest> Proof<D> {
     {
         // Empty proof is valid for an empty MMR
         if elements.is_empty() {
-            return self.size == 0 && *root == hasher.root(0, core::iter::empty());
+            return self.size == Position::new(0)
+                && *root == hasher.root(Position::new(0), core::iter::empty());
         }
         if !PeakIterator::check_validity(self.size) {
             return false;
@@ -444,7 +445,10 @@ impl<D: Digest> Proof<D> {
 /// # Panics
 ///
 /// Panics if `size` is invalid or the range is invalid for an MMR of the provided `size`.
-pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<Location>) -> Vec<Position> {
+pub(crate) fn nodes_required_for_range_proof(
+    size: Position,
+    range: Range<Location>,
+) -> Vec<Position> {
     let mut positions = Vec::new();
     if range.is_empty() {
         return positions;
@@ -532,7 +536,7 @@ pub(crate) fn nodes_required_for_range_proof(size: u64, range: Range<Location>) 
 /// Panics if locations is empty.
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
-    size: u64,
+    size: Position,
     locations: &[Location],
 ) -> BTreeSet<Position> {
     // Collect all required node positions
@@ -729,7 +733,7 @@ mod tests {
         let wrong_sizes = [0, 16, 17, 18, 20, u64::MAX - 100];
         for sz in wrong_sizes {
             let mut wrong_size_proof = proof.clone();
-            wrong_size_proof.size = sz;
+            wrong_size_proof.size = Position::new(sz);
             assert!(
                 !wrong_size_proof.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
                 "proof with wrong size should fail verification"
@@ -759,7 +763,7 @@ mod tests {
             "proof verification should fail with mangled proof hash"
         );
         proof2 = proof.clone();
-        proof2.size = 10;
+        proof2.size = Position::new(10);
         assert!(
             !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, &root),
             "proof verification should fail with incorrect size"
@@ -934,7 +938,7 @@ mod tests {
 
         // Confirm we can successfully prove all retained elements in the MMR after pruning.
         let root = mmr.root(&mut hasher);
-        for i in 1..mmr.size() {
+        for i in 1..*mmr.size() {
             mmr.prune_to_pos(Position::new(i));
             let pruned_root = mmr.root(&mut hasher);
             assert_eq!(root, pruned_root);
@@ -947,7 +951,7 @@ mod tests {
                 assert!(proof.is_ok());
                 assert!(proof.unwrap().verify_element_inclusion(
                     &mut hasher,
-                    &elements[loc.as_u64() as usize],
+                    &elements[*loc as usize],
                     loc,
                     &root
                 ));
@@ -1174,9 +1178,7 @@ mod tests {
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
-        let proof = mmr
-            .range_proof(Location::new(0)..Location::new(mmr.leaves()))
-            .unwrap();
+        let proof = mmr.range_proof(Location::new(0)..mmr.leaves()).unwrap();
         let mut node_digests = proof
             .verify_range_inclusion_and_extract_digests(
                 &mut hasher,
@@ -1185,8 +1187,8 @@ mod tests {
                 &root,
             )
             .unwrap();
-        assert_eq!(node_digests.len(), mmr.size() as usize);
-        node_digests.sort_by_key(|(pos, _)| pos.as_u64());
+        assert_eq!(node_digests.len() as u64, mmr.size());
+        node_digests.sort_by_key(|(pos, _)| *pos);
         for (i, (pos, d)) in node_digests.into_iter().enumerate() {
             assert_eq!(pos, i as u64);
             assert_eq!(mmr.get_node(pos).unwrap(), d);
@@ -1342,7 +1344,11 @@ mod tests {
 
         // Verify mangling the size to something invalid should fail. Test three cases: valid MMR
         // size but wrong value, invalid MMR size, and overflowing MMR size.
-        let wrong_sizes = [16, 17, u64::MAX - 100];
+        let wrong_sizes = [
+            Position::new(16),
+            Position::new(17),
+            Position::new(u64::MAX - 100),
+        ];
         for sz in wrong_sizes {
             let mut wrong_size_proof = multi_proof.clone();
             wrong_size_proof.size = sz;

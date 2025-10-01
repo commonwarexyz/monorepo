@@ -85,7 +85,7 @@ pub enum Variable<K: Array, V: Codec> {
     // Operations for mutable stores.
     Delete(K),
     Update(K, V),
-    CommitFloor(Option<V>, u64),
+    CommitFloor(Option<V>, Location),
 }
 
 impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
@@ -97,7 +97,9 @@ impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
         1 + match self {
             Variable::Delete(_) => K::SIZE,
             Variable::Update(_, v) => K::SIZE + v.encode_size(),
-            Variable::CommitFloor(v, floor_loc) => v.encode_size() + UInt(*floor_loc).encode_size(),
+            Variable::CommitFloor(v, floor_loc) => {
+                v.encode_size() + UInt(**floor_loc).encode_size()
+            }
             Variable::Set(_, v) => K::SIZE + v.encode_size(),
             Variable::Commit(v) => v.encode_size(),
         }
@@ -239,7 +241,7 @@ impl<K: Array, V: CodecFixed> Write for Fixed<K, V> {
             }
             Fixed::CommitFloor(floor_loc) => {
                 COMMIT_FLOOR_CONTEXT.write(buf);
-                buf.put_slice(&floor_loc.as_u64().to_be_bytes());
+                buf.put_slice(&floor_loc.to_be_bytes());
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
             }
@@ -271,7 +273,7 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
             Variable::CommitFloor(v, floor_loc) => {
                 COMMIT_FLOOR_CONTEXT.write(buf);
                 v.write(buf);
-                UInt(*floor_loc).write(buf);
+                UInt(**floor_loc).write(buf);
             }
         }
     }
@@ -354,7 +356,7 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
             COMMIT_FLOOR_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
-                Ok(Self::CommitFloor(metadata, floor_loc.into()))
+                Ok(Self::CommitFloor(metadata, Location::new(floor_loc.into())))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }

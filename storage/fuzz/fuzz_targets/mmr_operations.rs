@@ -241,7 +241,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::GetNode { pos } => {
                     if mmr.size() > 0 {
-                        let safe_pos = Position::new(*pos % mmr.size());
+                        let safe_pos = Position::new(*pos % *mmr.size());
                         let node = mmr.get_node(safe_pos);
 
                         // Check if the node is pruned
@@ -345,7 +345,7 @@ fn fuzz(input: FuzzInput) {
                 MmrOperation::PruneToPos { pos_idx } => {
                     if mmr.size() > 0 {
                         // Only prune to positions within the current size (0 to size inclusive)
-                        let pos = Position::new((*pos_idx) % (mmr.size() + 1));
+                        let pos = Position::new((*pos_idx) % (*mmr.size() + 1));
 
                         // Skip if trying to prune to a position before or equal to what's already pruned
                         if pos <= mmr.pruned_to_pos() {
