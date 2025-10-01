@@ -1,219 +1,195 @@
-//! A historical wrapper around [`Prunable`] that stores snapshots via batched mutation tracking.
+//! A historical wrapper around [`Prunable`] that maintains snapshots via diff-based batching.
 //!
-//! Each snapshot is identified by a monotonically increasing `u64` key. The latest snapshot is
-//! stored in full while older snapshots are reverse diffs that describe how to recover their state
-//! from the newer snapshot. Diffs are built from chunk-level preimages that are captured as the
-//! bitmap is mutated inside a [`BatchGuard`], so creating a new snapshot never requires scanning
-//! the entire bitmap.
+//! The Historical bitmap maintains exactly ONE full [`Prunable`] bitmap (the current/HEAD state).
+//! All historical states and batch mutations are represented as lightweight diffs, never full clones.
 //!
-//! # Examples
+//! # Architecture
+//!
+//! - **Current State**: Single `Prunable<N>` representing the latest committed state
+//! - **Batches**: Diff layers that track modifications without cloning the bitmap
+//! - **History**: Reverse diffs that allow reconstructing past states from current
+//!
+//! # Key Features
+//!
+//! - **Memory Efficient**: Only one full bitmap stored; all other state is diffs
+//! - **Read-Through Semantics**: Batch reads see modifications or fall through to current
+//! - **Full Abort Support**: Batches can be dropped without committing
+//! - **Monotonic Commits**: Commit numbers must be strictly increasing
+//!
+//! # Usage Examples
+//!
+//! ## Basic Batching
 //!
 //! ```
 //! # use commonware_utils::bitmap::Historical;
 //! let mut historical: Historical<4> = Historical::new();
 //!
-//! // 1. Mutate inside a batch and commit snapshot 1.
+//! // Create and commit a batch
 //! historical.with_batch(1, |batch| {
 //!     batch.push(true);
+//!     batch.push(false);
 //! }).unwrap();
 //!
-//! // 2. Start another batch, record changes, and commit snapshot 2.
-//! let mut batch = historical.start_batch();
-//! batch.set_bit(0, false);
-//! batch.commit(2).unwrap();
+//! assert_eq!(historical.len(), 2);
+//! assert!(historical.get_bit(0));
+//! assert!(!historical.get_bit(1));
+//! ```
 //!
-//! // 3. Read historical states and prune old entries when desired.
-//! assert!(historical.get_snapshot(1).unwrap().get_bit(0));
-//! assert!(!historical.get_snapshot(2).unwrap().get_bit(0));
-//! let removed = historical.remove_snapshots_below(2);
-//! assert_eq!(removed, 1);
+//! ## Read-Through Semantics
+//!
+//! ```
+//! # use commonware_utils::bitmap::Historical;
+//! let mut historical: Historical<4> = Historical::new();
+//! historical.with_batch(1, |batch| { batch.push(false); }).unwrap();
+//!
+//! // Before modification
+//! assert!(!historical.get_bit(0));
+//!
+//! {
+//!     let mut batch = historical.start_batch();
+//!     batch.set_bit(0, true);
+//!
+//!     // Read through batch sees the modification
+//!     assert!(batch.get_bit(0));
+//!
+//!     batch.commit(2).unwrap();
+//! }
+//!
+//! // After commit, modification is in current
+//! assert!(historical.get_bit(0));
+//! ```
+//!
+//! ## Abort on Drop
+//!
+//! ```
+//! # use commonware_utils::bitmap::Historical;
+//! # let mut historical: Historical<4> = Historical::new();
+//! # historical.with_batch(1, |batch| { batch.push(true); }).unwrap();
+//! let len_before = historical.len();
+//!
+//! {
+//!     let mut batch = historical.start_batch();
+//!     batch.push(true);
+//!     batch.push(false);
+//!     // Drop without commit = automatic abort
+//! }
+//!
+//! assert_eq!(historical.len(), len_before); // Unchanged
+//! ```
+//!
+//! ## Commit History Management
+//!
+//! ```
+//! # use commonware_utils::bitmap::Historical;
+//! # let mut historical: Historical<4> = Historical::new();
+//! for i in 1..=5 {
+//!     historical.with_batch(i, |batch| {
+//!         batch.push(true);
+//!     }).unwrap();
+//! }
+//!
+//! assert_eq!(historical.commits().count(), 5);
+//!
+//! // Prune old commits
+//! historical.prune_commits_before(3);
+//! assert_eq!(historical.commits().count(), 3);
 //! ```
 
 use super::Prunable;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::{fmt, ops::Deref};
+use core::fmt;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
-/// Represents a change to a single chunk in the bitmap.
-#[derive(Clone, Debug)]
-struct ChunkDiff<const N: usize> {
-    /// Index of the chunk in the bitmap.
-    chunk_index: usize,
-    /// The chunk data at this snapshot.
-    chunk_data: [u8; N],
-}
-
-/// Represents a reverse diff between two snapshots.
-#[derive(Clone, Debug)]
-struct BitmapDiff<const N: usize> {
-    /// Length of the target (older) bitmap.
-    len: usize,
-    /// Number of pruned chunks in the target (older) bitmap.
-    pruned_chunks: usize,
-    /// Changed chunks needed to transform from newer snapshot to older snapshot.
-    changed_chunks: Vec<ChunkDiff<N>>,
-}
-
-/// Storage type for snapshots - either a full bitmap or a reverse diff.
-#[derive(Clone, Debug)]
-enum SnapshotStorage<const N: usize> {
-    /// Full bitmap snapshot (used for the newest/base snapshot).
-    Full(Prunable<N>),
-    /// Reverse diff showing how to get from a newer snapshot to this older snapshot.
-    Diff(BitmapDiff<N>),
-}
-
-#[cfg(feature = "std")]
-type MapIter<'a, const N: usize> = std::collections::btree_map::Iter<'a, u64, SnapshotStorage<N>>;
-#[cfg(not(feature = "std"))]
-type MapIter<'a, const N: usize> = alloc::collections::btree_map::Iter<'a, u64, SnapshotStorage<N>>;
-
-/// Errors that can arise while recording historical snapshots.
+/// Errors that can occur in Historical bitmap operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SnapshotError {
-    /// Snapshot keys must be strictly increasing; attempting to reuse or go backwards is rejected.
-    NonMonotonicKey { previous: u64, attempted: u64 },
+pub enum HistoricalError {
+    /// Commit numbers must be strictly monotonically increasing.
+    NonMonotonicCommit { previous: u64, attempted: u64 },
 }
 
-impl fmt::Display for SnapshotError {
+impl fmt::Display for HistoricalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SnapshotError::NonMonotonicKey {
+            HistoricalError::NonMonotonicCommit {
                 previous,
                 attempted,
-            } => write!(
-                f,
-                "snapshot key {attempted} must be greater than previously committed key {previous}"
-            ),
+            } => {
+                write!(
+                    f,
+                    "commit number {} must be greater than previous commit {}",
+                    attempted, previous
+                )
+            }
         }
     }
 }
 
 #[cfg(feature = "std")]
-impl std::error::Error for SnapshotError {}
+impl std::error::Error for HistoricalError {}
 
-/// Errors that can arise when executing a batched mutation with user-provided fallible logic.
-#[derive(Debug, PartialEq, Eq)]
-pub enum BatchError<E> {
-    /// The user-provided closure returned an error; no snapshot was committed.
-    User(E),
-    /// Committing the batch failed due to snapshot bookkeeping (for example, a non-monotonic key).
-    Snapshot(SnapshotError),
-}
-
-impl<E: fmt::Display> fmt::Display for BatchError<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BatchError::User(err) => write!(f, "batch aborted: {err}"),
-            BatchError::Snapshot(err) => write!(f, "batch commit failed: {err}"),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl<E: fmt::Display + fmt::Debug> std::error::Error for BatchError<E> {}
-
+/// Metadata about a historical state.
 #[derive(Clone, Debug)]
-struct ActiveBatch<const N: usize> {
-    /// Number of bits in the bitmap when the batch began.
-    base_len: usize,
-    /// Number of pruned chunks when the batch began.
-    base_pruned_chunks: usize,
-    /// Snapshot of every chunk that was modified or pruned during the batch, keyed by the
-    /// chunk index in the base snapshot (after accounting for pruned chunks).
-    preimages: BTreeMap<usize, [u8; N]>,
-}
-
-/// Guard that records chunk-level preimages while a batch of mutations is applied.
-///
-/// All bitmap writes must go through the guard so that we know exactly which chunks changed. When
-/// [`commit`](BatchGuard::commit) is called the preimages are turned into a reverse diff and stored
-/// as the historical snapshot for the provided key.
-#[must_use = "historical batches must be explicitly committed"]
-pub struct BatchGuard<'a, const N: usize> {
-    historical: &'a mut Historical<N>,
-    committed: bool,
-}
-
-/// Read-only view of a stored snapshot.
-#[derive(Clone, Copy, Debug)]
-pub enum SnapshotView<'a, const N: usize> {
-    /// Snapshot stored as a full bitmap.
-    Full(&'a Prunable<N>),
-    /// Snapshot stored as a reverse diff from a newer snapshot.
-    Diff(SnapshotDiffRef<'a, N>),
-}
-
-/// Reference to a stored reverse diff.
-#[derive(Clone, Copy, Debug)]
-pub struct SnapshotDiffRef<'a, const N: usize> {
-    len: usize,
+#[allow(dead_code)] // Fields will be used when implementing historical reconstruction
+struct CommitMetadata {
+    /// Total length in bits at this commit.
+    len: u64,
+    /// Number of pruned chunks at this commit.
     pruned_chunks: usize,
-    changed_chunks: &'a [ChunkDiff<N>],
 }
 
-impl<'a, const N: usize> SnapshotDiffRef<'a, N> {
-    /// Length of the older bitmap that this diff reconstructs.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Number of pruned chunks in the older bitmap.
-    pub fn pruned_chunks(&self) -> usize {
-        self.pruned_chunks
-    }
-
-    /// Iterator over the chunk updates recorded in the diff.
-    pub fn changed_chunks(&self) -> impl Iterator<Item = (usize, &'a [u8; N])> {
-        self.changed_chunks
-            .iter()
-            .map(|diff| (diff.chunk_index, &diff.chunk_data))
-    }
-}
-
-/// Iterator over stored snapshots.
-pub struct SnapshotIter<'a, const N: usize> {
-    inner: MapIter<'a, N>,
-}
-
-impl<'a, const N: usize> Iterator for SnapshotIter<'a, N> {
-    type Item = (u64, SnapshotView<'a, N>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let (key, storage) = self.inner.next()?;
-        let view = match storage {
-            SnapshotStorage::Full(bitmap) => SnapshotView::Full(bitmap),
-            SnapshotStorage::Diff(diff) => SnapshotView::Diff(SnapshotDiffRef {
-                len: diff.len,
-                pruned_chunks: diff.pruned_chunks,
-                changed_chunks: &diff.changed_chunks,
-            }),
-        };
-        Some((*key, view))
-    }
-}
-
-/// A historical bitmap that records snapshots using batched mutation tracking.
-///
-/// The newest snapshot is stored in full; older snapshots are reverse diffs that describe how to
-/// recover their state from the newer snapshot. A snapshot can only be created through a
-/// [`BatchGuard`], ensuring we never need to scan the entire bitmap to learn what changed.
-/// Mutating the bitmap outside a batch is unsupported and will produce incorrect history.
+/// Type of change to a chunk.
 #[derive(Clone, Debug)]
+enum ChunkChange<const N: usize> {
+    /// Chunk was modified (contains old value before the change).
+    Modified([u8; N]),
+    /// Chunk was added (did not exist before).
+    Added,
+    /// Chunk was pruned/removed (contains old value before pruning).
+    Pruned([u8; N]),
+}
+
+/// A reverse diff that describes the state before a commit.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // Fields will be used when implementing historical reconstruction
+struct CommitDiff<const N: usize> {
+    /// Metadata about the state before this commit.
+    metadata: CommitMetadata,
+    /// Chunk-level changes.
+    changes: BTreeMap<usize, ChunkChange<N>>,
+}
+
+/// An active batch that tracks mutations as a diff layer.
+struct Batch<const N: usize> {
+    /// State when batch started.
+    base_len: u64,
+    base_pruned_chunks: usize,
+
+    /// Projected state if batch is committed.
+    projected_len: u64,
+    projected_pruned_chunks: usize,
+
+    /// Bits that were modified (exist in base and were changed).
+    modified_bits: BTreeMap<u64, bool>,
+
+    /// Bits appended beyond base_len.
+    appended_bits: Vec<bool>,
+
+    /// Chunks that will be pruned if batch commits (captures old data for reverse diff).
+    chunks_to_prune: BTreeMap<usize, [u8; N]>,
+}
+
+/// A historical bitmap that maintains one actual bitmap plus diffs for history and batching.
 pub struct Historical<const N: usize> {
-    /// The current/active prunable bitmap.
+    /// The current/HEAD state - the one and only full bitmap.
     current: Prunable<N>,
 
-    /// Historical snapshots: key -> snapshot storage (full or diff).
-    /// The BTreeMap maintains key order, with the NEWEST snapshot being the full base.
-    /// Older snapshots are stored as reverse diffs from newer snapshots.
-    /// Keys must be monotonically increasing for the diff-chain approach to work correctly.
-    snapshots: BTreeMap<u64, SnapshotStorage<N>>,
+    /// Historical commits: commit_number -> reverse diff from that commit.
+    commits: BTreeMap<u64, CommitDiff<N>>,
 
-    /// Active batch collecting chunk preimages for diff construction.
-    active_batch: Option<ActiveBatch<N>>,
+    /// Active batch (if any).
+    active_batch: Option<Batch<N>>,
 }
 
 impl<const N: usize> Historical<N> {
@@ -221,7 +197,7 @@ impl<const N: usize> Historical<N> {
     pub fn new() -> Self {
         Self {
             current: Prunable::new(),
-            snapshots: BTreeMap::new(),
+            commits: BTreeMap::new(),
             active_batch: None,
         }
     }
@@ -230,394 +206,155 @@ impl<const N: usize> Historical<N> {
     pub fn new_with_pruned_chunks(pruned_chunks: usize) -> Self {
         Self {
             current: Prunable::new_with_pruned_chunks(pruned_chunks),
-            snapshots: BTreeMap::new(),
+            commits: BTreeMap::new(),
             active_batch: None,
         }
     }
 
-    /// Retrieve a historical snapshot by key.
+    /// Start a new batch for making mutations.
     ///
-    /// Note: This method may need to reconstruct the snapshot from diffs,
-    /// so it returns an owned `Prunable<N>` rather than a reference.
-    pub fn get_snapshot(&self, key: u64) -> Option<Prunable<N>> {
-        // Find the target snapshot
-        self.snapshots.get(&key)?;
-
-        // Reconstruct by following the reverse diff chain from the newest base
-        self.reconstruct_snapshot_chain(key)
-    }
-
-    /// Remove all snapshots with keys below the given threshold.
+    /// The returned [`BatchGuard`] must be either committed or dropped. All mutations
+    /// are applied to the guard's diff layer and do not affect the current bitmap
+    /// until commit.
     ///
-    /// Returns the number of snapshots removed.
-    pub fn remove_snapshots_below(&mut self, threshold: u64) -> usize {
-        let keys_to_remove: Vec<u64> = self.snapshots.range(..threshold).map(|(k, _)| *k).collect();
-
-        if keys_to_remove.is_empty() {
-            return 0;
-        }
-
-        // Handle newest snapshot removal if needed
-        self.handle_newest_removal_if_needed(&keys_to_remove);
-
-        // Remove the old snapshots
-        let count = keys_to_remove.len();
-        for key in keys_to_remove {
-            self.snapshots.remove(&key);
-        }
-        count
-    }
-
-    /// Remove all snapshots with keys at or below the given threshold.
+    /// # Examples
     ///
-    /// Returns the number of snapshots removed.
-    pub fn remove_snapshots_at_or_below(&mut self, threshold: u64) -> usize {
-        let keys_to_remove: Vec<u64> = self
-            .snapshots
-            .range(..=threshold)
-            .map(|(k, _)| *k)
-            .collect();
-
-        if keys_to_remove.is_empty() {
-            return 0;
-        }
-
-        // Handle newest snapshot removal if needed
-        self.handle_newest_removal_if_needed(&keys_to_remove);
-
-        // Remove the old snapshots
-        let count = keys_to_remove.len();
-        for key in keys_to_remove {
-            self.snapshots.remove(&key);
-        }
-        count
-    }
-
-    /// Remove a specific snapshot by key.
+    /// ```
+    /// # use commonware_utils::bitmap::Historical;
+    /// let mut historical: Historical<4> = Historical::new();
     ///
-    /// Returns true if the snapshot existed and was removed, false otherwise.
-    pub fn remove_snapshot(&mut self, key: u64) -> bool {
-        if !self.snapshots.contains_key(&key) {
-            return false;
-        }
-
-        // Handle newest snapshot removal if needed
-        self.handle_newest_removal_if_needed(&[key]);
-
-        // Remove the snapshot
-        self.snapshots.remove(&key).is_some()
-    }
-
-    /// Get the number of stored snapshots.
-    pub fn snapshot_count(&self) -> usize {
-        self.snapshots.len()
-    }
-
-    /// Get an iterator over all snapshot keys in ascending order.
-    pub fn snapshot_keys(&self) -> impl Iterator<Item = u64> + '_ {
-        self.snapshots.keys().copied()
-    }
-
-    /// Get the smallest snapshot key, if any snapshots exist.
-    pub fn min_snapshot_key(&self) -> Option<u64> {
-        self.snapshots.keys().next().copied()
-    }
-
-    /// Get the largest snapshot key, if any snapshots exist.
-    pub fn max_snapshot_key(&self) -> Option<u64> {
-        self.snapshots.keys().next_back().copied()
-    }
-
-    /// Clear all snapshots.
-    pub fn clear_snapshots(&mut self) {
-        self.snapshots.clear();
-    }
-
-    /// Iterate over stored snapshots in ascending key order.
-    pub fn snapshots(&self) -> SnapshotIter<'_, N> {
-        SnapshotIter {
-            inner: self.snapshots.iter(),
-        }
-    }
-
-    /// Number of bits currently in the live bitmap state.
-    pub fn len(&self) -> usize {
-        self.current.len()
-    }
-
-    /// Returns true if the live bitmap is empty.
-    pub fn is_empty(&self) -> bool {
-        self.current.is_empty()
-    }
-
-    /// Returns the number of pruned chunks in the live bitmap.
-    pub fn pruned_chunks(&self) -> usize {
-        self.current.pruned_chunks()
-    }
-
-    /// Returns the number of pruned bits in the live bitmap.
-    pub fn pruned_bits(&self) -> usize {
-        self.current.pruned_bits()
-    }
-
-    /// Returns the number of chunks in the live bitmap (including the trailing spare chunk).
-    pub fn chunks_len(&self) -> usize {
-        self.current.chunks_len()
-    }
-
-    /// Returns the bit value at `bit_offset` in the live bitmap.
-    pub fn get_bit(&self, bit_offset: usize) -> bool {
-        self.current.get_bit(bit_offset)
-    }
-
-    /// Returns the chunk containing `bit_offset` in the live bitmap.
-    pub fn get_chunk(&self, bit_offset: usize) -> &[u8; N] {
-        self.current.get_chunk(bit_offset)
-    }
-
-    /// Returns the last chunk of the live bitmap along with the number of bits it contains.
-    pub fn last_chunk(&self) -> (&[u8; N], usize) {
-        self.current.last_chunk()
-    }
-
-    /// Returns the live bitmap state after the most recent batch commit.
-    pub fn bitmap(&self) -> &Prunable<N> {
-        &self.current
-    }
-
-    /// Begin a batch that records chunk preimages while mutating the bitmap.
+    /// let mut batch = historical.start_batch();
+    /// batch.push(true);
+    /// batch.push(false);
+    /// batch.commit(1).unwrap();
     ///
-    /// Each mutation performed through the returned guard stores the original chunk contents so
-    /// that we can build a diff in `O(changed_chunks)` time when the batch is committed. The caller
-    /// is responsible for committing the batch with a strictly increasing snapshot key.
+    /// assert_eq!(historical.len(), 2);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if a batch is already active.
     pub fn start_batch(&mut self) -> BatchGuard<'_, N> {
         assert!(
             self.active_batch.is_none(),
-            "a historical bitmap batch is already active"
+            "cannot start batch: batch already active"
         );
 
-        let batch = ActiveBatch {
+        let batch = Batch {
             base_len: self.current.len(),
             base_pruned_chunks: self.current.pruned_chunks(),
-            preimages: BTreeMap::new(),
+            projected_len: self.current.len(),
+            projected_pruned_chunks: self.current.pruned_chunks(),
+            modified_bits: BTreeMap::new(),
+            appended_bits: Vec::new(),
+            chunks_to_prune: BTreeMap::new(),
         };
+
         self.active_batch = Some(batch);
+
         BatchGuard {
             historical: self,
             committed: false,
         }
     }
 
-    /// Convenience helper that starts a batch, executes `f`, then commits at `key`.
-    ///
-    /// This is the preferred way to mutate the bitmap:
-    ///
-    /// ```
-    /// # use commonware_utils::bitmap::Historical;
-    /// let mut historical: Historical<4> = Historical::new();
-    /// historical
-    ///     .with_batch(42, |batch| {
-    ///         batch.push(true);
-    ///         batch.set_bit(0, false);
-    ///     })
-    ///     .unwrap();
-    /// ```
+    /// Execute a closure with a batch and commit it at the given commit number.
     ///
     /// # Errors
     ///
-    /// Returns [`SnapshotError::NonMonotonicKey`] if `key` is not greater than the largest
-    /// previously committed key.
-    pub fn with_batch<F>(&mut self, key: u64, f: F) -> Result<(), SnapshotError>
+    /// Returns [`HistoricalError::NonMonotonicCommit`] if the commit number is not
+    /// greater than the previous commit.
+    pub fn with_batch<F>(&mut self, commit_number: u64, f: F) -> Result<(), HistoricalError>
     where
         F: FnOnce(&mut BatchGuard<'_, N>),
     {
         let mut guard = self.start_batch();
         f(&mut guard);
-        guard.commit(key)
+        guard.commit(commit_number)
     }
 
-    /// Execute a fallible batch and commit it at the provided key.
+    /// Get the bitmap state as it existed at a specific commit.
     ///
-    /// If the user-provided closure returns an error, the batch is aborted and the error is
-    /// returned as [`BatchError::User`]. If the closure succeeds but committing the batch fails,
-    /// the batch is aborted automatically and [`BatchError::Snapshot`] is returned.
-    pub fn with_batch_try<F, R, E>(&mut self, key: u64, f: F) -> Result<R, BatchError<E>>
-    where
-        F: FnOnce(&mut BatchGuard<'_, N>) -> Result<R, E>,
-    {
-        let mut guard = self.start_batch();
-        let result = f(&mut guard);
-        match result {
-            Ok(value) => guard
-                .commit(key)
-                .map(|()| value)
-                .map_err(BatchError::Snapshot),
-            Err(err) => {
-                guard.abort();
-                Err(BatchError::User(err))
-            }
+    /// Returns `None` if the commit does not exist.
+    ///
+    /// This reconstructs the historical state by applying reverse diffs backward from
+    /// the current state. Each commit's reverse diff describes the state before that
+    /// commit, so we "undo" commits one by one until we reach the target.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use commonware_utils::bitmap::Historical;
+    /// let mut historical: Historical<4> = Historical::new();
+    ///
+    /// historical.with_batch(1, |batch| {
+    ///     batch.push(true);
+    ///     batch.push(false);
+    /// }).unwrap();
+    ///
+    /// historical.with_batch(2, |batch| {
+    ///     batch.set_bit(0, false);
+    ///     batch.push(true);
+    /// }).unwrap();
+    ///
+    /// // Get state as it was at commit 1
+    /// let state_at_1 = historical.get_at_commit(1).unwrap();
+    /// assert_eq!(state_at_1.len(), 2);
+    /// assert!(state_at_1.get_bit(0));
+    /// assert!(!state_at_1.get_bit(1));
+    ///
+    /// // Current state is different
+    /// assert_eq!(historical.len(), 3);
+    /// assert!(!historical.get_bit(0));
+    /// ```
+    pub fn get_at_commit(&self, commit_number: u64) -> Option<Prunable<N>> {
+        // Check if the commit exists
+        if !self.commits.contains_key(&commit_number) {
+            return None;
         }
+
+        // Start with current state
+        let mut state = self.current.clone();
+
+        // Apply reverse diffs from newest down to target (exclusive)
+        // Each reverse diff at commit N describes the state before commit N
+        for (_commit, diff) in self.commits.range(commit_number + 1..).rev() {
+            state = self.apply_reverse_diff(state, diff);
+        }
+
+        Some(state)
     }
 
-    /// Finalise the active batch and record a snapshot entry for `key`.
-    fn finish_active_batch(&mut self, key: u64) -> Result<(), SnapshotError> {
-        let Some(batch) = self.active_batch.take() else {
-            panic!("no active batch to finish");
-        };
+    /// Apply a reverse diff to a bitmap, producing the previous state.
+    fn apply_reverse_diff(&self, newer_state: Prunable<N>, diff: &CommitDiff<N>) -> Prunable<N> {
+        // The diff describes the state before the commit
+        // We need to transform newer_state into that older state
 
-        if let Some(existing_max) = self.max_snapshot_key() {
-            if key <= existing_max {
-                self.active_batch = Some(batch);
-                return Err(SnapshotError::NonMonotonicKey {
-                    previous: existing_max,
-                    attempted: key,
-                });
-            }
-        }
+        // Start with the target metadata
+        let target_len = diff.metadata.len;
+        let target_pruned = diff.metadata.pruned_chunks;
 
-        let changed_chunks = batch
-            .preimages
-            .into_iter()
-            .map(|(chunk_index, chunk_data)| ChunkDiff {
-                chunk_index,
-                chunk_data,
-            })
-            .collect();
-
-        let diff = BitmapDiff {
-            len: batch.base_len,
-            pruned_chunks: batch.base_pruned_chunks,
-            changed_chunks,
-        };
-
-        if self.snapshots.is_empty() {
-            self.snapshots
-                .insert(key, SnapshotStorage::Full(self.current.clone()));
-        } else {
-            let newest_key = *self.snapshots.keys().next_back().unwrap();
-            self.snapshots
-                .insert(newest_key, SnapshotStorage::Diff(diff));
-            self.snapshots
-                .insert(key, SnapshotStorage::Full(self.current.clone()));
-        }
-
-        Ok(())
-    }
-
-    /// Check if we're removing the newest snapshot and handle it appropriately.
-    /// With reverse diff approach, we need to promote the next newest to full if we remove the current newest.
-    fn handle_newest_removal_if_needed(&mut self, keys_to_remove: &[u64]) {
-        if keys_to_remove.is_empty() || self.snapshots.is_empty() {
-            return;
-        }
-
-        let newest_key = *self.snapshots.keys().next_back().unwrap();
-        let removing_newest = keys_to_remove.contains(&newest_key);
-
-        if removing_newest && keys_to_remove.len() < self.snapshots.len() {
-            // Find the next newest snapshot that will remain
-            let next_newest_key = self
-                .snapshots
-                .keys()
-                .rev()
-                .find(|&&k| !keys_to_remove.contains(&k))
-                .copied();
-
-            if let Some(next_newest_key) = next_newest_key {
-                // Reconstruct it as a full snapshot to become the new base
-                if let Some(reconstructed) = self.reconstruct_snapshot_chain(next_newest_key) {
-                    self.snapshots
-                        .insert(next_newest_key, SnapshotStorage::Full(reconstructed));
-                }
-            }
-        }
-    }
-
-    /// Reconstruct a snapshot by following the reverse diff chain from the newest base.
-    fn reconstruct_snapshot_chain(&self, target_key: u64) -> Option<Prunable<N>> {
-        // Find the newest (highest key) snapshot - this is our base
-        let newest_key = *self.snapshots.keys().next_back()?;
-
-        // If we're asking for the newest snapshot, it should be full
-        if target_key == newest_key {
-            let newest_storage = self.snapshots.get(&newest_key)?;
-            return match newest_storage {
-                SnapshotStorage::Full(bitmap) => Some(bitmap.clone()),
-                SnapshotStorage::Diff(_) => None, // Newest should always be full
-            };
-        }
-
-        // Start from the newest full snapshot and work backward
-        let newest_storage = self.snapshots.get(&newest_key)?;
-        let mut result = match newest_storage {
-            SnapshotStorage::Full(bitmap) => bitmap.clone(),
-            SnapshotStorage::Diff(_) => return None, // Newest should always be full
-        };
-
-        // Apply reverse diffs going backward from newest to target
-        for (&key, storage) in self.snapshots.range(target_key..newest_key).rev() {
-            // Apply this reverse diff to continue going backward
-            match storage {
-                SnapshotStorage::Full(bitmap) => {
-                    // If we encounter another full snapshot, use it as new base
-                    result = bitmap.clone();
-                }
-                SnapshotStorage::Diff(diff) => {
-                    // Apply the reverse diff to go further back in time
-                    result = self.apply_reverse_diff_to_bitmap(&result, diff)?;
-                }
-            }
-
-            // Check if we've reached our target after applying the diff
-            if key == target_key {
-                return Some(result);
-            }
-        }
-
-        None
-    }
-
-    /// Apply a reverse diff to a bitmap to get the previous (older) state.
-    fn apply_reverse_diff_to_bitmap(
-        &self,
-        newer_bitmap: &Prunable<N>,
-        reverse_diff: &BitmapDiff<N>,
-    ) -> Option<Prunable<N>> {
-        // Create a new bitmap with the target properties
-        let mut result = Prunable::new_with_pruned_chunks(reverse_diff.pruned_chunks);
-
-        let newer_pruned = newer_bitmap.pruned_chunks();
-        let base_pruned = reverse_diff.pruned_chunks;
+        // Create result bitmap with correct pruning
+        let mut result = Prunable::new_with_pruned_chunks(target_pruned);
 
         // Calculate how many complete chunks we need
-        let complete_chunks = reverse_diff.len / Prunable::<N>::CHUNK_SIZE_BITS;
-        let remaining_bits = reverse_diff.len % Prunable::<N>::CHUNK_SIZE_BITS;
+        let complete_chunks = (target_len / Prunable::<N>::CHUNK_SIZE_BITS) as usize;
+        let remaining_bits = (target_len % Prunable::<N>::CHUNK_SIZE_BITS) as usize;
 
-        // Add complete chunks
+        // Reconstruct each complete chunk
         for chunk_idx in 0..complete_chunks {
-            let chunk_data = Self::chunk_from_diff_or_newer(
-                newer_bitmap,
-                reverse_diff,
-                chunk_idx,
-                base_pruned,
-                newer_pruned,
-            );
-
+            let chunk_data =
+                self.get_chunk_from_diff_or_newer(&newer_state, diff, chunk_idx, target_pruned);
             result.push_chunk(&chunk_data);
         }
 
-        // Handle the partial last chunk if there are remaining bits
+        // Handle partial last chunk if there are remaining bits
         if remaining_bits > 0 {
             let chunk_idx = complete_chunks;
-            let chunk_data = Self::chunk_from_diff_or_newer(
-                newer_bitmap,
-                reverse_diff,
-                chunk_idx,
-                base_pruned,
-                newer_pruned,
-            );
+            let chunk_data =
+                self.get_chunk_from_diff_or_newer(&newer_state, diff, chunk_idx, target_pruned);
 
-            // Add bits from this chunk one by one until we reach the target length
+            // Push bits one by one for the partial chunk
             for bit_idx in 0..remaining_bits {
                 let byte_idx = bit_idx / 8;
                 let bit_in_byte = bit_idx % 8;
@@ -626,44 +363,254 @@ impl<const N: usize> Historical<N> {
             }
         }
 
-        Some(result)
+        result
     }
 
-    /// Fetches the chunk data for `chunk_index` of the older snapshot described by
-    /// `reverse_diff`, either from the recorded diff or by reusing chunk data from the newer
-    /// snapshot (adjusting for differences in pruned prefixes).
-    fn chunk_from_diff_or_newer(
-        newer_bitmap: &Prunable<N>,
-        reverse_diff: &BitmapDiff<N>,
-        chunk_index: usize,
-        base_pruned: usize,
-        newer_pruned: usize,
+    /// Get chunk data for reconstruction, either from the diff or from the newer state.
+    fn get_chunk_from_diff_or_newer(
+        &self,
+        newer_state: &Prunable<N>,
+        diff: &CommitDiff<N>,
+        chunk_idx: usize,
+        target_pruned: usize,
     ) -> [u8; N] {
-        if let Some(diff) = reverse_diff
-            .changed_chunks
-            .iter()
-            .find(|chunk_diff| chunk_diff.chunk_index == chunk_index)
-        {
-            return diff.chunk_data;
+        // Check if this chunk has a recorded change
+        if let Some(change) = diff.changes.get(&chunk_idx) {
+            match change {
+                ChunkChange::Modified(old_data) => {
+                    // Use the old data from before the modification
+                    return *old_data;
+                }
+                ChunkChange::Added => {
+                    // This chunk was added, so it didn't exist in the old state
+                    // This shouldn't happen if our logic is correct since we're only
+                    // reconstructing chunks up to target_len
+                    return [0u8; N];
+                }
+                ChunkChange::Pruned(old_data) => {
+                    // This chunk was pruned, use the captured old data
+                    return *old_data;
+                }
+            }
         }
 
-        let raw_chunk_index = chunk_index + base_pruned;
-        if raw_chunk_index < newer_pruned {
-            debug_assert!(
-                reverse_diff
-                    .changed_chunks
-                    .iter()
-                    .any(|chunk_diff| chunk_diff.chunk_index == chunk_index),
-                "missing diff entry for pruned chunk"
-            );
+        // No change recorded, so the chunk was the same in both states
+        // Get it from the newer state, adjusting for pruning differences
+        let raw_chunk_idx = chunk_idx + target_pruned;
+        let newer_pruned = newer_state.pruned_chunks();
+
+        if raw_chunk_idx < newer_pruned {
+            // This chunk is pruned in newer state but not in target state
+            // This shouldn't happen if our diff capture is correct
             return [0u8; N];
         }
 
-        let current_chunk_index = raw_chunk_index - newer_pruned;
-        if current_chunk_index < newer_bitmap.chunks_len() {
-            *newer_bitmap.get_chunk_by_index(current_chunk_index)
+        let newer_chunk_idx = raw_chunk_idx - newer_pruned;
+        if newer_chunk_idx < newer_state.chunks_len() {
+            *newer_state.get_chunk_by_index(newer_chunk_idx)
         } else {
             [0u8; N]
+        }
+    }
+
+    /// Check if a commit exists.
+    pub fn commit_exists(&self, commit_number: u64) -> bool {
+        self.commits.contains_key(&commit_number)
+    }
+
+    /// Get an iterator over all commit numbers in ascending order.
+    pub fn commits(&self) -> impl Iterator<Item = u64> + '_ {
+        self.commits.keys().copied()
+    }
+
+    /// Get the latest commit number, if any commits exist.
+    pub fn latest_commit(&self) -> Option<u64> {
+        self.commits.keys().next_back().copied()
+    }
+
+    /// Get the earliest commit number, if any commits exist.
+    pub fn earliest_commit(&self) -> Option<u64> {
+        self.commits.keys().next().copied()
+    }
+
+    /// Get a reference to the current bitmap state.
+    pub fn current(&self) -> &Prunable<N> {
+        &self.current
+    }
+
+    /// Number of bits in the current bitmap.
+    pub fn len(&self) -> u64 {
+        self.current.len()
+    }
+
+    /// Returns true if the current bitmap is empty.
+    pub fn is_empty(&self) -> bool {
+        self.current.is_empty()
+    }
+
+    /// Get the value of a bit in the current bitmap.
+    pub fn get_bit(&self, bit_offset: u64) -> bool {
+        self.current.get_bit(bit_offset)
+    }
+
+    /// Get the chunk containing a bit in the current bitmap.
+    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
+        self.current.get_chunk(bit_offset)
+    }
+
+    /// Number of pruned chunks in the current bitmap.
+    pub fn pruned_chunks(&self) -> usize {
+        self.current.pruned_chunks()
+    }
+
+    /// Remove all commits with numbers below the threshold.
+    ///
+    /// Returns the number of commits removed.
+    pub fn prune_commits_before(&mut self, threshold: u64) -> usize {
+        let keys_to_remove: Vec<u64> = self.commits.range(..threshold).map(|(k, _)| *k).collect();
+        let count = keys_to_remove.len();
+        for key in keys_to_remove {
+            self.commits.remove(&key);
+        }
+        count
+    }
+
+    /// Remove all commits with numbers at or below the threshold.
+    ///
+    /// Returns the number of commits removed.
+    pub fn prune_commits_at_or_below(&mut self, threshold: u64) -> usize {
+        let keys_to_remove: Vec<u64> = self.commits.range(..=threshold).map(|(k, _)| *k).collect();
+        let count = keys_to_remove.len();
+        for key in keys_to_remove {
+            self.commits.remove(&key);
+        }
+        count
+    }
+
+    /// Clear all historical commits.
+    pub fn clear_history(&mut self) {
+        self.commits.clear();
+    }
+
+    /// Apply a batch's changes to the current bitmap.
+    fn apply_batch_to_current(&mut self, batch: &Batch<N>) {
+        // Apply modifications to existing bits
+        for (&bit_offset, &value) in &batch.modified_bits {
+            self.current.set_bit(bit_offset, value);
+        }
+
+        // Apply appends
+        for &bit in &batch.appended_bits {
+            self.current.push(bit);
+        }
+
+        // Apply pruning
+        if batch.projected_pruned_chunks > batch.base_pruned_chunks {
+            let prune_to_bit =
+                batch.projected_pruned_chunks as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
+            self.current.prune_to_bit(prune_to_bit);
+        }
+
+        // Handle pops (if projected_len < final_len after appends)
+        while self.current.len() > batch.projected_len {
+            self.current.pop();
+        }
+    }
+
+    /// Build a reverse diff from a batch before applying it.
+    fn build_reverse_diff(&self, batch: &Batch<N>) -> CommitDiff<N> {
+        let mut changes = BTreeMap::new();
+
+        // Capture old values of modified chunks
+        #[cfg(not(feature = "std"))]
+        let mut affected_chunks = alloc::collections::BTreeSet::new();
+        #[cfg(feature = "std")]
+        let mut affected_chunks = std::collections::BTreeSet::new();
+
+        for &bit_offset in batch.modified_bits.keys() {
+            affected_chunks.insert(Prunable::<N>::raw_chunk_index(bit_offset));
+        }
+
+        for &chunk_idx in &affected_chunks {
+            // Get the chunk value before batch modifications
+            let current_pruned = self.current.pruned_chunks();
+            if chunk_idx >= current_pruned {
+                let bitmap_idx = chunk_idx - current_pruned;
+                if bitmap_idx < self.current.chunks_len() {
+                    let old_chunk = *self.current.get_chunk_by_index(bitmap_idx);
+                    changes.insert(chunk_idx, ChunkChange::Modified(old_chunk));
+                }
+            }
+        }
+
+        // Record appended chunks as Added (if they didn't exist before)
+        // or Modified (if they partially existed and we're extending them)
+        if !batch.appended_bits.is_empty() {
+            let start_chunk = Prunable::<N>::raw_chunk_index(batch.base_len);
+            let end_chunk = Prunable::<N>::raw_chunk_index(batch.projected_len.saturating_sub(1));
+            for chunk_idx in start_chunk..=end_chunk {
+                // Only mark as Added/Modified if not already recorded (don't overwrite existing entries)
+                changes.entry(chunk_idx).or_insert_with(|| {
+                    // Check if chunk existed before at all
+                    let current_pruned = self.current.pruned_chunks();
+                    if chunk_idx >= current_pruned {
+                        let bitmap_idx = chunk_idx - current_pruned;
+                        if bitmap_idx < self.current.chunks_len() {
+                            // Chunk existed, capture its old value as Modified
+                            let old_chunk = *self.current.get_chunk_by_index(bitmap_idx);
+                            ChunkChange::Modified(old_chunk)
+                        } else {
+                            // Chunk is entirely new
+                            ChunkChange::Added
+                        }
+                    } else {
+                        // Chunk was pruned, which shouldn't happen for appends
+                        ChunkChange::Added
+                    }
+                });
+            }
+        }
+
+        // Handle length reduction (pop operations)
+        // If projected_len < base_len, we need to capture chunks that will be affected
+        if batch.projected_len < batch.base_len && batch.base_len > 0 {
+            let old_last_chunk = Prunable::<N>::raw_chunk_index(batch.base_len - 1);
+            let start_chunk = if batch.projected_len > 0 {
+                Prunable::<N>::raw_chunk_index(batch.projected_len - 1)
+            } else {
+                0
+            };
+
+            // Capture chunks that are being removed or truncated
+            for chunk_idx in start_chunk..=old_last_chunk {
+                changes.entry(chunk_idx).or_insert_with(|| {
+                    let current_pruned = self.current.pruned_chunks();
+                    if chunk_idx >= current_pruned {
+                        let bitmap_idx = chunk_idx - current_pruned;
+                        if bitmap_idx < self.current.chunks_len() {
+                            let old_chunk = *self.current.get_chunk_by_index(bitmap_idx);
+                            ChunkChange::Modified(old_chunk)
+                        } else {
+                            ChunkChange::Added
+                        }
+                    } else {
+                        ChunkChange::Added
+                    }
+                });
+            }
+        }
+
+        // Record pruned chunks with their old values
+        for (&chunk_idx, &chunk_data) in &batch.chunks_to_prune {
+            changes.insert(chunk_idx, ChunkChange::Pruned(chunk_data));
+        }
+
+        CommitDiff {
+            metadata: CommitMetadata {
+                len: batch.base_len,
+                pruned_chunks: batch.base_pruned_chunks,
+            },
+            changes,
         }
     }
 }
@@ -674,235 +621,292 @@ impl<const N: usize> Default for Historical<N> {
     }
 }
 
+/// Guard for a batch of mutations with read-through semantics.
+#[must_use = "batches must be committed or explicitly dropped"]
+pub struct BatchGuard<'a, const N: usize> {
+    historical: &'a mut Historical<N>,
+    committed: bool,
+}
+
 impl<'a, const N: usize> BatchGuard<'a, N> {
-    /// Returns the current length (after applied batch mutations).
-    pub fn len(&self) -> usize {
-        self.historical.current.len()
+    /// Get the length of the bitmap as it would be after committing this batch.
+    pub fn len(&self) -> u64 {
+        self.historical
+            .active_batch
+            .as_ref()
+            .map(|b| b.projected_len)
+            .unwrap_or(0)
     }
 
-    /// Returns the number of pruned chunks after applied batch mutations.
+    /// Returns true if the bitmap would be empty after committing this batch.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Get the number of pruned chunks after this batch.
     pub fn pruned_chunks(&self) -> usize {
-        self.historical.current.pruned_chunks()
+        self.historical
+            .active_batch
+            .as_ref()
+            .map(|b| b.projected_pruned_chunks)
+            .unwrap_or(0)
     }
 
-    /// Read-only access to the current bitmap state during the batch.
-    pub fn current(&self) -> &Prunable<N> {
-        &self.historical.current
+    /// Get a bit value with read-through semantics.
+    ///
+    /// Checks the batch's modifications first, then falls through to current bitmap.
+    pub fn get_bit(&self, bit_offset: u64) -> bool {
+        let batch = self.historical.active_batch.as_ref().unwrap();
+
+        // Check if bit is in appended range
+        if bit_offset >= batch.base_len {
+            let append_offset = (bit_offset - batch.base_len) as usize;
+            if append_offset < batch.appended_bits.len() {
+                return batch.appended_bits[append_offset];
+            } else {
+                panic!("bit offset {} out of range", bit_offset);
+            }
+        }
+
+        // Check if bit was modified in batch
+        if let Some(&value) = batch.modified_bits.get(&bit_offset) {
+            return value;
+        }
+
+        // Check if bit was pruned in batch
+        let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
+        if chunk_idx < batch.projected_pruned_chunks {
+            panic!("bit pruned: {}", bit_offset);
+        }
+
+        // Fall through to current bitmap
+        self.historical.current.get_bit(bit_offset)
     }
 
-    /// Set the value of a bit, recording preimage data for the touched chunk.
-    pub fn set_bit(&mut self, bit_offset: usize, bit: bool) -> &mut Self {
-        self.capture_preimage_for_bit(bit_offset);
-        self.historical.current.set_bit(bit_offset, bit);
+    /// Get a chunk value with read-through semantics.
+    ///
+    /// Reconstructs the chunk if it has modifications, otherwise returns from current.
+    pub fn get_chunk(&self, bit_offset: u64) -> [u8; N] {
+        let batch = self.historical.active_batch.as_ref().unwrap();
+        let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
+
+        // Check if chunk is in pruned range
+        if chunk_idx < batch.projected_pruned_chunks {
+            panic!("chunk pruned at bit offset: {}", bit_offset);
+        }
+
+        let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
+
+        // Check if chunk has any modifications
+        let chunk_has_mods = (chunk_start_bit..chunk_start_bit + Prunable::<N>::CHUNK_SIZE_BITS)
+            .any(|bit| {
+                batch.modified_bits.contains_key(&bit)
+                    || (bit >= batch.base_len && bit < batch.projected_len)
+            });
+
+        if chunk_has_mods {
+            // Reconstruct chunk from current + batch modifications
+            self.reconstruct_modified_chunk(chunk_start_bit)
+        } else {
+            // Fall through to current bitmap
+            *self.historical.current.get_chunk(bit_offset)
+        }
+    }
+
+    /// Reconstruct a chunk that has modifications or appends.
+    fn reconstruct_modified_chunk(&self, chunk_start: u64) -> [u8; N] {
+        let batch = self.historical.active_batch.as_ref().unwrap();
+
+        // Start with current chunk if it exists
+        let mut chunk = if chunk_start < self.historical.current.len() {
+            *self.historical.current.get_chunk(chunk_start)
+        } else {
+            [0u8; N]
+        };
+
+        // Apply batch modifications
+        for bit_in_chunk in 0..Prunable::<N>::CHUNK_SIZE_BITS {
+            let bit_offset = chunk_start + bit_in_chunk;
+
+            if bit_offset >= batch.projected_len {
+                break;
+            }
+
+            let byte_idx = (bit_in_chunk / 8) as usize;
+            let bit_idx = bit_in_chunk % 8;
+            let mask = 1u8 << bit_idx;
+
+            // Check if this bit is modified
+            if let Some(&value) = batch.modified_bits.get(&bit_offset) {
+                if value {
+                    chunk[byte_idx] |= mask;
+                } else {
+                    chunk[byte_idx] &= !mask;
+                }
+            } else if bit_offset >= batch.base_len {
+                // This is an appended bit
+                let append_offset = (bit_offset - batch.base_len) as usize;
+                if append_offset < batch.appended_bits.len() {
+                    let value = batch.appended_bits[append_offset];
+                    if value {
+                        chunk[byte_idx] |= mask;
+                    } else {
+                        chunk[byte_idx] &= !mask;
+                    }
+                }
+            }
+        }
+
+        chunk
+    }
+
+    /// Set a bit value in the batch.
+    pub fn set_bit(&mut self, bit_offset: u64, value: bool) -> &mut Self {
+        let batch = self.historical.active_batch.as_mut().unwrap();
+
+        // Check bounds
+        if bit_offset >= batch.projected_len {
+            panic!("bit offset {} out of range", bit_offset);
+        }
+
+        // Check not pruned
+        let chunk_idx = Prunable::<N>::raw_chunk_index(bit_offset);
+        if chunk_idx < batch.projected_pruned_chunks {
+            panic!("cannot set pruned bit");
+        }
+
+        // Record modification
+        batch.modified_bits.insert(bit_offset, value);
+
         self
     }
 
-    /// Push a single bit to the bitmap, tracking the chunk when necessary.
+    /// Push a bit to the end of the bitmap.
     pub fn push(&mut self, bit: bool) -> &mut Self {
-        let (_, next_bit) = self.historical.current.last_chunk();
-        if next_bit > 0 {
-            let current_chunk_index = self.historical.current.chunks_len() - 1;
-            self.capture_preimage_for_current_chunk(current_chunk_index);
-        }
-        self.historical.current.push(bit);
+        let batch = self.historical.active_batch.as_mut().unwrap();
+
+        batch.appended_bits.push(bit);
+        batch.projected_len += 1;
+
         self
     }
 
-    /// Push a byte to the bitmap, tracking the affected chunk.
+    /// Push a byte to the end of the bitmap.
     pub fn push_byte(&mut self, byte: u8) -> &mut Self {
-        let (_, next_bit) = self.historical.current.last_chunk();
-        if next_bit > 0 {
-            let current_chunk_index = self.historical.current.chunks_len() - 1;
-            self.capture_preimage_for_current_chunk(current_chunk_index);
-        }
-        self.historical.current.push_byte(byte);
-        self
-    }
-
-    /// Push a full chunk to the bitmap. No preimage tracking is required because the chunk
-    /// did not exist in the base snapshot.
-    pub fn push_chunk(&mut self, chunk: &[u8; N]) -> &mut Self {
-        self.historical.current.push_chunk(chunk);
-        self
-    }
-
-    /// Extend the bitmap by appending a series of bits.
-    pub fn extend_bits<I>(&mut self, bits: I) -> &mut Self
-    where
-        I: IntoIterator<Item = bool>,
-    {
-        for bit in bits {
+        for i in 0..8 {
+            let bit = (byte >> i) & 1 == 1;
             self.push(bit);
         }
         self
     }
 
-    /// Apply a set of direct bit updates.
-    pub fn set_bits<I>(&mut self, updates: I) -> &mut Self
-    where
-        I: IntoIterator<Item = (usize, bool)>,
-    {
-        for (index, value) in updates {
-            self.set_bit(index, value);
+    /// Push a full chunk to the end of the bitmap.
+    pub fn push_chunk(&mut self, chunk: &[u8; N]) -> &mut Self {
+        for byte in chunk {
+            self.push_byte(*byte);
         }
         self
     }
 
-    /// Pop the last bit, recording the chunk that will be modified.
+    /// Pop the last bit from the bitmap.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the bitmap is empty.
     pub fn pop(&mut self) -> bool {
-        self.capture_preimage_for_pop();
-        self.historical.current.pop()
-    }
+        let batch = self.historical.active_batch.as_mut().unwrap();
 
-    /// Prune chunks preceding `bit_offset`, capturing preimages for every chunk that will be
-    /// removed so we can reconstruct the older snapshot without scanning.
-    pub fn prune_to_bit(&mut self, bit_offset: usize) -> &mut Self {
-        let chunk_num = Prunable::<N>::raw_chunk_index(bit_offset);
-        let current_pruned = self.historical.current.pruned_chunks();
-        if chunk_num <= current_pruned {
-            return self;
+        if batch.projected_len == 0 {
+            panic!("cannot pop from empty bitmap");
         }
 
-        let chunks_to_prune = chunk_num - current_pruned;
-        self.capture_preimages_for_pruned_chunks(chunks_to_prune);
-        self.historical.current.prune_to_bit(bit_offset);
+        batch.projected_len -= 1;
+        let bit_offset = batch.projected_len;
+
+        // Check if popping from appended region
+        if bit_offset >= batch.base_len {
+            batch.appended_bits.pop().unwrap()
+        } else {
+            // Popping from base region - read current value
+            self.historical.current.get_bit(bit_offset)
+        }
+    }
+
+    /// Prune chunks up to the chunk containing the given bit offset.
+    pub fn prune_to_bit(&mut self, bit_offset: u64) -> &mut Self {
+        let batch = self.historical.active_batch.as_mut().unwrap();
+        let chunk_num = Prunable::<N>::raw_chunk_index(bit_offset);
+
+        if chunk_num <= batch.projected_pruned_chunks {
+            return self; // Already pruned
+        }
+
+        // Capture preimages of chunks being pruned
+        let current_pruned = self.historical.current.pruned_chunks();
+        for chunk_idx in batch.projected_pruned_chunks..chunk_num {
+            #[cfg(not(feature = "std"))]
+            use alloc::collections::btree_map::Entry;
+            #[cfg(feature = "std")]
+            use std::collections::btree_map::Entry;
+
+            if let Entry::Vacant(e) = batch.chunks_to_prune.entry(chunk_idx) {
+                if chunk_idx >= current_pruned {
+                    let bitmap_idx = chunk_idx - current_pruned;
+                    if bitmap_idx < self.historical.current.chunks_len() {
+                        let chunk_data = *self.historical.current.get_chunk_by_index(bitmap_idx);
+                        e.insert(chunk_data);
+                    }
+                }
+            }
+        }
+
+        batch.projected_pruned_chunks = chunk_num;
+
         self
     }
 
-    /// Commit the batch, writing a snapshot at `key` and clearing the batch state.
+    /// Commit the batch, applying its changes and storing a historical snapshot.
     ///
     /// # Errors
     ///
-    /// Returns [`SnapshotError::NonMonotonicKey`] if `key` is not greater than the previously
-    /// committed snapshot key.
-    pub fn commit(&mut self, key: u64) -> Result<(), SnapshotError> {
-        assert!(!self.committed, "batch guard already committed");
-        match self.historical.finish_active_batch(key) {
-            Ok(()) => {
-                self.committed = true;
-                Ok(())
-            }
-            Err(err) => {
-                self.abort();
-                Err(err)
+    /// Returns [`HistoricalError::NonMonotonicCommit`] if the commit number is not
+    /// greater than the previous commit.
+    pub fn commit(mut self, commit_number: u64) -> Result<(), HistoricalError> {
+        // Validate commit number is monotonically increasing
+        if let Some(&max_commit) = self.historical.commits.keys().next_back() {
+            if commit_number <= max_commit {
+                return Err(HistoricalError::NonMonotonicCommit {
+                    previous: max_commit,
+                    attempted: commit_number,
+                });
             }
         }
-    }
 
-    /// Mark the batch as finished without creating a snapshot.
-    ///
-    /// This simply clears the tracked preimages; any mutations that were performed remain applied
-    /// to the live bitmap state.
-    pub fn abort(&mut self) {
-        if !self.committed {
-            self.historical.active_batch = None;
-            self.committed = true;
-        }
-    }
+        // Take the batch
+        let batch = self.historical.active_batch.take().unwrap();
 
-    fn capture_preimage_for_bit(&mut self, bit_offset: usize) {
-        let base_pruned = self
-            .historical
-            .active_batch
-            .as_ref()
-            .expect("batch not active")
-            .base_pruned_chunks;
-        let raw_chunk_index = Prunable::<N>::raw_chunk_index(bit_offset);
-        debug_assert!(
-            raw_chunk_index >= base_pruned,
-            "bit is below base pruning boundary"
-        );
-        let base_chunk_index = raw_chunk_index - base_pruned;
-        let current_chunk_index = self.historical.current.pruned_chunk_index(bit_offset);
-        self.capture_preimage_for_chunk_indices(base_chunk_index, current_chunk_index);
-    }
+        // Build reverse diff (captures OLD state before applying batch)
+        let reverse_diff = self.historical.build_reverse_diff(&batch);
 
-    fn capture_preimage_for_current_chunk(&mut self, current_chunk_index: usize) {
-        let (base_pruned, current_pruned) = {
-            let batch = self
-                .historical
-                .active_batch
-                .as_ref()
-                .expect("batch not active");
-            (
-                batch.base_pruned_chunks,
-                self.historical.current.pruned_chunks(),
-            )
-        };
-        debug_assert!(
-            current_pruned >= base_pruned,
-            "pruned chunk count cannot decrease within a batch"
-        );
-        let base_chunk_index = current_chunk_index + (current_pruned - base_pruned);
-        self.capture_preimage_for_chunk_indices(base_chunk_index, current_chunk_index);
-    }
+        // Apply batch changes to current bitmap
+        self.historical.apply_batch_to_current(&batch);
 
-    fn capture_preimages_for_pruned_chunks(&mut self, chunks_to_prune: usize) {
-        for current_chunk_index in 0..chunks_to_prune {
-            self.capture_preimage_for_current_chunk(current_chunk_index);
-        }
-    }
+        // Store the reverse diff
+        self.historical.commits.insert(commit_number, reverse_diff);
 
-    fn capture_preimage_for_pop(&mut self) {
-        let (.., next_bit) = self.historical.current.last_chunk();
-        let chunk_len = self.historical.current.chunks_len();
-        let current_chunk_index = if next_bit == 0 {
-            debug_assert!(
-                chunk_len >= 2,
-                "pop from empty bitmap should panic elsewhere"
-            );
-            chunk_len - 2
-        } else {
-            chunk_len - 1
-        };
-        self.capture_preimage_for_current_chunk(current_chunk_index);
-    }
+        // Mark as committed
+        self.committed = true;
 
-    fn capture_preimage_for_chunk_indices(
-        &mut self,
-        base_chunk_index: usize,
-        current_chunk_index: usize,
-    ) {
-        let needs_insert = {
-            let batch = self
-                .historical
-                .active_batch
-                .as_ref()
-                .expect("batch not active");
-            !batch.preimages.contains_key(&base_chunk_index)
-        };
-
-        if !needs_insert {
-            return;
-        }
-
-        let chunk = *self
-            .historical
-            .current
-            .get_chunk_by_index(current_chunk_index);
-
-        self.historical
-            .active_batch
-            .as_mut()
-            .expect("batch not active")
-            .preimages
-            .insert(base_chunk_index, chunk);
+        Ok(())
     }
 }
 
 impl<'a, const N: usize> Drop for BatchGuard<'a, N> {
     fn drop(&mut self) {
         if !self.committed {
-            panic!("historical batch dropped without commit; call commit() before releasing it");
+            // Batch is being dropped without commit - discard the diff layer
+            self.historical.active_batch = None;
         }
-    }
-}
-
-impl<'a, const N: usize> Deref for BatchGuard<'a, N> {
-    type Target = Prunable<N>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.historical.current
     }
 }
 
@@ -914,336 +918,216 @@ mod tests {
     fn test_new() {
         let historical: Historical<4> = Historical::new();
         assert_eq!(historical.len(), 0);
-        assert_eq!(historical.snapshot_count(), 0);
         assert!(historical.is_empty());
+        assert_eq!(historical.commits().count(), 0);
     }
 
     #[test]
-    fn test_new_with_pruned_chunks() {
-        let historical: Historical<4> = Historical::new_with_pruned_chunks(2);
-        assert_eq!(historical.len(), 64); // 2 chunks * 32 bits
-        assert_eq!(historical.pruned_chunks(), 2);
-        assert_eq!(historical.snapshot_count(), 0);
-    }
-
-    #[test]
-    fn test_create_and_get_snapshot() {
+    fn test_basic_batch_commit() {
         let mut historical: Historical<4> = Historical::new();
 
         historical
-            .with_batch(100, |batch| {
+            .with_batch(1, |batch| {
                 batch.push(true);
                 batch.push(false);
                 batch.push(true);
             })
             .unwrap();
+
         assert_eq!(historical.len(), 3);
-
-        historical
-            .with_batch(200, |batch| {
-                batch.push(false);
-                batch.push(true);
-            })
-            .unwrap();
-        assert_eq!(historical.len(), 5);
-
-        let snapshot100 = historical.get_snapshot(100).unwrap();
-        assert_eq!(snapshot100.len(), 3);
-        assert!(snapshot100.get_bit(0));
-        assert!(!snapshot100.get_bit(1));
-        assert!(snapshot100.get_bit(2));
-
-        let snapshot200 = historical.get_snapshot(200).unwrap();
-        assert_eq!(snapshot200.len(), 5);
-        assert!(snapshot200.get_bit(0));
-        assert!(!snapshot200.get_bit(1));
-        assert!(snapshot200.get_bit(2));
-        assert!(!snapshot200.get_bit(3));
-        assert!(snapshot200.get_bit(4));
+        assert!(historical.get_bit(0));
+        assert!(!historical.get_bit(1));
+        assert!(historical.get_bit(2));
+        assert_eq!(historical.commits().count(), 1);
     }
 
     #[test]
-    fn test_batch_extend_and_set_bits() {
+    fn test_batch_abort() {
         let mut historical: Historical<4> = Historical::new();
 
-        historical
-            .with_batch(10, |batch| {
-                batch
-                    .extend_bits([true, false, true, true])
-                    .set_bits([(1, true), (3, false)]);
-            })
-            .unwrap();
-
-        let snapshot = historical.get_snapshot(10).unwrap();
-        assert_eq!(snapshot.len(), 4);
-        assert!(snapshot.get_bit(0));
-        assert!(snapshot.get_bit(1));
-        assert!(snapshot.get_bit(2));
-        assert!(!snapshot.get_bit(3));
-    }
-
-    #[test]
-    fn test_with_batch_try_user_error() {
-        let mut historical: Historical<4> = Historical::new();
-        let err: BatchError<&'static str> = historical
-            .with_batch_try(1, |_batch| -> Result<(), &'static str> { Err("oops") })
-            .unwrap_err();
-        assert_eq!(historical.snapshot_count(), 0);
-        match err {
-            BatchError::User(msg) => assert_eq!(msg, "oops"),
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_with_batch_try_snapshot_error() {
-        let mut historical: Historical<4> = Historical::new();
+        // Initial commit
         historical
             .with_batch(1, |batch| {
                 batch.push(true);
-            })
-            .unwrap();
-
-        let err: BatchError<()> = historical
-            .with_batch_try(1, |batch| -> Result<(), ()> {
                 batch.push(false);
-                Ok(())
-            })
-            .unwrap_err();
-
-        assert_eq!(historical.snapshot_count(), 1);
-        match err {
-            BatchError::Snapshot(SnapshotError::NonMonotonicKey {
-                previous,
-                attempted,
-            }) => {
-                assert_eq!(previous, 1);
-                assert_eq!(attempted, 1);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_batch_method_chaining() {
-        let mut historical: Historical<4> = Historical::new();
-        historical
-            .with_batch(7, |batch| {
-                batch
-                    .push(true)
-                    .push(false)
-                    .set_bit(0, false)
-                    .extend_bits([true, true]);
             })
             .unwrap();
 
-        let snapshot = historical.get_snapshot(7).unwrap();
-        assert_eq!(snapshot.len(), 4);
-        assert!(!snapshot.get_bit(0));
-        assert!(!snapshot.get_bit(1));
-        assert!(snapshot.get_bit(2));
-        assert!(snapshot.get_bit(3));
-    }
+        assert_eq!(historical.len(), 2);
 
-    #[test]
-    fn test_batch_abort_allows_new_batch() {
-        let mut historical: Historical<4> = Historical::new();
-        let starting_len = historical.len();
-
+        // Start batch and drop without commit (abort)
         {
-            let mut guard = historical.start_batch();
-            guard.push(true);
-            guard.abort();
+            let mut batch = historical.start_batch();
+            batch.push(true);
+            batch.push(true);
+            // Drop here - should abort
         }
 
-        assert_eq!(historical.len(), starting_len + 1);
+        // State should be unchanged
+        assert_eq!(historical.len(), 2);
+        assert!(historical.get_bit(0));
+        assert!(!historical.get_bit(1));
+        assert_eq!(historical.commits().count(), 1);
+    }
+
+    #[test]
+    fn test_read_through_semantics() {
+        let mut historical: Historical<4> = Historical::new();
 
         historical
             .with_batch(1, |batch| {
+                batch.push(true);
                 batch.push(false);
+                batch.push(true);
             })
             .unwrap();
 
-        let snapshot = historical.get_snapshot(1).unwrap();
-        assert_eq!(snapshot.len(), starting_len + 2);
+        let mut batch = historical.start_batch();
+
+        // Read unmodified bits (should fall through)
+        assert!(batch.get_bit(0));
+        assert!(!batch.get_bit(1));
+        assert!(batch.get_bit(2));
+
+        // Modify a bit
+        batch.set_bit(1, true);
+
+        // Read modified bit (should see new value)
+        assert!(batch.get_bit(1));
+
+        // Append a bit
+        batch.push(false);
+
+        // Read appended bit
+        assert!(!batch.get_bit(3));
+
+        batch.commit(2).unwrap();
+
+        // After commit, changes should be in current
+        assert_eq!(historical.len(), 4);
+        assert!(historical.get_bit(1));
+        assert!(!historical.get_bit(3));
     }
 
     #[test]
-    fn test_get_snapshot_not_found() {
-        let historical: Historical<4> = Historical::new();
-        assert!(historical.get_snapshot(100).is_none());
-    }
-
-    #[test]
-    fn test_snapshot_key_monotonicity_error() {
+    fn test_monotonic_commit_numbers() {
         let mut historical: Historical<4> = Historical::new();
+
         historical
             .with_batch(5, |batch| {
                 batch.push(true);
             })
             .unwrap();
 
-        let err = historical.with_batch(5, |_| {}).unwrap_err();
-        assert!(matches!(
-            err,
-            SnapshotError::NonMonotonicKey {
-                previous: 5,
-                attempted: 5
+        let err = historical
+            .with_batch(5, |batch| {
+                batch.push(false);
+            })
+            .unwrap_err();
+
+        match err {
+            HistoricalError::NonMonotonicCommit {
+                previous,
+                attempted,
+            } => {
+                assert_eq!(previous, 5);
+                assert_eq!(attempted, 5);
             }
-        ));
-    }
-
-    #[test]
-    fn test_remove_snapshots_below() {
-        let mut historical: Historical<4> = Historical::new();
-
-        for key in [10_u64, 20, 30, 40, 50] {
-            historical
-                .with_batch(key, |batch| {
-                    batch.push(true);
-                })
-                .unwrap();
         }
 
-        assert_eq!(historical.snapshot_count(), 5);
+        let err = historical
+            .with_batch(3, |batch| {
+                batch.push(false);
+            })
+            .unwrap_err();
 
-        // Remove snapshots below 30
-        let removed = historical.remove_snapshots_below(30);
-        assert_eq!(removed, 2); // 10 and 20
-        assert_eq!(historical.snapshot_count(), 3);
-
-        // Verify remaining snapshots
-        assert!(historical.get_snapshot(10).is_none());
-        assert!(historical.get_snapshot(20).is_none());
-        assert!(historical.get_snapshot(30).is_some());
-        assert!(historical.get_snapshot(40).is_some());
-        assert!(historical.get_snapshot(50).is_some());
-    }
-
-    #[test]
-    fn test_remove_snapshots_at_or_below() {
-        let mut historical: Historical<4> = Historical::new();
-
-        for key in [10_u64, 20, 30, 40, 50] {
-            historical
-                .with_batch(key, |batch| {
-                    batch.push(true);
-                })
-                .unwrap();
+        match err {
+            HistoricalError::NonMonotonicCommit {
+                previous,
+                attempted,
+            } => {
+                assert_eq!(previous, 5);
+                assert_eq!(attempted, 3);
+            }
         }
 
-        // Remove snapshots at or below 30
-        let removed = historical.remove_snapshots_at_or_below(30);
-        assert_eq!(removed, 3); // 10, 20, and 30
-        assert_eq!(historical.snapshot_count(), 2);
-
-        // Verify remaining snapshots
-        assert!(historical.get_snapshot(30).is_none());
-        assert!(historical.get_snapshot(40).is_some());
-        assert!(historical.get_snapshot(50).is_some());
-    }
-
-    #[test]
-    fn test_remove_snapshot() {
-        let mut historical: Historical<4> = Historical::new();
+        // Should succeed with larger number
         historical
-            .with_batch(100, |batch| {
-                batch.push(true);
+            .with_batch(10, |batch| {
+                batch.push(false);
             })
             .unwrap();
-
-        assert!(historical.remove_snapshot(100));
-        assert_eq!(historical.snapshot_count(), 0);
-        assert!(!historical.remove_snapshot(100)); // Already removed
     }
 
     #[test]
-    fn test_snapshot_keys_and_bounds() {
+    fn test_prune_commits() {
         let mut historical: Historical<4> = Historical::new();
 
-        assert_eq!(historical.snapshot_count(), 0);
-        assert!(historical.min_snapshot_key().is_none());
-        assert!(historical.max_snapshot_key().is_none());
-
-        for key in [5_u64, 10, 20, 30] {
+        for i in 1..=5 {
             historical
-                .with_batch(key, |batch| {
+                .with_batch(i, |batch| {
                     batch.push(true);
                 })
                 .unwrap();
         }
 
-        let keys: Vec<u64> = historical.snapshot_keys().collect();
-        assert_eq!(keys, vec![5, 10, 20, 30]);
+        assert_eq!(historical.commits().count(), 5);
 
-        assert_eq!(historical.min_snapshot_key(), Some(5));
-        assert_eq!(historical.max_snapshot_key(), Some(30));
+        let removed = historical.prune_commits_before(3);
+        assert_eq!(removed, 2);
+        assert_eq!(historical.commits().count(), 3);
+
+        let removed = historical.prune_commits_at_or_below(4);
+        assert_eq!(removed, 2);
+        assert_eq!(historical.commits().count(), 1);
     }
 
     #[test]
-    fn test_snapshot_iterator_views() {
+    #[should_panic(expected = "batch already active")]
+    fn test_cannot_start_batch_when_active() {
         let mut historical: Historical<4> = Historical::new();
+        let _batch1 = historical.start_batch();
+        // This should panic because a batch is already active
+        // We need to use core::mem::forget to prevent drop from clearing the batch
+        core::mem::forget(_batch1);
+        let _batch2 = historical.start_batch();
+    }
+
+    #[test]
+    fn test_batch_with_modifications_and_appends() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Initial state
         historical
             .with_batch(1, |batch| {
-                batch.push(true);
+                batch.push(false); // bit 0
+                batch.push(false); // bit 1
+                batch.push(false); // bit 2
             })
             .unwrap();
+
+        // Modify existing bits and append new ones
         historical
             .with_batch(2, |batch| {
-                batch.set_bit(0, false);
+                batch.set_bit(0, true); // Modify
+                batch.set_bit(1, true); // Modify
+                batch.push(true); // Append bit 3
+                batch.push(true); // Append bit 4
             })
             .unwrap();
 
-        let mut iter = historical.snapshots();
-
-        let (key1, view1) = iter.next().expect("missing first snapshot");
-        assert_eq!(key1, 1);
-        match view1 {
-            SnapshotView::Diff(diff) => {
-                assert_eq!(diff.len(), 1);
-                assert_eq!(diff.pruned_chunks(), 0);
-                let changes: Vec<_> = diff.changed_chunks().collect();
-                assert_eq!(changes.len(), 1);
-                let (chunk_idx, chunk_bytes) = changes[0];
-                assert_eq!(chunk_idx, 0);
-                assert_ne!(chunk_bytes[0], 0);
-            }
-            SnapshotView::Full(_) => panic!("older snapshot should be diff"),
-        }
-
-        let (key2, view2) = iter.next().expect("missing newest snapshot");
-        assert_eq!(key2, 2);
-        match view2 {
-            SnapshotView::Full(bitmap) => {
-                assert_eq!(bitmap.len(), 1);
-                assert!(!bitmap.get_bit(0));
-            }
-            SnapshotView::Diff(_) => panic!("newest snapshot must be full"),
-        }
-
-        assert!(iter.next().is_none());
+        assert_eq!(historical.len(), 5);
+        assert!(historical.get_bit(0));
+        assert!(historical.get_bit(1));
+        assert!(!historical.get_bit(2));
+        assert!(historical.get_bit(3));
+        assert!(historical.get_bit(4));
     }
 
     #[test]
-    fn test_clear_snapshots() {
+    fn test_batch_pop_operations() {
         let mut historical: Historical<4> = Historical::new();
 
-        for key in 1_u64..=3 {
-            historical
-                .with_batch(key, |batch| {
-                    batch.push(true);
-                })
-                .unwrap();
-        }
-
-        assert_eq!(historical.snapshot_count(), 3);
-        historical.clear_snapshots();
-        assert_eq!(historical.snapshot_count(), 0);
-    }
-
-    #[test]
-    fn test_read_access() {
-        let mut historical: Historical<4> = Historical::new();
         historical
             .with_batch(1, |batch| {
                 batch.push(true);
@@ -1252,221 +1136,529 @@ mod tests {
             })
             .unwrap();
 
-        let view: &Prunable<4> = historical.bitmap();
-        assert_eq!(view.len(), 3);
-        assert!(view.get_bit(0));
-        assert!(!view.get_bit(1));
-        assert!(view.get_bit(2));
-    }
-
-    #[test]
-    fn test_pruning_with_snapshots() {
-        let mut historical: Historical<4> = Historical::new();
-
-        // Add multiple chunks
-        let chunk1 = [0x01, 0x02, 0x03, 0x04];
-        let chunk2 = [0x05, 0x06, 0x07, 0x08];
-        let chunk3 = [0x09, 0x0A, 0x0B, 0x0C];
-
-        historical
-            .with_batch(100, |batch| {
-                batch.push_chunk(&chunk1);
-                batch.push_chunk(&chunk2);
-            })
-            .unwrap();
-
-        historical
-            .with_batch(200, |batch| {
-                batch.push_chunk(&chunk3);
-            })
-            .unwrap();
-
-        historical
-            .with_batch(300, |batch| {
-                batch.prune_to_bit(64);
-            })
-            .unwrap();
-        assert_eq!(historical.pruned_chunks(), 2);
-
-        // Snapshots should be unaffected by pruning of current state
-        let snapshot100 = historical.get_snapshot(100).unwrap();
-        assert_eq!(snapshot100.len(), 64);
-        assert_eq!(snapshot100.pruned_chunks(), 0);
-        assert_eq!(snapshot100.get_chunk(0), &chunk1);
-        assert_eq!(snapshot100.get_chunk(32), &chunk2);
-
-        let snapshot200 = historical.get_snapshot(200).unwrap();
-        assert_eq!(snapshot200.len(), 96);
-        assert_eq!(snapshot200.pruned_chunks(), 0);
-        assert_eq!(snapshot200.get_chunk(0), &chunk1);
-        assert_eq!(snapshot200.get_chunk(32), &chunk2);
-        assert_eq!(snapshot200.get_chunk(64), &chunk3);
-
-        let snapshot300 = historical.get_snapshot(300).unwrap();
-        assert_eq!(snapshot300.pruned_chunks(), 2);
-        assert_eq!(snapshot300.get_chunk(64), &chunk3);
-    }
-
-    #[test]
-    fn test_multiple_snapshots_different_states() {
-        let mut historical: Historical<4> = Historical::new();
-
-        historical.with_batch(0, |_| {}).unwrap();
-
-        historical
-            .with_batch(1, |batch| {
-                batch.push(true);
-            })
-            .unwrap();
-
+        // Pop within batch
         historical
             .with_batch(2, |batch| {
-                batch.push(false);
-                batch.push(true);
+                batch.push(false); // Add bit 3
+                let popped = batch.pop(); // Remove bit 3
+                assert!(!popped);
+                assert_eq!(batch.len(), 3); // Back to original length
             })
             .unwrap();
 
-        // Verify each snapshot has the correct state
-        let snapshot0 = historical.get_snapshot(0).unwrap();
-        assert_eq!(snapshot0.len(), 0);
-
-        let snapshot1 = historical.get_snapshot(1).unwrap();
-        assert_eq!(snapshot1.len(), 1);
-        assert!(snapshot1.get_bit(0));
-
-        let snapshot2 = historical.get_snapshot(2).unwrap();
-        assert_eq!(snapshot2.len(), 3);
-        assert!(snapshot2.get_bit(0));
-        assert!(!snapshot2.get_bit(1));
-        assert!(snapshot2.get_bit(2));
-
-        // Current state should have 3 bits
         assert_eq!(historical.len(), 3);
     }
 
     #[test]
-    fn test_diff_based_snapshots() {
-        // Test diff-based storage with reverse diff approach
+    fn test_batch_prune_operations() {
         let mut historical: Historical<4> = Historical::new();
 
+        // Create multiple chunks
         historical
-            .with_batch(100, |batch| {
-                batch.push(true);
-                batch.push(false);
+            .with_batch(1, |batch| {
+                for _ in 0..64 {
+                    batch.push(true);
+                }
             })
             .unwrap();
 
+        assert_eq!(historical.len(), 64);
+        assert_eq!(historical.pruned_chunks(), 0);
+
+        // Prune first chunk
         historical
-            .with_batch(200, |batch| {
-                batch.set_bit(1, true);
-                batch.push(true);
+            .with_batch(2, |batch| {
+                batch.prune_to_bit(32);
             })
             .unwrap();
 
-        // Verify both snapshots work
-        let snapshot100 = historical.get_snapshot(100).unwrap();
-        assert_eq!(snapshot100.len(), 2);
-        assert!(snapshot100.get_bit(0));
-        assert!(!snapshot100.get_bit(1));
-
-        let snapshot200 = historical.get_snapshot(200).unwrap();
-        assert_eq!(snapshot200.len(), 3);
-        assert!(snapshot200.get_bit(0));
-        assert!(snapshot200.get_bit(1));
-        assert!(snapshot200.get_bit(2));
+        assert_eq!(historical.len(), 64);
+        assert_eq!(historical.pruned_chunks(), 1);
     }
 
     #[test]
-    fn test_batch_set_bit_commit() {
+    fn test_commit_history_queries() {
         let mut historical: Historical<4> = Historical::new();
+
+        assert!(historical.earliest_commit().is_none());
+        assert!(historical.latest_commit().is_none());
+
+        for i in 1..=5 {
+            historical
+                .with_batch(i * 10, |batch| {
+                    batch.push(true);
+                })
+                .unwrap();
+        }
+
+        assert_eq!(historical.earliest_commit(), Some(10));
+        assert_eq!(historical.latest_commit(), Some(50));
+        assert!(historical.commit_exists(30));
+        assert!(!historical.commit_exists(25));
+
+        let commits: Vec<u64> = historical.commits().collect();
+        assert_eq!(commits, vec![10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn test_clear_history() {
+        let mut historical: Historical<4> = Historical::new();
+
+        for i in 1..=5 {
+            historical
+                .with_batch(i, |batch| {
+                    batch.push(true);
+                })
+                .unwrap();
+        }
+
+        assert_eq!(historical.commits().count(), 5);
+
+        historical.clear_history();
+
+        assert_eq!(historical.commits().count(), 0);
+        assert!(historical.earliest_commit().is_none());
+        assert!(historical.latest_commit().is_none());
+        // Current state should be preserved
+        assert_eq!(historical.len(), 5);
+    }
+
+    #[test]
+    fn test_batch_push_byte_and_chunk() {
+        let mut historical: Historical<4> = Historical::new();
+
         historical
-            .with_batch(0, |batch| {
-                batch.push(false);
+            .with_batch(1, |batch| {
+                batch.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]); // 32 bits (full chunk)
+                batch.push_byte(0xFF); // 8 more bits
+            })
+            .unwrap();
+
+        assert_eq!(historical.len(), 40);
+
+        // Verify first chunk
+        let chunk = historical.get_chunk(0);
+        assert_eq!(chunk, &[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // Check byte pushed after chunk (bits 32-39)
+        for i in 32..40 {
+            assert!(historical.get_bit(i));
+        }
+    }
+
+    #[test]
+    fn test_batch_get_chunk_with_modifications() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Create initial chunk
+        historical
+            .with_batch(1, |batch| {
+                batch.push_chunk(&[0x00, 0x00, 0x00, 0x00]);
             })
             .unwrap();
 
         let mut batch = historical.start_batch();
+
+        // Modify some bits in the chunk
         batch.set_bit(0, true);
-        batch.commit(1).unwrap();
-        drop(batch);
+        batch.set_bit(7, true);
 
-        let snapshot0 = historical.get_snapshot(0).unwrap();
-        assert_eq!(snapshot0.len(), 1);
-        assert!(!snapshot0.get_bit(0));
+        // Get chunk through batch - should show modifications
+        let chunk = batch.get_chunk(0);
 
-        let snapshot1 = historical.get_snapshot(1).unwrap();
-        assert_eq!(snapshot1.len(), 1);
-        assert!(snapshot1.get_bit(0));
+        // Check modifications are reflected
+        assert_eq!(chunk[0] & 0x01, 0x01); // bit 0 set
+        assert_eq!(chunk[0] & 0x80, 0x80); // bit 7 set
+
+        batch.commit(2).unwrap();
+
+        // Verify modifications persisted
+        let final_chunk = historical.get_chunk(0);
+        assert_eq!(final_chunk[0] & 0x01, 0x01);
+        assert_eq!(final_chunk[0] & 0x80, 0x80);
     }
 
     #[test]
-    fn test_batch_push_and_flip() {
+    fn test_empty_batch_commit() {
         let mut historical: Historical<4> = Historical::new();
 
-        {
-            let mut batch = historical.start_batch();
-            batch.push(true);
-            batch.push(false);
-            batch.commit(10).unwrap();
-        }
+        // Commit an empty batch
+        historical.with_batch(1, |_batch| {}).unwrap();
 
-        assert_eq!(historical.len(), 2);
-
-        historical
-            .with_batch(11, |batch| {
-                batch.set_bit(0, false);
-                batch.set_bit(1, true);
-            })
-            .unwrap();
-
-        let snapshot10 = historical.get_snapshot(10).unwrap();
-        assert!(snapshot10.get_bit(0));
-        assert!(!snapshot10.get_bit(1));
-
-        let snapshot11 = historical.get_snapshot(11).unwrap();
-        assert!(!snapshot11.get_bit(0));
-        assert!(snapshot11.get_bit(1));
+        assert_eq!(historical.len(), 0);
+        assert!(historical.commit_exists(1));
     }
 
     #[test]
-    fn test_batch_prune_preserves_history() {
+    fn test_method_chaining() {
         let mut historical: Historical<4> = Historical::new();
-        let chunk1 = [0xFF, 0x00, 0xFF, 0x00];
-        let chunk2 = [0xAA, 0x55, 0xAA, 0x55];
 
         historical
             .with_batch(1, |batch| {
-                batch.push_chunk(&chunk1);
-                batch.push_chunk(&chunk2);
+                batch.push(true).push(false).push(true).push_byte(0xAA);
+            })
+            .unwrap();
+
+        assert_eq!(historical.len(), 11); // 3 + 8 bits
+
+        // Now modify and chain in another batch
+        historical
+            .with_batch(2, |batch| {
+                batch.set_bit(1, true).push(true);
+            })
+            .unwrap();
+
+        assert_eq!(historical.len(), 12);
+        assert!(historical.get_bit(0));
+        assert!(historical.get_bit(1)); // Modified from false to true
+        assert!(historical.get_bit(2));
+        assert!(historical.get_bit(11)); // Newly pushed
+    }
+
+    #[test]
+    fn test_get_at_commit_basic() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Commit 1: Add 3 bits
+        historical
+            .with_batch(1, |batch| {
+                batch.push(true);
+                batch.push(false);
+                batch.push(true);
+            })
+            .unwrap();
+
+        // Current state after commit 1
+        assert_eq!(historical.len(), 3);
+        assert!(historical.get_bit(0));
+        assert!(!historical.get_bit(1));
+        assert!(historical.get_bit(2));
+
+        // Commit 2: Modify bit and append
+        historical
+            .with_batch(2, |batch| {
+                batch.set_bit(0, false);
+                batch.push(false);
+            })
+            .unwrap();
+
+        // Current state should be at commit 2
+        assert_eq!(historical.len(), 4);
+        assert!(!historical.get_bit(0));
+        assert!(!historical.get_bit(1));
+        assert!(historical.get_bit(2));
+        assert!(!historical.get_bit(3));
+
+        // Get state at commit 1
+        let state_at_1 = historical.get_at_commit(1).unwrap();
+        assert_eq!(state_at_1.len(), 3);
+        assert!(state_at_1.get_bit(0)); // Was true
+        assert!(!state_at_1.get_bit(1));
+        assert!(state_at_1.get_bit(2));
+
+        // Get state at commit 2 (should match current)
+        let state_at_2 = historical.get_at_commit(2).unwrap();
+        assert_eq!(state_at_2.len(), 4);
+        assert!(!state_at_2.get_bit(0));
+        assert!(!state_at_2.get_bit(1));
+        assert!(state_at_2.get_bit(2));
+        assert!(!state_at_2.get_bit(3));
+    }
+
+    #[test]
+    fn test_get_at_commit_multiple_modifications() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Commit 1: Initial state
+        historical
+            .with_batch(1, |batch| {
+                batch.push_chunk(&[0xFF, 0x00, 0xFF, 0x00]);
+            })
+            .unwrap();
+
+        // Commit 2: Modify some bits
+        historical
+            .with_batch(2, |batch| {
+                batch.set_bit(0, false);
+                batch.set_bit(8, true);
+            })
+            .unwrap();
+
+        // Commit 3: Modify more bits
+        historical
+            .with_batch(3, |batch| {
+                batch.set_bit(16, false);
+                batch.set_bit(24, true);
+            })
+            .unwrap();
+
+        // Verify we can get each state
+        let state_at_1 = historical.get_at_commit(1).unwrap();
+        assert_eq!(state_at_1.len(), 32);
+        assert!(state_at_1.get_bit(0)); // Original
+        assert!(!state_at_1.get_bit(8)); // Original
+        assert!(state_at_1.get_bit(16)); // Original
+        assert!(!state_at_1.get_bit(24)); // Original
+
+        let state_at_2 = historical.get_at_commit(2).unwrap();
+        assert_eq!(state_at_2.len(), 32);
+        assert!(!state_at_2.get_bit(0)); // Modified in commit 2
+        assert!(state_at_2.get_bit(8)); // Modified in commit 2
+        assert!(state_at_2.get_bit(16)); // Not yet modified
+        assert!(!state_at_2.get_bit(24)); // Not yet modified
+
+        let state_at_3 = historical.get_at_commit(3).unwrap();
+        assert_eq!(state_at_3.len(), 32);
+        assert!(!state_at_3.get_bit(0));
+        assert!(state_at_3.get_bit(8));
+        assert!(!state_at_3.get_bit(16)); // Modified in commit 3
+        assert!(state_at_3.get_bit(24)); // Modified in commit 3
+    }
+
+    #[test]
+    fn test_get_at_commit_with_appends() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Commit 1: 2 bits
+        historical
+            .with_batch(1, |batch| {
+                batch.push(true);
+                batch.push(false);
+            })
+            .unwrap();
+
+        // Commit 2: Append 2 more bits
+        historical
+            .with_batch(2, |batch| {
+                batch.push(true);
+                batch.push(true);
+            })
+            .unwrap();
+
+        // Commit 3: Append 2 more bits
+        historical
+            .with_batch(3, |batch| {
+                batch.push(false);
+                batch.push(false);
+            })
+            .unwrap();
+
+        // Verify lengths
+        let state_at_1 = historical.get_at_commit(1).unwrap();
+        assert_eq!(state_at_1.len(), 2);
+
+        let state_at_2 = historical.get_at_commit(2).unwrap();
+        assert_eq!(state_at_2.len(), 4);
+
+        let state_at_3 = historical.get_at_commit(3).unwrap();
+        assert_eq!(state_at_3.len(), 6);
+        assert_eq!(historical.len(), 6);
+    }
+
+    #[test]
+    fn test_get_at_commit_with_pruning() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Commit 1: Create 64 bits (2 chunks)
+        historical
+            .with_batch(1, |batch| {
+                batch.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]);
+                batch.push_chunk(&[0x11, 0x22, 0x33, 0x44]);
             })
             .unwrap();
 
         assert_eq!(historical.pruned_chunks(), 0);
 
-        let mut batch = historical.start_batch();
-        batch.prune_to_bit(32); // Remove the first chunk
-        batch.commit(2).unwrap();
-        drop(batch);
+        // Commit 2: Prune first chunk
+        historical
+            .with_batch(2, |batch| {
+                batch.prune_to_bit(32);
+            })
+            .unwrap();
 
         assert_eq!(historical.pruned_chunks(), 1);
 
-        let snapshot1 = historical.get_snapshot(1).unwrap();
-        assert_eq!(snapshot1.pruned_chunks(), 0);
-        assert_eq!(snapshot1.get_chunk(0), &chunk1);
-        assert_eq!(snapshot1.get_chunk(32), &chunk2);
+        // Get state at commit 1 - should have both chunks, no pruning
+        let state_at_1 = historical.get_at_commit(1).unwrap();
+        assert_eq!(state_at_1.len(), 64);
+        assert_eq!(state_at_1.pruned_chunks(), 0);
 
-        let snapshot2 = historical.get_snapshot(2).unwrap();
-        assert_eq!(snapshot2.pruned_chunks(), 1);
-        assert_eq!(snapshot2.get_chunk(32), &chunk2);
-        // The pruned chunk should still decode correctly when going back to the old snapshot
-        assert!(historical.get_snapshot(1).is_some());
+        // Verify first chunk data is restored
+        let chunk = state_at_1.get_chunk(0);
+        assert_eq!(chunk, &[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let chunk2 = state_at_1.get_chunk(32);
+        assert_eq!(chunk2, &[0x11, 0x22, 0x33, 0x44]);
+
+        // Get state at commit 2 - should have pruning
+        let state_at_2 = historical.get_at_commit(2).unwrap();
+        assert_eq!(state_at_2.len(), 64);
+        assert_eq!(state_at_2.pruned_chunks(), 1);
+
+        let chunk2_at_2 = state_at_2.get_chunk(32);
+        assert_eq!(chunk2_at_2, &[0x11, 0x22, 0x33, 0x44]);
     }
 
     #[test]
-    #[should_panic(expected = "historical batch dropped without commit")]
-    fn test_batch_drop_without_commit_panics() {
+    fn test_get_at_commit_nonexistent() {
         let mut historical: Historical<4> = Historical::new();
-        let _batch = historical.start_batch();
-        // Dropping `_batch` without committing should panic.
+
+        historical
+            .with_batch(10, |batch| {
+                batch.push(true);
+            })
+            .unwrap();
+
+        // Query non-existent commit
+        assert!(historical.get_at_commit(5).is_none());
+        assert!(historical.get_at_commit(15).is_none());
+
+        // Query existing commit
+        assert!(historical.get_at_commit(10).is_some());
+    }
+
+    #[test]
+    fn test_get_at_commit_after_pruning_history() {
+        let mut historical: Historical<4> = Historical::new();
+
+        for i in 1..=5 {
+            historical
+                .with_batch(i, |batch| {
+                    for _ in 0..i {
+                        batch.push(true);
+                    }
+                })
+                .unwrap();
+        }
+
+        // Prune old history
+        historical.prune_commits_before(3);
+
+        // Should not be able to get commits 1 and 2
+        assert!(historical.get_at_commit(1).is_none());
+        assert!(historical.get_at_commit(2).is_none());
+
+        // Should be able to get commits 3, 4, 5
+        assert!(historical.get_at_commit(3).is_some());
+        assert!(historical.get_at_commit(4).is_some());
+        assert!(historical.get_at_commit(5).is_some());
+
+        let state_at_3 = historical.get_at_commit(3).unwrap();
+        assert_eq!(state_at_3.len(), 6); // 1+2+3 bits
+    }
+
+    #[test]
+    fn test_get_at_commit_complex_scenario() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Commit 1: Initial bits
+        historical
+            .with_batch(1, |batch| {
+                batch.push(true);
+                batch.push(true);
+                batch.push(true);
+                batch.push(true);
+            })
+            .unwrap();
+
+        // Commit 2: Modify and append
+        historical
+            .with_batch(2, |batch| {
+                batch.set_bit(0, false);
+                batch.set_bit(2, false);
+                batch.push(false);
+                batch.push(false);
+            })
+            .unwrap();
+
+        // Commit 3: More modifications
+        historical
+            .with_batch(3, |batch| {
+                batch.set_bit(1, false);
+                batch.set_bit(3, false);
+                batch.push(true);
+                batch.push(true);
+            })
+            .unwrap();
+
+        // Verify state at each commit
+        let state_at_1 = historical.get_at_commit(1).unwrap();
+        assert_eq!(state_at_1.len(), 4);
+        for i in 0..4 {
+            assert!(state_at_1.get_bit(i));
+        }
+
+        let state_at_2 = historical.get_at_commit(2).unwrap();
+        assert_eq!(state_at_2.len(), 6);
+        assert!(!state_at_2.get_bit(0)); // Modified
+        assert!(state_at_2.get_bit(1)); // Unchanged
+        assert!(!state_at_2.get_bit(2)); // Modified
+        assert!(state_at_2.get_bit(3)); // Unchanged
+        assert!(!state_at_2.get_bit(4)); // Appended
+        assert!(!state_at_2.get_bit(5)); // Appended
+
+        let state_at_3 = historical.get_at_commit(3).unwrap();
+        assert_eq!(state_at_3.len(), 8);
+        assert!(!state_at_3.get_bit(0));
+        assert!(!state_at_3.get_bit(1)); // Modified in commit 3
+        assert!(!state_at_3.get_bit(2));
+        assert!(!state_at_3.get_bit(3)); // Modified in commit 3
+        assert!(state_at_3.get_bit(6)); // Appended in commit 3
+        assert!(state_at_3.get_bit(7)); // Appended in commit 3
+    }
+
+    #[test]
+    fn test_get_at_commit_with_pop_and_append() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Commit 1: Add 5 bits
+        historical
+            .with_batch(1, |batch| {
+                for i in 0..5 {
+                    batch.push(i % 2 == 0);
+                }
+            })
+            .unwrap();
+        assert_eq!(historical.len(), 5);
+
+        // Commit 2: Pop 2 bits
+        historical
+            .with_batch(2, |batch| {
+                batch.pop();
+                batch.pop();
+            })
+            .unwrap();
+        assert_eq!(historical.len(), 3);
+
+        // Commit 3: Append 3 bits
+        historical
+            .with_batch(3, |batch| {
+                batch.push(true);
+                batch.push(true);
+                batch.push(true);
+            })
+            .unwrap();
+        assert_eq!(historical.len(), 6);
+
+        // Verify reconstruction at each commit
+        let state_1 = historical.get_at_commit(1).unwrap();
+        assert_eq!(state_1.len(), 5);
+        assert!(state_1.get_bit(0)); // true
+        assert!(!state_1.get_bit(1)); // false
+        assert!(state_1.get_bit(2)); // true
+        assert!(!state_1.get_bit(3)); // false
+        assert!(state_1.get_bit(4)); // true
+
+        let state_2 = historical.get_at_commit(2).unwrap();
+        assert_eq!(state_2.len(), 3);
+        assert!(state_2.get_bit(0));
+        assert!(!state_2.get_bit(1));
+        assert!(state_2.get_bit(2));
+
+        let state_3 = historical.get_at_commit(3).unwrap();
+        assert_eq!(state_3.len(), 6);
+        assert!(state_3.get_bit(3));
+        assert!(state_3.get_bit(4));
+        assert!(state_3.get_bit(5));
     }
 }
