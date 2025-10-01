@@ -1,7 +1,7 @@
 use commonware_cryptography::Signer;
 use commonware_utils::NZU32;
 use governor::Quota;
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 /// Configuration for the peer-to-peer instance.
 ///
@@ -54,8 +54,17 @@ pub struct Config<C: Signer> {
     /// Quota for connection attempts per peer (incoming or outgoing).
     pub allowed_connection_rate_per_peer: Quota,
 
-    /// Quota for incoming connections across all peers.
-    pub allowed_incoming_connection_rate: Quota,
+    /// Maximum number of concurrent handshake attempts allowed.
+    pub max_concurrent_handshakes: NonZeroU32,
+
+    /// Quota for handshake attempts originating from a single IP address.
+    ///
+    /// To cap the number of handshakes concurrently attempted for a single
+    /// IP, set this to [Config::handshake_timeout].
+    pub allowed_handshake_rate_per_ip: Quota,
+
+    /// Quota for handshake attempts originating from a single IP subnet.
+    pub allowed_handshake_rate_per_subnet: Quota,
 
     /// Frequency at which we send ping messages to peers.
     pub ping_frequency: Duration,
@@ -104,10 +113,12 @@ impl<C: Signer> Config<C> {
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
-            allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
+            max_concurrent_handshakes: NZU32!(512),
+            allowed_handshake_rate_per_ip: Quota::with_period(Duration::from_secs(5)).unwrap(), // 1 concurrent handshake per IP
+            allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             ping_frequency: Duration::from_secs(50),
             allowed_ping_rate: Quota::per_minute(NZU32!(2)),
-            dial_frequency: Duration::from_millis(1_000),
+            dial_frequency: Duration::from_secs(1),
             query_frequency: Duration::from_secs(60),
             tracked_peer_sets: 4,
         }
@@ -117,8 +128,9 @@ impl<C: Signer> Config<C> {
     /// can be useful when running local demos.
     ///
     /// # Warning
+    ///
     /// It is not recommended to use this configuration in production.
-    pub fn aggressive(
+    pub fn local(
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
@@ -138,7 +150,9 @@ impl<C: Signer> Config<C> {
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
-            allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
+            max_concurrent_handshakes: NZU32!(1_024),
+            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 80 concurrent handshakes per IP
+            allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             ping_frequency: Duration::from_secs(5),
             allowed_ping_rate: Quota::per_second(NZU32!(2)),
             dial_frequency: Duration::from_millis(500),
@@ -162,11 +176,13 @@ impl<C: Signer> Config<C> {
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(4)),
-            allowed_incoming_connection_rate: Quota::per_second(NZU32!(1_024)),
+            max_concurrent_handshakes: NZU32!(1_024),
+            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP
+            allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             ping_frequency: Duration::from_secs(1),
             allowed_ping_rate: Quota::per_second(NZU32!(5)),
             dial_frequency: Duration::from_millis(200),
-            query_frequency: Duration::from_millis(5_000),
+            query_frequency: Duration::from_secs(5),
             tracked_peer_sets: 4,
         }
     }
