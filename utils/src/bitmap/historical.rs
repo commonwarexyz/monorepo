@@ -338,13 +338,51 @@ impl<const N: usize> Historical<N> {
         Some(state)
     }
 
+    /// Efficiently push bits to extend the bitmap to target length.
+    /// Optimized to push entire chunks when possible.
+    fn push_to_length(&self, state: &mut Prunable<N>, target_len: u64) {
+        while state.len() < target_len {
+            let remaining = target_len - state.len();
+            let next_bit = state.len() % Prunable::<N>::CHUNK_SIZE_BITS;
+
+            // If we're at a chunk boundary and need at least a full chunk, push an entire chunk
+            if next_bit == 0 && remaining >= Prunable::<N>::CHUNK_SIZE_BITS {
+                state.push_chunk(&[0u8; N]);
+            } else {
+                // Otherwise push individual bits
+                state.push(false);
+            }
+        }
+    }
+
+    /// Efficiently pop bits to shrink the bitmap to target length.
+    /// Optimized to pop entire chunks when possible.
+    fn pop_to_length(&self, state: &mut Prunable<N>, target_len: u64) {
+        while state.len() > target_len {
+            let excess = state.len() - target_len;
+            let next_bit = state.len() % Prunable::<N>::CHUNK_SIZE_BITS;
+
+            // If current chunk is empty and we need to remove at least a full chunk, pop entire chunk
+            if next_bit == 0 && excess >= Prunable::<N>::CHUNK_SIZE_BITS {
+                state.pop(); // This removes the empty chunk
+            } else {
+                // Otherwise pop individual bits
+                state.pop();
+            }
+        }
+    }
+
     /// Apply a reverse diff to transform newer_state into the previous state (in-place).
     ///
-    /// Simple algorithm:
-    /// 1. Chunks in old but pruned in new → prepend them back
-    /// 2. Chunks in old but removed in new → restore them
-    /// 3. Chunks in both but modified → update data
-    /// 4. Chunks in new but not in old → remove them
+    /// Algorithm:
+    /// 1. Restore pruned chunks by prepending them back (unprune)
+    /// 2. Adjust bitmap structure to target length (extend/shrink as needed)
+    /// 3. Update chunk data for Modified and Removed chunks
+    /// 4. Set next_bit to match target length exactly
+    ///
+    /// Key insight: We adjust the bitmap's STRUCTURE first (ensuring all chunks exist),
+    /// then update chunk DATA. This avoids the alignment issues that occur when trying
+    /// to push chunks onto a non-aligned bitmap.
     fn apply_reverse_diff(&self, newer_state: &mut Prunable<N>, diff: &CommitDiff<N>) {
         let target_len = diff.metadata.len;
         let target_pruned = diff.metadata.pruned_chunks;
@@ -356,18 +394,11 @@ impl<const N: usize> Historical<N> {
             "invariant violation: target_pruned ({target_pruned}) > newer_pruned ({newer_pruned})"
         );
 
-        // Phase 1: Restore pruned chunks (left side)
-        // ============================================
-        // Chunks that were pruned from old to new state must be prepended back.
-        // Pruned chunks are exactly those in range [target_pruned, newer_pruned).
-        // We collect them in order of increasing chunk index, then reverse for prepending.
-
+        // Phase 1: Restore pruned chunks
         assert!(
             target_pruned <= newer_pruned,
             "invariant violation: target_pruned ({target_pruned}) > newer_pruned ({newer_pruned})"
         );
-
-        // Unprune chunks that were pruned from old to new state.
         for raw_chunk_idx in (target_pruned..newer_pruned).rev() {
             let Some(ChunkChange::Pruned(chunk)) = diff.changes.get(&raw_chunk_idx) else {
                 panic!("chunk {raw_chunk_idx} should be Pruned in diff");
@@ -375,47 +406,36 @@ impl<const N: usize> Historical<N> {
             newer_state.unprune_chunks(&[*chunk]);
         }
 
-        // Update modified chunks that exist in both old and new state.
+        // Phase 2: Adjust bitmap structure to target length
+        if newer_state.len() < target_len {
+            self.push_to_length(newer_state, target_len);
+        } else if newer_state.len() > target_len {
+            self.pop_to_length(newer_state, target_len);
+        }
+
+        // Phase 3: Update chunk data
         for (&raw_chunk_idx, change) in diff
             .changes
             .iter()
             .filter(|(chunk_idx, _)| **chunk_idx >= newer_pruned)
         {
-            if let ChunkChange::Modified(old_data) = change {
-                newer_state.set_chunk_by_index(raw_chunk_idx, old_data);
-            }
-        }
-
-        // All remaining chunk changes are either Added or Removed.
-        let mut saw_added = false;
-        let mut saw_removed = false;
-        for (&_, change) in diff.changes.iter().rev() {
             match change {
+                ChunkChange::Modified(old_data) | ChunkChange::Removed(old_data) => {
+                    // Both cases: chunk exists in target, just update its data
+                    newer_state.set_chunk_by_index(raw_chunk_idx, old_data);
+                }
                 ChunkChange::Added => {
-                    saw_added = true;
-                    assert!(!saw_removed, "invariant violation: saw Added after Removed");
-                    // Chunk was added from old to new: remove it by popping
-                    newer_state.pop();
-                }
-                ChunkChange::Removed(old_data) => {
-                    saw_removed = true;
-                    assert!(!saw_added, "invariant violation: saw Removed after Added");
-                    // Chunk was removed from old to new: restore it by pushing
-                    newer_state.push_chunk(old_data);
-                }
-                _ => {
-                    // Hit Modified or Pruned: we handled these already
+                    // Chunk didn't exist in target - already handled by shrinking in Phase 2
                     break;
                 }
+                ChunkChange::Pruned(_) => {
+                    panic!("pruned chunk {raw_chunk_idx} should have been handled")
+                }
             }
         }
 
-        while newer_state.len() > target_len {
-            newer_state.pop();
-        }
-
-        debug_assert_eq!(newer_state.pruned_chunks(), target_pruned);
-        debug_assert_eq!(newer_state.len(), target_len);
+        assert_eq!(newer_state.pruned_chunks(), target_pruned);
+        assert_eq!(newer_state.len(), target_len);
     }
 
     /// Check if a commit exists.
