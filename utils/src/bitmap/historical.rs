@@ -110,9 +110,11 @@ struct CommitMetadata {
 enum ChunkChange<const N: usize> {
     /// Chunk was modified (contains old value before the change).
     Modified([u8; N]),
+    /// Chunk was removed from the right side (contains old value before removal).
+    Removed([u8; N]),
     /// Chunk was added (did not exist before).
     Added,
-    /// Chunk was pruned/removed (contains old value before pruning).
+    /// Chunk was pruned from the left side (contains old value before pruning).
     Pruned([u8; N]),
 }
 
@@ -330,119 +332,90 @@ impl<const N: usize> Historical<N> {
         // Apply reverse diffs from newest down to target (exclusive)
         // Each reverse diff at commit N describes the state before commit N
         for (_commit, diff) in self.commits.range(commit_number + 1..).rev() {
-            state = self.apply_reverse_diff(state, diff);
+            self.apply_reverse_diff(&mut state, diff);
         }
 
         Some(state)
     }
 
-    /// Apply a reverse diff to a bitmap, producing the previous state.
-    fn apply_reverse_diff(&self, newer_state: Prunable<N>, diff: &CommitDiff<N>) -> Prunable<N> {
-        // The diff describes the state before the commit
-        // We need to transform newer_state into that older state
-
-        // Start with the target metadata
+    /// Apply a reverse diff to transform newer_state into the previous state (in-place).
+    ///
+    /// Simple algorithm:
+    /// 1. Chunks in old but pruned in new → prepend them back
+    /// 2. Chunks in old but removed in new → restore them
+    /// 3. Chunks in both but modified → update data
+    /// 4. Chunks in new but not in old → remove them
+    fn apply_reverse_diff(&self, newer_state: &mut Prunable<N>, diff: &CommitDiff<N>) {
         let target_len = diff.metadata.len;
         let target_pruned = diff.metadata.pruned_chunks;
-
-        // Create result bitmap with correct pruning
-        let mut result = Prunable::new_with_pruned_chunks(target_pruned);
-
-        if target_len == 0 {
-            return result;
-        }
-
-        // Calculate the raw chunk indices we need to reconstruct
-        // (accounting for pruning)
-        let raw_first_chunk = target_pruned;
-        let raw_last_chunk = Prunable::<N>::raw_chunk_index(target_len - 1);
-
-        // Edge case: If all bits are pruned (target_len <= pruned bits),
-        // raw_last_chunk will be < raw_first_chunk. Return empty bitmap.
-        if raw_last_chunk < raw_first_chunk {
-            return result;
-        }
-
-        let last_chunk_bits = ((target_len - 1) % Prunable::<N>::CHUNK_SIZE_BITS) + 1;
-
-        // Reconstruct complete chunks (all but the last)
-        for raw_chunk_idx in raw_first_chunk..raw_last_chunk {
-            let chunk_data = self.get_chunk_from_diff_or_newer(&newer_state, diff, raw_chunk_idx);
-            result.push_chunk(&chunk_data);
-        }
-
-        // Handle the last chunk (may be partial)
-        let last_chunk_data = self.get_chunk_from_diff_or_newer(&newer_state, diff, raw_last_chunk);
-
-        if last_chunk_bits < Prunable::<N>::CHUNK_SIZE_BITS {
-            // Partial chunk, push bits one by one
-            for bit_idx in 0..last_chunk_bits as usize {
-                let byte_idx = bit_idx / 8;
-                let bit_in_byte = bit_idx % 8;
-                let bit_value = (last_chunk_data[byte_idx] >> bit_in_byte) & 1 == 1;
-                result.push(bit_value);
-            }
-        } else {
-            // Complete chunk
-            result.push_chunk(&last_chunk_data);
-        }
-
-        result
-    }
-
-    /// Get chunk data for reconstruction, either from the diff or from the newer state.
-    ///
-    /// `raw_chunk_idx` is the global chunk index (not adjusted for target pruning).
-    fn get_chunk_from_diff_or_newer(
-        &self,
-        newer_state: &Prunable<N>,
-        diff: &CommitDiff<N>,
-        raw_chunk_idx: usize,
-    ) -> [u8; N] {
-        // Check if this chunk has a recorded change
-        if let Some(change) = diff.changes.get(&raw_chunk_idx) {
-            match change {
-                ChunkChange::Modified(old_data) => {
-                    // Use the old data from before the modification
-                    return *old_data;
-                }
-                ChunkChange::Added => {
-                    // This is a logic bug: we're reconstructing chunks up to target_len
-                    // (the length before the commit), so we shouldn't be asking for
-                    // chunks that were added in this commit.
-                    panic!(
-                        "attempted to reconstruct chunk {raw_chunk_idx} marked as Added at target_len {}",
-                        diff.metadata.len
-                    );
-                }
-                ChunkChange::Pruned(old_data) => {
-                    // This chunk was pruned, use the captured old data
-                    return *old_data;
-                }
-            }
-        }
-
-        // No change recorded, so the chunk was the same in both states
-        // Get it from the newer state, adjusting for pruning differences
         let newer_pruned = newer_state.pruned_chunks();
 
-        // If a chunk was pruned between target state and newer state,
-        // we should have captured it in the diff.
+        // Invariant: Pruning only increases over time
         assert!(
-            raw_chunk_idx >= newer_pruned,
-            "chunk {raw_chunk_idx} (raw) is pruned in newer state (pruned={})",
-            newer_pruned
+            target_pruned <= newer_pruned,
+            "invariant violation: target_pruned ({target_pruned}) > newer_pruned ({newer_pruned})"
         );
 
-        // The chunk should either be in the diff (if it changed)
-        // or accessible in the newer state (if unchanged).
-        let newer_chunk_idx = raw_chunk_idx - newer_pruned;
+        // Phase 1: Restore pruned chunks (left side)
+        // ============================================
+        // Chunks that were pruned from old to new state must be prepended back.
+        // Pruned chunks are exactly those in range [target_pruned, newer_pruned).
+        // We collect them in order of increasing chunk index, then reverse for prepending.
+
         assert!(
-            newer_chunk_idx < newer_state.chunks_len(),
-            "chunk {raw_chunk_idx} (raw) is out of bounds in newer state"
+            target_pruned <= newer_pruned,
+            "invariant violation: target_pruned ({target_pruned}) > newer_pruned ({newer_pruned})"
         );
 
-        *newer_state.get_chunk_by_index(newer_chunk_idx)
+        // Unprune chunks that were pruned from old to new state.
+        for raw_chunk_idx in (target_pruned..newer_pruned).rev() {
+            let Some(ChunkChange::Pruned(chunk)) = diff.changes.get(&raw_chunk_idx) else {
+                panic!("chunk {raw_chunk_idx} should be Pruned in diff");
+            };
+            newer_state.unprune_chunks(&[*chunk]);
+        }
+
+        // Update modified chunks that exist in both old and new state.
+        for (&raw_chunk_idx, change) in diff
+            .changes
+            .iter()
+            .filter(|(chunk_idx, _)| **chunk_idx >= newer_pruned)
+        {
+            if let ChunkChange::Modified(old_data) = change {
+                newer_state.set_chunk_by_index(raw_chunk_idx, old_data);
+            }
+        }
+
+        // All remaining chunk changes are either Added or Removed.
+        let mut saw_added = false;
+        let mut saw_removed = false;
+        for (&_, change) in diff.changes.iter().rev() {
+            match change {
+                ChunkChange::Added => {
+                    saw_added = true;
+                    assert!(!saw_removed, "invariant violation: saw Added after Removed");
+                    // Chunk was added from old to new: remove it by popping
+                    newer_state.pop();
+                }
+                ChunkChange::Removed(old_data) => {
+                    saw_removed = true;
+                    assert!(!saw_added, "invariant violation: saw Removed after Added");
+                    // Chunk was removed from old to new: restore it by pushing
+                    newer_state.push_chunk(old_data);
+                }
+                _ => {
+                    // Hit Modified or Pruned: we handled these already
+                    break;
+                }
+            }
+        }
+
+        while newer_state.len() > target_len {
+            newer_state.pop();
+        }
+
+        debug_assert_eq!(newer_state.pruned_chunks(), target_pruned);
+        debug_assert_eq!(newer_state.len(), target_len);
     }
 
     /// Check if a commit exists.
@@ -777,12 +750,20 @@ impl<const N: usize> Historical<N> {
         // Capture all chunks between the new and old endpoints.
         for chunk_idx in new_last_chunk..=old_last_chunk {
             changes.entry(chunk_idx).or_insert_with(|| {
-                // Popped chunks must have existed in the base bitmap at batch creation.
-                // If get_chunk_if_exists returns None, that's an invariant violation.
                 let old_chunk = self
                     .get_chunk_if_exists(chunk_idx)
                     .expect("chunk must exist in base bitmap for popped bits");
-                ChunkChange::Modified(old_chunk)
+
+                // Determine if this chunk is partially kept or completely removed
+                let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
+
+                if batch.projected_len > chunk_start_bit {
+                    // Chunk spans the new length boundary → partially kept (Modified)
+                    ChunkChange::Modified(old_chunk)
+                } else {
+                    // Chunk is completely beyond the new length → fully removed (Removed)
+                    ChunkChange::Removed(old_chunk)
+                }
             });
         }
     }

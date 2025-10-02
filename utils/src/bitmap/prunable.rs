@@ -181,6 +181,44 @@ impl<const N: usize> Prunable<N> {
         self.pruned_chunks = chunk_num;
     }
 
+    /// Overwrite a chunk's data by its raw (unpruned) chunk index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chunk is pruned or out of bounds.
+    pub(super) fn set_chunk_by_index(&mut self, raw_chunk_idx: usize, chunk_data: &[u8; N]) {
+        assert!(
+            raw_chunk_idx >= self.pruned_chunks,
+            "cannot set pruned chunk {raw_chunk_idx} (pruned_chunks: {})",
+            self.pruned_chunks
+        );
+        let bitmap_chunk_idx = raw_chunk_idx - self.pruned_chunks;
+        self.bitmap.set_chunk_by_index(bitmap_chunk_idx, chunk_data);
+    }
+
+    /// Unpruned chunks by prepending them in the order provided.
+    ///
+    /// The caller must provide chunks in the order they should appear after prepending
+    /// (i.e., reversed from the order they were pruned).
+    ///
+    /// # Panics
+    ///
+    /// Panics if chunks.len() > self.pruned_chunks.
+    pub(super) fn unprune_chunks(&mut self, chunks: &[[u8; N]]) {
+        assert!(
+            chunks.len() <= self.pruned_chunks,
+            "cannot unpruned {} chunks (only {} pruned)",
+            chunks.len(),
+            self.pruned_chunks
+        );
+
+        for chunk in chunks.iter() {
+            self.bitmap.prepend_chunk(chunk);
+        }
+
+        self.pruned_chunks -= chunks.len();
+    }
+
     /* Indexing Helpers */
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
