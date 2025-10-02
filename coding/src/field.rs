@@ -154,6 +154,9 @@ impl F {
     /// That enables optimizations when doing NTTs, and things like that.
     pub const ROOT_OF_UNITY: Self = Self(0xee41f5320c4ea145);
 
+    /// An element guaranteed not to be any power of [Self::ROOT_OF_UNITY].
+    pub const NOT_ROOT_OF_UNITY: Self = Self(0x79bc2f50acd74161);
+
     /// Construct a 2^lg_k root of unity.
     ///
     /// This will fail for lg_k > 32.
@@ -238,6 +241,11 @@ mod test {
     #[test]
     fn test_root_of_unity_calculation() {
         assert_eq!(F::ROOT_OF_UNITY, F::GENERATOR.exp((P - 1) >> 32));
+    }
+
+    #[test]
+    fn test_not_root_of_unity_calculation() {
+        assert_eq!(F::NOT_ROOT_OF_UNITY, F::GENERATOR.exp(1 << 32));
     }
 
     #[test]

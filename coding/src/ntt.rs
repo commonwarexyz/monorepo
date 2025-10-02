@@ -1,5 +1,7 @@
 use std::ops::{Index, IndexMut};
 
+use commonware_utils::BitVec;
+
 use crate::field::F;
 
 /// Reverse the first `bit_width` bits of `i`.
@@ -75,8 +77,6 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
     // In general, with 2^n rows, we need n stages.
     let stages = {
         let mut out = vec![(0usize, F::zero()); lg_rows];
-        // In the case of the inverse algorithm, we want to undo multiplication
-        // by w_i, so we need the inverse.
         let mut w_i = w;
         for i in (0..lg_rows).rev() {
             out[i] = (i, w_i);
@@ -128,6 +128,26 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
             }
             i += 2 * skip;
         }
+    }
+}
+
+/// A single column of some larger data.
+///
+/// This allows us to easily do NTTs over partial segments of some bigger matrix.
+struct Column<'a> {
+    data: &'a mut [F],
+}
+
+impl<'a> Index<(usize, usize)> for Column<'a> {
+    type Output = F;
+
+    fn index(&self, (i, _): (usize, usize)) -> &Self::Output {
+        &self.data[i]
+    }
+}
+impl<'a> IndexMut<(usize, usize)> for Column<'a> {
+    fn index_mut(&mut self, (i, _): (usize, usize)) -> &mut Self::Output {
+        &mut self.data[i]
     }
 }
 
@@ -214,6 +234,248 @@ impl Index<(usize, usize)> for Matrix {
 impl IndexMut<(usize, usize)> for Matrix {
     fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut Self::Output {
         &mut self.data[self.cols * i + j]
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct Polynomial {
+    coefficients: Vec<F>,
+}
+
+impl Polynomial {
+    /// Create a polynomial which vanishes (evaluates to 0) except at a few points.
+    ///
+    /// It's assumed that `except` is a bit vector with length a power of 2.
+    ///
+    /// For each index i NOT IN `except`, the resulting polynomial will evalute
+    /// to w^i, where w is a `except.len()` root of unity.
+    ///
+    /// e.g. with `except` = 1001, then the resulting polynomial will
+    /// evaluate to 0 at w^1 and w^2, where w is a 4th root of unity.
+    fn vanishing(except: &BitVec) -> Self {
+        // Algorithm taken from: https://ethresear.ch/t/reed-solomon-erasure-code-recovery-in-n-log-2-n-time-with-ffts/3039.
+        // The basic idea of the algorithm is that given a set of indices S,
+        // we can split it in two: the even indices (first bit = 0) and the odd indices.
+        // We compute two vanishing polynomials over
+        //
+        //   S_L := {i / 2 | i in S}
+        //   S_R := {(i - 1) / 2 | i in S}
+        //
+        // Using a domain of half the size. i.e. instead of w, they use w^2 as the root.
+        //
+        // V_L vanishes at (w^2)^(i / 2) for each i in S, i.e. w^i, for each even i in S.
+        // Similarly, V_R vanishes at (w^2)^((i - 1) / 2) = w^(i - 1), for each odd i in S.
+        //
+        // To combine these into one polynomial, we multiply the roots of V_R by w, so that it
+        // vanishes at the w^i (for odd i) instead of w^(i - 1). To multiply the roots of a polynomial
+        //
+        //   P(X) := a0 + a1 X + a2 X^2 + ...
+        //
+        // by some factor z, it suffices to divide the ith coefficient by z^i:
+        //
+        //   Q(X) := a0 + (a1 / z) X + (a2 / z^2) X^2 + ...
+        //
+        // Notice that Q(z X) = P(X), so if P(x) = 0, then Q(z x) = 0, so we've multiplied
+        // the roots by a factor of z.
+        //
+        // After multiplying the roots of V_R by w, we can then multiply the resulting polynomial
+        // with V_L, producing a polynomial which vanishes at the right indices.
+        //
+        // To multiply efficiently, we can do multiplication over the evaluation domain:
+        // we perform an NTT over each polynomial, multiplie the evaluations pointwise,
+        // and then perform an inverse NTT to get the result. We just need to make sure that
+        // when we perform the NTT, we've added enough extra 0 coefficients in each polynomial
+        // to accomodate the extra degree. e.g. if we have two polynomials of degree 1, then
+        // we need to make sure to pad them to have enough coefficients for a polynomial of degree 2,
+        // so that we can correctly interpolate the result back.
+        //
+        // The tricky part is transforming this algorithm into an iterative one, and respecting
+        // the reverse bit order of the coefficients we need
+        let rows = except.len();
+        let padded_rows = rows.next_power_of_two();
+        let zeroes = except.count_zeros() + padded_rows - rows;
+        assert!(zeroes < padded_rows, "too many points to vanish over");
+        let lg_rows = padded_rows.ilog2();
+        // At each iteration, we split `except` into sections.
+        // Each section has a polynomial associated with it, which should
+        // be the polynomial that vanishes over all the 0 bits of that section,
+        // or the 0 polynomial if that section has no 0 bits.
+        //
+        // The sections are organized into a tree:
+        //
+        // 0xx             1xx
+        // 00x     01x     10x         11x
+        // 000 001 010 011 100 101 110 111
+        //
+        // The first half of the sections are even, the second half are odd.
+        // The first half of the first half have their first two bits set to 00,
+        // the second half of the first half have their first two bits set to 01,
+        // and so on.
+        //
+        // In other words, the ith index in except becomes the i.reverse_bits()
+        // section.
+        //
+        // How many polynomials do we have? (Potentially 0 ones).
+        let mut polynomial_count = padded_rows;
+        // How many coefficients does each polynomial have?
+        let mut polynomial_size: usize = 2;
+        // For the first iteration, each
+        let mut polynomials = vec![F::zero(); 2 * padded_rows];
+        let mut active = BitVec::with_capacity(polynomial_count);
+        for i in 0..polynomial_count {
+            let rev_i = reverse_bits(lg_rows, i as u64) as usize;
+            if !except.get(rev_i).unwrap_or(false) {
+                polynomials[2 * i] = -F::one();
+                polynomials[2 * i + 1] = F::one();
+                active.push(true);
+            } else {
+                active.push(false);
+            }
+        }
+        // Rather than store w at each iteration, and divide by it, just store its inverse,
+        // allowing us to multiply by it.
+        let w_invs = {
+            // since w^(2^lg_rows) = 1, w^(2^lg_rows - 1) * w = 1,
+            // making that left-hand term the inverse of w.
+            let mut w_inv = F::root_of_unity(lg_rows as u8)
+                .expect("too many rows to create vanishing polynomial")
+                .exp((1 << lg_rows) - 1);
+            let mut out = vec![F::zero(); lg_rows as usize];
+            for i in 0..lg_rows as usize {
+                out[i] = w_inv;
+                w_inv = w_inv * w_inv;
+            }
+            out.reverse();
+            out
+        };
+        // When we multiply
+        let mut scratch: Vec<F> = Vec::with_capacity(padded_rows);
+        for w_inv in w_invs.into_iter() {
+            // After this iteration, we're going to end up with half the polynomials
+            polynomial_count >>= 1;
+            // and each of them will be twice as large.
+            let new_polynomial_size = polynomial_size << 1;
+            // Our goal is to construct the ith polynomial.
+            for i in 0..polynomial_count {
+                let start = new_polynomial_size * i;
+                let has_left = active.get(2 * i).unwrap_or(false);
+                let has_right = active.get(2 * i + 1).unwrap_or(false);
+                match (has_left, has_right) {
+                    // No polynomials to combine.
+                    (false, false) => {}
+                    // We need to multiply the roots of the right side,
+                    // but then it can just expand to fill the entire polynomial.
+                    (false, true) => {
+                        let slice = &mut polynomials[start..start + new_polynomial_size];
+                        // Scale the roots of the right side by w.
+                        let lg_p_size = polynomial_size.ilog2();
+                        let mut w_j = F::one();
+                        for j in 0..polynomial_size {
+                            let index =
+                                polynomial_size + reverse_bits(lg_p_size, j as u64) as usize;
+                            slice[index] = slice[index] * w_j;
+                            w_j = w_j * w_inv;
+                        }
+                        // Expand the right side to occupy the entire space.
+                        // The left side must be 0s.
+                        for j in 0..polynomial_size {
+                            slice.swap(polynomial_size + j, 2 * j);
+                        }
+                    }
+                    // No need to multiply roots, but we do need to expand the left side.
+                    (true, false) => {
+                        let slice = &mut polynomials[start..start + new_polynomial_size];
+                        // Expand the left side to occupy the entire space.
+                        // The right side must be 0s.
+                        for j in (0..polynomial_size).rev() {
+                            slice.swap(j, 2 * j);
+                        }
+                    }
+                    // We need to combine the two doing an actual multiplication.
+                    (true, true) => {
+                        debug_assert_eq!(scratch.len(), 0);
+                        scratch.resize(new_polynomial_size, F::zero());
+                        let slice = &mut polynomials[start..start + new_polynomial_size];
+
+                        let lg_p_size = polynomial_size.ilog2();
+                        let mut w_j = F::one();
+                        for j in 0..polynomial_size {
+                            let index =
+                                polynomial_size + reverse_bits(lg_p_size, j as u64) as usize;
+                            slice[index] = slice[index] * w_j;
+                            w_j = w_j * w_inv;
+                        }
+
+                        // Expand the right side to occupy all of scratch.
+                        // Clear the right side.
+                        for j in 0..polynomial_size {
+                            scratch[2 * j] = slice[polynomial_size + j];
+                            slice[polynomial_size + j] = F::zero();
+                        }
+
+                        // Expand the left side to occupy the entire space.
+                        // The right side has been cleared above.
+                        for j in (0..polynomial_size).rev() {
+                            slice.swap(j, 2 * j);
+                        }
+
+                        // Multiply the polynomials together, by first evaluating each of them,
+                        // then multiplying their evaluations, producing (f * g) evaluated over
+                        // the domain, which we can then interpolate back.
+                        ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: &mut scratch });
+                        ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: slice });
+                        for (s_i, p_i) in scratch.drain(..).zip(slice.iter_mut()) {
+                            *p_i = *p_i * s_i
+                        }
+                        ntt::<false, _>(new_polynomial_size, 1, &mut Column { data: slice })
+                    }
+                }
+                // If there was a polynomial on the left or the right, then on the next iteration
+                // the combined section will have data to process, so we need to set it to true
+                active.set_to(i, has_left | has_right);
+            }
+            polynomial_size = new_polynomial_size;
+        }
+        // If the final polynomial is inactive, there are no points to vanish over,
+        // so we want to return the polynomial f(X) = 1.
+        if !active.get(0).unwrap_or(false) {
+            let mut coefficients = vec![F::zero(); padded_rows];
+            coefficients[0] = F::one();
+            return Self { coefficients };
+        }
+        // We have a polynomial that's twice the size we need, so we need to truncate it.
+        // This is the opposite of the sub-routine we had for expanding the left side to fit
+        // the entire polynomial.
+        for i in 0..padded_rows {
+            polynomials.swap(i, 2 * i);
+        }
+        polynomials.truncate(padded_rows);
+        Self {
+            coefficients: polynomials,
+        }
+    }
+
+    #[cfg(test)]
+    fn evaluate(&self, point: F) -> F {
+        let mut out = F::zero();
+        let rows = self.coefficients.len();
+        let lg_rows = rows.ilog2();
+        for i in (0..rows).rev() {
+            out = out * point + self.coefficients[reverse_bits(lg_rows, i as u64) as usize];
+        }
+        out
+    }
+
+    #[cfg(test)]
+    fn degree(&self) -> usize {
+        let rows = self.coefficients.len();
+        let lg_rows = rows.ilog2();
+        for i in (0..rows).rev() {
+            if self.coefficients[reverse_bits(lg_rows, i as u64) as usize] != F::zero() {
+                return i;
+            }
+        }
+        0
     }
 }
 
@@ -354,6 +616,18 @@ mod test {
         })
     }
 
+    fn any_bit_vec_not_all_0(max_log_rows: usize) -> impl Strategy<Value = BitVec> {
+        (0..=max_log_rows).prop_flat_map(move |lg_rows| {
+            let rows = (1 << lg_rows) as usize;
+            (0..rows).prop_flat_map(move |set_row| {
+                proptest::collection::vec(any::<bool>(), 1 << lg_rows).prop_map(move |mut bools| {
+                    bools[set_row] = true;
+                    BitVec::from_bools(&bools)
+                })
+            })
+        })
+    }
+
     proptest! {
         #[test]
         fn test_ntt_eq_naive(p in any_polynomial_vector(6, 4)) {
@@ -365,6 +639,24 @@ mod test {
         #[test]
         fn test_evaluation_then_inverse(p in any_polynomial_vector(6, 4)) {
             assert_eq!(p.clone(), p.evaluate().interpolate());
+        }
+
+        #[test]
+        fn test_vanishing_polynomial(bv in any_bit_vec_not_all_0(8)) {
+            let v = Polynomial::vanishing(&bv);
+            let expected_degree = bv.count_zeros();
+            assert_eq!(v.degree(), expected_degree, "expected v to have degree {expected_degree}");
+            let w = F::root_of_unity(bv.len().ilog2() as u8).unwrap();
+            let mut w_i = F::one();
+            for b_i in bv.iter() {
+                let v_at_w_i = v.evaluate(w_i);
+                if !b_i {
+                    assert_eq!(v_at_w_i, F::zero(), "v should evaluate to 0 at {w_i:?}");
+                } else {
+                    assert_ne!(v_at_w_i, F::zero());
+                }
+                w_i = w_i * w;
+            }
         }
     }
 }
