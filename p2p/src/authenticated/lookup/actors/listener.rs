@@ -199,6 +199,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                     };
                     debug!(?address, "accepted incoming connection");
 
+                    // Check whether the IP is registered
+                    let ip = address.ip();
+                    if !self.registered_ips.contains(&ip) {
+                        self.handshakes_blocked.inc();
+                        debug!(?address, "rejecting unregistered address");
+                        continue;
+                    }
+
                     // Cleanup the rate limiters periodically
                     if accepted > CLEANUP_INTERVAL {
                         self.ip_rate_limiter.shrink_to_fit();
@@ -206,14 +214,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                         accepted = 0;
                     }
                     accepted += 1;
-
-                    // Check whether the IP is permitted
-                    let ip = address.ip();
-                    if !self.registered_ips.contains(&ip) {
-                        self.handshakes_blocked.inc();
-                        debug!(?address, "rejecting unregistered address");
-                        continue;
-                    }
 
                     // Check whether the IP (and subnet) exceeds its rate limit
                     let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
@@ -433,5 +433,84 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test_traced("DEBUG")]
+    fn blocks_unregistered_ips() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
+            let stream_cfg = StreamConfig {
+                signing_key: PrivateKey::from_seed(1),
+                namespace: b"test-rate-limit".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_millis(5),
+            };
+
+            let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let actor = Actor::new(
+                context.clone(),
+                Config {
+                    address,
+                    stream_cfg,
+                    max_concurrent_handshakes: NZU32!(8),
+                    allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
+                    allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
+                },
+                updates_rx,
+            );
+
+            let (tracker_mailbox, mut tracker_rx) = Mailbox::test();
+            let tracker_task = context.clone().spawn(|_| async move {
+                while let Some(message) = tracker_rx.next().await {
+                    match message {
+                        tracker::Message::Listenable { responder, .. } => {
+                            let _ = responder.send(true);
+                        }
+                        tracker::Message::Listen { reservation, .. } => {
+                            let _ = reservation.send(None);
+                        }
+                        tracker::Message::Release { .. } => {}
+                        _ => panic!("unexpected tracker message"),
+                    }
+                }
+            });
+
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
+            let supervisor_task = context
+                .clone()
+                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
+            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+
+            // Allow a single handshake attempt from this IP.
+            let (sink, mut stream) = loop {
+                match context.dial(address).await {
+                    Ok(pair) => break pair,
+                    Err(RuntimeError::ConnectionFailed) => {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(err) => panic!("unexpected dial error: {err:?}"),
+                }
+            };
+
+            // Wait for some message or drop.
+            let buf = vec![0u8; 1];
+            let _ = stream.recv(buf).await;
+            drop((sink, stream));
+
+            // Check metrics
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("handshakes_blocked_total 1"),
+                "{}",
+                metrics
+            );
+
+            listener_handle.abort();
+            tracker_task.abort();
+            supervisor_task.abort();
+        });
     }
 }
