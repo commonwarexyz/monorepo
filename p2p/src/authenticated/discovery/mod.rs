@@ -124,14 +124,14 @@
 //! ```rust
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
-//! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
+//! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
 //! // Configure context
-//! let runtime_cfg = tokio::Config::default();
-//! let runner = tokio::Runner::new(runtime_cfg.clone());
+//! let runtime_cfg = deterministic::Config::default();
+//! let runner = deterministic::Runner::new(runtime_cfg.clone());
 //!
 //! // Generate identity
 //! //

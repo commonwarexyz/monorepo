@@ -427,7 +427,7 @@ where
     }
 
     /// Simulates a commit failure by avoiding syncing either or both of the log or locations.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub async fn simulate_failure(
         mut self,
         sync_locations: bool,

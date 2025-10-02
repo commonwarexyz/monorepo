@@ -7,7 +7,11 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{concurrency::Limiter, IpAddrExt, Subnet};
+use commonware_utils::{
+    concurrency::Limiter,
+    net::{Subnet, SubnetMask},
+    IpAddrExt,
+};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -19,6 +23,9 @@ use std::{
     num::NonZeroU32,
 };
 use tracing::debug;
+
+/// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
+const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 
 /// Interval at which to prune tracked IPs and Subnets.
 const CLEANUP_INTERVAL: u32 = 16_384;
@@ -185,7 +192,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             } else {
                 false
             };
-            let subnet = ip.subnet();
+            let subnet = ip.subnet(&SUBNET_MASK);
             let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
                 self.handshakes_subnet_rate_limited.inc();
                 debug!(?address, "subnet exceeded handshake rate limit");

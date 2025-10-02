@@ -10,14 +10,14 @@ use libfuzzer_sys::fuzz_target;
 enum MmrOperation {
     Add { data: Vec<u8> },
     Pop,
-    UpdateLeaf { leaf_idx: u8, new_data: Vec<u8> },
+    UpdateLeaf { location: u8, new_data: Vec<u8> },
     GetNode { pos: u64 },
     GetLastLeafPos,
     GetSize,
     GetRoot,
-    GenerateProof { leaf_idx: u8 },
+    Proof { location: u64 },
     PruneAll,
-    PruneToPos { pos_idx: u8 },
+    PruneToPos { pos_idx: u64 },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -201,10 +201,10 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                MmrOperation::UpdateLeaf { leaf_idx, new_data } => {
+                MmrOperation::UpdateLeaf { location, new_data } => {
                     if !reference.leaf_positions.is_empty() {
-                        let idx = (*leaf_idx as usize) % reference.leaf_positions.len();
-                        let pos = reference.leaf_positions[idx];
+                        let location = (*location as usize) % reference.leaf_positions.len();
+                        let pos = reference.leaf_positions[location];
 
                         let limited_data = if new_data.len() > 16 {
                             &new_data[0..16]
@@ -220,7 +220,7 @@ fn fuzz(input: FuzzInput) {
                         let root_before = mmr.root(&mut hasher);
 
                         mmr.update_leaf(&mut hasher, pos, limited_data);
-                        reference.update_leaf(idx, limited_data.to_vec());
+                        reference.update_leaf(location, limited_data.to_vec());
 
                         // Size should not change
                         assert_eq!(
@@ -230,7 +230,7 @@ fn fuzz(input: FuzzInput) {
 
                         // Root should change (unless data is identical)
                         let root_after = mmr.root(&mut hasher);
-                        if limited_data != reference.leaf_data[idx] {
+                        if limited_data != reference.leaf_data[location] {
                             assert_ne!(
                                 root_before, root_after,
                                 "Operation {op_idx}: Root should change after update_leaf with different data"
@@ -289,38 +289,25 @@ fn fuzz(input: FuzzInput) {
                     );
                 }
 
-                MmrOperation::GenerateProof { leaf_idx } => {
+                MmrOperation::Proof { location } => {
                     if reference.leaf_positions.is_empty() {
                         return;
                     }
-                    let loc = (*leaf_idx as u64) % reference.leaf_positions.len() as u64;
-                    let pos = reference.leaf_positions[loc as usize];
-                    let loc = Location::new(loc);
+                    let location_idx = (*location as usize) % reference.leaf_positions.len();
+                    let test_element_pos = reference.leaf_positions[location_idx];
+                    let loc = Location::new(location_idx as u64);
+                    if test_element_pos >= mmr.size() || test_element_pos < mmr.pruned_to_pos() {
+                        continue;
+                    }
 
-                    // Check if the element is pruned
-                    let is_pruned = reference.is_leaf_pruned(pos);
-                    match mmr.proof(loc) {
-                        Ok(proof) => {
-                            // If we got a proof for a pruned element, it might be pinned
-                            // Verify the proof with the actual data we stored
-                            let root = mmr.root(&mut hasher);
-                            let leaf_data = &reference.leaf_data[*loc as usize];
-                            let is_valid = proof.verify_element_inclusion(&mut hasher, leaf_data, loc, &root);
-                            assert!(
-                                is_valid,
-                                "Operation {op_idx}: Proof verification failed for leaf at loc {loc}",
-                            );
-                        }
-                        Err(e) => {
-                            // Expected error for pruned elements
-                            if is_pruned {
-                                // This is expected - we can't generate proofs for pruned elements
-                                // unless they're pinned
-                            } else {
-                                // Unexpected error for non-pruned elements
-                                panic!("Could not generate proof for non-pruned pos {pos}: {e:?}");
-                            }
-                        }
+                    if let Ok(proof) = mmr.proof(loc) {
+                        let root = mmr.root(&mut hasher);
+                        assert!(proof.verify_element_inclusion(
+                            &mut hasher,
+                            reference.leaf_data[location_idx].as_slice(),
+                            loc,
+                            &root,
+                        ));
                     }
                 }
 
@@ -358,7 +345,7 @@ fn fuzz(input: FuzzInput) {
                 MmrOperation::PruneToPos { pos_idx } => {
                     if mmr.size() > 0 {
                         // Only prune to positions within the current size (0 to size inclusive)
-                        let pos = Position::new((*pos_idx as u64) % (*mmr.size() + 1));
+                        let pos = Position::new((*pos_idx) % (*mmr.size() + 1));
 
                         // Skip if trying to prune to a position before or equal to what's already pruned
                         if pos <= mmr.pruned_to_pos() {

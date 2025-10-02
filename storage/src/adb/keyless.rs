@@ -646,9 +646,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     /// Simulate failure by consuming the db but without syncing / closing the various structures.
-    pub(super) async fn simulate_failure(
+    pub async fn simulate_failure(
         mut self,
         sync_log: bool,
         sync_locations: bool,
