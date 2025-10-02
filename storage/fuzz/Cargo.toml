@@ -12,11 +12,13 @@ cargo-fuzz = true
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-runtime = { workspace = true }
-commonware-storage = { workspace = true, features = ["std"] }
+commonware-storage = { workspace = true, features = ["std", "fuzzing"] }
 commonware-utils = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
 futures = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
 
 [[bin]]
 name = "adb_operations"
@@ -96,8 +98,29 @@ doc = false
 bench = false
 
 [[bin]]
-name = "adb_sync"
-path = "fuzz_targets/adb_sync.rs"
+name = "adb_any_fixed_sync"
+path = "fuzz_targets/adb_any_fixed_sync.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adb_any_variable_sync"
+path = "fuzz_targets/adb_any_variable_sync.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adb_keyless"
+path = "fuzz_targets/adb_keyless.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "store_operations"
+path = "fuzz_targets/store_operations.rs"
 test = false
 doc = false
 bench = false
@@ -105,6 +128,48 @@ bench = false
 [[bin]]
 name = "ordinal_operations"
 path = "fuzz_targets/ordinal_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "translator_operations"
+path = "fuzz_targets/translator_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mmr_journaled"
+path = "fuzz_targets/mmr_journaled.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mmr_bitmap"
+path = "fuzz_targets/mmr_bitmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_operations"
+path = "fuzz_targets/cache_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adb_immutable"
+path = "fuzz_targets/adb_immutable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proofs_malleability"
+path = "fuzz_targets/proofs_malleability.rs"
 test = false
 doc = false
 bench = false
