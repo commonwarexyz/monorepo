@@ -8,8 +8,8 @@ use governor::{
 };
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, HashMap},
-    net::SocketAddr,
+    collections::{BTreeMap, HashMap, HashSet},
+    net::{IpAddr, SocketAddr},
 };
 use tracing::debug;
 
@@ -205,6 +205,17 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         self.peers
             .get(peer)
             .is_some_and(|r| r.listenable(self.allow_private_ips))
+    }
+
+    /// Return all registered IP addresses.
+    pub fn registered(&self) -> HashSet<IpAddr> {
+        // Using `.allowed()` here excludes any peers that are still connected but no longer
+        // part of a peer set (and will be dropped shortly).
+        self.peers
+            .values()
+            .filter(|r| r.allowed(self.allow_private_ips))
+            .filter_map(|r| r.socket().map(|s| s.ip()))
+            .collect()
     }
 
     // --------- Helpers ----------

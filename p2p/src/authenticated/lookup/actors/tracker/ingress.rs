@@ -194,6 +194,7 @@ impl<E: Spawner + Metrics, C: PublicKey> Oracle<E, C> {
     ///   Should be monotonically increasing.
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     ///   Each element is a tuple containing the public key and the socket address of the peer.
+    ///   The peer must be dialable at and dial from the given socket address.
     pub async fn register(&mut self, index: u64, peers: Vec<(C, SocketAddr)>) {
         let _ = self.sender.send(Message::Register { index, peers }).await;
     }

@@ -12,7 +12,10 @@ use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+};
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
@@ -22,6 +25,9 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
+
+    /// The mailbox for the listener.
+    listener: Mailbox<HashSet<IpAddr>>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -65,6 +71,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 context,
                 receiver,
                 directory,
+                listener: cfg.listener,
                 mailboxes: HashMap::new(),
             },
             mailbox,
@@ -87,6 +94,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                             mailbox.kill().await;
                         }
                     }
+
+                    // Send the updated registered IP addresses to the listener.
+                    let _ = self.listener.send(self.directory.registered()).await;
                 }
                 Message::Connect {
                     public_key,
@@ -131,6 +141,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     if let Some(mut peer) = self.mailboxes.remove(&public_key) {
                         peer.kill().await;
                     }
+
+                    // Send the updated registered IP addresses to the listener.
+                    let _ = self.listener.send(self.directory.registered()).await;
                 }
                 Message::Release { metadata } => {
                     // Clear the peer handle if it exists
@@ -164,20 +177,25 @@ mod tests {
     use commonware_utils::NZU32;
     use governor::Quota;
     use std::{
-        net::{IpAddr, Ipv4Addr, SocketAddr},
+        net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
     };
 
     // Test Configuration Setup
-    fn default_test_config<C: Signer>(crypto: C) -> Config<C> {
-        Config {
-            crypto,
-            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            mailbox_size: 32,
-            tracked_peer_sets: 2,
-            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
-            allow_private_ips: true,
-        }
+    fn default_test_config<C: Signer>(crypto: C) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
+        let (registered_ips_sender, registered_ips_receiver) = mpsc::channel(1);
+        (
+            Config {
+                crypto,
+                address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                mailbox_size: 32,
+                tracked_peer_sets: 2,
+                allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
+                allow_private_ips: true,
+                listener: Mailbox::new(registered_ips_sender),
+            },
+            registered_ips_receiver,
+        )
     }
 
     // Helper to create Ed25519 signer and public key
@@ -208,7 +226,7 @@ mod tests {
     fn test_connect_unauthorized_peer_is_killed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = default_test_config(PrivateKey::from_seed(0));
+            let (cfg, _) = default_test_config(PrivateKey::from_seed(0));
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
@@ -227,7 +245,7 @@ mod tests {
     fn test_block_peer_standard_behavior() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -254,7 +272,7 @@ mod tests {
     fn test_block_peer_already_blocked_is_noop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -284,7 +302,7 @@ mod tests {
     fn test_block_peer_non_existent_is_noop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
             let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg_initial);
 
             let (_s1_signer, pk_non_existent) = new_signer_and_pk(100);
@@ -303,7 +321,7 @@ mod tests {
             let (_peer_signer2, peer_pk2) = new_signer_and_pk(2);
             let peer_addr2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002);
             let (_peer_signer3, peer_pk3) = new_signer_and_pk(3);
-            let cfg_initial = default_test_config(peer_signer);
+            let (cfg_initial, _) = default_test_config(peer_signer);
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -336,7 +354,7 @@ mod tests {
     fn test_listen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -376,7 +394,7 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -396,7 +414,7 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
+            let (cfg_initial, _) = default_test_config(PrivateKey::from_seed(0));
 
             let TestHarness {
                 mut mailbox,
@@ -429,7 +447,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // 1) Setup actor
-            let cfg = default_test_config(PrivateKey::from_seed(0));
+            let (cfg, _) = default_test_config(PrivateKey::from_seed(0));
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -477,9 +495,9 @@ mod tests {
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9001);
             let pk_2 = new_signer_and_pk(2).1;
-            let addr_2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9002);
+            let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
-            let mut cfg = default_test_config(my_sk);
+            let (mut cfg, mut listener_receiver) = default_test_config(my_sk);
             cfg.tracked_peer_sets = 1;
 
             let TestHarness {
@@ -495,6 +513,12 @@ mod tests {
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
 
+            // Wait for a listener update
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(registered_ips.contains(&my_addr.ip()));
+            assert!(registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
+
             // Mark peer as connected
             let reservation = mailbox.listen(pk_1.clone()).await;
             assert!(reservation.is_some());
@@ -504,7 +528,12 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle.register(1, vec![(pk_2.clone(), addr_2)]).await;
-            // let the register take effect
+
+            // Wait for a listener update
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&my_addr.ip()));
+            assert!(!registered_ips.contains(&addr_1.ip()));
+            assert!(registered_ips.contains(&addr_2.ip()));
 
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.
