@@ -45,7 +45,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
 
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
-    receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
+    receiver: mpsc::Receiver<Message<C::PublicKey>>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -58,11 +58,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (
-        Self,
-        Mailbox<Message<E, C::PublicKey>>,
-        Oracle<E, C::PublicKey>,
-    ) {
+    ) -> (Self, Mailbox<Message<C::PublicKey>>, Oracle<C::PublicKey>) {
         // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
