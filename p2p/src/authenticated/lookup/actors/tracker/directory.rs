@@ -209,6 +209,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     /// Return all registered IP addresses.
     pub fn registered(&self) -> HashSet<IpAddr> {
+        // Using `.allowed()` here excludes any peers that are still connected but no longer
+        // part of a peer set (and will be dropped shortly).
         self.peers
             .values()
             .filter(|r| r.allowed(self.allow_private_ips))
