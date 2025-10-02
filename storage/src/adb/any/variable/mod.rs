@@ -952,6 +952,36 @@ pub(super) mod test {
                 &root
             ));
 
+            // Single op proof should verify.
+            let (proof, ops) = db.proof(Location::new(0), NZU64!(1)).await.unwrap();
+            assert!(verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &root
+            ));
+
+            // Add one more op.
+            db.commit(None).await.unwrap();
+            // Historical proof from larger db should match proof from smaller db.
+            let (proof2, ops2) = db
+                .historical_proof(Location::new(1), Location::new(0), NZU64!(1))
+                .await
+                .unwrap();
+            assert_eq!(proof, proof2);
+            assert_eq!(ops, ops2);
+
+            // Proof will not verify against the root of the bigger db.
+            let root2 = db.root(&mut hasher);
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &root2
+            ));
+
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
                 db.commit(None).await.unwrap();
