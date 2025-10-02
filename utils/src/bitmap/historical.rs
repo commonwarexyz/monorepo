@@ -935,21 +935,20 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
         let chunk_end_bit = chunk_start_bit + Prunable::<N>::CHUNK_SIZE_BITS;
 
-        // Determine if this chunk needs reconstruction due to batch changes.
-        // Check conditions in order with short-circuit evaluation.
+        // Determine if this chunk needs reconstruction.
         let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
-        
-        let chunk_needs_reconstruction = 
-            // Check 1: Does the chunk extend beyond projected_len (has popped bits to zero)?
-            (chunk_end_bit > batch.projected_len && chunk_start_bit < batch.projected_len) ||
-            // Check 2: Does the chunk overlap with appended bits?
-            // Must check this BEFORE clamping range, as appended-only chunks have chunk_start >= base_len
-            (chunk_start_bit < batch.projected_len && chunk_end_bit > appended_start) ||
-            // Check 3: Does the chunk have any explicit modifications in the base region?
-            {
-                let range_end = chunk_end_bit.min(batch.base_len);
-                (chunk_start_bit..range_end).any(|bit| batch.modified_bits.contains_key(&bit))
-            };
+
+        // Skip reconstruction only if chunk is entirely outside modified regions
+        let chunk_entirely_past_end = chunk_start_bit >= batch.projected_len;
+        let chunk_entirely_before_changes =
+            chunk_end_bit <= appended_start && chunk_end_bit <= batch.projected_len;
+
+        let chunk_needs_reconstruction =
+            // Chunk overlaps with pops or appends
+            !(chunk_entirely_past_end || chunk_entirely_before_changes)
+            // OR chunk has explicit bit modifications
+            || (chunk_start_bit..chunk_end_bit.min(batch.base_len))
+                .any(|bit| batch.modified_bits.contains_key(&bit));
 
         if chunk_needs_reconstruction {
             // Reconstruct chunk from current + batch modifications
@@ -1858,7 +1857,7 @@ mod tests {
         assert_eq!(chunk[0] & 0x02, 0, "bit 1 should be false");
         assert_ne!(chunk[0] & 0x04, 0, "bit 2 should be true");
         assert_eq!(chunk[0] & 0x08, 0, "bit 3 should be false");
-        
+
         // Overall pattern should be 0x55 (binary 01010101)
         assert_eq!(chunk[0], 0x55, "byte 0 should be 0x55");
     }
@@ -1900,10 +1899,7 @@ mod tests {
         let bit_31_in_byte = 31 % 8; // bit 7
         let bit_31_set = (byte_31 >> bit_31_in_byte) & 1 == 1;
 
-        assert_eq!(
-            bit_31_set, false,
-            "bit 31 should be zero after being popped (beyond projected_len)"
-        );
+        assert!(!bit_31_set);
     }
 
     /// Test that batch reads correctly see appended bits after pops.
@@ -1942,16 +1938,8 @@ mod tests {
 
         // The appended region is now [7, 9), not [10, 12)
         // Verify get_bit sees the new false values, not the old true values
-        assert_eq!(
-            batch.get_bit(7),
-            false,
-            "get_bit should read from appended_bits"
-        );
-        assert_eq!(
-            batch.get_bit(8),
-            false,
-            "get_bit should read from appended_bits"
-        );
+        assert!(!batch.get_bit(7));
+        assert!(!batch.get_bit(8));
 
         // Verify get_chunk also reconstructs correctly
         let chunk = batch.get_chunk(0); // Chunk containing bits 0..31
@@ -1960,17 +1948,13 @@ mod tests {
 
         // Also verify we can modify appended bits
         batch.set_bit(7, true);
-        assert_eq!(
-            batch.get_bit(7),
-            true,
-            "set_bit should update appended_bits"
-        );
+        assert!(batch.get_bit(7));
 
         // Commit and verify the final state
         batch.commit(2).unwrap();
         assert_eq!(historical.len(), 9);
-        assert_eq!(historical.get_bit(7), true);
-        assert_eq!(historical.get_bit(8), false);
+        assert!(historical.get_bit(7));
+        assert!(!historical.get_bit(8));
     }
 
     /// Test historical reconstruction when current state has MORE pruning than target.
@@ -2017,18 +2001,10 @@ mod tests {
 
         // Verify the data is correct
         for i in 0..32 {
-            assert_eq!(
-                reconstructed.get_bit(i),
-                true,
-                "first chunk should be all true"
-            );
+            assert!(reconstructed.get_bit(i));
         }
         for i in 32..64 {
-            assert_eq!(
-                reconstructed.get_bit(i),
-                false,
-                "second chunk should be all false"
-            );
+            assert!(!reconstructed.get_bit(i));
         }
     }
 

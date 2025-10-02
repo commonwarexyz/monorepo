@@ -832,8 +832,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Simulate an unclean shutdown by consuming the db without syncing (or only partially syncing)
     /// the log and/or locations and/or mmr. When _not_ fully syncing the mmr, the `write_limit`
     /// parameter dictates how many mmr nodes to write during a partial sync (can be 0).
-    #[cfg(test)]
-    pub(super) async fn simulate_failure(
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub async fn simulate_failure(
         mut self,
         sync_log: bool,
         sync_locations: bool,
