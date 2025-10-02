@@ -55,7 +55,7 @@ pub struct Actor<
     subnet_rate_limiter:
         RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
     registered_ips: HashSet<IpAddr>,
-    updates: mpsc::Receiver<HashSet<IpAddr>>,
+    mailbox: mpsc::Receiver<HashSet<IpAddr>>,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -65,7 +65,7 @@ pub struct Actor<
 impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config<C>, updates: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
         context.register(
@@ -107,7 +107,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 &context,
             ),
             registered_ips: HashSet::new(),
-            updates,
+            mailbox,
             handshakes_blocked,
             handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
@@ -182,11 +182,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         let mut accepted = 0;
         loop {
             select! {
-                updates = self.updates.next() => {
-                    let Some(updates) = updates else {
+                update = self.mailbox.next() => {
+                    let Some(registered_ips) = update else {
+                        debug!("mailbox closed");
                         break;
                     };
-                    self.registered_ips = updates;
+                    self.registered_ips = registered_ips;
                 },
                 listener = listener.accept() => {
                     // Accept a new connection
@@ -340,7 +341,7 @@ mod tests {
                 .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
-            // Allow a single handshake attempt from this IP.
+            // Connect to the listener
             let (sink, mut stream) = loop {
                 match context.dial(address).await {
                     Ok(pair) => break pair,
@@ -351,16 +352,16 @@ mod tests {
                 }
             };
 
-            // Wait for some message or drop.
+            // Wait for some message or drop
             let buf = vec![0u8; 1];
             let _ = stream.recv(buf).await;
             drop((sink, stream));
 
-            // Additional attempts should be rate limited immediately.
+            // Additional attempts should be rate limited immediately
             for _ in 0..3 {
                 let (sink, mut stream) = context.dial(address).await.expect("dial");
 
-                // Wait for some message or drop.
+                // Wait for some message or drop
                 let buf = vec![0u8; 1];
                 let _ = stream.recv(buf).await;
                 drop((sink, stream));
@@ -499,7 +500,7 @@ mod tests {
                 .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
-            // Allow a single handshake attempt from this IP.
+            // Connect to the listener
             let (sink, mut stream) = loop {
                 match context.dial(address).await {
                     Ok(pair) => break pair,
@@ -510,7 +511,7 @@ mod tests {
                 }
             };
 
-            // Wait for some message or drop.
+            // Wait for some message or drop
             let buf = vec![0u8; 1];
             let _ = stream.recv(buf).await;
             drop((sink, stream));
