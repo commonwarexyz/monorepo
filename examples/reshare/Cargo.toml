@@ -1,0 +1,35 @@
+[package]
+name = "commonware-reshare"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Key reshare amongst untrusted participants over a replicated log."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"
+documentation = "https://docs.rs/commonware-reshare"
+
+[dependencies]
+rand.workspace = true
+bytes.workspace = true
+serde.workspace = true
+futures.workspace = true
+tracing.workspace = true
+governor.workspace = true
+rand_core.workspace = true
+serde_json.workspace = true
+commonware-p2p.workspace = true
+commonware-codec.workspace = true
+commonware-utils.workspace = true
+commonware-macros.workspace = true
+commonware-runtime.workspace = true
+commonware-resolver.workspace = true
+commonware-broadcast.workspace = true
+commonware-consensus.workspace = true
+commonware-cryptography.workspace = true
+clap = { workspace = true, features = ["derive"] }
+
+[[bin]]
+name = "commonware-reshare"
+bench = false
