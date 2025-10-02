@@ -12,7 +12,7 @@ use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_macros::select;
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{Handle, Metrics, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -57,13 +57,13 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     deregistrar: Option<Deregistrar<E, R>>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
+impl<E: Spawner + Metrics, S: Sender, R: Receiver> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
     pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
         let (control_tx, control_rx) = mpsc::channel(mailbox_size);
         let (deregistrar, deregistrar_handle) =
-            Deregistrar::new(context.clone(), control_tx.clone());
+            Deregistrar::new(context.with_label("deregistrar"), control_tx.clone());
 
         let mux = Self {
             context: context.clone(),
@@ -170,42 +170,38 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     }
 }
 
-/// Background worker flushing deferred deregistration requests when the muxer
+/// Background worker that flushes deferred deregistration requests when the [Muxer]
 /// control channel is full.
 struct Deregistrar<E: Spawner, R: Receiver> {
     context: E,
-    sender: mpsc::Sender<Control<R>>,
+    control_tx: mpsc::Sender<Control<R>>,
     backlog: mpsc::UnboundedReceiver<Channel>,
 }
 
 impl<E: Spawner, R: Receiver> Deregistrar<E, R> {
-    /// Creates a deregistrar and backlog handle shared with sub-receivers.
-    ///
-    /// Sub-receivers first attempt to send `Control::Deregister` directly; if that fails because
-    /// the bounded channel is full the request is pushed onto this backlog so it can be replayed
-    /// asynchronously by the deregistrar task.
-    fn new(context: E, sender: mpsc::Sender<Control<R>>) -> (Self, DeregistrarHandle<R>) {
+    /// Creates the [Deregistrar] worker and a [DeregistrarHandle] to issue deregistration
+    /// requests.
+    fn new(context: E, control_tx: mpsc::Sender<Control<R>>) -> (Self, DeregistrarHandle<R>) {
         let (backlog_tx, backlog_rx) = mpsc::unbounded();
-        let handle_sender = sender.clone();
         (
             Self {
                 context,
-                sender,
+                control_tx: control_tx.clone(),
                 backlog: backlog_rx,
             },
             DeregistrarHandle {
-                control_tx: handle_sender,
+                control_tx,
                 backlog: backlog_tx,
             },
         )
     }
 
-    /// Spawns the deregistrar worker that drains the backlog until the control channel is closed.
+    /// Starts the [Deregistrar] worker.
     fn start(mut self) -> Handle<()> {
         self.context.spawn(|_| async move {
             while let Some(subchannel) = self.backlog.next().await {
                 if self
-                    .sender
+                    .control_tx
                     .send(Control::Deregister { subchannel })
                     .await
                     .is_err()
@@ -217,8 +213,7 @@ impl<E: Spawner, R: Receiver> Deregistrar<E, R> {
     }
 }
 
-/// Lightweight handle cloned into each sub-receiver so they can issue
-/// deregister requests on drop.
+/// A clonable handle that allows issuing deregister requests to the [Deregistrar] worker.
 struct DeregistrarHandle<R: Receiver> {
     control_tx: mpsc::Sender<Control<R>>,
     backlog: mpsc::UnboundedSender<Channel>,
@@ -395,7 +390,7 @@ mod tests {
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer<E: Spawner>(
+    async fn create_peer<E: Spawner + Metrics>(
         context: &E,
         oracle: &mut Oracle<Pk>,
         seed: u64,
@@ -640,8 +635,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // mailbox has capacity for only 1 element
+            //
+            // NOTE: mpsc::channel always reserves one slot per sender
             let (control_tx, mut control_rx) =
-                mpsc::channel::<Control<crate::simulated::Receiver<Pk>>>(1);
+                mpsc::channel::<Control<crate::simulated::Receiver<Pk>>>(0);
             let (deregistrar, mut handle) = Deregistrar::new(context.clone(), control_tx);
             deregistrar.start();
 
