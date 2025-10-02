@@ -1,6 +1,4 @@
-use super::{
-    ingress::ReleaserHandle, metrics::Metrics, record::Record, set::Set, Metadata, Reservation,
-};
+use super::{metrics::Metrics, record::Record, releaser, set::Set, Metadata, Reservation};
 use crate::authenticated::discovery::{
     metrics,
     types::{self, PeerInfo},
@@ -56,8 +54,9 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
 
     // ---------- Message-Passing ----------
-    /// Handle for issuing reservation releases back to the tracker.
-    releaser: ReleaserHandle<C>,
+    /// The mailbox for the releaser actor responsible for issuing reservation
+    /// releases back to the tracker.
+    releaser_mailbox: releaser::Mailbox<C>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
@@ -71,7 +70,7 @@ impl<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         bootstrappers: Vec<(C, SocketAddr)>,
         myself: PeerInfo<C>,
         cfg: Config,
-        releaser: ReleaserHandle<C>,
+        releaser_mailbox: releaser::Mailbox<C>,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
         let mut peers = HashMap::new();
@@ -95,7 +94,7 @@ impl<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
-            releaser,
+            releaser_mailbox,
             metrics,
         }
     }
@@ -347,7 +346,7 @@ impl<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Reserve
         if record.reserve() {
             self.metrics.reserved.inc();
-            return Some(Reservation::new(metadata, self.releaser.clone()));
+            return Some(Reservation::new(metadata, self.releaser_mailbox.clone()));
         }
         None
     }

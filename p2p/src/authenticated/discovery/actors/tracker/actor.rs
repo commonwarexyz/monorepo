@@ -1,7 +1,7 @@
 use super::{
     directory::{self, Directory},
-    ingress::{Message, Oracle, Releaser},
-    Config, Error,
+    ingress::{Message, Oracle},
+    releaser, Config, Error,
 };
 use crate::authenticated::{discovery::types, ip, Mailbox};
 use commonware_cryptography::Signer;
@@ -49,12 +49,13 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C::PublicKey>,
 
-    /// Background worker to handle a backlog of release messages when the
+    /// Background actor to handle a backlog of release messages when the
     /// primary mailbox is saturated.
     ///
-    /// The reason we need this is because we try to release a reservation on
-    /// drop, which can't handle backpressure since `Drop` must be synchronous.
-    releaser: Option<Releaser<E, C::PublicKey>>,
+    /// We release reservations when handles are dropped, but `Drop` itself cannot
+    /// wait for backpressure. The releaser actor drains those deferred requests
+    /// once the bounded mailbox has space again.
+    releaser: Option<releaser::Actor<E, C::PublicKey>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -80,7 +81,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         // Create the mailboxes
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(sender.clone());
-        let (releaser, releaser_handle) = Releaser::new(context.clone(), sender.clone());
+        let (releaser, releaser_mailbox) =
+            releaser::Actor::new(context.with_label("releaser"), sender.clone());
         let oracle = Oracle::new(sender);
 
         // Create the directory
@@ -89,7 +91,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             cfg.bootstrappers,
             myself,
             directory_cfg,
-            releaser_handle,
+            releaser_mailbox,
         );
 
         (
