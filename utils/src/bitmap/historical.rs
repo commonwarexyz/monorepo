@@ -2272,4 +2272,36 @@ mod tests {
             test_randomized_helper(&mut rng);
         }
     }
+
+    #[test]
+    #[should_panic(expected = "bit pruned: 31")]
+    fn test_pop_into_pruned_region_panics() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Create a bitmap with 64 bits (2 chunks), then prune first chunk
+        historical
+            .with_batch(1, |b| {
+                b.push_chunk(&[0xFF; 4]);
+                b.push_chunk(&[0xFF; 4]);
+            })
+            .unwrap();
+
+        historical
+            .with_batch(2, |b| {
+                b.prune_to_bit(32);
+            })
+            .unwrap();
+
+        // Now we have: len=64, pruned_chunks=1 (32 pruned bits, 32 live bits)
+        assert_eq!(historical.len(), 64);
+        assert_eq!(historical.pruned_chunks(), 1);
+
+        // Try to pop past the prune boundary
+        // This should panic with "cannot pop into pruned region"
+        let mut batch = historical.start_batch();
+        for _ in 0..33 {
+            // Pop 33 times (32 live bits + 1 pruned bit)
+            batch.pop();
+        }
+    }
 }
