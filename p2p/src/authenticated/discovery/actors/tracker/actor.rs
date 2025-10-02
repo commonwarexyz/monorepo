@@ -11,7 +11,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, IpAddrExt, SystemTimeExt};
-use futures::{channel::mpsc, FutureExt, StreamExt};
+use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
 use std::time::Duration;
@@ -161,30 +161,27 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     async fn run(mut self) {
-        'run: loop {
-            // Drain any queued release messages (to prevent starvation under load)
-            while let Some(msg) = self.unbound_receiver.next().now_or_never() {
-                let Some(msg) = msg else {
-                    break 'run;
-                };
-                self.handle_msg(msg).await;
-            }
-
-            // Wait for the next message to process
-            select! {
-                msg = self.receiver.next() => {
-                    let Some(msg) = msg else {
-                        break 'run;
-                    };
-                    self.handle_msg(msg).await;
-                },
-                msg = self.unbound_receiver.next() => {
-                    let Some(msg) = msg else {
-                        break 'run;
-                    };
-                    self.handle_msg(msg).await;
+        let mut prefer_unbounded = true;
+        loop {
+            // Alternate which mailbox we poll first to avoid starvation
+            let msg = if prefer_unbounded {
+                select! {
+                    msg = self.unbound_receiver.next() => { msg },
+                    msg = self.receiver.next() => { msg },
                 }
-            }
+            } else {
+                select! {
+                    msg = self.receiver.next() => { msg },
+                    msg = self.unbound_receiver.next() => { msg },
+                }
+            };
+            prefer_unbounded = !prefer_unbounded;
+
+            // Handle the message (if any)
+            let Some(msg) = msg else {
+                break;
+            };
+            self.handle_msg(msg).await;
         }
         debug!("tracker shutdown");
     }
