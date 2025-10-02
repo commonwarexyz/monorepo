@@ -2,7 +2,9 @@
 //!
 //! # Panics
 //!
-//! If any task panics, the runtime will panic (and shutdown).
+//! Unless configured otherwise, spawned task panics are caught and translated into
+//! [`Error::Exited`](crate::Error::Exited). Set [`Config::with_catch_panics`] to `false` to
+//! propagate the panic instead.
 //!
 //! # Example
 //!
@@ -34,13 +36,14 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         signal::{Signal, Stopper},
-        Aborter,
+        Aborter, PanicHook,
     },
     Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 use futures::{
+    channel::oneshot,
     task::{waker, ArcWake},
     Future,
 };
@@ -160,6 +163,9 @@ pub struct Config {
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
+
+    /// Whether spawned tasks should catch panics instead of propagating them.
+    catch_panics: bool,
 }
 
 impl Config {
@@ -169,6 +175,7 @@ impl Config {
             seed: 42,
             cycle: Duration::from_millis(1),
             timeout: None,
+            catch_panics: false,
         }
     }
 
@@ -188,6 +195,11 @@ impl Config {
         self.timeout = timeout;
         self
     }
+    /// See [Config]
+    pub fn with_catch_panics(mut self, catch_panics: bool) -> Self {
+        self.catch_panics = catch_panics;
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -201,6 +213,10 @@ impl Config {
     /// See [Config]
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+    /// See [Config]
+    pub fn catch_panics(&self) -> bool {
+        self.catch_panics
     }
 
     /// Assert that the configuration is valid.
@@ -234,6 +250,8 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
+    catch_panics: bool,
+    panic_hook: Option<PanicHook>,
 }
 
 /// An artifact that can be used to recover the state of the runtime.
@@ -246,6 +264,7 @@ pub struct Checkpoint {
     rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
+    catch_panics: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -505,6 +524,7 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
+            catch_panics: executor.catch_panics,
         };
 
         (output, checkpoint)
@@ -709,6 +729,13 @@ impl Context {
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        let panic_hook = if cfg.catch_panics {
+            None
+        } else {
+            let (panic_tx, _panic_rx) = oneshot::channel();
+            Some(PanicHook::new(panic_tx))
+        };
+
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
@@ -720,6 +747,8 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
+            catch_panics: cfg.catch_panics,
+            panic_hook,
         });
 
         (
@@ -757,6 +786,13 @@ impl Context {
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        let panic_hook = if checkpoint.catch_panics {
+            None
+        } else {
+            let (panic_tx, _panic_rx) = oneshot::channel();
+            Some(PanicHook::new(panic_tx))
+        };
+
         let executor = Arc::new(Executor {
             // Copied from the checkpoint
             cycle: checkpoint.cycle,
@@ -771,6 +807,8 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
+            catch_panics: checkpoint.catch_panics,
+            panic_hook,
         });
         (
             Self {
@@ -835,7 +873,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, children, None);
+        let (f, handle) = Handle::init_future(future, metric, children, executor.panic_hook.clone());
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -862,7 +900,7 @@ impl crate::Spawner for Context {
         let executor = self.executor();
 
         move |f: F| {
-            let (f, handle) = Handle::init_future(f, metric, children, None);
+            let (f, handle) = Handle::init_future(f, metric, children, executor.panic_hook.clone());
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -903,7 +941,8 @@ impl crate::Spawner for Context {
 
         // Initialize the blocking task
         let executor = self.executor();
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, None);
+        let (f, handle) =
+            Handle::init_blocking(|| f(self), metric, executor.panic_hook.clone());
 
         // Spawn the task
         let f = async move { f() };
@@ -926,7 +965,7 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor();
         move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metric, None);
+            let (f, handle) = Handle::init_blocking(f, metric, executor.panic_hook.clone());
 
             // Spawn the task
             let f = async move { f() };
