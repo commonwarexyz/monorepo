@@ -51,7 +51,8 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// The unbounded mailbox for the actor.
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
-    /// during [`Drop`].
+    /// during [`Drop`]. While this channel is unbounded, it is practically bounded by
+    /// the number of peers we can connect to at one time.
     unbound_receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
 
     // ---------- State ----------
