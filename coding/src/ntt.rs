@@ -104,6 +104,8 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
         let skip = 1 << stage;
         let mut i = 0;
         while i < rows {
+            // In the case of a backwards NTT, skew should be the inverse of the skew
+            // in the forwards direction.
             let mut w_j = F::one();
             for j in 0..skip {
                 let index_a = i + j;
@@ -237,7 +239,7 @@ impl IndexMut<(usize, usize)> for Matrix {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Polynomial {
     coefficients: Vec<F>,
 }
@@ -267,7 +269,9 @@ impl Polynomial {
         // Similarly, V_R vanishes at (w^2)^((i - 1) / 2) = w^(i - 1), for each odd i in S.
         //
         // To combine these into one polynomial, we multiply the roots of V_R by w, so that it
-        // vanishes at the w^i (for odd i) instead of w^(i - 1). To multiply the roots of a polynomial
+        // vanishes at the w^i (for odd i) instead of w^(i - 1).
+        //
+        // To multiply the roots of a polynomial
         //
         //   P(X) := a0 + a1 X + a2 X^2 + ...
         //
@@ -477,6 +481,23 @@ impl Polynomial {
         }
         0
     }
+
+    /// Divide the roots of each polynomial by some factor.
+    ///
+    /// If f(x) = 0, then after this transformation, f(x / z) = 0 instead.
+    ///
+    /// The number of roots does not change.
+    ///
+    /// c.f. [Polynomial::vanishing] for an explanation of how this works.
+    fn divide_roots(&mut self, factor: F) {
+        let mut factor_i = F::one();
+        let lg_rows = self.coefficients.len().ilog2();
+        for i in 0..self.coefficients.len() {
+            let index = reverse_bits(lg_rows, i as u64) as usize;
+            self.coefficients[index] = self.coefficients[index] * factor_i;
+            factor_i = factor_i * factor;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -535,7 +556,11 @@ impl PolynomialVector {
     /// Evaluate each polynomial in this vector over all points in an interpolation domain.
     fn evaluate(mut self) -> EvaluationVector {
         self.data.ntt::<true>();
-        EvaluationVector { data: self.data }
+        let active_rows = BitVec::ones(self.data.rows);
+        EvaluationVector {
+            data: self.data,
+            active_rows,
+        }
     }
 
     /// Like [Self::evaluation], but with a simpler algorithm that's much less efficient.
@@ -565,23 +590,174 @@ impl PolynomialVector {
 
         EvaluationVector {
             data: vandermonde_matrix.mul(&self.data),
+            active_rows: BitVec::ones(rows),
         }
+    }
+
+    /// Divide the roots of each polynomial by some factor.
+    ///
+    /// c.f. [Polynomial::divide_roots]. This performs the same operation on
+    /// each polynomial in this vector.
+    fn divide_roots(&mut self, factor: F) {
+        let mut factor_i = F::one();
+        let lg_rows = self.data.rows.ilog2();
+        for i in 0..self.data.rows {
+            for p_i in &mut self.data[reverse_bits(lg_rows, i as u64) as usize] {
+                *p_i = *p_i * factor_i;
+            }
+            factor_i = factor_i * factor;
+        }
+    }
+
+    /// For each polynomial P_i in this vector compute the evaluation of P_i / Q.
+    ///
+    /// Naturally, you can call [EvaluationVector::interpolate]. The reason we don't
+    /// do this is that the algorithm naturally yields an [EvaluationVector], and
+    /// some use-cases may want access to that data as well.
+    ///
+    /// This assumes that the number of coefficients in the polynomials of this vector
+    /// matches that of `q` (the coefficients can be 0, but need to be padded to the right size).
+    ///
+    /// This assumes that `q` has no zeroes over [F::NOT_ROOT_OF_UNITY] * [F::ROOT_OF_UNITY]^i,
+    /// for any i. This will be the case for [Polynomial::vanishing].
+    /// If this isn't the case, the result may be junk.
+    ///
+    /// If `q` doesn't divide a partiular polynomial in this vector, the result
+    /// for that polynomial is not guaranteed to be anything meaningful.
+    fn divide(&mut self, mut q: Polynomial) {
+        // The algorithm operates column wise.
+        //
+        // You can compute P(X) / Q(X) by evaluating each polynomial, then computing
+        //
+        //   P(w^i) / Q(w^i)
+        //
+        // for each evaluation point. Then, you can interpolate back.
+        //
+        // But wait! What if Q(w^i) = 0? In particular, for the case of recovering
+        // a polynomial from data with missing rows, we *expect* P(w^i) = 0 = Q(w^i)
+        // for the indicies we're missing, so this doesn't work.
+        //
+        // What we can do is to instead multiply each of the roots by some factor z,
+        // such that z w^i != w^j, for any i, j. In other words, we change the roots
+        // such that they're not in the evaluation domain anymore, allowing us to
+        // divide. We can then interpolate the result back into a polynomial,
+        // and divide back the roots to where they should be.
+        //
+        // c.f. [PolynomialVector::divide_roots]
+        assert_eq!(
+            self.data.rows,
+            q.coefficients.len(),
+            "cannot divide by polynomial of the wrong size"
+        );
+        let skew = F::NOT_ROOT_OF_UNITY;
+        let skew_inv = F::NOT_ROOT_OF_UNITY_INV;
+        self.divide_roots(skew);
+        q.divide_roots(skew);
+        ntt::<true, _>(self.data.rows, self.data.cols, &mut self.data);
+        ntt::<true, _>(
+            q.coefficients.len(),
+            1,
+            &mut Column {
+                data: &mut q.coefficients,
+            },
+        );
+        // Do a point wise division.
+        for i in 0..self.data.rows {
+            let q_i_inv = q.coefficients[i].inv();
+            for d_i_j in &mut self.data[i] {
+                *d_i_j = *d_i_j * q_i_inv;
+            }
+        }
+        // Interpolate back, using the inverse skew
+        ntt::<false, _>(self.data.rows, self.data.cols, &mut self.data);
+        self.divide_roots(skew_inv);
     }
 }
 
 /// The result of evaluating a vector of polynomials over all points in an interpolation domain.
+///
+/// This struct also remembers which rows have ever been filled with [Self::fill_row].
+/// This is used in [Self::recover], which can use the rows that are present to fill in the missing
+/// rows.
 #[derive(Debug, PartialEq)]
 struct EvaluationVector {
     data: Matrix,
+    active_rows: BitVec,
 }
 
 impl EvaluationVector {
     /// Figure out the polynomial which evaluates to this vector.
     ///
     /// i.e. the inverse of [PolynomialVector::evaluation].
+    ///
+    /// (This makes all the rows count as filled).
     fn interpolate(mut self) -> PolynomialVector {
         self.data.ntt::<false>();
         PolynomialVector { data: self.data }
+    }
+
+    /// Create an empty element of this struct, with no filled rows.
+    fn empty(lg_rows: usize, cols: usize) -> Self {
+        let data = Matrix::zero(1 << lg_rows, cols);
+        let active = BitVec::zeroes(data.rows);
+        Self {
+            data,
+            active_rows: active,
+        }
+    }
+
+    /// Fill a specific row.
+    fn fill_row(&mut self, row: usize, data: &[F]) {
+        assert!(data.len() <= self.data.cols);
+        self.data[row][..data.len()].copy_from_slice(data);
+        self.active_rows.set(row);
+    }
+
+    /// Erase a particular row.
+    ///
+    /// Useful for testing the recovery procedure.
+    #[cfg(test)]
+    fn remove_row(&mut self, row: usize) {
+        self.data[row].fill(F::zero());
+        self.active_rows.clear(row);
+    }
+
+    fn multiply(&mut self, polynomial: Polynomial) {
+        let Polynomial { mut coefficients } = polynomial;
+        ntt::<true, _>(
+            coefficients.len(),
+            1,
+            &mut Column {
+                data: &mut coefficients,
+            },
+        );
+        for i in 0..self.data.rows {
+            let c_i = coefficients[i];
+            for self_j in &mut self.data[i] {
+                *self_j = *self_j * c_i;
+            }
+        }
+    }
+
+    /// Attempt to recover the missing rows in this data.
+    fn recover(mut self) -> PolynomialVector {
+        // If we had all of the rows, we could simply call [Self::interpolate],
+        // in order to recover the original polynomial. If we do this while missing some
+        // rows, what we get is D(X) * V(X) where D is the original polynomial,
+        // and V(X) is a polynomial which vanishes at all the rows we're missing.
+        //
+        // As long as the degree of D is low enough, compared to the number of evaluations
+        // we *do* have, then we can recover it by performing:
+        //
+        //   (D(X) * V(X)) / V(X)
+        //
+        // If we have multiple columns, then this procedure can be done column by column,
+        // with the same vanishing polynomial.
+        let vanishing = Polynomial::vanishing(&self.active_rows);
+        self.multiply(vanishing.clone());
+        let mut out = self.interpolate();
+        out.divide(vanishing);
+        out
     }
 }
 
@@ -628,6 +804,71 @@ mod test {
         })
     }
 
+    #[derive(Debug)]
+    struct RecoverySetup {
+        n: usize,
+        k: usize,
+        cols: usize,
+        data: Vec<F>,
+        present: BitVec,
+    }
+
+    impl RecoverySetup {
+        fn any(max_n: usize, max_k: usize, max_cols: usize) -> impl Strategy<Value = Self> {
+            (1..=max_n).prop_flat_map(move |n| {
+                (0..=max_k).prop_flat_map(move |k| {
+                    (1..=max_cols).prop_flat_map(move |cols| {
+                        proptest::collection::vec(any_f(), n * cols).prop_flat_map(move |data| {
+                            let padded_rows = (n + k).next_power_of_two();
+                            proptest::sample::subsequence(
+                                (0..padded_rows).collect::<Vec<_>>(),
+                                n..=padded_rows,
+                            )
+                            .prop_map(move |indices| {
+                                let mut present = BitVec::zeroes(padded_rows);
+                                for i in indices {
+                                    present.set(i);
+                                }
+                                Self {
+                                    n,
+                                    k,
+                                    cols,
+                                    // idk why this is necessary, but who cares
+                                    data: data.clone(),
+                                    present: present,
+                                }
+                            })
+                        })
+                    })
+                })
+            })
+        }
+
+        fn test(self) {
+            let data = PolynomialVector::new(self.n + self.k, self.cols, self.data.into_iter());
+            let mut encoded = data.clone().evaluate();
+            for (i, b_i) in self.present.iter().enumerate() {
+                if !b_i {
+                    encoded.remove_row(i);
+                }
+            }
+            let recovered_data = encoded.recover();
+            assert_eq!(data, recovered_data);
+        }
+    }
+
+    #[test]
+    fn test_recovery_000() {
+        RecoverySetup {
+            n: 1,
+            k: 1,
+            cols: 1,
+            data: vec![F::one()],
+            present: vec![false, true].into(),
+        }
+        .test()
+    }
+
     proptest! {
         #[test]
         fn test_ntt_eq_naive(p in any_polynomial_vector(6, 4)) {
@@ -657,6 +898,11 @@ mod test {
                 }
                 w_i = w_i * w;
             }
+        }
+
+        #[test]
+        fn test_recovery(setup in RecoverySetup::any(128, 128, 4)) {
+            setup.test();
         }
     }
 }
