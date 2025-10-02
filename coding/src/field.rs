@@ -123,6 +123,10 @@ impl F {
         Self::zero().sub_inner(self)
     }
 
+    pub const fn inv(self) -> Self {
+        self.exp(P - 2)
+    }
+
     /// Calculate self ^ k.
     pub const fn exp(self, mut k: u64) -> Self {
         let mut acc = Self::one();
@@ -156,6 +160,9 @@ impl F {
 
     /// An element guaranteed not to be any power of [Self::ROOT_OF_UNITY].
     pub const NOT_ROOT_OF_UNITY: Self = Self(0x79bc2f50acd74161);
+
+    /// The inverse of [Self::NOT_ROOT_OF_UNITY].
+    pub const NOT_ROOT_OF_UNITY_INV: Self = Self(0x1036c4023580ce8d);
 
     /// Construct a 2^lg_k root of unity.
     ///
@@ -246,6 +253,11 @@ mod test {
     #[test]
     fn test_not_root_of_unity_calculation() {
         assert_eq!(F::NOT_ROOT_OF_UNITY, F::GENERATOR.exp(1 << 32));
+    }
+
+    #[test]
+    fn test_not_root_of_unity_inv_calculation() {
+        assert_eq!(F::NOT_ROOT_OF_UNITY * F::NOT_ROOT_OF_UNITY_INV, F::one());
     }
 
     #[test]
