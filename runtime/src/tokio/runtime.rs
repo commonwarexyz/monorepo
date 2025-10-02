@@ -15,15 +15,11 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, Aborter, PanicHook},
+    utils::{signal::Stopper, Aborter, Panicker},
     Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
-use futures::{
-    channel::oneshot,
-    future::{self, Either},
-    pin_mut, FutureExt,
-};
+use futures::channel::oneshot;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -221,7 +217,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
-    panic_hook: PanicHook,
+    panicker: Option<Panicker>,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -263,8 +259,13 @@ impl crate::Runner for Runner {
             .build()
             .expect("failed to create Tokio runtime");
 
-        let (panic_tx, panic_rx) = oneshot::channel::<String>();
-        let panic_hook = PanicHook::new(panic_tx);
+        // Initialize panicker
+        let (panicker, panicked) = if self.cfg.catch_panics {
+            (None, None)
+        } else {
+            let (panic_tx, panic_rx) = oneshot::channel::<String>();
+            (Some(Panicker::new(panic_tx)), Some(panic_rx))
+        };
 
         // Collect process metrics.
         //
@@ -332,7 +333,7 @@ impl crate::Runner for Runner {
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
-            panic_hook: panic_hook.clone(),
+            panicker,
         });
 
         // Get metrics
@@ -350,17 +351,20 @@ impl crate::Runner for Runner {
             children: Arc::new(Mutex::new(Vec::new())),
         };
         let output = executor.runtime.block_on(async move {
-            let panic_future =
-                panic_rx.map(|message| message.expect("panic notifier dropped without message"));
-            let future = f(context);
-            pin_mut!(panic_future);
-            pin_mut!(future);
+            // Wait for task to complete (if we are catching panics)
+            let Some(panicked) = panicked else {
+                return f(context).await;
+            };
 
-            match future::select(panic_future, future).await {
-                Either::Left((message, _)) => {
+            // Wait for task to complete or panic
+            select! {
+                message = panicked => {
+                    let message = message.expect("panic notifier dropped without message");
                     panic!("tokio runtime task panicked: {message}");
-                }
-                Either::Right((output, _)) => output,
+                },
+                output = f(context) => {
+                    output
+                },
             }
         });
         gauge.dec();
@@ -431,12 +435,6 @@ impl crate::Spawner for Context {
         let (_, metric) = spawn_metrics!(self, future);
 
         // Set up the task
-        let catch_panics = self.executor.cfg.catch_panics;
-        let panic_hook = if catch_panics {
-            None
-        } else {
-            Some(self.executor.panic_hook.clone())
-        };
         let executor = self.executor.clone();
 
         // Give spawned task its own empty children list
@@ -444,7 +442,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, children, panic_hook);
+        let (f, handle) = Handle::init_future(future, metric, children, executor.panicker.clone());
 
         // Spawn the task
         executor.runtime.spawn(f);
@@ -471,13 +469,8 @@ impl crate::Spawner for Context {
         let executor = self.executor.clone();
 
         move |f: F| {
-            let catch_panics = executor.cfg.catch_panics;
-            let panic_hook = if catch_panics {
-                None
-            } else {
-                Some(executor.panic_hook.clone())
-            };
-            let (f, handle) = Handle::init_future(f, metric, children.clone(), panic_hook);
+            let (f, handle) =
+                Handle::init_future(f, metric, children.clone(), executor.panicker.clone());
 
             // Spawn the task
             executor.runtime.spawn(f);
@@ -518,13 +511,7 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
-        let catch_panics = executor.cfg.catch_panics;
-        let panic_hook = if catch_panics {
-            None
-        } else {
-            Some(executor.panic_hook.clone())
-        };
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, panic_hook);
+        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
 
         // Spawn the blocking task
         if dedicated {
@@ -550,13 +537,7 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         move |f: F| {
-            let catch_panics = executor.cfg.catch_panics;
-            let panic_hook = if catch_panics {
-                None
-            } else {
-                Some(executor.panic_hook.clone())
-            };
-            let (f, handle) = Handle::init_blocking(f, metric, panic_hook);
+            let (f, handle) = Handle::init_blocking(f, metric, executor.panicker.clone());
 
             // Spawn the blocking task
             if dedicated {
