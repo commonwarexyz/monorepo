@@ -12,6 +12,7 @@ use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
+use futures::channel::mpsc;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use tracing::{debug, info, warn};
@@ -32,6 +33,7 @@ pub struct Network<
     tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    registered_ip_updates: mpsc::Receiver<listener::Message>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -48,6 +50,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
+        let (registered_ip_sender, registered_ip_updates) =
+            mpsc::channel::<listener::Message>(cfg.mailbox_size);
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
@@ -57,6 +61,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
+                registered_ips: Mailbox::new(registered_ip_sender),
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
@@ -77,6 +82,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracker_mailbox,
                 router,
                 router_mailbox,
+                registered_ip_updates,
             },
             oracle,
         )
@@ -115,56 +121,88 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     }
 
     async fn run(self) {
+        let Self {
+            context,
+            cfg,
+            channels,
+            tracker,
+            tracker_mailbox,
+            router,
+            router_mailbox,
+            registered_ip_updates,
+        } = self;
+
         // Start tracker
-        let mut tracker_task = self.tracker.start();
+        let mut tracker_task = tracker.start();
 
         // Start router
-        let mut router_task = self.router.start(self.channels);
+        let mut router_task = router.start(channels);
+
+        let Config {
+            crypto,
+            namespace,
+            listen,
+            dialable: _,
+            allow_private_ips: _,
+            max_message_size,
+            mailbox_size,
+            synchrony_bound,
+            max_handshake_age,
+            handshake_timeout,
+            allowed_connection_rate_per_peer: _,
+            max_concurrent_handshakes,
+            allowed_handshake_rate_per_ip,
+            allowed_handshake_rate_per_subnet,
+            ping_frequency,
+            allowed_ping_rate,
+            dial_frequency,
+            query_frequency,
+            tracked_peer_sets: _,
+        } = cfg;
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
-            self.context.with_label("spawner"),
+            context.with_label("spawner"),
             spawner::Config {
-                mailbox_size: self.cfg.mailbox_size,
-                ping_frequency: self.cfg.ping_frequency,
-                allowed_ping_rate: self.cfg.allowed_ping_rate,
+                mailbox_size,
+                ping_frequency,
+                allowed_ping_rate,
             },
         );
-        let mut spawner_task =
-            spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
+        let mut spawner_task = spawner.start(tracker_mailbox.clone(), router_mailbox.clone());
 
         // Start listener
         let stream_cfg = StreamConfig {
-            signing_key: self.cfg.crypto,
-            namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.cfg.max_message_size + types::MAX_PAYLOAD_DATA_OVERHEAD,
-            synchrony_bound: self.cfg.synchrony_bound,
-            max_handshake_age: self.cfg.max_handshake_age,
-            handshake_timeout: self.cfg.handshake_timeout,
+            signing_key: crypto,
+            namespace: union(&namespace, STREAM_SUFFIX),
+            max_message_size: max_message_size + types::MAX_PAYLOAD_DATA_OVERHEAD,
+            synchrony_bound,
+            max_handshake_age,
+            handshake_timeout,
         };
         let listener = listener::Actor::new(
-            self.context.with_label("listener"),
+            context.with_label("listener"),
             listener::Config {
-                address: self.cfg.listen,
+                address: listen,
                 stream_cfg: stream_cfg.clone(),
-                max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
-                allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
-                allowed_handshake_rate_per_subnet: self.cfg.allowed_handshake_rate_per_subnet,
+                max_concurrent_handshakes,
+                allowed_handshake_rate_per_ip,
+                allowed_handshake_rate_per_subnet,
             },
+            registered_ip_updates,
         );
-        let mut listener_task =
-            listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());
+        let mut listener_task = listener.start(tracker_mailbox.clone(), spawner_mailbox.clone());
 
         // Start dialer
         let dialer = dialer::Actor::new(
-            self.context.with_label("dialer"),
+            context.with_label("dialer"),
             dialer::Config {
                 stream_cfg,
-                dial_frequency: self.cfg.dial_frequency,
-                query_frequency: self.cfg.query_frequency,
+                dial_frequency,
+                query_frequency,
             },
         );
-        let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
+        let mut dialer_task = dialer.start(tracker_mailbox, spawner_mailbox);
 
         // Wait for first actor to exit
         info!("network started");

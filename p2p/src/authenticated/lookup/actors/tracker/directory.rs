@@ -1,5 +1,11 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
-use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
+use crate::authenticated::{
+    lookup::{
+        actors::{listener, tracker::ingress::Releaser},
+        metrics,
+    },
+    Mailbox,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use governor::{
@@ -8,8 +14,8 @@ use governor::{
 };
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, HashMap},
-    net::SocketAddr,
+    collections::{BTreeMap, HashMap, HashSet},
+    net::{IpAddr, SocketAddr},
 };
 use tracing::debug;
 
@@ -17,6 +23,9 @@ use tracing::debug;
 pub struct Config {
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
+
+    /// Mailbox to publish registered IP addresses for pre-handshake filtering.
+    pub registered_ips: Mailbox<listener::Message>,
 
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
@@ -35,6 +44,9 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
+
+    /// Mailbox to publish registered IP addresses for pre-handshake filtering.
+    registered_ips: Mailbox<listener::Message>,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -73,16 +85,20 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let metrics = Metrics::init(context.clone());
         metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
 
-        Self {
+        let directory = Self {
             context,
             max_sets: cfg.max_sets,
             allow_private_ips: cfg.allow_private_ips,
+            registered_ips: cfg.registered_ips,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
             releaser,
             metrics,
-        }
+        };
+
+        directory.refresh_registered_ips();
+        directory
     }
 
     // ---------- Setters ----------
@@ -153,6 +169,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Attempt to remove any old records from the rate limiter.
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
         self.rate_limiter.shrink_to_fit();
+        self.refresh_registered_ips();
         deleted_peers
     }
 
@@ -175,6 +192,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     pub fn block(&mut self, peer: &C) {
         if self.peers.get_mut(peer).is_some_and(|r| r.block()) {
             self.metrics.blocked.inc();
+            self.refresh_registered_ips();
         }
     }
 
@@ -262,13 +280,33 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
         self.peers.remove(peer);
         self.metrics.tracked.dec();
+        self.refresh_registered_ips();
         true
+    }
+
+    fn refresh_registered_ips(&self) {
+        let mut ips = HashSet::<IpAddr>::new();
+        for record in self.peers.values() {
+            if record.allowed(self.allow_private_ips) {
+                if let Some(addr) = record.socket() {
+                    ips.insert(addr.ip());
+                }
+            }
+        }
+
+        let mut mailbox = self.registered_ips.clone();
+        let mut context = self.context.clone();
+        context.spawn_ref()(async move {
+            let _ = mailbox
+                .send(listener::Message::UpdateRegisteredIps(ips))
+                .await;
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::lookup::actors::tracker::directory::Directory;
+    use crate::authenticated::{lookup::actors::tracker::directory::Directory, Mailbox};
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
@@ -282,8 +320,11 @@ mod tests {
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
         let (tx, _rx) = mpsc::channel(1);
         let releaser = super::Releaser::new(tx);
+        let (registered_ips_tx, _registered_ips_rx) = mpsc::channel(1);
+        let registered_ips = Mailbox::new(registered_ips_tx);
         let config = super::Config {
             allow_private_ips: true,
+            registered_ips,
             max_sets: 1,
             rate_limit: governor::Quota::per_second(NZU32!(10)),
         };
