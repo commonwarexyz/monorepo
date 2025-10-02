@@ -45,9 +45,13 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     peer_gossip_max_count: usize,
 
     // ---------- Message-Passing ----------
-    /// The mailbox for the actor.
+    /// The bounded mailbox for the actor.
     receiver: mpsc::Receiver<Message<C::PublicKey>>,
 
+    /// The unbounded mailbox for the actor.
+    ///
+    /// We use this to support sending a [`Message::Release`] message to the actor
+    /// during [`Drop`].
     unbound_receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
 
     // ---------- State ----------
@@ -77,10 +81,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         // Create the mailboxes
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let (unbound_sender, unbound_receiver) = mpsc::unbounded();
         let mailbox = Mailbox::new(sender.clone());
-        let releaser = Releaser::new(unbound_sender);
         let oracle = Oracle::new(sender);
+        let (unbound_sender, unbound_receiver) = mpsc::unbounded();
+        let releaser = Releaser::new(unbound_sender);
 
         // Create the directory
         let directory = Directory::init(
