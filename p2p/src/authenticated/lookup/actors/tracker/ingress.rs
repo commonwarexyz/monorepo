@@ -4,10 +4,9 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+    SinkExt,
 };
 use std::net::SocketAddr;
 
@@ -140,76 +139,6 @@ impl<C: PublicKey> Mailbox<Message<C>> {
     }
 }
 
-/// Owns the worker that drains deferred release requests when the main tracker
-/// mailbox is full.
-pub struct Releaser<E: Spawner, C: PublicKey> {
-    context: E,
-    sender: mpsc::Sender<Message<C>>,
-    backlog: mpsc::UnboundedReceiver<Metadata<C>>,
-}
-
-impl<E: Spawner, C: PublicKey> Releaser<E, C> {
-    /// Creates a new releaser and associated handle for issuing release requests.
-    pub(super) fn new(context: E, sender: mpsc::Sender<Message<C>>) -> (Self, ReleaserHandle<C>) {
-        let (backlog_tx, backlog_rx) = mpsc::unbounded();
-        let handle_sender = sender.clone();
-        (
-            Self {
-                context,
-                sender,
-                backlog: backlog_rx,
-            },
-            ReleaserHandle {
-                sender: handle_sender,
-                backlog: backlog_tx,
-            },
-        )
-    }
-
-    /// Spawns the worker that drains the backlog and forwards releases to the tracker mailbox.
-    pub(super) fn start(mut self) -> Handle<()> {
-        self.context.spawn(|_| async move {
-            while let Some(metadata) = self.backlog.next().await {
-                if self
-                    .sender
-                    .send(Message::Release { metadata })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-    }
-}
-
-/// Handle used by reservations to request releases.
-#[derive(Clone)]
-pub struct ReleaserHandle<C: PublicKey> {
-    sender: mpsc::Sender<Message<C>>,
-    backlog: mpsc::UnboundedSender<Metadata<C>>,
-}
-
-impl<C: PublicKey> ReleaserHandle<C> {
-    /// Releases a reservation, queueing it if the tracker mailbox is currently full.
-    ///
-    /// Returns `true` when the release request was sent to the tracker immediately (or
-    /// the tracker mailbox was already closed), and `false` when it was queued in the
-    /// backlog for the worker to replay.
-    pub fn release(&mut self, metadata: Metadata<C>) -> bool {
-        match self.sender.try_send(Message::Release {
-            metadata: metadata.clone(),
-        }) {
-            Ok(()) => true,
-            Err(e) if e.is_disconnected() => true,
-            Err(_) => {
-                let _ = self.backlog.unbounded_send(metadata);
-                false
-            }
-        }
-    }
-}
-
 /// Mechanism to register authorized peers.
 ///
 /// Peers that are not explicitly authorized
@@ -242,48 +171,5 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
 
     async fn block(&mut self, public_key: Self::PublicKey) {
         let _ = self.sender.send(Message::Block { public_key }).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
-    use commonware_runtime::{deterministic::Runner, Runner as _};
-    use futures::StreamExt;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-    #[test]
-    fn releaser_drains_backlog_when_mailbox_full() {
-        let executor = Runner::default();
-        executor.start(|context| async move {
-            // mailbox has capacity for only 1 element
-            let (sender, mut receiver) = mpsc::channel(1);
-            let (releaser, mut handle) = Releaser::new(context.clone(), sender);
-            releaser.start();
-
-            let metadata_a = Metadata::Dialer(
-                PrivateKey::from_seed(1).public_key(),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1337),
-            );
-            let metadata_b = Metadata::Listener(PrivateKey::from_seed(2).public_key());
-
-            // the first release request should go through directly to the mailbox
-            assert!(handle.release(metadata_a.clone()));
-            // the second release request should be queued in the backlog
-            assert!(!handle.release(metadata_b.clone()));
-
-            let first = receiver.next().await.unwrap();
-            assert!(matches!(
-                first,
-                Message::Release { ref metadata } if metadata.public_key() == metadata_a.public_key()
-            ));
-
-            let second = receiver.next().await.unwrap();
-            assert!(matches!(
-                second,
-                Message::Release { ref metadata } if metadata.public_key() == metadata_b.public_key()
-            ));
-        });
     }
 }

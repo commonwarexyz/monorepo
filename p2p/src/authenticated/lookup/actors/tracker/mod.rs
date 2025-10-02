@@ -10,6 +10,7 @@ mod ingress;
 mod metadata;
 mod metrics;
 mod record;
+mod releaser;
 mod reservation;
 
 pub use actor::Actor;

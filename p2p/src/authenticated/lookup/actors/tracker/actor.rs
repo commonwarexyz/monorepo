@@ -1,12 +1,9 @@
 use super::{
     directory::{self, Directory},
     ingress::{Message, Oracle},
-    Config,
+    releaser, Config,
 };
-use crate::authenticated::{
-    lookup::actors::{peer, tracker::ingress::Releaser},
-    Mailbox,
-};
+use crate::authenticated::{lookup::actors::peer, Mailbox};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
@@ -32,12 +29,13 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// Set when a peer connects and cleared when it is blocked or released.
     mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
 
-    /// Background worker to handle a backlog of release messages when the
+    /// Background actor to handle a backlog of release messages when the
     /// primary mailbox is saturated.
     ///
-    /// The reason we need this is because we try to release a reservation on
-    /// drop, which can't handle backpressure since `Drop` must be synchronous.
-    releaser: Option<Releaser<E, C::PublicKey>>,
+    /// We release reservations when handles are dropped, but `Drop` itself cannot
+    /// wait for backpressure. The releaser actor drains those deferred requests
+    /// once the bounded mailbox has space again.
+    releaser: Option<releaser::Actor<E, C::PublicKey>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -57,12 +55,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         // Create the mailboxes
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(sender.clone());
-        let (releaser, releaser_handle) = Releaser::new(context.clone(), sender.clone());
+        let (releaser, releaser_mailbox) =
+            releaser::Actor::new(context.with_label("releaser"), sender.clone());
         let oracle = Oracle::new(sender);
 
         // Create the directory
         let myself = (cfg.crypto.public_key(), cfg.address);
-        let directory = Directory::init(context.clone(), myself, directory_cfg, releaser_handle);
+        let directory = Directory::init(context.clone(), myself, directory_cfg, releaser_mailbox);
 
         (
             Self {

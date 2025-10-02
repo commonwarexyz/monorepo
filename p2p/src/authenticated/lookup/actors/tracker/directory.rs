@@ -1,4 +1,4 @@
-use super::{ingress::ReleaserHandle, metrics::Metrics, record::Record, Metadata, Reservation};
+use super::{metrics::Metrics, record::Record, releaser, Metadata, Reservation};
 use crate::authenticated::lookup::metrics;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics};
@@ -46,8 +46,9 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
 
     // ---------- Message-Passing ----------
-    /// Handle for issuing reservation releases back to the tracker.
-    releaser: ReleaserHandle<C>,
+    /// The mailbox for the releaser actor responsible for issuing reservation
+    /// releases back to the tracker.
+    releaser_mailbox: releaser::Mailbox<C>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
@@ -60,7 +61,7 @@ impl<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         context: E,
         myself: (C, SocketAddr),
         cfg: Config,
-        releaser: ReleaserHandle<C>,
+        releaser_mailbox: releaser::Mailbox<C>,
     ) -> Self {
         // Create the list of peers and add myself.
         let mut peers = HashMap::new();
@@ -77,7 +78,7 @@ impl<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
-            releaser,
+            releaser_mailbox,
             metrics,
         }
     }
@@ -235,7 +236,7 @@ impl<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Reserve
         if record.reserve() {
             self.metrics.reserved.inc();
-            return Some(Reservation::new(metadata, self.releaser.clone()));
+            return Some(Reservation::new(metadata, self.releaser_mailbox.clone()));
         }
         None
     }
@@ -261,7 +262,7 @@ impl<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::lookup::actors::tracker::{directory::Directory, ingress::Releaser};
+    use crate::authenticated::lookup::actors::tracker::{directory::Directory, releaser};
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
@@ -288,9 +289,11 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
-            let (releaser, releaser_handle) = Releaser::new(context.clone(), tx);
+            let (releaser, releaser_mailbox) = releaser::Actor::new(context.clone(), tx);
             releaser.start();
-            let mut directory = Directory::init(context, (my_pk, my_addr), config, releaser_handle);
+
+            let mut directory =
+                Directory::init(context, (my_pk, my_addr), config, releaser_mailbox);
 
             let deleted =
                 directory.add_set(0, vec![(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]);
