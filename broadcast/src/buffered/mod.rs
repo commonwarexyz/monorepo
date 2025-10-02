@@ -40,12 +40,12 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
     };
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Recipients,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{deterministic, Clock, Error, Metrics, Runner};
     use std::{collections::BTreeMap, time::Duration};
 
     // Number of messages to cache per sender
@@ -266,9 +266,10 @@ mod tests {
                 for peer in peers.iter() {
                     let mut mailbox = mailboxes.get(peer).unwrap().clone();
                     let receiver = mailbox.subscribe(None, commitment, None).await;
-                    let has = select! {
-                        _ = context.sleep(A_JIFFY) => {false},
-                        r = receiver => { r.is_ok() },
+                    let has = match context.timeout(A_JIFFY, receiver).await {
+                        Ok(r) => r.is_ok(),
+                        Err(Error::Timeout) => false,
+                        Err(e) => panic!("unexpected error: {e:?}"),
                     };
                     all_received &= has;
                 }
@@ -386,9 +387,10 @@ mod tests {
             let receiver = peer_mailbox
                 .subscribe(None, messages[0].commitment(), None)
                 .await;
-            select! {
-                _ = context.sleep(A_JIFFY) => {},
-                _ = receiver => { panic!("receiver should have failed")},
+            match context.timeout(A_JIFFY, receiver).await {
+                Ok(_) => panic!("receiver should have failed"),
+                Err(Error::Timeout) => {} // Expected timeout
+                Err(e) => panic!("unexpected error: {e:?}"),
             }
         });
     }
@@ -450,9 +452,10 @@ mod tests {
 
             // Verify B cannot get M1 (evicted from all deques)
             let receiver = mailbox_b.subscribe(None, commitment_m1, None).await;
-            select! {
-                _ = context.sleep(A_JIFFY) => {},
-                _ = receiver => { panic!("M1 should not be retrievable"); },
+            match context.timeout(A_JIFFY, receiver).await {
+                Ok(_) => panic!("M1 should not be retrievable"),
+                Err(Error::Timeout) => {} // Expected timeout
+                Err(e) => panic!("unexpected error: {e:?}"),
             }
         });
     }

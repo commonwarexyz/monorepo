@@ -14,10 +14,10 @@ Commonware is a Rust library providing high-performance, production-ready distri
 cargo build --workspace --all-targets
 
 # Test specific crate
-cargo test -p commonware-cryptography
+just test -p commonware-cryptography
 
 # Test single function
-cargo test -p commonware-consensus test_name
+just test -p commonware-consensus test_name
 
 # Run benchmarks
 cargo bench -p commonware-cryptography
@@ -96,35 +96,33 @@ Run these commands locally before pushing to avoid CI failures:
 
 ```bash
 # 1. Format and lint (REQUIRED)
-cargo +nightly fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
+just lint
 
 # 2. Run tests (REQUIRED)
-cargo test --workspace --verbose
+just test --workspace
 
 # 3. Platform-specific (Linux only, if touching runtime)
-cargo test --features commonware-runtime/iouring-storage
-cargo test --features commonware-runtime/iouring-network
+just test --features commonware-runtime/iouring-storage
+just test --features commonware-runtime/iouring-network
 
 # 4. Check dependencies (if modified)
-cargo +nightly udeps --all-targets
+just udeps
 
 # 5. WASM build (if touching cryptography/utils/storage)
 cargo build --target wasm32-unknown-unknown --release -p commonware-cryptography
 
 # 6. Unsafe code (if adding unsafe blocks)
-MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --lib <module>::
+just miri <module>::
 ```
 
 ### Extended Checks (before PR)
 
 ```bash
 # Long-running tests
-cargo test --workspace -- --ignored
+just test --workspace -- --ignored
 
 # Fuzz testing (60 seconds per target)
-cd <primitive>/fuzz
-cargo +nightly fuzz run <target> -- -max_total_time=60
+just fuzz <primitive>/fuzz
 
 # Coverage report
 cargo llvm-cov --workspace --lcov --output-path lcov.info
@@ -145,9 +143,9 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 ## Development Workflow
 1. Make changes in relevant primitive directory
-2. Run `cargo test -p <crate-name>` for quick iteration
+2. Run `just test -p <crate-name>` for quick iteration
 3. Run CI fast checks before committing (see CI section above)
-4. Use `cargo +nightly fmt` for formatting
+4. Use `just fix-fmt` for formatting
 5. Run full CI checks locally before creating PR
 
 ## Deterministic Async Testing

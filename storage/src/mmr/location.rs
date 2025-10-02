@@ -2,7 +2,7 @@ use super::position::Position;
 use core::{
     convert::TryFrom,
     fmt,
-    ops::{Add, AddAssign, Range, Sub, SubAssign},
+    ops::{Add, AddAssign, Deref, Range, Sub, SubAssign},
 };
 use thiserror::Error;
 
@@ -75,13 +75,25 @@ impl From<usize> for Location {
     }
 }
 
-impl From<Location> for u64 {
-    #[inline]
-    fn from(loc: Location) -> Self {
-        loc.as_u64()
+impl Deref for Location {
+    type Target = u64;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
+impl From<Location> for u64 {
+    #[inline]
+    fn from(loc: Location) -> Self {
+        *loc
+    }
+}
+
+/// Add two locations together.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl Add for Location {
     type Output = Self;
 
@@ -91,6 +103,11 @@ impl Add for Location {
     }
 }
 
+/// Add a location and a `u64`.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl Add<u64> for Location {
     type Output = Self;
 
@@ -100,6 +117,11 @@ impl Add<u64> for Location {
     }
 }
 
+/// Subtract two locations.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl Sub for Location {
     type Output = Self;
 
@@ -109,6 +131,11 @@ impl Sub for Location {
     }
 }
 
+/// Subtract a `u64` from a location.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl Sub<u64> for Location {
     type Output = Self;
 
@@ -147,6 +174,11 @@ impl PartialOrd<Location> for u64 {
     }
 }
 
+/// Add a `u64` to a location.
+///
+/// # Panics
+///
+/// Panics if the result overflows.
 impl AddAssign<u64> for Location {
     #[inline]
     fn add_assign(&mut self, rhs: u64) {
@@ -154,6 +186,11 @@ impl AddAssign<u64> for Location {
     }
 }
 
+/// Subtract a `u64` from a location.
+///
+/// # Panics
+///
+/// Panics if the result underflows.
 impl SubAssign<u64> for Location {
     #[inline]
     fn sub_assign(&mut self, rhs: u64) {
@@ -175,13 +212,11 @@ impl TryFrom<Position> for Location {
     /// Panics if `pos` is too large (top 2 bits should be 0).
     #[inline]
     fn try_from(pos: Position) -> Result<Self, Self::Error> {
-        let pos_u64 = pos.as_u64();
-        if pos_u64 == 0 {
+        if *pos == 0 {
             return Ok(Self(0));
         }
 
-        let start =
-            u64::MAX >> (pos_u64.checked_add(1).expect("leaf pos overflow")).leading_zeros();
+        let start = u64::MAX >> (*pos.checked_add(1).expect("leaf pos overflow")).leading_zeros();
         let height = start.trailing_ones();
         assert!(height > 1, "leaf pos overflow");
         let mut two_h = 1 << (height - 1);
@@ -189,12 +224,12 @@ impl TryFrom<Position> for Location {
         let mut leaf_loc_floor = 0u64;
 
         while two_h > 1 {
-            if cur_node == pos_u64 {
+            if cur_node == *pos {
                 return Err(NonLeafPositionError { pos });
             }
             let left_pos = cur_node - two_h;
             two_h >>= 1;
-            if pos_u64 > left_pos {
+            if *pos > left_pos {
                 // The leaf is in the right subtree, so we must account for the leaves in the left
                 // subtree all of which precede it.
                 leaf_loc_floor += two_h;
@@ -211,7 +246,7 @@ impl TryFrom<Position> for Location {
 
 /// Error returned when attempting to interpret a non-leaf position as a [Location].
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
-#[error("Position({}) is not a leaf", pos.as_u64())]
+#[error("Position({}) is not a leaf", *pos)]
 pub struct NonLeafPositionError {
     pos: Position,
 }
@@ -233,7 +268,7 @@ pub trait LocationRangeExt {
 impl LocationRangeExt for Range<Location> {
     #[inline]
     fn to_usize_range(&self) -> Range<usize> {
-        self.start.as_u64() as usize..self.end.as_u64() as usize
+        *self.start as usize..*self.end as usize
     }
 }
 

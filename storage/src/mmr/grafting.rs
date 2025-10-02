@@ -143,7 +143,7 @@ pub struct HasherFork<'a, H: CHasher> {
 /// find the node in the peak tree we are looking for, we return the position of the corresponding
 /// node reached in the base tree.
 fn destination_pos(peak_node_pos: Position, height: u32) -> Position {
-    let peak_node_pos = peak_node_pos.as_u64();
+    let peak_node_pos = *peak_node_pos;
     let leading_zeros = (peak_node_pos + 1).leading_zeros();
     assert!(leading_zeros >= height, "destination_pos > u64::MAX");
     let mut peak_pos = u64::MAX >> leading_zeros;
@@ -247,11 +247,11 @@ impl<H: CHasher> HasherTrait<H> for Hasher<'_, H> {
 
     fn root<'a>(
         &mut self,
-        size: u64,
+        size: Position,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        let dest_pos = self.destination_pos(Position::new(size));
-        self.hasher.root(dest_pos.as_u64(), peak_digests)
+        let dest_pos = self.destination_pos(size);
+        self.hasher.root(dest_pos, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -298,11 +298,11 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
 
     fn root<'a>(
         &mut self,
-        size: u64,
+        size: Position,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        let dest_pos = destination_pos(Position::new(size), self.height);
-        self.hasher.root(dest_pos.as_u64(), peak_digests)
+        let dest_pos = destination_pos(size, self.height);
+        self.hasher.root(dest_pos, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -400,7 +400,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
             return digest;
         }
         self.hasher
-            .update_with_element(self.elements[index.as_u64() as usize]);
+            .update_with_element(self.elements[*index as usize]);
         self.hasher.update_with_digest(&digest);
 
         self.hasher.finalize()
@@ -408,7 +408,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
 
     fn root<'a>(
         &mut self,
-        size: u64,
+        size: Position,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
         self.hasher.root(size, peak_digests)
@@ -463,7 +463,7 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
 impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> StorageTrait<H::Digest>
     for Storage<'_, H, S1, S2>
 {
-    fn size(&self) -> u64 {
+    fn size(&self) -> Position {
         self.base_mmr.size()
     }
 
@@ -583,7 +583,7 @@ mod tests {
         let d4 = test_digest::<H>(4);
 
         let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root(0, empty_vec.iter());
+        let empty_out = mmr_hasher.root(Position::new(0), empty_vec.iter());
         assert_ne!(
             empty_out,
             test_digest::<H>(0),
@@ -591,22 +591,22 @@ mod tests {
         );
 
         let digests = [d1, d2, d3, d4];
-        let out = mmr_hasher.root(10, digests.iter());
+        let out = mmr_hasher.root(Position::new(10), digests.iter());
         assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
         assert_ne!(out, empty_out, "root should differ from empty MMR");
 
-        let mut out2 = mmr_hasher.root(10, digests.iter());
+        let mut out2 = mmr_hasher.root(Position::new(10), digests.iter());
         assert_eq!(out, out2, "root should be computed consistently");
 
-        out2 = mmr_hasher.root(11, digests.iter());
+        out2 = mmr_hasher.root(Position::new(11), digests.iter());
         assert_ne!(out, out2, "root should change with different position");
 
         let digests = [d1, d2, d4, d3];
-        out2 = mmr_hasher.root(10, digests.iter());
+        out2 = mmr_hasher.root(Position::new(10), digests.iter());
         assert_ne!(out, out2, "root should change with different digest order");
 
         let digests = [d1, d2, d3];
-        out2 = mmr_hasher.root(10, digests.iter());
+        out2 = mmr_hasher.root(Position::new(10), digests.iter());
         assert_ne!(
             out, out2,
             "root should change with different number of hashes"

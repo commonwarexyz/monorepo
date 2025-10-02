@@ -7,22 +7,36 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
+use commonware_utils::{
+    concurrency::Limiter,
+    net::{Subnet, SubnetMask},
+    IpAddrExt,
+};
 use governor::{
-    clock::ReasonablyRealtime,
-    middleware::NoOpMiddleware,
-    state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
+    clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
+    RateLimiter,
 };
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
-use std::net::SocketAddr;
+use std::{
+    net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
+};
 use tracing::debug;
+
+/// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
+const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
+
+/// Interval at which to prune tracked IPs and Subnets.
+const CLEANUP_INTERVAL: u32 = 16_384;
 
 /// Configuration for the listener actor.
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
-    pub allowed_incoming_connection_rate: Quota,
+    pub max_concurrent_handshakes: NonZeroU32,
+    pub allowed_handshake_rate_per_ip: Quota,
+    pub allowed_handshake_rate_per_subnet: Quota,
 }
 
 pub struct Actor<
@@ -33,9 +47,13 @@ pub struct Actor<
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
-    rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
-
-    handshakes_rate_limited: Counter,
+    handshake_limiter: Limiter,
+    ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
+    subnet_rate_limiter:
+        RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
+    handshakes_concurrent_rate_limited: Counter,
+    handshakes_ip_rate_limited: Counter,
+    handshakes_subnet_rate_limited: Counter,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
@@ -43,11 +61,23 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
-        let handshakes_rate_limited = Counter::default();
+        let handshakes_concurrent_rate_limited = Counter::default();
         context.register(
-            "handshake_rate_limited",
-            "number of handshakes rate limited",
-            handshakes_rate_limited.clone(),
+            "handshake_concurrent_rate_limited",
+            "number of handshake attempts dropped because maximum concurrent handshakes was reached",
+            handshakes_concurrent_rate_limited.clone(),
+        );
+        let handshakes_ip_rate_limited = Counter::default();
+        context.register(
+            "handshake_ip_rate_limited",
+            "number of handshake attempts dropped because an IP exceeded its rate limit",
+            handshakes_ip_rate_limited.clone(),
+        );
+        let handshakes_subnet_rate_limited = Counter::default();
+        context.register(
+            "handshake_subnet_rate_limited",
+            "number of handshake attempts dropped because a subnet exceeded its rate limit",
+            handshakes_subnet_rate_limited.clone(),
         );
 
         Self {
@@ -55,12 +85,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
-            rate_limiter: RateLimiter::direct_with_clock(
-                cfg.allowed_incoming_connection_rate,
+            handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
+            ip_rate_limiter: RateLimiter::hashmap_with_clock(
+                cfg.allowed_handshake_rate_per_ip,
                 &context,
             ),
-
-            handshakes_rate_limited,
+            subnet_rate_limiter: RateLimiter::hashmap_with_clock(
+                cfg.allowed_handshake_rate_per_subnet,
+                &context,
+            ),
+            handshakes_concurrent_rate_limited,
+            handshakes_ip_rate_limited,
+            handshakes_subnet_rate_limited,
         }
     }
 
@@ -127,14 +163,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             .expect("failed to bind listener");
 
         // Loop over incoming connections as fast as our rate limiter allows
+        let mut accepted = 0;
         loop {
-            // Ensure we don't attempt to perform too many handshakes at once
-            if let Err(wait_until) = self.rate_limiter.check() {
-                self.handshakes_rate_limited.inc();
-                let wait = wait_until.wait_time_from(self.context.now());
-                self.context.sleep(wait).await;
-            }
-
             // Accept a new connection
             let (address, sink, stream) = match listener.accept().await {
                 Ok((address, sink, stream)) => (address, sink, stream),
@@ -143,19 +173,223 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                     continue;
                 }
             };
-            debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
+            debug!(?address, "accepted incoming connection");
+
+            // Cleanup the rate limiters periodically
+            if accepted > CLEANUP_INTERVAL {
+                self.ip_rate_limiter.shrink_to_fit();
+                self.subnet_rate_limiter.shrink_to_fit();
+                accepted = 0;
+            }
+            accepted += 1;
+
+            // Check whether the IP (and subnet) exceeds its rate limit
+            let ip = address.ip();
+            let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
+                self.handshakes_ip_rate_limited.inc();
+                debug!(?address, "ip exceeded handshake rate limit");
+                true
+            } else {
+                false
+            };
+            let subnet = ip.subnet(&SUBNET_MASK);
+            let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
+                self.handshakes_subnet_rate_limited.inc();
+                debug!(?address, "subnet exceeded handshake rate limit");
+                true
+            } else {
+                false
+            };
+
+            // We wait to check whether the handshake is permitted until after updating both the ip
+            // and subnet rate limiters
+            if ip_limited || subnet_limited {
+                continue;
+            }
+
+            // Check whether there are too many ongoing handshakes
+            let Some(reservation) = self.handshake_limiter.try_acquire() else {
+                self.handshakes_concurrent_rate_limited.inc();
+                debug!(?address, "maximum concurrent handshakes reached");
+                continue;
+            };
 
             // Spawn a new handshaker to upgrade connection
             self.context.with_label("handshaker").spawn({
                 let stream_cfg = self.stream_cfg.clone();
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();
-                move |context| {
+                move |context| async move {
                     Self::handshake(
                         context, address, stream_cfg, sink, stream, tracker, supervisor,
                     )
+                    .await;
+
+                    // Once the handshake attempt is complete, release the reservation
+                    drop(reservation);
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{deterministic, Error as RuntimeError, Runner as _, Stream};
+    use commonware_utils::NZU32;
+    use futures::StreamExt as _;
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        time::Duration,
+    };
+
+    fn check_rate_limits<CheckMetrics>(
+        allowed_handshake_rate_per_ip: Quota,
+        allowed_handshake_rate_per_subnet: Quota,
+        check_metrics: CheckMetrics,
+    ) where
+        CheckMetrics: FnOnce(&str),
+    {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_001);
+            let stream_cfg = StreamConfig {
+                signing_key: PrivateKey::from_seed(1),
+                namespace: b"test-rate-limit".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_millis(5),
+            };
+
+            let actor = Actor::new(
+                context.clone(),
+                Config {
+                    address,
+                    stream_cfg,
+                    max_concurrent_handshakes: NZU32!(8),
+                    allowed_handshake_rate_per_ip,
+                    allowed_handshake_rate_per_subnet,
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) = Mailbox::test();
+            let tracker_task = context.clone().spawn(|_| async move {
+                while let Some(message) = tracker_rx.next().await {
+                    match message {
+                        tracker::Message::Listenable { responder, .. } => {
+                            let _ = responder.send(true);
+                        }
+                        tracker::Message::Listen { reservation, .. } => {
+                            let _ = reservation.send(None);
+                        }
+                        tracker::Message::Release { .. } => {}
+                        _ => panic!("unexpected tracker message"),
+                    }
+                }
+            });
+
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
+            let supervisor_task = context
+                .clone()
+                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
+            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+
+            // Allow a single handshake attempt from this IP.
+            let (sink, mut stream) = loop {
+                match context.dial(address).await {
+                    Ok(pair) => break pair,
+                    Err(RuntimeError::ConnectionFailed) => {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(err) => panic!("unexpected dial error: {err:?}"),
+                }
+            };
+
+            // Wait for some message or drop.
+            let buf = vec![0u8; 1];
+            let _ = stream.recv(buf).await;
+            drop((sink, stream));
+
+            // Additional attempts should be rate limited immediately.
+            for _ in 0..3 {
+                let (sink, mut stream) = context.dial(address).await.expect("dial");
+
+                // Wait for some message or drop.
+                let buf = vec![0u8; 1];
+                let _ = stream.recv(buf).await;
+                drop((sink, stream));
+            }
+
+            let metrics = context.encode();
+            check_metrics(&metrics);
+
+            listener_handle.abort();
+            tracker_task.abort();
+            supervisor_task.abort();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn rate_limits_ip() {
+        check_rate_limits(
+            Quota::per_hour(NZU32!(1)),
+            Quota::per_hour(NZU32!(100)),
+            |metrics| {
+                assert!(
+                    metrics.contains("handshake_ip_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshake_subnet_rate_limited_total 0"),
+                    "{}",
+                    metrics
+                );
+            },
+        );
+    }
+
+    #[test_traced("DEBUG")]
+    fn rate_limits_subnet() {
+        check_rate_limits(
+            Quota::per_hour(NZU32!(100)),
+            Quota::per_hour(NZU32!(1)),
+            |metrics| {
+                assert!(
+                    metrics.contains("handshake_subnet_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshake_ip_rate_limited_total 0"),
+                    "{}",
+                    metrics
+                );
+            },
+        );
+    }
+
+    #[test_traced("DEBUG")]
+    fn rate_limits_both() {
+        check_rate_limits(
+            Quota::per_hour(NZU32!(1)),
+            Quota::per_hour(NZU32!(1)),
+            |metrics| {
+                assert!(
+                    metrics.contains("handshake_ip_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshake_subnet_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+            },
+        );
     }
 }

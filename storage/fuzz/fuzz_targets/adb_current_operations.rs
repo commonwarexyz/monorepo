@@ -64,7 +64,7 @@ fn fuzz(data: FuzzInput) {
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys = std::collections::HashSet::new();
         let mut uncommitted_ops = 0;
-        let mut last_committed_op_count = 0;
+        let mut last_committed_op_count = Location::new(0);
 
         for op in data.operations.iter().take(100) {
             match op {
@@ -153,7 +153,7 @@ fn fuzz(data: FuzzInput) {
                         let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
 
                         // Adjust start_loc and max_ops to be within valid range
-                        let start_loc = Location::new(start_loc % current_op_count);
+                        let start_loc = Location::new(start_loc % *current_op_count);
                         let max_ops = (*max_ops % 50).max(1);
 
                         let oldest_loc = db.inactivity_floor_loc();

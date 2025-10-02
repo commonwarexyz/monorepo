@@ -110,7 +110,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
     }
 
-    pub fn size(&self) -> u64 {
+    pub fn size(&self) -> Position {
         self.mmr.size()
     }
 
@@ -544,13 +544,13 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let chunk = *self.get_chunk(bit_offset);
         let chunk_loc = Self::chunk_loc(bit_offset);
 
-        if chunk_loc as u64 == self.mmr.leaves() {
+        if chunk_loc as u64 == *self.mmr.leaves() {
             assert!(self.next_bit > 0);
             // Proof is over a bit in the partial chunk. In this case only a single digest is
             // required in the proof: the mmr's root.
             return Ok((
                 Proof {
-                    size: self.bit_count(),
+                    size: Position::new(self.bit_count()),
                     digests: vec![self.mmr.root(hasher)],
                 },
                 chunk,
@@ -559,7 +559,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         let range = Location::new(chunk_loc as u64)..Location::new((chunk_loc + 1) as u64);
         let mut proof = verification::range_proof(&self.mmr, range).await?;
-        proof.size = self.bit_count();
+        proof.size = Position::new(self.bit_count());
         if self.next_bit == 0 {
             // Bitmap is chunk aligned.
             return Ok((proof, chunk));
@@ -582,7 +582,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         bit_offset: u64,
         root: &H::Digest,
     ) -> bool {
-        let bit_count = proof.size;
+        let bit_count = *proof.size;
         if bit_offset >= bit_count {
             debug!(bit_count, bit_offset, "tried to verify non-existent bit");
             return false;
@@ -590,7 +590,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         let leaves = Self::chunk_loc(bit_count) as u64;
         let mut mmr_proof = Proof::<H::Digest> {
-            size: Position::from(Location::new(leaves)).into(),
+            size: Position::from(Location::new(leaves)),
             digests: proof.digests.clone(),
         };
 
@@ -661,7 +661,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 }
 
 impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
-    fn size(&self) -> u64 {
+    fn size(&self) -> Position {
         self.size()
     }
 
@@ -697,7 +697,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher = StandardHasher::new();
             let proof = Proof {
-                size: 100,
+                size: Position::new(100),
                 digests: Vec::new(),
             };
             assert!(
