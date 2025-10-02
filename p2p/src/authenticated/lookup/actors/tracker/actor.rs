@@ -12,7 +12,10 @@ use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+};
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
@@ -22,6 +25,9 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
+
+    /// The mailbox for the listener.
+    listener: Mailbox<HashSet<IpAddr>>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -48,7 +54,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             max_sets: cfg.tracked_peer_sets,
             rate_limit: cfg.allowed_connection_rate_per_peer,
             allow_private_ips: cfg.allow_private_ips,
-            registered_ips: cfg.registered_ips.clone(),
         };
 
         // Create the mailboxes
@@ -66,6 +71,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 context,
                 receiver,
                 directory,
+                listener: cfg.registered_ips,
                 mailboxes: HashMap::new(),
             },
             mailbox,
@@ -88,6 +94,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                             mailbox.kill().await;
                         }
                     }
+
+                    // Send the updated registered IP addresses to the listener.
+                    let _ = self.listener.send(self.directory.registered()).await;
                 }
                 Message::Connect {
                     public_key,
@@ -132,6 +141,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     if let Some(mut peer) = self.mailboxes.remove(&public_key) {
                         peer.kill().await;
                     }
+
+                    // Send the updated registered IP addresses to the listener.
+                    let _ = self.listener.send(self.directory.registered()).await;
                 }
                 Message::Release { metadata } => {
                     // Clear the peer handle if it exists
