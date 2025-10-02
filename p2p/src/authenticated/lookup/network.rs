@@ -1,5 +1,7 @@
 //! Implementation of an `authenticated` network.
 
+use std::{collections::HashSet, net::IpAddr};
+
 use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
@@ -33,7 +35,7 @@ pub struct Network<
     tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
-    registered_ip_updates: mpsc::Receiver<listener::Message>,
+    registered_ip_updates: mpsc::Receiver<HashSet<IpAddr>>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -51,7 +53,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
         let (registered_ip_sender, registered_ip_updates) =
-            mpsc::channel::<listener::Message>(cfg.mailbox_size);
+            mpsc::channel::<HashSet<IpAddr>>(cfg.mailbox_size);
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {

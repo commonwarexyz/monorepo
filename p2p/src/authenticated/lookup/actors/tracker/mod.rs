@@ -1,9 +1,12 @@
 //! Tracker
 
-use crate::authenticated::{lookup::actors::listener, Mailbox};
+use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
 use governor::Quota;
-use std::net::SocketAddr;
+use std::{
+    collections::HashSet,
+    net::{IpAddr, SocketAddr},
+};
 
 pub mod actor;
 mod directory;
@@ -26,5 +29,5 @@ pub struct Config<C: Signer> {
     pub tracked_peer_sets: usize,
     pub allowed_connection_rate_per_peer: Quota,
     pub allow_private_ips: bool,
-    pub registered_ips: Mailbox<listener::Message>,
+    pub registered_ips: Mailbox<HashSet<IpAddr>>,
 }

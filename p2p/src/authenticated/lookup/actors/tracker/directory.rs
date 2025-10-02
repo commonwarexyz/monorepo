@@ -1,9 +1,6 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::{
-    lookup::{
-        actors::{listener, tracker::ingress::Releaser},
-        metrics,
-    },
+    lookup::{actors::tracker::ingress::Releaser, metrics},
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
@@ -25,7 +22,7 @@ pub struct Config {
     pub allow_private_ips: bool,
 
     /// Mailbox to publish registered IP addresses for pre-handshake filtering.
-    pub registered_ips: Mailbox<listener::Message>,
+    pub registered_ips: Mailbox<HashSet<IpAddr>>,
 
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
@@ -46,7 +43,7 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     pub allow_private_ips: bool,
 
     /// Mailbox to publish registered IP addresses for pre-handshake filtering.
-    registered_ips: Mailbox<listener::Message>,
+    registered_ips: Mailbox<HashSet<IpAddr>>,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -297,9 +294,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let mut mailbox = self.registered_ips.clone();
         let mut context = self.context.clone();
         context.spawn_ref()(async move {
-            let _ = mailbox
-                .send(listener::Message::UpdateRegisteredIps(ips))
-                .await;
+            let _ = mailbox.send(ips).await;
         });
     }
 }
