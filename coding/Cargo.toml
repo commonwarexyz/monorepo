@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-coding"
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
+commonware-utils = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 reed-solomon-simd = "3.0.1"
