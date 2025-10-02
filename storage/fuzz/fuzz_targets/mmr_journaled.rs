@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
     journaled::{Config, Mmr, SyncConfig},
-    location::Location,
+    location::{Location, LocationRangeExt},
     Position, StandardHasher as Standard,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -206,11 +206,16 @@ fn fuzz(input: FuzzInput) {
                     {
                         continue;
                     }
+
                     mmr.process_updates(&mut hasher);
                     if let Ok(proof) = mmr.range_proof(range.clone()).await {
-                        let historical_proof = mmr.range_proof(range).await.unwrap();
-                        assert_eq!(proof.size, historical_proof.size);
-                        assert_eq!(proof.digests, historical_proof.digests);
+                        let root = mmr.root(&mut hasher);
+                        assert!(proof.verify_range_inclusion(
+                            &mut hasher,
+                            &leaves[range.to_usize_range()],
+                            Location::new(start_loc),
+                            &root
+                        ));
                     }
                 }
 
@@ -233,7 +238,17 @@ fn fuzz(input: FuzzInput) {
                     }
                     let range = Location::new(start_loc)..Location::new(end_loc);
                     mmr.process_updates(&mut hasher);
-                    let _ = mmr.historical_range_proof(mmr.size(), range).await;
+                    if let Ok(historical_proof) =
+                        mmr.historical_range_proof(mmr.size(), range.clone()).await
+                    {
+                        let root = mmr.root(&mut hasher);
+                        assert!(historical_proof.verify_range_inclusion(
+                            &mut hasher,
+                            &leaves[range.to_usize_range()],
+                            Location::new(start_loc),
+                            &root
+                        ));
+                    }
                 }
 
                 MmrJournaledOperation::Sync => {
