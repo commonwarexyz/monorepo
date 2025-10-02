@@ -161,21 +161,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     async fn run(mut self) {
-        let mut prefer_unbounded = true;
         loop {
-            // Alternate which mailbox we poll first to avoid starvation
-            let msg = if prefer_unbounded {
-                select! {
-                    msg = self.unbound_receiver.next() => { msg },
-                    msg = self.receiver.next() => { msg },
-                }
-            } else {
-                select! {
-                    msg = self.receiver.next() => { msg },
-                    msg = self.unbound_receiver.next() => { msg },
-                }
+            // We prefer the unbounded mailbox because `receiver` will block
+            // already block when full (providing backpressure).
+            let msg = select! {
+                msg = self.unbound_receiver.next() => { msg },
+                msg = self.receiver.next() => { msg },
             };
-            prefer_unbounded = !prefer_unbounded;
 
             // Handle the message (if any)
             let Some(msg) = msg else {
