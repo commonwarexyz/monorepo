@@ -50,7 +50,7 @@ check-docs *args='':
 
 # Run all fuzz tests in a given directory
 fuzz fuzz_dir max_time='60' nightly_version='nightly':
-  #!/bin/bash
+  #!/usr/bin/env bash
   for target in $(cargo +{{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}}); do
     cargo +{{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}}
   done
