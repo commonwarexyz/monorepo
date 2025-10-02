@@ -5,6 +5,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
+use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{
@@ -12,7 +13,7 @@ use commonware_utils::{
     net::{Subnet, SubnetMask},
     IpAddrExt,
 };
-use futures::{channel::mpsc, TryStreamExt};
+use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -31,12 +32,6 @@ const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 
 /// Interval at which to prune tracked IPs and Subnets.
 const CLEANUP_INTERVAL: u32 = 16_384;
-
-/// Control messages for the listener actor.
-#[derive(Debug)]
-pub enum Message {
-    UpdateRegisteredIps(HashSet<IpAddr>),
-}
 
 /// Configuration for the listener actor.
 pub struct Config<C: Signer> {
@@ -60,7 +55,8 @@ pub struct Actor<
     subnet_rate_limiter:
         RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
     registered_ips: HashSet<IpAddr>,
-    updates: mpsc::Receiver<Message>,
+    updates: mpsc::Receiver<HashSet<IpAddr>>,
+    handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
     handshakes_subnet_rate_limited: Counter,
@@ -69,8 +65,14 @@ pub struct Actor<
 impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config<C>, updates: mpsc::Receiver<Message>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, updates: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
         // Create metrics
+        let handshakes_blocked = Counter::default();
+        context.register(
+            "handshakes_blocked",
+            "number of handshake attempts blocked because the IP was not registered",
+            handshakes_blocked.clone(),
+        );
         let handshakes_concurrent_rate_limited = Counter::default();
         context.register(
             "handshake_concurrent_rate_limited",
@@ -106,6 +108,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             ),
             registered_ips: HashSet::new(),
             updates,
+            handshakes_blocked,
             handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
             handshakes_subnet_rate_limited,
@@ -164,107 +167,101 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     #[allow(clippy::type_complexity)]
     async fn run(
-        self,
+        mut self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
-        let Self {
-            context,
-            address,
-            stream_cfg,
-            handshake_limiter,
-            ip_rate_limiter,
-            subnet_rate_limiter,
-            mut registered_ips,
-            mut updates,
-            handshakes_concurrent_rate_limited,
-            handshakes_ip_rate_limited,
-            handshakes_subnet_rate_limited,
-        } = self;
-
         // Start listening for incoming connections
-        let mut listener = context
-            .bind(address)
+        let mut listener = self
+            .context
+            .bind(self.address)
             .await
             .expect("failed to bind listener");
 
         // Loop over incoming connections
         let mut accepted = 0;
         loop {
-            while let Ok(Some(Message::UpdateRegisteredIps(set))) = updates.try_next() {
-                registered_ips = set;
+            select! {
+                updates = self.updates.next() => {
+                    let Some(updates) = updates else {
+                        break;
+                    };
+                    self.registered_ips = updates;
+                },
+                listener = listener.accept() => {
+                    // Accept a new connection
+                    let (address, sink, stream) = match listener {
+                        Ok((address, sink, stream)) => (address, sink, stream),
+                        Err(e) => {
+                            debug!(error = ?e, "failed to accept connection");
+                            continue;
+                        }
+                    };
+                    debug!(?address, "accepted incoming connection");
+
+                    // Cleanup the rate limiters periodically
+                    if accepted > CLEANUP_INTERVAL {
+                        self.ip_rate_limiter.shrink_to_fit();
+                        self.subnet_rate_limiter.shrink_to_fit();
+                        accepted = 0;
+                    }
+                    accepted += 1;
+
+                    // Check whether the IP is permitted
+                    let ip = address.ip();
+                    if !self.registered_ips.contains(&ip) {
+                        self.handshakes_blocked.inc();
+                        debug!(?address, "rejecting unregistered address");
+                        continue;
+                    }
+
+                    // Check whether the IP (and subnet) exceeds its rate limit
+                    let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
+                        self.handshakes_ip_rate_limited.inc();
+                        debug!(?address, "ip exceeded handshake rate limit");
+                        true
+                    } else {
+                        false
+                    };
+                    let subnet = ip.subnet(&SUBNET_MASK);
+                    let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
+                        self.handshakes_subnet_rate_limited.inc();
+                        debug!(?address, "subnet exceeded handshake rate limit");
+                        true
+                    } else {
+                        false
+                    };
+
+                    // We wait to check whether the handshake is permitted until after updating both the ip
+                    // and subnet rate limiters
+                    if ip_limited || subnet_limited {
+                        continue;
+                    }
+
+                    // Check whether there are too many ongoing handshakes
+                    let Some(reservation) = self.handshake_limiter.try_acquire() else {
+                        self.handshakes_concurrent_rate_limited.inc();
+                        debug!(?address, "maximum concurrent handshakes reached");
+                        continue;
+                    };
+
+                    // Spawn a new handshaker to upgrade connection
+                    self.context.with_label("handshaker").spawn({
+                        let stream_cfg = self.stream_cfg.clone();
+                        let tracker = tracker.clone();
+                        let supervisor = supervisor.clone();
+                        move |context| async move {
+                            Self::handshake(
+                                context, address, stream_cfg, sink, stream, tracker, supervisor,
+                            )
+                            .await;
+
+                            // Once the handshake attempt is complete, release the reservation
+                            drop(reservation);
+                        }
+                    });
+                },
             }
-
-            // Accept a new connection
-            let (address, sink, stream) = match listener.accept().await {
-                Ok((address, sink, stream)) => (address, sink, stream),
-                Err(e) => {
-                    debug!(error = ?e, "failed to accept connection");
-                    continue;
-                }
-            };
-            debug!(?address, "accepted incoming connection");
-
-            // Cleanup the rate limiters periodically
-            if accepted > CLEANUP_INTERVAL {
-                ip_rate_limiter.shrink_to_fit();
-                subnet_rate_limiter.shrink_to_fit();
-                accepted = 0;
-            }
-            accepted += 1;
-
-            let ip = address.ip();
-
-            if !registered_ips.contains(&ip) {
-                debug!(?address, "rejecting unregistered address");
-                continue;
-            }
-
-            // Check whether the IP (and subnet) exceeds its rate limit
-            let ip_limited = if ip_rate_limiter.check_key(&ip).is_err() {
-                handshakes_ip_rate_limited.inc();
-                debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
-                true
-            } else {
-                false
-            };
-            let subnet = ip.subnet(&SUBNET_MASK);
-            let subnet_limited = if subnet_rate_limiter.check_key(&subnet).is_err() {
-                handshakes_subnet_rate_limited.inc();
-                debug!(ip = ?address.ip(), "subnet exceeded handshake rate limit");
-                true
-            } else {
-                false
-            };
-
-            // We wait to check whether the handshake is permitted until after updating both the ip
-            // and subnet rate limiters
-            if ip_limited || subnet_limited {
-                continue;
-            }
-
-            // Check whether there are too many ongoing handshakes
-            let Some(reservation) = handshake_limiter.try_acquire() else {
-                handshakes_concurrent_rate_limited.inc();
-                debug!(?address, "maximum concurrent handshakes reached");
-                continue;
-            };
-
-            // Spawn a new handshaker to upgrade connection
-            context.with_label("handshaker").spawn({
-                let stream_cfg = stream_cfg.clone();
-                let tracker = tracker.clone();
-                let supervisor = supervisor.clone();
-                move |context| async move {
-                    Self::handshake(
-                        context, address, stream_cfg, sink, stream, tracker, supervisor,
-                    )
-                    .await;
-
-                    // Once the handshake attempt is complete, release the reservation
-                    drop(reservation);
-                }
-            });
         }
     }
 }
@@ -276,7 +273,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Error as RuntimeError, Runner as _, Stream};
     use commonware_utils::NZU32;
-    use futures::{SinkExt as _, StreamExt as _};
+    use futures::SinkExt;
     use std::{
         net::{IpAddr, Ipv4Addr},
         time::Duration,
@@ -317,7 +314,7 @@ mod tests {
             let mut allowed = HashSet::new();
             allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
             updates_tx
-                .send(Message::UpdateRegisteredIps(allowed))
+                .send(allowed)
                 .await
                 .expect("update registered ips");
 
