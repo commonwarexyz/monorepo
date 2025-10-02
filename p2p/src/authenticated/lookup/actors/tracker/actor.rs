@@ -177,7 +177,7 @@ mod tests {
     use commonware_utils::NZU32;
     use governor::Quota;
     use std::{
-        net::{IpAddr, Ipv4Addr, SocketAddr},
+        net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
     };
 
@@ -495,9 +495,9 @@ mod tests {
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9001);
             let pk_2 = new_signer_and_pk(2).1;
-            let addr_2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9002);
+            let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
-            let (mut cfg, _) = default_test_config(my_sk);
+            let (mut cfg, mut listener_receiver) = default_test_config(my_sk);
             cfg.tracked_peer_sets = 1;
 
             let TestHarness {
@@ -513,6 +513,12 @@ mod tests {
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
 
+            // Wait for a listener update
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(registered_ips.contains(&my_addr.ip()));
+            assert!(registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
+
             // Mark peer as connected
             let reservation = mailbox.listen(pk_1.clone()).await;
             assert!(reservation.is_some());
@@ -522,7 +528,12 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle.register(1, vec![(pk_2.clone(), addr_2)]).await;
-            // let the register take effect
+
+            // Wait for a listener update
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&my_addr.ip()));
+            assert!(!registered_ips.contains(&addr_1.ip()));
+            assert!(registered_ips.contains(&addr_2.ip()));
 
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.
