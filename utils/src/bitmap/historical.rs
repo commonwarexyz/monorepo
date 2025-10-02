@@ -938,15 +938,18 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         // Determine if this chunk needs reconstruction due to batch changes.
         // Check conditions in order with short-circuit evaluation.
         let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
-        let range_end = chunk_end_bit.min(batch.base_len);
         
         let chunk_needs_reconstruction = 
             // Check 1: Does the chunk extend beyond projected_len (has popped bits to zero)?
-        (chunk_end_bit > batch.projected_len && chunk_start_bit < batch.projected_len) ||
-            // Check 2: Does the chunk have any explicit modifications?
-            (chunk_start_bit..range_end).any(|bit| batch.modified_bits.contains_key(&bit))
-            // Check 3: Does the chunk overlap with appended bits?
-            || (chunk_start_bit..range_end).any(|bit| bit >= appended_start && bit < batch.projected_len);
+            (chunk_end_bit > batch.projected_len && chunk_start_bit < batch.projected_len) ||
+            // Check 2: Does the chunk overlap with appended bits?
+            // Must check this BEFORE clamping range, as appended-only chunks have chunk_start >= base_len
+            (chunk_start_bit < batch.projected_len && chunk_end_bit > appended_start) ||
+            // Check 3: Does the chunk have any explicit modifications in the base region?
+            {
+                let range_end = chunk_end_bit.min(batch.base_len);
+                (chunk_start_bit..range_end).any(|bit| batch.modified_bits.contains_key(&bit))
+            };
 
         if chunk_needs_reconstruction {
             // Reconstruct chunk from current + batch modifications
@@ -1822,6 +1825,42 @@ mod tests {
         let mut batch = historical.start_batch();
         batch.pop(); // projected_len = 9
         batch.prune_to_bit(100); // Should panic - bit 100 is beyond projected length
+    }
+
+    /// Test that get_chunk can read entirely appended chunks.
+    ///
+    /// This tests the scenario where:
+    /// 1. We start with an empty (or short) bitmap
+    /// 2. We append bits that create a chunk entirely in the appended region
+    /// 3. We call get_chunk on that chunk
+    ///
+    /// The bug is that when a chunk is entirely appended (chunk_start >= base_len),
+    /// the range_end calculation (chunk_end.min(base_len)) creates an empty range,
+    /// so all checks return false and we fall back to current.get_chunk(), which
+    /// panics because that chunk doesn't exist in current.
+    #[test]
+    fn test_get_chunk_on_appended_only_chunk() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Start with empty bitmap
+        let mut batch = historical.start_batch();
+
+        // Push 32 bits (fills chunk 0 entirely)
+        for i in 0..32 {
+            batch.push(i % 2 == 0); // Alternating pattern: true, false, true, false...
+        }
+
+        // Now try to read chunk 0 - this chunk is entirely appended
+        let chunk = batch.get_chunk(0);
+
+        // Verify the alternating pattern: true, false, true, false...
+        assert_ne!(chunk[0] & 0x01, 0, "bit 0 should be true");
+        assert_eq!(chunk[0] & 0x02, 0, "bit 1 should be false");
+        assert_ne!(chunk[0] & 0x04, 0, "bit 2 should be true");
+        assert_eq!(chunk[0] & 0x08, 0, "bit 3 should be false");
+        
+        // Overall pattern should be 0x55 (binary 01010101)
+        assert_eq!(chunk[0], 0x55, "byte 0 should be 0x55");
     }
 
     /// Test that get_chunk zeros out bits beyond projected_len after pops.
