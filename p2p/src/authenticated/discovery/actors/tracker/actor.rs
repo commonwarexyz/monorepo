@@ -204,7 +204,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 // Mark the record as connected
                 self.directory.connect(&public_key, dialer);
 
-                // Send the peer info to the peer
+                // Proactively send our own info to the peer
                 let info = self.directory.info(&self.crypto.public_key()).unwrap();
                 let _ = peer.peers(vec![info]).await;
             }
@@ -279,6 +279,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 // time it sends the `Connect` or `Construct` message to the tracker.
             }
             Message::Release { metadata } => {
+                // Release the peer
                 self.directory.release(metadata);
             }
         }
