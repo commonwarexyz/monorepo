@@ -5,7 +5,7 @@ use crate::{
         interesting,
         metrics::{self, Inbound, Outbound},
         min_active,
-        signing::SigningScheme,
+        new_types::SigningScheme,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal, Voter,

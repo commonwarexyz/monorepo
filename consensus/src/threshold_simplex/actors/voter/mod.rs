@@ -3,7 +3,7 @@ mod ingress;
 
 use crate::{
     threshold_simplex::{
-        signing::SigningScheme,
+        new_types::SigningScheme,
         types::{Activity, Context},
     },
     types::{Epoch, View},

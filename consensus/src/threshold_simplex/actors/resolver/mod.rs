@@ -1,7 +1,7 @@
 mod actor;
 mod ingress;
 
-use crate::{threshold_simplex::signing::SigningScheme, types::Epoch, Supervisor};
+use crate::{threshold_simplex::new_types::SigningScheme, types::Epoch, Supervisor};
 pub use actor::Actor;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::Blocker;

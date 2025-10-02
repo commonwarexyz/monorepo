@@ -4,7 +4,7 @@ use super::{
     types::{Activity, Context},
 };
 use crate::{
-    threshold_simplex::signing::SigningScheme, types::View, Automaton, Relay, Reporter,
+    threshold_simplex::new_types::SigningScheme, types::View, Automaton, Relay, Reporter,
     ThresholdSupervisor,
 };
 use commonware_cryptography::{

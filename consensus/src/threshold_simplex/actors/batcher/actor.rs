@@ -4,7 +4,7 @@ use crate::{
         actors::voter,
         interesting,
         metrics::Inbound,
-        signing::SigningScheme,
+        new_types::SigningScheme,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
             Finalize, Notarize, Nullify, NullifyFinalize, Voter,
