@@ -49,7 +49,7 @@ enum Operation {
         max_ops: NonZeroU64,
     },
     HistoricalProof {
-        size: u32,
+        size: u64,
         start_loc: Location,
         max_ops: NonZeroU64,
     },
@@ -185,7 +185,10 @@ fn fuzz(input: FuzzInput) {
         .await
         .expect("Failed to init source db");
 
-        let mut map = HashMap::<[u8; 32], Vec<u8>>::default();
+        let mut historical_roots: HashMap<
+            Location,
+            <Sha256 as commonware_cryptography::Hasher>::Digest,
+        > = HashMap::new();
 
         let mut has_uncommitted = false;
 
@@ -195,7 +198,6 @@ fn fuzz(input: FuzzInput) {
                     db.update(Key::new(*key), value_bytes.to_vec())
                         .await
                         .expect("Update should not fail");
-                    map.insert(*key, value_bytes.to_vec());
                     has_uncommitted = true;
                 }
 
@@ -203,9 +205,6 @@ fn fuzz(input: FuzzInput) {
                     db.delete(Key::new(*key))
                         .await
                         .expect("Delete should not fail");
-                    if map.contains_key(&key.clone()) {
-                        map.remove(key).unwrap();
-                    }
                     has_uncommitted = true;
                 }
 
@@ -213,6 +212,7 @@ fn fuzz(input: FuzzInput) {
                     db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
+                    historical_roots.insert(db.op_count(), db.root(&mut hasher));
                     has_uncommitted = false;
                 }
 
@@ -245,15 +245,12 @@ fn fuzz(input: FuzzInput) {
                 Operation::Proof { start_loc, max_ops } => {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
-                        // Skip invalid cases
-                        if db.op_count() == 0 || map.is_empty() {
-                            continue;
-                        }
                         if *start_loc < db.oldest_retained_loc().unwrap() || *start_loc >= op_count
                         {
                             continue;
                         }
 
+                        db.sync().await.expect("Sync should not fail");
                         if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
                             let root = db.root(&mut hasher);
                             assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
@@ -266,22 +263,19 @@ fn fuzz(input: FuzzInput) {
                     start_loc,
                     max_ops,
                 } => {
-                    let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
-                        let size = Location::new((*size as u64) % op_count.as_u64()) + 1;
-                        // Skip invalid cases
-                        if db.op_count() == 0 || map.is_empty() {
-                            continue;
-                        }
-                        if *start_loc > size || *start_loc >= op_count {
+                    if db.op_count() > 0 && !has_uncommitted {
+                        let op_count = Location::new((*size) % db.op_count().as_u64()) + 1;
+
+                        if *start_loc >= op_count || op_count > max_ops.get() {
                             continue;
                         }
 
                         if let Ok((proof, log)) =
-                            db.historical_proof(size, *start_loc, *max_ops).await
+                            db.historical_proof(op_count, *start_loc, *max_ops).await
                         {
-                            let root = db.root(&mut hasher);
-                            assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
+                            if let Some(root) = historical_roots.get(&op_count) {
+                                assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
+                            }
                         }
                     }
                 }
