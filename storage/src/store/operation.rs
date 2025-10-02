@@ -3,6 +3,7 @@
 //! The `Operation` enum implements the `Array` trait, allowing for a persistent log of operations
 //! based on a `crate::Journal`.
 
+use crate::mmr::Location;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     util::at_least, varint::UInt, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize,
@@ -52,7 +53,7 @@ pub enum Fixed<K: Array, V: CodecFixed> {
 
     /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
     /// operations has been raised to the wrapped value.
-    CommitFloor(u64),
+    CommitFloor(Location),
 }
 
 /// Operations for keyless stores.
@@ -84,7 +85,7 @@ pub enum Variable<K: Array, V: Codec> {
     // Operations for mutable stores.
     Delete(K),
     Update(K, V),
-    CommitFloor(Option<V>, u64),
+    CommitFloor(Option<V>, Location),
 }
 
 impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
@@ -96,7 +97,9 @@ impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
         1 + match self {
             Variable::Delete(_) => K::SIZE,
             Variable::Update(_, v) => K::SIZE + v.encode_size(),
-            Variable::CommitFloor(v, floor_loc) => v.encode_size() + UInt(*floor_loc).encode_size(),
+            Variable::CommitFloor(v, floor_loc) => {
+                v.encode_size() + UInt(**floor_loc).encode_size()
+            }
             Variable::Set(_, v) => K::SIZE + v.encode_size(),
             Variable::Commit(v) => v.encode_size(),
         }
@@ -270,7 +273,7 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
             Variable::CommitFloor(v, floor_loc) => {
                 COMMIT_FLOOR_CONTEXT.write(buf);
                 v.write(buf);
-                UInt(*floor_loc).write(buf);
+                UInt(**floor_loc).write(buf);
             }
         }
     }
@@ -323,7 +326,7 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
                         ));
                     }
                 }
-                Ok(Self::CommitFloor(floor_loc))
+                Ok(Self::CommitFloor(Location::new(floor_loc)))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -353,7 +356,7 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
             COMMIT_FLOOR_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
-                Ok(Self::CommitFloor(metadata, floor_loc.into()))
+                Ok(Self::CommitFloor(metadata, Location::new(floor_loc.into())))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -430,7 +433,7 @@ mod tests {
         let delete_op = Fixed::<U64, U64>::Delete(key.clone());
         assert_eq!(&key, delete_op.key().unwrap());
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(42);
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new(42));
         assert_eq!(None, commit_op.key());
     }
 
@@ -445,7 +448,7 @@ mod tests {
         let delete_op = Fixed::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.value());
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(42);
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new(42));
         assert_eq!(None, commit_op.value());
     }
 
@@ -470,10 +473,10 @@ mod tests {
         assert_eq!(None, from.value());
         assert_eq!(delete_op, from);
 
-        let commit_op = Fixed::<U64, U64>::CommitFloor(42);
+        let commit_op = Fixed::<U64, U64>::CommitFloor(Location::new(42));
         let from = Fixed::<U64, U64>::decode(commit_op.encode()).unwrap();
         assert_eq!(None, from.value());
-        assert!(matches!(from, Fixed::CommitFloor(42)));
+        assert!(matches!(from, Fixed::CommitFloor(loc) if loc == Location::new(42)));
         assert_eq!(commit_op, from);
 
         // test non-zero byte detection in delete operation

@@ -9,13 +9,12 @@
 
 use crate::{
     adb::Error,
-    index::Index,
+    index::{Cursor, Index as _, Unordered as Index},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
-        Proof, StandardHasher as Standard,
+        Location, Position, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed as Operation,
     translator::Translator,
@@ -109,11 +108,11 @@ pub struct Any<
     /// # Invariant
     ///
     /// Only references operations of type [Operation::Update].
-    pub(crate) snapshot: Index<T, u64>,
+    pub(crate) snapshot: Index<T, Location>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
-    pub(crate) inactivity_floor_loc: u64,
+    pub(crate) inactivity_floor_loc: Location,
 
     /// The number of operations that are pending commit.
     pub(crate) uncommitted_ops: u64,
@@ -133,7 +132,7 @@ impl<
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
-        let mut snapshot: Index<T, u64> =
+        let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let mut hasher = Standard::<H>::new();
         let (inactivity_floor_loc, mmr, log) =
@@ -166,7 +165,7 @@ impl<
         context: E,
         cfg: Config<T>,
         hasher: &mut Standard<H>,
-    ) -> Result<(u64, Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
+    ) -> Result<(Location, Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
             hasher,
@@ -194,52 +193,51 @@ impl<
 
         // Back up over / discard any uncommitted operations in the log.
         let mut log_size = log.size().await?;
-        let mut rewind_leaf_num = log_size;
-        let mut inactivity_floor_loc = 0;
-        while rewind_leaf_num > 0 {
-            if let Operation::CommitFloor(loc) = log.read(rewind_leaf_num - 1).await? {
+        let mut rewind_leaf_loc = log_size;
+        let mut inactivity_floor_loc = Location::new(0);
+        while rewind_leaf_loc > 0 {
+            if let Operation::CommitFloor(loc) = log.read(rewind_leaf_loc - 1).await? {
                 inactivity_floor_loc = loc;
                 break;
             }
-            rewind_leaf_num -= 1;
+            rewind_leaf_loc -= 1;
         }
-        if rewind_leaf_num != log_size {
-            let op_count = log_size - rewind_leaf_num;
+        if rewind_leaf_loc != log_size {
+            let op_count = log_size - rewind_leaf_loc;
             warn!(
                 log_size,
                 op_count, "rewinding over uncommitted log operations"
             );
-            log.rewind(rewind_leaf_num).await?;
+            log.rewind(rewind_leaf_loc).await?;
             log.sync().await?;
-            log_size = rewind_leaf_num;
+            log_size = rewind_leaf_loc;
         }
 
         // Pop any MMR elements that are ahead of the last log commit point.
-        let mut next_mmr_leaf_num = leaf_pos_to_num(mmr.size()).unwrap();
-        if next_mmr_leaf_num > log_size {
-            let op_count = next_mmr_leaf_num - log_size;
-            warn!(log_size, op_count, "popping uncommitted MMR operations");
-            mmr.pop(op_count as usize).await?;
-            next_mmr_leaf_num = log_size;
+        let mut next_mmr_leaf_loc = *mmr.leaves();
+        if next_mmr_leaf_loc > log_size {
+            let num_to_pop = (next_mmr_leaf_loc - log_size) as usize;
+            warn!(log_size, num_to_pop, "popping uncommitted MMR operations");
+            mmr.pop(num_to_pop).await?;
+            next_mmr_leaf_loc = log_size;
         }
 
         // If the MMR is behind, replay log operations to catch up.
-        if next_mmr_leaf_num < log_size {
-            let op_count = log_size - next_mmr_leaf_num;
+        if next_mmr_leaf_loc < log_size {
             warn!(
                 log_size,
-                op_count, "MMR lags behind log, replaying log to catch up"
+                next_mmr_leaf_loc, "MMR lags behind log, replaying log to catch up"
             );
-            while next_mmr_leaf_num < log_size {
-                let op = log.read(next_mmr_leaf_num).await?;
+            while next_mmr_leaf_loc < log_size {
+                let op = log.read(next_mmr_leaf_loc).await?;
                 mmr.add_batched(hasher, &op.encode()).await?;
-                next_mmr_leaf_num += 1;
+                next_mmr_leaf_loc += 1;
             }
             mmr.sync(hasher).await.map_err(Error::Mmr)?;
         }
 
         // At this point the MMR and log should be consistent.
-        assert_eq!(log.size().await?, leaf_pos_to_num(mmr.size()).unwrap());
+        assert_eq!(log.size().await?, mmr.leaves());
 
         Ok((inactivity_floor_loc, mmr, log))
     }
@@ -252,9 +250,9 @@ impl<
     /// with its value reflecting its activity status. The caller is responsible for syncing any
     /// changes made to the bitmap.
     pub(crate) async fn build_snapshot_from_log<const N: usize>(
-        inactivity_floor_loc: u64,
+        inactivity_floor_loc: Location,
         log: &Journal<E, Operation<K, V>>,
-        snapshot: &mut Index<T, u64>,
+        snapshot: &mut Index<T, Location>,
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<(), Error> {
         if let Some(ref bitmap) = bitmap {
@@ -262,7 +260,7 @@ impl<
         }
 
         let stream = log
-            .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), inactivity_floor_loc)
+            .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), *inactivity_floor_loc)
             .await?;
         pin_mut!(stream);
         while let Some(result) = stream.next().await {
@@ -273,21 +271,31 @@ impl<
                 Ok((i, op)) => {
                     match op {
                         Operation::Delete(key) => {
-                            let result =
-                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
+                            let result = Any::<E, K, V, H, T>::delete_key(
+                                snapshot,
+                                log,
+                                &key,
+                                Location::new(i),
+                            )
+                            .await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 // Mark previous location (if any) of the deleted key as inactive.
                                 if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc, false);
+                                    bitmap.set_bit(*old_loc, false);
                                 }
                             }
                         }
                         Operation::Update(key, _) => {
-                            let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, i).await?;
+                            let result = Any::<E, K, V, H, T>::update_loc(
+                                snapshot,
+                                log,
+                                &key,
+                                Location::new(i),
+                            )
+                            .await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 if let Some(old_loc) = result {
-                                    bitmap.set_bit(old_loc, false);
+                                    bitmap.set_bit(*old_loc, false);
                                 }
                                 bitmap.append(true);
                             }
@@ -311,11 +319,11 @@ impl<
     /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
     /// insert it if the key isn't already present.
     async fn update_loc(
-        snapshot: &mut Index<T, u64>,
+        snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
-        new_loc: u64,
-    ) -> Result<Option<u64>, Error> {
+        new_loc: Location,
+    ) -> Result<Option<Location>, Error> {
         // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
         // cursor to look for the key.
         let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
@@ -346,8 +354,11 @@ impl<
     /// Panics if the location does not reference an update operation. This should never happen
     /// unless the snapshot is buggy, or this method is being used to look up an operation
     /// independent of the snapshot contents.
-    async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
-        let Operation::Update(k, v) = log.read(loc).await? else {
+    async fn get_update_op(
+        log: &Journal<E, Operation<K, V>>,
+        loc: Location,
+    ) -> Result<(K, V), Error> {
+        let Operation::Update(k, v) = log.read(*loc).await? else {
             panic!("location does not reference update operation. loc={loc}");
         };
 
@@ -362,18 +373,18 @@ impl<
     /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
-    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+    pub async fn get_loc(&self, loc: Location) -> Result<Option<V>, Error> {
         assert!(loc < self.op_count());
         if loc < self.inactivity_floor_loc {
             return Err(Error::OperationPruned(loc));
         }
 
-        Ok(self.log.read(loc).await?.into_value())
+        Ok(self.log.read(*loc).await?.into_value())
     }
 
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
-    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
+    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
         for &loc in self.snapshot.get(key) {
             let (k, v) = Self::get_update_op(&self.log, loc).await?;
             if k == *key {
@@ -386,13 +397,13 @@ impl<
 
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
-    pub fn op_count(&self) -> u64 {
-        leaf_pos_to_num(self.mmr.size()).unwrap()
+    pub fn op_count(&self) -> Location {
+        self.mmr.leaves()
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
-    pub fn inactivity_floor_loc(&self) -> u64 {
+    pub fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc
     }
 
@@ -410,7 +421,7 @@ impl<
         &mut self,
         key: K,
         value: V,
-    ) -> Result<Option<u64>, Error> {
+    ) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
         let res =
             Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
@@ -424,7 +435,7 @@ impl<
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
-    pub async fn delete(&mut self, key: K) -> Result<Option<u64>, Error> {
+    pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
         let loc = self.op_count();
         let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
         if r.is_some() {
@@ -437,11 +448,11 @@ impl<
     /// Delete `key` from the snapshot if it exists, returning the location that was previously
     /// associated with it.
     async fn delete_key(
-        snapshot: &mut Index<T, u64>,
+        snapshot: &mut Index<T, Location>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
-        delete_loc: u64,
-    ) -> Result<Option<u64>, Error> {
+        delete_loc: Location,
+    ) -> Result<Option<Location>, Error> {
         // If the translated key is in the snapshot, get a cursor to look for the key.
         let Some(mut cursor) = snapshot.get_mut(key) else {
             return Ok(None);
@@ -502,34 +513,30 @@ impl<
     /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
-        start_loc: u64,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_loc, max_ops)
             .await
     }
 
-    /// Analogous to proof, but with respect to the state of the MMR when it had `size` elements.
+    /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
+    /// operations.
     pub async fn historical_proof(
         &self,
-        size: u64,
-        start_loc: u64,
+        op_count: Location,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_loc = std::cmp::min(
-            size.saturating_sub(1),
-            start_loc.saturating_add(max_ops.get()) - 1,
-        );
-        let end_pos = leaf_num_to_pos(end_loc);
-        let mmr_size = leaf_num_to_pos(size);
+        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
 
+        let mmr_size = Position::from(op_count);
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_pos, end_pos)
+            .historical_range_proof(mmr_size, start_loc..end_loc)
             .await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
-        let futures = (start_loc..=end_loc)
+        let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
+        let futures = (*start_loc..*end_loc)
             .map(|i| self.log.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
@@ -580,8 +587,8 @@ impl<
     pub(crate) async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
-        old_loc: u64,
-    ) -> Result<Option<u64>, Error> {
+        old_loc: Location,
+    ) -> Result<Option<Location>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
         let Some(key) = op.key() else {
             return Ok(None); // operations without keys cannot be active
@@ -619,7 +626,7 @@ impl<
             if self.inactivity_floor_loc == self.op_count() {
                 break;
             }
-            let op = self.log.read(self.inactivity_floor_loc).await?;
+            let op = self.log.read(*self.inactivity_floor_loc).await?;
             self.move_op_if_active(op, self.inactivity_floor_loc)
                 .await?;
             self.inactivity_floor_loc += 1;
@@ -637,7 +644,7 @@ impl<
     /// # Panic
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
-    pub async fn prune(&mut self, target_prune_loc: u64) -> Result<(), Error> {
+    pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
         assert!(target_prune_loc <= self.inactivity_floor_loc);
         if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.
@@ -649,17 +656,18 @@ impl<
         // the operations between the MMR tip and the log pruning boundary.
         self.mmr.sync(&mut self.hasher).await?;
 
-        if !self.log.prune(target_prune_loc).await? {
+        if !self.log.prune(*target_prune_loc).await? {
             return Ok(());
         }
 
         debug!(
-            log_size = self.op_count(),
-            target_prune_loc, "pruned inactive ops"
+            log_size = ?self.op_count(),
+            ?target_prune_loc,
+            "pruned inactive ops"
         );
 
         self.mmr
-            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(target_prune_loc))
+            .prune_to_pos(&mut self.hasher, Position::from(target_prune_loc))
             .await?;
 
         Ok(())
@@ -693,7 +701,7 @@ impl<
     /// Simulate an unclean shutdown by consuming the db without syncing (or only partially syncing)
     /// the log and/or mmr. When _not_ fully syncing the mmr, the `write_limit` parameter dictates
     /// how many mmr nodes to write during a partial sync (can be 0).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub async fn simulate_failure(
         mut self,
         sync_log: bool,
@@ -836,17 +844,26 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
-            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            let empty_root = db.root(&mut hasher);
+            assert_eq!(empty_root, MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an
             // uncommitted op, and even without a clean shutdown.
             let d1 = Sha256::fill(1u8);
             let d2 = Sha256::fill(2u8);
-            let root = db.root(&mut hasher);
             db.update(d1, d2).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(&mut hasher), empty_root);
             assert_eq!(db.op_count(), 0);
+
+            let empty_proof = Proof::default();
+            assert!(verify_proof(
+                &mut hasher,
+                &empty_proof,
+                Location::new(0),
+                &[] as &[Operation<Digest, Digest>],
+                &empty_root
+            ));
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit().await.unwrap();
@@ -858,6 +875,15 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(&mut hasher), root);
+
+            // Empty proof should no longer verify.
+            assert!(!verify_proof(
+                &mut hasher,
+                &empty_proof,
+                Location::new(0),
+                &[] as &[Operation<Digest, Digest>],
+                &root
+            ));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
@@ -904,12 +930,12 @@ pub(super) mod test {
 
             assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
             assert_eq!(db.snapshot.keys(), 2);
-            assert_eq!(db.inactivity_floor_loc, 0);
+            assert_eq!(db.inactivity_floor_loc, Location::new(0));
             db.sync().await.unwrap();
 
             // Advance over 3 inactive operations.
             db.raise_inactivity_floor(3).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc, 3);
+            assert_eq!(db.inactivity_floor_loc, Location::new(3));
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();
 
@@ -919,7 +945,7 @@ pub(super) mod test {
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
-            assert_eq!(db.inactivity_floor_loc, 3);
+            assert_eq!(db.inactivity_floor_loc, Location::new(3));
 
             db.sync().await.unwrap();
             let root = db.root(&mut hasher);
@@ -1022,7 +1048,7 @@ pub(super) mod test {
             }
 
             assert_eq!(db.op_count(), 1477);
-            assert_eq!(db.inactivity_floor_loc, 0);
+            assert_eq!(db.inactivity_floor_loc, Location::new(0));
             assert_eq!(db.log.size().await.unwrap(), 1477);
             assert_eq!(db.snapshot.items(), 857);
 
@@ -1031,7 +1057,7 @@ pub(super) mod test {
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.op_count(), 2336);
-            assert_eq!(db.inactivity_floor_loc, 1478);
+            assert_eq!(db.inactivity_floor_loc, Location::new(1478));
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1040,13 +1066,13 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2336);
-            assert_eq!(db.inactivity_floor_loc, 1478);
+            assert_eq!(db.inactivity_floor_loc, Location::new(1478));
             assert_eq!(db.snapshot.items(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
             db.raise_inactivity_floor(3000).await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc, 4478);
+            assert_eq!(db.inactivity_floor_loc, Location::new(4478));
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
             assert_eq!(db.op_count(), 4478 + 858);
@@ -1070,16 +1096,17 @@ pub(super) mod test {
             let max_ops = NZU64!(4);
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
-            let start_loc = leaf_pos_to_num(start_pos).unwrap();
+            let start_loc = Location::try_from(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(100).await.unwrap();
             db.sync().await.unwrap();
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
-            for i in start_loc..end_loc {
-                let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
+            for loc in *start_loc..*end_loc {
+                let loc = Location::new(loc);
+                let (proof, log) = db.proof(loc, max_ops).await.unwrap();
+                assert!(verify_proof(&mut hasher, &proof, loc, &log, &root));
             }
 
             db.destroy().await.unwrap();
@@ -1346,7 +1373,7 @@ pub(super) mod test {
             db.close().await.unwrap();
             // Initialize the bitmap based on the current db's inactivity floor.
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
-            for _ in 0..inactivity_floor_loc {
+            for _ in 0..*inactivity_floor_loc {
                 bitmap.append(false);
             }
             bitmap.sync(&mut hasher).await.unwrap();
@@ -1359,8 +1386,7 @@ pub(super) mod test {
                     .unwrap();
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
-            let mut snapshot: Index<TwoCap, u64> =
-                Index::init(context.with_label("snapshot"), TwoCap);
+            let mut snapshot = Index::init(context.with_label("snapshot"), TwoCap);
             AnyTest::build_snapshot_from_log::<SHA256_SIZE>(
                 inactivity_floor_loc,
                 &log,
@@ -1386,7 +1412,7 @@ pub(super) mod test {
             assert_eq!(bitmap.bit_count(), items);
             let mut active_positions = HashSet::new();
             // This loop checks that the expected true bits are true in the bitmap.
-            for pos in db.inactivity_floor_loc..items {
+            for pos in *db.inactivity_floor_loc..items {
                 let item = db.log.read(pos).await.unwrap();
                 let Some(item_key) = item.key() else {
                     // `item` is a commit
@@ -1403,7 +1429,7 @@ pub(super) mod test {
                 }
             }
             // This loop checks that the expected false bits are false in the bitmap.
-            for pos in db.inactivity_floor_loc..items {
+            for pos in *db.inactivity_floor_loc..items {
                 if !active_positions.contains(&pos) {
                     assert!(!bitmap.get_bit(pos));
                 }
@@ -1428,10 +1454,10 @@ pub(super) mod test {
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, 5, max_ops)
+                .historical_proof(original_op_count, Location::new(5), max_ops)
                 .await
                 .unwrap();
-            let (regular_proof, regular_ops) = db.proof(5, max_ops).await.unwrap();
+            let (regular_proof, regular_ops) = db.proof(Location::new(5), max_ops).await.unwrap();
 
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -1440,7 +1466,7 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
-                5,
+                Location::new(5),
                 &historical_ops,
                 &root_hash
             ));
@@ -1452,10 +1478,10 @@ pub(super) mod test {
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
-                .historical_proof(original_op_count, 5, NZU64!(10))
+                .historical_proof(original_op_count, Location::new(5), NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(historical_proof.size, leaf_num_to_pos(original_op_count));
+            assert_eq!(historical_proof.size, Position::from(original_op_count));
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
@@ -1463,7 +1489,7 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
-                5,
+                Location::new(5),
                 &historical_ops,
                 &root_hash
             ));
@@ -1484,8 +1510,11 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
 
             // Test singleton database
-            let (single_proof, single_ops) = db.historical_proof(1, 0, NZU64!(1)).await.unwrap();
-            assert_eq!(single_proof.size, leaf_num_to_pos(1));
+            let (single_proof, single_ops) = db
+                .historical_proof(Location::new(1), Location::new(0), NZU64!(1))
+                .await
+                .unwrap();
+            assert_eq!(single_proof.size, Position::from(Location::new(1)));
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
@@ -1498,20 +1527,25 @@ pub(super) mod test {
             assert!(verify_proof(
                 &mut hasher,
                 &single_proof,
-                0,
+                Location::new(0),
                 &single_ops,
                 &single_root
             ));
 
             // Test requesting more operations than available in historical position
-            let (_limited_proof, limited_ops) =
-                db.historical_proof(10, 5, NZU64!(20)).await.unwrap();
+            let (_limited_proof, limited_ops) = db
+                .historical_proof(Location::new(10), Location::new(5), NZU64!(20))
+                .await
+                .unwrap();
             assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
             assert_eq!(limited_ops, ops[5..10]);
 
             // Test proof at minimum historical position
-            let (min_proof, min_ops) = db.historical_proof(3, 0, NZU64!(3)).await.unwrap();
-            assert_eq!(min_proof.size, leaf_num_to_pos(3));
+            let (min_proof, min_ops) = db
+                .historical_proof(Location::new(3), Location::new(0), NZU64!(3))
+                .await
+                .unwrap();
+            assert_eq!(min_proof.size, Position::from(Location::new(3)));
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
@@ -1532,19 +1566,20 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
 
             // Test historical proof generation for several historical states.
-            let start_loc = 20;
+            let start_loc = Location::new(20);
             let max_ops = NZU64!(10);
             for end_loc in 31..50 {
+                let end_loc = Location::new(end_loc);
                 let (historical_proof, historical_ops) = db
                     .historical_proof(end_loc, start_loc, max_ops)
                     .await
                     .unwrap();
 
-                assert_eq!(historical_proof.size, leaf_num_to_pos(end_loc));
+                assert_eq!(historical_proof.size, Position::from(end_loc));
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
-                apply_ops(&mut ref_db, ops[0..end_loc as usize].to_vec()).await;
+                apply_ops(&mut ref_db, ops[0..*end_loc as usize].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
                 ref_db.sync().await.unwrap();
 
@@ -1552,8 +1587,8 @@ pub(super) mod test {
                 assert_eq!(ref_proof.size, historical_proof.size);
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
-                let end_loc = std::cmp::min(start_loc + max_ops.get(), end_loc);
-                assert_eq!(ref_ops, ops[start_loc as usize..end_loc as usize]);
+                let end_loc = std::cmp::min(start_loc.checked_add(max_ops.get()).unwrap(), end_loc);
+                assert_eq!(ref_ops, ops[*start_loc as usize..*end_loc as usize]);
 
                 // Verify proof against reference root
                 let ref_root = ref_db.root(&mut hasher);
@@ -1581,8 +1616,11 @@ pub(super) mod test {
             apply_ops(&mut db, ops).await;
             db.commit().await.unwrap();
 
-            let (proof, ops) = db.historical_proof(5, 1, NZU64!(10)).await.unwrap();
-            assert_eq!(proof.size, leaf_num_to_pos(5));
+            let (proof, ops) = db
+                .historical_proof(Location::new(5), Location::new(1), NZU64!(10))
+                .await
+                .unwrap();
+            assert_eq!(proof.size, Position::from(Location::new(5)));
             assert_eq!(ops.len(), 4);
 
             let mut hasher = Standard::<Sha256>::new();
@@ -1592,13 +1630,25 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.digests[0] = Sha256::hash(b"invalid");
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
             {
                 let mut proof = proof.clone();
                 proof.digests.push(Sha256::hash(b"invalid"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
 
             // Changing the ops should cause verification to fail
@@ -1606,7 +1656,13 @@ pub(super) mod test {
                 let mut ops = ops.clone();
                 ops[0] = Operation::Update(Sha256::hash(b"key1"), Sha256::hash(b"value1"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
             {
                 let mut ops = ops.clone();
@@ -1615,13 +1671,25 @@ pub(super) mod test {
                     Sha256::hash(b"value1"),
                 ));
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
 
             // Changing the start location should cause verification to fail
             {
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 1, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(1),
+                    &ops,
+                    &root_hash
+                ));
             }
 
             // Changing the root digest should cause verification to fail
@@ -1629,7 +1697,7 @@ pub(super) mod test {
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
-                    0,
+                    Location::new(0),
                     &ops,
                     &Sha256::hash(b"invalid")
                 ));
@@ -1638,9 +1706,15 @@ pub(super) mod test {
             // Changing the proof size should cause verification to fail
             {
                 let mut proof = proof.clone();
-                proof.size = 100;
+                proof.size = Position::new(100);
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!verify_proof(
+                    &mut hasher,
+                    &proof,
+                    Location::new(0),
+                    &ops,
+                    &root_hash
+                ));
             }
 
             db.destroy().await.unwrap();

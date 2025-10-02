@@ -105,7 +105,6 @@ mod tests {
         registrations
     }
 
-    #[allow(dead_code)]
     enum Action {
         Link(Link),
         Update(Link),

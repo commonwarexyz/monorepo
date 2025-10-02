@@ -1,7 +1,7 @@
 use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
-use commonware_stream::public_key::Connection;
+use commonware_stream::{Receiver, Sender};
 
 /// Messages that can be processed by the spawner actor.
 pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
@@ -10,7 +10,7 @@ pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKe
         /// The peer's public key.
         peer: P,
         /// The connection to the peer.
-        connection: Connection<Si, St>,
+        connection: (Sender<Si>, Receiver<St>),
         /// The reservation for the peer.
         reservation: Reservation<E, P>,
     },
@@ -20,7 +20,11 @@ impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey>
     Mailbox<Message<E, Si, St, P>>
 {
     /// Send a message to the actor to spawn a new task for the given peer.
-    pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
+    pub async fn spawn(
+        &mut self,
+        connection: (Sender<Si>, Receiver<St>),
+        reservation: Reservation<E, P>,
+    ) {
         self.send(Message::Spawn {
             peer: reservation.metadata().public_key().clone(),
             connection,

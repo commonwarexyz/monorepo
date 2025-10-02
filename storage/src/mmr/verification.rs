@@ -11,16 +11,17 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Proof};
+use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Location, Position, Proof};
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap};
 
 /// A store derived from a [Proof] that can be used to generate proofs over any sub-range of the
 /// original range.
 pub struct ProofStore<D> {
-    digests: HashMap<u64, D>,
-    size: u64,
+    digests: HashMap<Position, D>,
+    size: Position,
 }
 
 impl<D: Digest> ProofStore<D> {
@@ -31,7 +32,7 @@ impl<D: Digest> ProofStore<D> {
         hasher: &mut H,
         proof: &Proof<D>,
         elements: &[E],
-        start_element_pos: u64,
+        start_loc: Location,
         root: &D,
     ) -> Result<Self, Error>
     where
@@ -39,12 +40,8 @@ impl<D: Digest> ProofStore<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let digests = proof.verify_range_inclusion_and_extract_digests(
-            hasher,
-            elements,
-            start_element_pos,
-            root,
-        )?;
+        let digests =
+            proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
 
         Ok(ProofStore::new_from_digests(proof.size, digests))
     }
@@ -52,61 +49,68 @@ impl<D: Digest> ProofStore<D> {
     /// Create a new [ProofStore] from the result of calling
     /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
-    pub fn new_from_digests(size: u64, digests: Vec<(u64, D)>) -> Self {
+    pub fn new_from_digests(size: Position, digests: Vec<(Position, D)>) -> Self {
         Self {
             size,
             digests: digests.into_iter().collect(),
         }
     }
 
-    pub async fn range_proof(
-        &self,
-        start_element_pos: u64,
-        end_element_pos: u64,
-    ) -> Result<Proof<D>, Error> {
-        range_proof(self, start_element_pos, end_element_pos).await
+    /// Return a range proof for the nodes corresponding to the given location range.
+    pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
+        range_proof(self, range).await
     }
 
-    pub async fn multi_proof(&self, positions: &[u64]) -> Result<Proof<D>, Error> {
-        multi_proof(self, positions).await
+    /// Return a multi proof for the elements corresponding to the given locations.
+    pub async fn multi_proof(&self, locations: &[Location]) -> Result<Proof<D>, Error> {
+        multi_proof(self, locations).await
     }
 }
 
 impl<D: Digest> Storage<D> for ProofStore<D> {
-    async fn get_node(&self, pos: u64) -> Result<Option<D>, Error> {
+    async fn get_node(&self, pos: Position) -> Result<Option<D>, Error> {
         Ok(self.digests.get(&pos).cloned())
     }
 
-    fn size(&self) -> u64 {
+    fn size(&self) -> Position {
         self.size
     }
 }
 
-/// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
-/// Returns ElementPruned error if some element needed to generate the proof has been pruned.
+/// Return a range proof for the nodes corresponding to the given location range.
+///
+/// # Errors
+///
+/// Returns ElementPruned error if some element needed to generate the proof has been pruned, or
+/// Empty error if the requested range is empty.
 pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
-    start_element_pos: u64,
-    end_element_pos: u64,
+    range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    historical_range_proof(mmr, mmr.size(), start_element_pos, end_element_pos).await
+    historical_range_proof(mmr, mmr.size(), range).await
 }
 
-/// Analogous to range_proof but for a previous database state.
-/// Specifically, the state when the MMR had `size` elements.
+/// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
+/// had `size` nodes.
+///
+/// # Errors
+///
+/// Returns ElementPruned error if some element needed to generate the proof has been pruned, or
+/// Empty error if the requested range is empty.
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
-    size: u64,
-    start_element_pos: u64,
-    end_element_pos: u64,
+    size: Position,
+    range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    assert!(start_element_pos <= end_element_pos);
-    assert!(start_element_pos < mmr.size());
-    assert!(end_element_pos < mmr.size());
+    if range.is_empty() {
+        return Err(Error::Empty);
+    }
 
+    // Get the positions of all nodes needed to generate the proof.
+    let positions = proof::nodes_required_for_range_proof(size, range);
+
+    // Fetch the digest of each.
     let mut digests: Vec<D> = Vec::new();
-    let positions = proof::nodes_required_for_range_proof(size, start_element_pos, end_element_pos);
-
     let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
     let hash_results = try_join_all(node_futures).await?;
 
@@ -120,25 +124,26 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     Ok(Proof { size, digests })
 }
 
-/// Return an inclusion proof for the specified positions. This is analogous to range_proof but
-/// supports non-contiguous positions.
+/// Return an inclusion proof for the elements at the specified locations. This is analogous to
+/// range_proof but supports non-contiguous locations.
 ///
 /// The order of positions does not affect the output (sorted internally).
+///
+/// # Errors
+///
+/// Returns Empty error if the requested locations are empty.
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
-    positions: &[u64],
+    locations: &[Location],
 ) -> Result<Proof<D>, Error> {
-    // If there are no positions, return an empty proof
-    let size = mmr.size();
-    if positions.is_empty() {
-        return Ok(Proof {
-            size,
-            digests: vec![],
-        });
+    if locations.is_empty() {
+        // Disallow proofs over empty element lists just as we disallow proofs over empty ranges.
+        return Err(Error::Empty);
     }
 
     // Collect all required node positions
-    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, positions);
+    let size = mmr.size();
+    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations);
 
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions
@@ -162,7 +167,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{mem::Mmr, StandardHasher as Standard};
+    use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
@@ -188,17 +193,16 @@ mod tests {
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.
-            let mut range_start = 0;
-            let mut range_end = 48;
-            while range_start <= range_end {
-                let range_proof = mmr
-                    .range_proof(element_positions[range_start], element_positions[range_end])
-                    .unwrap();
+            let mut range_start = Location::new(0);
+            let mut range_end = Location::new(49);
+            while range_start < range_end {
+                let range = range_start..range_end;
+                let range_proof = mmr.range_proof(range.clone()).unwrap();
                 let proof_store = ProofStore::new(
                     &mut hasher,
                     &range_proof,
-                    &elements[range_start..range_end + 1],
-                    element_positions[range_start],
+                    &elements[range.to_usize_range()],
+                    range_start,
                     &root,
                 )
                 .unwrap();
@@ -207,19 +211,14 @@ mod tests {
                 // starting with the full range down to a range containing a single element.
                 let mut subrange_start = range_start;
                 let mut subrange_end = range_end;
-                while subrange_start <= subrange_end {
+                while subrange_start < subrange_end {
                     // Verify a proof over a sub-range of the original range.
-                    let sub_range_proof = proof_store
-                        .range_proof(
-                            element_positions[subrange_start],
-                            element_positions[subrange_end],
-                        )
-                        .await
-                        .unwrap();
+                    let sub_range = subrange_start..subrange_end;
+                    let sub_range_proof = proof_store.range_proof(sub_range.clone()).await.unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
-                        &elements[subrange_start..subrange_end + 1],
-                        element_positions[subrange_start],
+                        &elements[sub_range.to_usize_range()],
+                        sub_range.start,
                         &root
                     ));
                     subrange_start += 1;

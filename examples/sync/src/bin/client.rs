@@ -12,7 +12,7 @@ use commonware_storage::{adb::sync, mmr::StandardHasher};
 use commonware_sync::{
     any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
 };
-use commonware_utils::parse_duration;
+use commonware_utils::DurationExt;
 use futures::channel::mpsc;
 use rand::Rng;
 use std::{
@@ -328,10 +328,10 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid metrics port: {e}"))?;
 
     let target_update_interval =
-        parse_duration(matches.get_one::<String>("target-update-interval").unwrap())
+        Duration::parse(matches.get_one::<String>("target-update-interval").unwrap())
             .map_err(|e| format!("Invalid target update interval: {e}"))?;
 
-    let sync_interval = parse_duration(matches.get_one::<String>("sync-interval").unwrap())
+    let sync_interval = Duration::parse(matches.get_one::<String>("sync-interval").unwrap())
         .map_err(|e| format!("Invalid sync interval: {e}"))?;
 
     let max_outstanding_requests = matches

@@ -22,6 +22,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use commonware_macros::select;
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
 use std::{
@@ -298,6 +299,47 @@ pub trait Clock: Clone + Send + Sync + 'static {
 
     /// Sleep until the given deadline.
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+
+    /// Await a future with a timeout, returning `Error::Timeout` if it expires.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use commonware_runtime::{deterministic, Error, Runner, Clock};
+    ///
+    /// let executor = deterministic::Runner::default();
+    /// executor.start(|context| async move {
+    ///     match context
+    ///         .timeout(Duration::from_millis(100), async { 42 })
+    ///         .await
+    ///     {
+    ///         Ok(value) => assert_eq!(value, 42),
+    ///         Err(Error::Timeout) => panic!("should not timeout"),
+    ///         Err(e) => panic!("unexpected error: {:?}", e),
+    ///     }
+    /// });
+    /// ```
+    fn timeout<F, T>(
+        &self,
+        duration: Duration,
+        future: F,
+    ) -> impl Future<Output = Result<T, Error>> + Send + '_
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        async move {
+            select! {
+                result = future => {
+                    Ok(result)
+                },
+                _ = self.sleep(duration) => {
+                    Err(Error::Timeout)
+                },
+            }
+        }
+    }
 }
 
 /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
@@ -509,6 +551,34 @@ mod tests {
             // Ensure slept duration has elapsed
             let elapsed = now.elapsed().unwrap();
             assert!(elapsed >= Duration::from_millis(100));
+        });
+    }
+
+    fn test_clock_timeout<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            // Future completes before timeout
+            let result = context
+                .timeout(Duration::from_millis(100), async { "success" })
+                .await;
+            assert_eq!(result.unwrap(), "success");
+
+            // Future exceeds timeout duration
+            let result = context
+                .timeout(Duration::from_millis(50), pending::<()>())
+                .await;
+            assert!(matches!(result, Err(Error::Timeout)));
+
+            // Future completes within timeout
+            let result = context
+                .timeout(
+                    Duration::from_millis(100),
+                    context.sleep(Duration::from_millis(50)),
+                )
+                .await;
+            assert!(result.is_ok());
         });
     }
 
@@ -1747,6 +1817,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_clock_timeout() {
+        let executor = deterministic::Runner::default();
+        test_clock_timeout(executor);
+    }
+
+    #[test]
     fn test_deterministic_root_finishes() {
         let executor = deterministic::Runner::default();
         test_root_finishes(executor);
@@ -1996,6 +2072,12 @@ mod tests {
     fn test_tokio_clock_sleep_until() {
         let executor = tokio::Runner::default();
         test_clock_sleep_until(executor);
+    }
+
+    #[test]
+    fn test_tokio_clock_timeout() {
+        let executor = tokio::Runner::default();
+        test_clock_timeout(executor);
     }
 
     #[test]

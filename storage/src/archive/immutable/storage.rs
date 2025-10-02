@@ -305,6 +305,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.ordinal.next_gap(index)
     }
 
+    fn first_index(&self) -> Option<u64> {
+        self.ordinal.first_index()
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        self.ordinal.last_index()
+    }
+
     async fn close(mut self) -> Result<(), Error> {
         // Close ordinal
         self.ordinal.close().await?;

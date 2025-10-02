@@ -18,7 +18,7 @@ use commonware_sync::{
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
-use commonware_utils::parse_duration;
+use commonware_utils::DurationExt;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
@@ -152,12 +152,12 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, lower_bound_ops, upper_bound_ops) = {
+    let (root, lower_bound, upper_bound) = {
         let mut hasher = Standard::new();
         let database = state.database.read().await;
         (
             database.root(&mut hasher),
-            database.lower_bound_ops(),
+            database.lower_bound(),
             database.op_count().saturating_sub(1),
         )
     };
@@ -165,8 +165,8 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound_ops,
-            upper_bound_ops,
+            lower_bound,
+            upper_bound,
         },
     };
 
@@ -197,7 +197,7 @@ where
     }
 
     // Calculate how many operations to return
-    let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
+    let max_ops = std::cmp::min(request.max_ops.get(), *db_size - *request.start_loc);
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
     let max_ops =
         NonZeroU64::new(max_ops).expect("max_ops cannot be zero since start_loc < db_size");
@@ -205,14 +205,14 @@ where
     debug!(
         request_id = request.request_id,
         max_ops,
-        start_loc = request.start_loc,
-        db_size,
+        start_loc = ?request.start_loc,
+        ?db_size,
         "operations request"
     );
 
     // Get the historical proof and operations
     let result = database
-        .historical_proof(request.size, request.start_loc, max_ops)
+        .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
     drop(database);
@@ -388,7 +388,7 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = database.op_count(),
+        op_count = ?database.op_count(),
         root = %root_hex,
         "{} database ready",
         DB::name()
@@ -577,7 +577,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .unwrap()
             .parse()
             .map_err(|e| format!("Invalid metrics port: {e}"))?,
-        op_interval: parse_duration(matches.get_one::<String>("op-interval").unwrap())
+        op_interval: Duration::parse(matches.get_one::<String>("op-interval").unwrap())
             .map_err(|e| format!("Invalid operation interval: {e}"))?,
         ops_per_interval: matches
             .get_one::<String>("ops-per-interval")

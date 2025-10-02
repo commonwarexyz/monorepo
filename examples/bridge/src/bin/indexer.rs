@@ -14,15 +14,12 @@ use commonware_cryptography::{
         group::G2,
         variant::{MinSig, Variant},
     },
-    ed25519,
+    ed25519::{self},
     sha256::Digest as Sha256Digest,
     Digest, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
-use commonware_stream::{
-    public_key::{Config, Connection, IncomingConnection},
-    Receiver, Sender,
-};
+use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{from_hex, union};
 use futures::{
     channel::{mpsc, oneshot},
@@ -223,8 +220,8 @@ fn main() {
 
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
-        let config = Config {
-            crypto: signer,
+        let config = StreamConfig {
+            signing_key: signer,
             namespace: INDEXER_NAMESPACE.to_vec(),
             max_message_size: 1024 * 1024,
             synchrony_bound: Duration::from_secs(1),
@@ -238,24 +235,21 @@ fn main() {
                 continue;
             };
 
-            // Handshake
-            let incoming =
-                match IncomingConnection::verify(&context, config.clone(), sink, stream).await {
-                    Ok(partial) => partial,
-                    Err(e) => {
-                        debug!(error = ?e, "failed to verify incoming handshake");
-                        continue;
-                    }
-                };
-            let peer = incoming.peer();
-            if !validators.contains(&peer) {
-                debug!(?peer, "unauthorized peer");
-                continue;
-            }
-            let stream = match Connection::upgrade_listener(context.clone(), incoming).await {
-                Ok(connection) => connection,
+            let (peer, mut sender, mut receiver) = match listen(
+                context.clone(),
+                |peer| {
+                    let out = validators.contains(&peer);
+                    async move { out }
+                },
+                config.clone(),
+                stream,
+                sink,
+            )
+            .await
+            {
+                Ok(x) => x,
                 Err(e) => {
-                    debug!(error = ?e, ?peer, "failed to upgrade connection");
+                    debug!(error = ?e, "failed to upgrade connection");
                     continue;
                 }
             };
@@ -265,11 +259,8 @@ fn main() {
             context.with_label("connection").spawn({
                 let mut handler = handler.clone();
                 move |_| async move {
-                    // Split stream
-                    let (mut sender, mut receiver) = stream.split();
-
                     // Handle messages
-                    while let Ok(msg) = receiver.receive().await {
+                    while let Ok(msg) = receiver.recv().await {
                         // Decode message
                         let msg = match Inbound::decode(msg) {
                             Ok(msg) => msg,

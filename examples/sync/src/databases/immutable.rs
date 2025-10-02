@@ -8,7 +8,7 @@ use commonware_storage::{
         self,
         immutable::{self, Config},
     },
-    mmr::{Proof, StandardHasher as Standard},
+    mmr::{Location, Proof, StandardHasher as Standard},
     store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -107,21 +107,21 @@ where
         self.root(hasher)
     }
 
-    fn op_count(&self) -> u64 {
+    fn op_count(&self) -> Location {
         self.op_count()
     }
 
-    fn lower_bound_ops(&self) -> u64 {
-        self.oldest_retained_loc().unwrap_or(0)
+    fn lower_bound(&self) -> Location {
+        self.oldest_retained_loc().unwrap_or(Location::new(0))
     }
 
     fn historical_proof(
         &self,
-        size: u64,
-        start_loc: u64,
+        op_count: Location,
+        start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(size, start_loc, max_ops)
+        self.historical_proof(op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {
