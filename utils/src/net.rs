@@ -2,6 +2,12 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+/// Bits in an IPv4 address.
+const IPV4_BITS: u8 = 32;
+
+/// Bits in an IPv6 address.
+const IPV6_BITS: u8 = 128;
+
 /// Canonical subnet representative for an IP address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Subnet {
@@ -11,21 +17,23 @@ pub struct Subnet {
 /// Prefix lengths (in bits) used to derive canonical subnets for IPv4 and IPv6 addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SubnetMask {
-    ipv4_mask: u32,
-    ipv6_mask: u128,
+    pub ipv4: u32,
+    pub ipv6: u128,
 }
 
 impl SubnetMask {
     /// Create a new [`SubnetMask`]. Values greater than the address width are clamped when applied.
     pub const fn new(ipv4_bits: u8, ipv6_bits: u8) -> Self {
-        let ipv4_bits = Self::clamp(ipv4_bits, 32);
-        let ipv6_bits = Self::clamp(ipv6_bits, 128);
+        let ipv4_bits = Self::clamp(ipv4_bits, IPV4_BITS);
+        let ipv6_bits = Self::clamp(ipv6_bits, IPV6_BITS);
         Self {
-            ipv4_mask: Self::mask_ipv4(ipv4_bits),
-            ipv6_mask: Self::mask_ipv6(ipv6_bits),
+            ipv4: Self::mask_ipv4(ipv4_bits),
+            ipv6: Self::mask_ipv6(ipv6_bits),
         }
     }
 
+    /// Clamp the given bits to the maximum value.
+    #[inline]
     const fn clamp(bits: u8, max: u8) -> u8 {
         if bits > max {
             max
@@ -34,6 +42,8 @@ impl SubnetMask {
         }
     }
 
+    /// Generate an IPv4 subnet mask that retains the upper `bits`.
+    #[inline]
     const fn mask_ipv4(bits: u8) -> u32 {
         if bits == 0 {
             0
@@ -42,24 +52,14 @@ impl SubnetMask {
         }
     }
 
+    /// Generate an IPv6 subnet mask that retains the upper `bits`.
+    #[inline]
     const fn mask_ipv6(bits: u8) -> u128 {
         if bits == 0 {
             0
         } else {
             (!0u128) << (128 - bits as u32)
         }
-    }
-
-    /// IPv4 subnet mask derived from [`Self::ipv4_mask`].
-    #[inline]
-    pub const fn ipv4_mask(self) -> u32 {
-        self.ipv4_mask
-    }
-
-    /// IPv6 subnet mask derived from [`Self::ipv6_mask`].
-    #[inline]
-    pub const fn ipv6_mask(self) -> u128 {
-        self.ipv6_mask
     }
 }
 
@@ -96,17 +96,17 @@ impl IpAddrExt for IpAddr {
     fn subnet(&self, mask: SubnetMask) -> Subnet {
         match self {
             IpAddr::V4(v4) => Subnet {
-                addr: ipv4_subnet(*v4, mask.ipv4_mask()),
+                addr: ipv4_subnet(*v4, mask.ipv4),
             },
             IpAddr::V6(v6) => {
-                if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                if let Some(v4) = v6.to_ipv4_mapped() {
                     return Subnet {
-                        addr: ipv4_subnet(mapped_v4, mask.ipv4_mask()),
+                        addr: ipv4_subnet(v4, mask.ipv4),
                     };
                 }
 
                 Subnet {
-                    addr: ipv6_subnet(*v6, mask.ipv6_mask()),
+                    addr: ipv6_subnet(*v6, mask.ipv6),
                 }
             }
         }
@@ -246,15 +246,15 @@ mod tests {
     #[test]
     fn subnet_mask_max() {
         let mask = SubnetMask::new(40, 200);
-        assert_eq!(mask.ipv4_mask(), u32::MAX);
-        assert_eq!(mask.ipv6_mask(), u128::MAX);
+        assert_eq!(mask.ipv4, u32::MAX);
+        assert_eq!(mask.ipv6, u128::MAX);
     }
 
     #[test]
     fn subnet_mask_min() {
         let mask = SubnetMask::new(0, 0);
-        assert_eq!(mask.ipv4_mask(), 0);
-        assert_eq!(mask.ipv6_mask(), 0);
+        assert_eq!(mask.ipv4, 0);
+        assert_eq!(mask.ipv6, 0);
     }
 
     #[test]
