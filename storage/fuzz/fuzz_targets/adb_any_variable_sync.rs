@@ -274,7 +274,7 @@ fn fuzz(input: FuzzInput) {
                             db.historical_proof(op_count, *start_loc, *max_ops).await
                         {
                             if let Some(root) = historical_roots.get(&op_count) {
-                                assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
+                                assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
                             }
                         }
                     }
