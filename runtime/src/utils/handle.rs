@@ -33,6 +33,7 @@ where
         metric: MetricHandle,
         catch_panic: bool,
         children: Arc<Mutex<Vec<Aborter>>>,
+        panic_hook: Option<PanicHook>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -42,23 +43,29 @@ where
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
         // Wrap the future to handle panics
-        let wrapped = async move {
-            // Run future
-            let result = AssertUnwindSafe(f).catch_unwind().await;
+        let wrapped = {
+            let panic_hook = panic_hook.clone();
+            async move {
+                // Run future
+                let result = AssertUnwindSafe(f).catch_unwind().await;
 
-            // Handle result
-            let result = match result {
-                Ok(result) => Ok(result),
-                Err(err) => {
-                    if !catch_panic {
-                        resume_unwind(err);
+                // Handle result
+                let result = match result {
+                    Ok(result) => Ok(result),
+                    Err(err) => {
+                        let message = extract_panic_message(&*err);
+                        if !catch_panic {
+                            if let Some(panic_hook) = panic_hook.as_ref() {
+                                panic_hook.notify(message.clone());
+                            }
+                            resume_unwind(err);
+                        }
+                        error!(?message, "task panicked");
+                        Err(Error::Exited)
                     }
-                    let err = extract_panic_message(&*err);
-                    error!(?err, "task panicked");
-                    Err(Error::Exited)
-                }
-            };
-            let _ = sender.send(result);
+                };
+                let _ = sender.send(result);
+            }
         };
 
         // Make the future abortable
@@ -89,6 +96,7 @@ where
         f: F,
         metric: MetricHandle,
         catch_panic: bool,
+        panic_hook: Option<PanicHook>,
     ) -> (impl FnOnce(), Self)
     where
         F: FnOnce() -> T + Send + 'static,
@@ -98,6 +106,7 @@ where
 
         // Wrap the closure with panic handling
         let f = {
+            let panic_hook = panic_hook.clone();
             let metric = metric.clone();
             move || {
                 // Run blocking task
@@ -107,11 +116,14 @@ where
                 let result = match result {
                     Ok(value) => Ok(value),
                     Err(err) => {
+                        let message = extract_panic_message(&*err);
                         if !catch_panic {
+                            if let Some(panic_hook) = panic_hook.as_ref() {
+                                panic_hook.notify(message.clone());
+                            }
                             resume_unwind(err);
                         }
-                        let err = extract_panic_message(&*err);
-                        error!(?err, "task panicked");
+                        error!(?message, "task panicked");
                         Err(Error::Exited)
                     }
                 };
@@ -195,6 +207,26 @@ impl MetricHandle {
         self.finished.call_once(move || {
             gauge.dec();
         });
+    }
+}
+
+/// Notifies the runtime when a spawned task panics so it can propagate the failure.
+#[derive(Clone)]
+pub(crate) struct PanicHook {
+    sender: Arc<Mutex<Option<oneshot::Sender<String>>>>,
+}
+
+impl PanicHook {
+    pub(crate) fn new(sender: oneshot::Sender<String>) -> Self {
+        Self {
+            sender: Arc::new(Mutex::new(Some(sender))),
+        }
+    }
+
+    pub(crate) fn notify(&self, message: String) {
+        if let Some(sender) = self.sender.lock().unwrap().take() {
+            let _ = sender.send(message);
+        }
     }
 }
 

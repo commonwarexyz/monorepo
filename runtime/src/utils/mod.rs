@@ -19,7 +19,7 @@ pub mod signal;
 
 mod handle;
 pub use handle::Handle;
-pub(crate) use handle::{Aborter, MetricHandle};
+pub(crate) use handle::{Aborter, MetricHandle, PanicHook};
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {
