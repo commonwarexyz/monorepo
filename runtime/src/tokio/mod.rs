@@ -3,8 +3,7 @@
 //!
 //! # Panics
 //!
-//! By default, the runtime will catch any panic and log the error. It is
-//! possible to override this behavior in the configuration.
+//! Unless configured otherwise, any task panic will lead to a runtime panic.
 //!
 //! # Example
 //!

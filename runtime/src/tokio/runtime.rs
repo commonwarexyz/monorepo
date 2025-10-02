@@ -212,7 +212,6 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    cfg: Config,
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
@@ -328,7 +327,6 @@ impl crate::Runner for Runner {
 
         // Initialize executor
         let executor = Arc::new(Executor {
-            cfg: self.cfg,
             registry: Mutex::new(registry),
             metrics,
             runtime,

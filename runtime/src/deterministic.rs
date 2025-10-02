@@ -2,9 +2,7 @@
 //!
 //! # Panics
 //!
-//! Unless configured otherwise, spawned task panics are caught and translated into
-//! [`Error::Exited`](crate::Error::Exited). Set [`Config::with_catch_panics`] to `false` to
-//! propagate the panic instead.
+//! Unless configured otherwise, any task panic will lead to a runtime panic.
 //!
 //! # Example
 //!
