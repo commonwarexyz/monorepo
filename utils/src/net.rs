@@ -8,7 +8,7 @@ const IPV4_BITS: u8 = 32;
 /// Bits in an IPv6 address.
 const IPV6_BITS: u8 = 128;
 
-/// Canonical subnet representative for an IP address.
+/// Canonical subnet representation for an IP address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Subnet {
     addr: IpAddr,
@@ -46,30 +46,30 @@ impl SubnetMask {
     #[inline]
     const fn mask_ipv4(bits: u8) -> u32 {
         if bits == 0 {
-            0
-        } else {
-            (!0u32) << (32 - bits as u32)
+            return 0;
         }
+
+        (!0u32) << (32 - bits as u32)
     }
 
     /// Generate an IPv6 subnet mask that retains the upper `bits`.
     #[inline]
     const fn mask_ipv6(bits: u8) -> u128 {
         if bits == 0 {
-            0
-        } else {
-            (!0u128) << (128 - bits as u32)
+            return 0;
         }
+
+        (!0u128) << (128 - bits as u32)
     }
 }
 
-/// Mask an IPv4 address according to the supplied bitmask.
+/// Mask an IPv4 address according to the supplied [`SubnetMask`].
 #[inline]
 fn ipv4_subnet(ip: Ipv4Addr, mask: &SubnetMask) -> IpAddr {
     IpAddr::V4(Ipv4Addr::from(u32::from(ip) & mask.ipv4))
 }
 
-/// Mask an IPv6 address according to the supplied bitmask.
+/// Mask an IPv6 address according to the supplied [`SubnetMask`].
 #[inline]
 fn ipv6_subnet(ip: Ipv6Addr, mask: &SubnetMask) -> IpAddr {
     IpAddr::V6(Ipv6Addr::from(u128::from(ip) & mask.ipv6))
@@ -77,18 +77,12 @@ fn ipv6_subnet(ip: Ipv6Addr, mask: &SubnetMask) -> IpAddr {
 
 /// Extension trait providing subnet helpers for [`IpAddr`].
 pub trait IpAddrExt {
-    /// Return the canonical subnet representative for this IP address.
-    ///
-    /// IPv4 addresses are truncated using `mask.ipv4_bits()`. Native IPv6 addresses are truncated
-    /// using `mask.ipv6_bits()`, while IPv4-mapped IPv6 addresses follow the IPv4 truncation rules.
-    /// This mirrors common ISP subnet sizes and allows rate-limiting to operate on configurable
-    /// network groupings.
+    /// Return the [`Subnet`] for the given [`SubnetMask`].
     fn subnet(&self, mask: &SubnetMask) -> Subnet;
 
     /// Determine if this IP address is globally routable.
-    ///
-    /// This mirrors the logic in the unstable `IpAddr::is_global` method from the standard library
-    /// and can be removed once that API is stabilized.
+    // TODO: This mirrors the logic in the unstable `IpAddr::is_global` method from the standard library
+    // and can be removed once that API is stabilized.
     fn is_global(&self) -> bool;
 }
 
