@@ -391,6 +391,11 @@ mod tests {
                     "{}",
                     metrics
                 );
+                assert!(
+                    metrics.contains("handshakes_blocked_total 0"),
+                    "{}",
+                    metrics
+                );
             },
         );
     }
@@ -411,6 +416,11 @@ mod tests {
                     "{}",
                     metrics
                 );
+                assert!(
+                    metrics.contains("handshakes_blocked_total 0"),
+                    "{}",
+                    metrics
+                );
             },
         );
     }
@@ -428,6 +438,11 @@ mod tests {
                 );
                 assert!(
                     metrics.contains("handshake_subnet_rate_limited_total 3"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshakes_blocked_total 0"),
                     "{}",
                     metrics
                 );
