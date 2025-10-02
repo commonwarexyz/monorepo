@@ -933,16 +933,22 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         );
 
         let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
+        let chunk_end_bit = chunk_start_bit + Prunable::<N>::CHUNK_SIZE_BITS;
 
-        // Check if chunk has any modifications or appended bits
+        // Determine if this chunk needs reconstruction due to batch changes.
+        // Check conditions in order with short-circuit evaluation.
         let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
-        let chunk_has_mods = (chunk_start_bit..chunk_start_bit + Prunable::<N>::CHUNK_SIZE_BITS)
-            .any(|bit| {
-                batch.modified_bits.contains_key(&bit)
-                    || (bit >= appended_start && bit < batch.projected_len)
-            });
+        let range_end = chunk_end_bit.min(batch.base_len);
+        
+        let chunk_needs_reconstruction = 
+            // Check 1: Does the chunk extend beyond projected_len (has popped bits to zero)?
+        (chunk_end_bit > batch.projected_len && chunk_start_bit < batch.projected_len) ||
+            // Check 2: Does the chunk have any explicit modifications?
+            (chunk_start_bit..range_end).any(|bit| batch.modified_bits.contains_key(&bit))
+            // Check 3: Does the chunk overlap with appended bits?
+            || (chunk_start_bit..range_end).any(|bit| bit >= appended_start && bit < batch.projected_len);
 
-        if chunk_has_mods {
+        if chunk_needs_reconstruction {
             // Reconstruct chunk from current + batch modifications
             self.reconstruct_modified_chunk(chunk_start_bit)
         } else {
@@ -951,7 +957,7 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         }
     }
 
-    /// Reconstruct a chunk that has modifications or appends.
+    /// Reconstruct a chunk that has modifications, appends, or pops.
     fn reconstruct_modified_chunk(&self, chunk_start: u64) -> [u8; N] {
         let batch = self.historical.active_batch.as_ref().unwrap();
 
@@ -965,20 +971,19 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         // Calculate appended region boundary
         let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
 
-        // Apply batch modifications
+        // Apply batch modifications and zero out popped bits
         for bit_in_chunk in 0..Prunable::<N>::CHUNK_SIZE_BITS {
             let bit_offset = chunk_start + bit_in_chunk;
-
-            if bit_offset >= batch.projected_len {
-                break;
-            }
 
             let byte_idx = (bit_in_chunk / 8) as usize;
             let bit_idx = bit_in_chunk % 8;
             let mask = 1u8 << bit_idx;
 
-            // Check if this bit is modified
-            if let Some(&value) = batch.modified_bits.get(&bit_offset) {
+            if bit_offset >= batch.projected_len {
+                // Bit is beyond projected length (popped), zero it out
+                chunk[byte_idx] &= !mask;
+            } else if let Some(&value) = batch.modified_bits.get(&bit_offset) {
+                // Bit was explicitly modified in the batch
                 if value {
                     chunk[byte_idx] |= mask;
                 } else {
@@ -1817,6 +1822,49 @@ mod tests {
         let mut batch = historical.start_batch();
         batch.pop(); // projected_len = 9
         batch.prune_to_bit(100); // Should panic - bit 100 is beyond projected length
+    }
+
+    /// Test that get_chunk zeros out bits beyond projected_len after pops.
+    ///
+    /// This tests the scenario where:
+    /// 1. We have a chunk with all bits set
+    /// 2. We pop some bits from the end of that chunk
+    /// 3. We call get_chunk on that chunk
+    ///
+    /// The bug is that get_chunk would return the full chunk from current without
+    /// zeroing out the popped bits, so readers see stale data that will be zeroed
+    /// after commit.
+    #[test]
+    fn test_pop_zeros_chunk_tail() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Setup: Create 33 bits (chunk 0 has bits 0-31 all true, chunk 1 has bit 32 true)
+        historical
+            .with_batch(1, |b| {
+                for _ in 0..33 {
+                    b.push(true);
+                }
+            })
+            .unwrap();
+
+        // Start a new batch and pop 2 bits
+        let mut batch = historical.start_batch();
+        batch.pop(); // projected_len = 32
+        batch.pop(); // projected_len = 31
+
+        // Now bit 31 is out of bounds (projected_len = 31)
+        // get_chunk(0) returns chunk 0, which contains bits 0-31
+        let chunk = batch.get_chunk(0);
+
+        // Bit 31 should be zeroed since it's >= projected_len
+        let byte_31 = chunk[31 / 8]; // byte 3
+        let bit_31_in_byte = 31 % 8; // bit 7
+        let bit_31_set = (byte_31 >> bit_31_in_byte) & 1 == 1;
+
+        assert_eq!(
+            bit_31_set, false,
+            "bit 31 should be zero after being popped (beyond projected_len)"
+        );
     }
 
     /// Test that batch reads correctly see appended bits after pops.
