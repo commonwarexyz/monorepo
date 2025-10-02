@@ -1132,32 +1132,50 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
         // Capture preimages of chunks being pruned
         let current_pruned = self.historical.current.pruned_chunks();
         for chunk_idx in batch.projected_pruned_chunks..chunk_num {
-            #[cfg(not(feature = "std"))]
-            use alloc::collections::hash_map::Entry;
-            #[cfg(feature = "std")]
-            use std::collections::hash_map::Entry;
-
-            if let Entry::Vacant(e) = batch.chunks_to_prune.entry(chunk_idx) {
-                // Invariant: chunk_idx should always be >= current_pruned because
-                // projected_pruned_chunks starts at base_pruned_chunks (= current_pruned)
-                assert!(
-                    chunk_idx >= current_pruned,
-                    "attempting to prune chunk {chunk_idx} which is already pruned (current pruned_chunks={})",
-                    current_pruned
-                );
-
-                let bitmap_idx = chunk_idx - current_pruned;
-
-                // Invariant: the chunk should exist in current bitmap
-                assert!(
-                    bitmap_idx < self.historical.current.chunks_len(),
-                    "attempting to prune non-existent chunk {chunk_idx} (bitmap_idx={bitmap_idx}, chunks_len={})",
-                    self.historical.current.chunks_len()
-                );
-
-                let chunk_data = *self.historical.current.get_chunk_by_index(bitmap_idx);
-                e.insert(chunk_data);
+            if batch.chunks_to_prune.contains_key(&chunk_idx) {
+                continue; // Already captured
             }
+
+            // Invariant: chunk_idx should always be >= current_pruned because
+            // projected_pruned_chunks starts at base_pruned_chunks (= current_pruned)
+            assert!(
+                chunk_idx >= current_pruned,
+                "attempting to prune chunk {chunk_idx} which is already pruned (current pruned_chunks={})",
+                current_pruned
+            );
+
+            let bitmap_idx = chunk_idx - current_pruned;
+
+            // Get chunk data, which may come from batch if it's appended
+            let chunk_data = if bitmap_idx < self.historical.current.chunks_len() {
+                // Chunk exists in current bitmap
+                *self.historical.current.get_chunk_by_index(bitmap_idx)
+            } else {
+                // Chunk only exists in this batch's appended bits
+                // Manually reconstruct it from appended_bits
+                let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
+                let appended_start = batch.projected_len - batch.appended_bits.len() as u64;
+
+                let mut chunk = [0u8; N];
+                for bit_in_chunk in 0..Prunable::<N>::CHUNK_SIZE_BITS {
+                    let bit_offset = chunk_start_bit + bit_in_chunk;
+                    if bit_offset >= batch.projected_len {
+                        break;
+                    }
+                    if bit_offset >= appended_start {
+                        let append_idx = (bit_offset - appended_start) as usize;
+                        if append_idx < batch.appended_bits.len() && batch.appended_bits[append_idx]
+                        {
+                            let byte_idx = (bit_in_chunk / 8) as usize;
+                            let bit_idx = bit_in_chunk % 8;
+                            chunk[byte_idx] |= 1u8 << bit_idx;
+                        }
+                    }
+                }
+                chunk
+            };
+
+            batch.chunks_to_prune.insert(chunk_idx, chunk_data);
         }
 
         batch.projected_pruned_chunks = chunk_num;
@@ -1900,6 +1918,50 @@ mod tests {
         let bit_31_set = (byte_31 >> bit_31_in_byte) & 1 == 1;
 
         assert!(!bit_31_set);
+    }
+
+    /// Test pruning a chunk that was just appended in the same batch.
+    ///
+    /// This tests the scenario where:
+    /// 1. We have a bitmap with some bits (not chunk-aligned)
+    /// 2. We append enough bits to create a NEW chunk beyond what exists in current
+    /// 3. We immediately prune that new chunk
+    ///
+    /// The bug is that prune_to_bit tries to capture chunk data from current,
+    /// but the new chunk only exists in appended_bits, causing a panic.
+    #[test]
+    fn test_prune_freshly_appended_chunk() {
+        let mut historical: Historical<4> = Historical::new();
+
+        // Start with 10 bits (chunk 0 is partial, no chunk 1)
+        historical
+            .with_batch(1, |b| {
+                for _ in 0..10 {
+                    b.push(true);
+                }
+            })
+            .unwrap();
+
+        assert_eq!(historical.current().chunks_len(), 1); // Only chunk 0 exists
+
+        // Now in a new batch, append 54 more bits
+        // This creates chunk 1 (bits 32-63) entirely within the batch
+        let mut batch = historical.start_batch();
+        for _ in 0..54 {
+            batch.push(true);
+        }
+
+        // projected_len = 64, we now have chunks 0 and 1
+        // But chunk 1 is ONLY in appended_bits, not in current
+        assert_eq!(batch.len(), 64);
+
+        // Try to prune to bit 64 (prune chunks 0 and 1)
+        // This should capture chunk 0 from current (OK)
+        // But chunk 1 doesn't exist in current yet!
+        batch.prune_to_bit(64);
+
+        // Should commit successfully
+        batch.commit(2).unwrap();
     }
 
     /// Test that batch reads correctly see appended bits after pops.
