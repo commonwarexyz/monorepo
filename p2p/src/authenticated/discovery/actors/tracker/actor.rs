@@ -161,6 +161,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     async fn run(mut self) {
         loop {
+            // We explicitly prefer messages required to keep a connection alive over
+            // connection cleanup.
             select! {
                 msg = self.receiver.next() => {
                     let Some(msg) = msg else {
