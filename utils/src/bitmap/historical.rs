@@ -84,15 +84,9 @@
 
 use super::Prunable;
 #[cfg(not(feature = "std"))]
-use alloc::{
-    collections::{BTreeMap, HashMap},
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(feature = "std")]
-use std::collections::{BTreeMap, HashMap};
-
-const DEFAULT_BATCH_BITS_CAPACITY: usize = 16;
-const DEFAULT_BATCH_CHUNKS_CAPACITY: usize = 4;
+use std::collections::BTreeMap;
 
 /// Errors that can occur in Historical bitmap operations.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -182,7 +176,7 @@ struct Batch<const N: usize> {
     /// Modifications to bits that existed in the bitmap (not appended bits).
     /// Contains offsets in [0, projected_len - appended_bits.len()).
     /// Maps: bit_offset -> new_value
-    modified_bits: HashMap<u64, bool>,
+    modified_bits: BTreeMap<u64, bool>,
 
     /// New bits pushed in this batch (in order).
     /// Logical position: [projected_len - appended_bits.len(), projected_len)
@@ -190,7 +184,7 @@ struct Batch<const N: usize> {
 
     /// Old chunk data for chunks being pruned.
     /// Captured eagerly during `prune_to_bit()` for historical reconstruction.
-    chunks_to_prune: HashMap<usize, [u8; N]>,
+    chunks_to_prune: BTreeMap<usize, [u8; N]>,
 }
 
 /// A historical bitmap that maintains one actual bitmap plus diffs for history and batching.
@@ -258,11 +252,9 @@ impl<const N: usize> Historical<N> {
             base_pruned_chunks: self.current.pruned_chunks(),
             projected_len: self.current.len(),
             projected_pruned_chunks: self.current.pruned_chunks(),
-            // Pre-allocate capacity to avoid reallocation
-            modified_bits: HashMap::with_capacity(DEFAULT_BATCH_BITS_CAPACITY),
+            modified_bits: BTreeMap::new(),
             appended_bits: Vec::new(),
-            // Pre-allocate capacity to avoid reallocation
-            chunks_to_prune: HashMap::with_capacity(DEFAULT_BATCH_CHUNKS_CAPACITY),
+            chunks_to_prune: BTreeMap::new(),
         };
 
         self.active_batch = Some(batch);
