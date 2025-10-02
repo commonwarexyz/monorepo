@@ -835,7 +835,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, false, children, None);
+        let (f, handle) = Handle::init_future(future, metric, children, None);
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -862,7 +862,7 @@ impl crate::Spawner for Context {
         let executor = self.executor();
 
         move |f: F| {
-            let (f, handle) = Handle::init_future(f, metric, false, children, None);
+            let (f, handle) = Handle::init_future(f, metric, children, None);
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -903,7 +903,7 @@ impl crate::Spawner for Context {
 
         // Initialize the blocking task
         let executor = self.executor();
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, false, None);
+        let (f, handle) = Handle::init_blocking(|| f(self), metric, None);
 
         // Spawn the task
         let f = async move { f() };
@@ -926,7 +926,7 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor();
         move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metric, false, None);
+            let (f, handle) = Handle::init_blocking(f, metric, None);
 
             // Spawn the task
             let f = async move { f() };

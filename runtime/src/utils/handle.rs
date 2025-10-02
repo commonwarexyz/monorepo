@@ -31,7 +31,6 @@ where
     pub(crate) fn init_future<F>(
         f: F,
         metric: MetricHandle,
-        catch_panic: bool,
         children: Arc<Mutex<Vec<Aborter>>>,
         panic_hook: Option<PanicHook>,
     ) -> (impl Future<Output = ()>, Self)
@@ -54,10 +53,8 @@ where
                     Ok(result) => Ok(result),
                     Err(err) => {
                         let message = extract_panic_message(&*err);
-                        if !catch_panic {
-                            if let Some(panic_hook) = panic_hook.as_ref() {
-                                panic_hook.notify(message.clone());
-                            }
+                        if let Some(panic_hook) = panic_hook.as_ref() {
+                            panic_hook.notify(message.clone());
                             resume_unwind(err);
                         }
                         error!(?message, "task panicked");
@@ -95,7 +92,6 @@ where
     pub(crate) fn init_blocking<F>(
         f: F,
         metric: MetricHandle,
-        catch_panic: bool,
         panic_hook: Option<PanicHook>,
     ) -> (impl FnOnce(), Self)
     where
@@ -117,10 +113,8 @@ where
                     Ok(value) => Ok(value),
                     Err(err) => {
                         let message = extract_panic_message(&*err);
-                        if !catch_panic {
-                            if let Some(panic_hook) = panic_hook.as_ref() {
-                                panic_hook.notify(message.clone());
-                            }
+                        if let Some(panic_hook) = panic_hook.as_ref() {
+                            panic_hook.notify(message.clone());
                             resume_unwind(err);
                         }
                         error!(?message, "task panicked");

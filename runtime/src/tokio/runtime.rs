@@ -444,7 +444,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, catch_panics, children, panic_hook);
+        let (f, handle) = Handle::init_future(future, metric, children, panic_hook);
 
         // Spawn the task
         executor.runtime.spawn(f);
@@ -477,8 +477,7 @@ impl crate::Spawner for Context {
             } else {
                 Some(executor.panic_hook.clone())
             };
-            let (f, handle) =
-                Handle::init_future(f, metric, catch_panics, children.clone(), panic_hook);
+            let (f, handle) = Handle::init_future(f, metric, children.clone(), panic_hook);
 
             // Spawn the task
             executor.runtime.spawn(f);
@@ -525,7 +524,7 @@ impl crate::Spawner for Context {
         } else {
             Some(executor.panic_hook.clone())
         };
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, catch_panics, panic_hook);
+        let (f, handle) = Handle::init_blocking(|| f(self), metric, panic_hook);
 
         // Spawn the blocking task
         if dedicated {
@@ -557,7 +556,7 @@ impl crate::Spawner for Context {
             } else {
                 Some(executor.panic_hook.clone())
             };
-            let (f, handle) = Handle::init_blocking(f, metric, catch_panics, panic_hook);
+            let (f, handle) = Handle::init_blocking(f, metric, panic_hook);
 
             // Spawn the blocking task
             if dedicated {
