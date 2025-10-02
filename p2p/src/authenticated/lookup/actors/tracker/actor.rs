@@ -92,7 +92,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     async fn run(mut self) {
         loop {
-            // We prefer the unbounded mailbox because `receiver` will block
+            // We prefer the unbounded mailbox because `receiver` will
             // already block when full (providing backpressure).
             let msg = select! {
                 msg = self.unbound_receiver.next() => { msg },
