@@ -24,7 +24,7 @@ use std::{
 };
 use tracing::debug;
 
-/// Subnet mask using `/24` for IPv4 and `/48` for IPv6 networks.
+/// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
 const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 
 /// Interval at which to prune tracked IPs and Subnets.
@@ -192,7 +192,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             } else {
                 false
             };
-            let subnet = ip.subnet(SUBNET_MASK);
+            let subnet = ip.subnet(&SUBNET_MASK);
             let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
                 self.handshakes_subnet_rate_limited.inc();
                 debug!(?address, "subnet exceeded handshake rate limit");

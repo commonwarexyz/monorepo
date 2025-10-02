@@ -65,14 +65,14 @@ impl SubnetMask {
 
 /// Mask an IPv4 address according to the supplied bitmask.
 #[inline]
-fn ipv4_subnet(ip: Ipv4Addr, mask: u32) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::from(u32::from(ip) & mask))
+fn ipv4_subnet(ip: Ipv4Addr, mask: &SubnetMask) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::from(u32::from(ip) & mask.ipv4))
 }
 
 /// Mask an IPv6 address according to the supplied bitmask.
 #[inline]
-fn ipv6_subnet(ip: Ipv6Addr, mask: u128) -> IpAddr {
-    IpAddr::V6(Ipv6Addr::from(u128::from(ip) & mask))
+fn ipv6_subnet(ip: Ipv6Addr, mask: &SubnetMask) -> IpAddr {
+    IpAddr::V6(Ipv6Addr::from(u128::from(ip) & mask.ipv6))
 }
 
 /// Extension trait providing subnet helpers for [`IpAddr`].
@@ -83,7 +83,7 @@ pub trait IpAddrExt {
     /// using `mask.ipv6_bits()`, while IPv4-mapped IPv6 addresses follow the IPv4 truncation rules.
     /// This mirrors common ISP subnet sizes and allows rate-limiting to operate on configurable
     /// network groupings.
-    fn subnet(&self, mask: SubnetMask) -> Subnet;
+    fn subnet(&self, mask: &SubnetMask) -> Subnet;
 
     /// Determine if this IP address is globally routable.
     ///
@@ -93,20 +93,20 @@ pub trait IpAddrExt {
 }
 
 impl IpAddrExt for IpAddr {
-    fn subnet(&self, mask: SubnetMask) -> Subnet {
+    fn subnet(&self, mask: &SubnetMask) -> Subnet {
         match self {
             IpAddr::V4(v4) => Subnet {
-                addr: ipv4_subnet(*v4, mask.ipv4),
+                addr: ipv4_subnet(*v4, mask),
             },
             IpAddr::V6(v6) => {
                 if let Some(v4) = v6.to_ipv4_mapped() {
                     return Subnet {
-                        addr: ipv4_subnet(v4, mask.ipv4),
+                        addr: ipv4_subnet(v4, mask),
                     };
                 }
 
                 Subnet {
-                    addr: ipv6_subnet(*v6, mask.ipv6),
+                    addr: ipv6_subnet(*v6, mask),
                 }
             }
         }
@@ -218,7 +218,7 @@ mod tests {
     fn ipv4_subnet_zeroes_lower_8_bits() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 123));
         assert_eq!(
-            ip.subnet(TEST_MASK).addr,
+            ip.subnet(&TEST_MASK).addr,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0))
         );
     }
@@ -229,7 +229,7 @@ mod tests {
             0x2001, 0xdb8, 0x1234, 0x5678, 0x9abc, 0xdef0, 0x1357, 0x2468,
         ));
         assert_eq!(
-            ip.subnet(TEST_MASK).addr,
+            ip.subnet(&TEST_MASK).addr,
             IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x1234, 0, 0, 0, 0, 0))
         );
     }
@@ -238,7 +238,7 @@ mod tests {
     fn ipv4_mapped_ipv6_subnet_uses_ipv4_truncation() {
         let ip = IpAddr::from_str("::ffff:192.168.1.123").unwrap();
         assert_eq!(
-            ip.subnet(TEST_MASK).addr,
+            ip.subnet(&TEST_MASK).addr,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0))
         );
     }
