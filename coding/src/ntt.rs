@@ -9,6 +9,128 @@ fn reverse_bits(bit_width: u32, i: u64) -> u64 {
     i.wrapping_shl(64 - bit_width).reverse_bits()
 }
 
+/// Calculate an NTT, or an inverse NTT (with FORWARD=false), in place.
+///
+/// We implement this generically over anything we can index into, which allows
+/// performing NTTs in place
+fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
+    rows: usize,
+    cols: usize,
+    matrix: &mut M,
+) {
+    let lg_rows = rows.ilog2() as usize;
+    assert_eq!(1 << lg_rows, rows, "rows should be a power of 2");
+    // A number w such that w^(2^lg_rows) = 1.
+    // (Or, in the inverse case, the inverse of that number, to undo the NTT).
+    let w = {
+        let w = F::root_of_unity(lg_rows as u8).expect("too many rows to perform NTT");
+        if FORWARD {
+            w
+        } else {
+            // since w^(2^lg_rows) = 1, w^(2^lg_rows - 1) * w = 1,
+            // making that left-hand term the inverse of w.
+            w.exp((1 << lg_rows) - 1)
+        }
+    };
+    // The inverse algorithm consists of carefully undoing the work of the
+    // standard algorithm, so we describe that in detail.
+    //
+    // To understand the NTT algorithm, first consider the case of a single
+    // column. We have a polynomial f(X), and we want to turn that into:
+    //
+    // [f(w^0), f(w^1), ..., f(w^(2^lg_rows - 1))]
+    //
+    // Our polynomial can be written as:
+    //
+    // f+(X^2) + X f-(X^2)
+    //
+    // where f+ and f- are polynomials with half the degree.
+    // f+ is obtained by taking the coefficients at even indices,
+    // f- is obtained by taking the coefficients at odd indices.
+    //
+    // w^2 is also conveniently a 2^(lg_rows - 1) root of unity. Thus,
+    // we can recursively compute an NTT on f+, using w^2 as the root,
+    // and an NTT on f-, using w^2 as the root, each of which is a problem
+    // of half the size.
+    //
+    // We can then compute:
+    // f+((w^i)^2) + (w^i) f-((w^i)^2)
+    // f+((w^i)^2) - (w^i) f-((w^i)^2)
+    // for each i.
+    // (Note that (-w^i)^2 = ((-w)^2)^i = (w^i)^2))
+    //
+    // Our coefficients are conveniently laid out as [f+ f-], already
+    // in a neat order. When we recurse, the coefficients of f+ are, in
+    // turn, already laid out as [f++ f+-], and so on.
+    //
+    // We just need to transform this recursive algorithm, in top down form,
+    // into an iterative one, in bottom up form. For that, note that the NTT
+    // for the case of 1 row is trivial: do nothing.
+
+    // Will contain, in bottom up order, the power of w we need at that stage.
+    // At the last stage, we need w itself.
+    // At the stage before last, we need w^2.
+    // And so on.
+    // How many stages do we need? If we have 1 row, we need 0 stages.
+    // In general, with 2^n rows, we need n stages.
+    let stages = {
+        let mut out = vec![(0usize, F::zero()); lg_rows];
+        // In the case of the inverse algorithm, we want to undo multiplication
+        // by w_i, so we need the inverse.
+        let mut w_i = w;
+        for i in (0..lg_rows).rev() {
+            out[i] = (i, w_i);
+            w_i = w_i * w_i;
+        }
+        // In the case of the reverse algorithm, we undo each stage of the
+        // forward algorithm, starting with the last stage.
+        if !FORWARD {
+            out.reverse();
+        }
+        out
+    };
+    for (stage, w) in stages.into_iter() {
+        // At stage i, we have polynomials with 2^i coefficients,
+        // which have already been evaluted to create 2^i entries.
+        // We need to combine these evaluations to create 2^(i + 1) entries,
+        // representing the evaluation of a polynomial with 2^(i + 1) coefficients.
+        // If we have two of these evaluations, laid out one after the other:
+        //
+        // [x_0, x_1, ...] [y_0, y_1, ...]
+        //
+        // Then the number of elements we need to skip to get the corresponding
+        // element in the other half is simply the number of elements in each half,
+        // i.e. 2^i.
+        let skip = 1 << stage;
+        let mut i = 0;
+        while i < rows {
+            let mut w_j = F::one();
+            for j in 0..skip {
+                let index_a = i + j;
+                let index_b = index_a + skip;
+                for k in 0..cols {
+                    let (a, b) = (matrix[(index_a, k)], matrix[(index_b, k)]);
+                    if FORWARD {
+                        matrix[(index_a, k)] = a + w_j * b;
+                        matrix[(index_b, k)] = a - w_j * b;
+                    } else {
+                        // To check the math, convince yourself that applying the forward
+                        // transformation, and then this transformation, with w_j being the
+                        // inverse of the value above, that you get (a, b).
+                        // (a + w_j * b) + (a - w_j * b) = 2 * a
+                        matrix[(index_a, k)] = (a + b).div_2();
+                        // (a + w_j * b) - (a - w_j * b) = 2 * w_j * b.
+                        // w_j in this branch is the inverse of w_j in the other branch.
+                        matrix[(index_b, k)] = ((a - b) * w_j).div_2();
+                    }
+                }
+                w_j = w_j * w;
+            }
+            i += 2 * skip;
+        }
+    }
+}
+
 /// Represents a matrix of field elements, of arbitrary dimensions
 ///
 /// This is in row major order, so consider processing elements in the same
@@ -62,119 +184,8 @@ impl Matrix {
         out
     }
 
-    /// Calculate an NTT, or an inverse NTT (with FORWARD=false), in place.
     fn ntt<const FORWARD: bool>(&mut self) {
-        let lg_rows = self.rows.ilog2() as usize;
-        assert_eq!(1 << lg_rows, self.rows, "rows should be a power of 2");
-        // A number w such that w^(2^lg_rows) = 1.
-        // (Or, in the inverse case, the inverse of that number, to undo the NTT).
-        let w = {
-            let w = F::root_of_unity(lg_rows as u8).expect("too many rows to perform NTT");
-            if FORWARD {
-                w
-            } else {
-                // since w^(2^lg_rows) = 1, w^(2^lg_rows - 1) * w = 1,
-                // making that left-hand term the inverse of w.
-                w.exp((1 << lg_rows) - 1)
-            }
-        };
-        // The inverse algorithm consists of carefully undoing the work of the
-        // standard algorithm, so we describe that in detail.
-        //
-        // To understand the NTT algorithm, first consider the case of a single
-        // column. We have a polynomial f(X), and we want to turn that into:
-        //
-        // [f(w^0), f(w^1), ..., f(w^(2^lg_rows - 1))]
-        //
-        // Our polynomial can be written as:
-        //
-        // f+(X^2) + X f-(X^2)
-        //
-        // where f+ and f- are polynomials with half the degree.
-        // f+ is obtained by taking the coefficients at even indices,
-        // f- is obtained by taking the coefficients at odd indices.
-        //
-        // w^2 is also conveniently a 2^(lg_rows - 1) root of unity. Thus,
-        // we can recursively compute an NTT on f+, using w^2 as the root,
-        // and an NTT on f-, using w^2 as the root, each of which is a problem
-        // of half the size.
-        //
-        // We can then compute:
-        // f+((w^i)^2) + (w^i) f-((w^i)^2)
-        // f+((w^i)^2) - (w^i) f-((w^i)^2)
-        // for each i.
-        // (Note that (-w^i)^2 = ((-w)^2)^i = (w^i)^2))
-        //
-        // Our coefficients are conveniently laid out as [f+ f-], already
-        // in a neat order. When we recurse, the coefficients of f+ are, in
-        // turn, already laid out as [f++ f+-], and so on.
-        //
-        // We just need to transform this recursive algorithm, in top down form,
-        // into an iterative one, in bottom up form. For that, note that the NTT
-        // for the case of 1 row is trivial: do nothing.
-
-        // Will contain, in bottom up order, the power of w we need at that stage.
-        // At the last stage, we need w itself.
-        // At the stage before last, we need w^2.
-        // And so on.
-        // How many stages do we need? If we have 1 row, we need 0 stages.
-        // In general, with 2^n rows, we need n stages.
-        let stages = {
-            let mut out = vec![(0usize, F::zero()); lg_rows];
-            // In the case of the inverse algorithm, we want to undo multiplication
-            // by w_i, so we need the inverse.
-            let mut w_i = w;
-            for i in (0..lg_rows).rev() {
-                out[i] = (i, w_i);
-                w_i = w_i * w_i;
-            }
-            // In the case of the reverse algorithm, we undo each stage of the
-            // forward algorithm, starting with the last stage.
-            if !FORWARD {
-                out.reverse();
-            }
-            out
-        };
-        for (stage, w) in stages.into_iter() {
-            // At stage i, we have polynomials with 2^i coefficients,
-            // which have already been evaluted to create 2^i entries.
-            // We need to combine these evaluations to create 2^(i + 1) entries,
-            // representing the evaluation of a polynomial with 2^(i + 1) coefficients.
-            // If we have two of these evaluations, laid out one after the other:
-            //
-            // [x_0, x_1, ...] [y_0, y_1, ...]
-            //
-            // Then the number of elements we need to skip to get the corresponding
-            // element in the other half is simply the number of elements in each half,
-            // i.e. 2^i.
-            let skip = 1 << stage;
-            let mut i = 0;
-            while i < self.rows {
-                let mut w_j = F::one();
-                for j in 0..skip {
-                    let index_a = i + j;
-                    let index_b = index_a + skip;
-                    for k in 0..self.cols {
-                        let (a, b) = (self[(index_a, k)], self[(index_b, k)]);
-                        if FORWARD {
-                            self[(index_a, k)] = a + w_j * b;
-                            self[(index_b, k)] = a - w_j * b;
-                        } else {
-                            // To check the math, convince yourself that applying the forward
-                            // transformation, and then this transformation, with w_j being the
-                            // inverse of the value above, that you get (a, b).
-                            // (a + w_j * b) + (a - w_j * b) = 2 * a
-                            self[(index_a, k)] = (a + b).div_2();
-                            // (a + w_j * b) - (a - w_j * b) = 2 * w_j * b.
-                            // w_j in this branch is the inverse of w_j in the other branch.
-                            self[(index_b, k)] = ((a - b) * w_j).div_2();
-                        }
-                    }
-                    w_j = w_j * w;
-                }
-                i += 2 * skip;
-            }
-        }
+        ntt::<FORWARD, Self>(self.rows, self.cols, self)
     }
 }
 
