@@ -141,13 +141,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     #[allow(clippy::type_complexity)]
     pub fn start(
-        self,
+        mut self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(tracker, supervisor))
+        self.context.spawn_ref()(self.run(tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]
