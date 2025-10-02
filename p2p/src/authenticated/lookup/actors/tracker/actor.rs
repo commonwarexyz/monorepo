@@ -1,7 +1,7 @@
 use super::{
     directory::{self, Directory},
     ingress::{Message, Oracle},
-    Config, Metadata,
+    Config,
 };
 use crate::authenticated::{
     lookup::actors::{peer, tracker::ingress::Releaser},
@@ -97,10 +97,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 let Some(msg) = msg else {
                     break 'run;
                 };
-                match msg {
-                    Message::Release { metadata } => self.handle_release(metadata),
-                    _ => panic!("unexpected message"),
-                }
+                self.handle_msg(msg).await;
             }
 
             // Wait for the next message to process
@@ -109,90 +106,88 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     let Some(msg) = msg else {
                         break 'run;
                     };
-
-                    match msg {
-                        Message::Register { index, peers } => {
-                            // If we are no longer interested in a peer, release them.
-                            for peer in self.directory.add_set(index, peers) {
-                                if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
-                                    mailbox.kill().await;
-                                }
-                            }
-
-                            // Send the updated registered IP addresses to the listener.
-                            let _ = self.listener.send(self.directory.registered()).await;
-                        }
-                        Message::Connect {
-                            public_key,
-                            mut peer,
-                        } => {
-                            // Kill if peer is not authorized
-                            if !self.directory.allowed(&public_key) {
-                                peer.kill().await;
-                                continue;
-                            }
-
-                            // Mark the record as connected
-                            self.directory.connect(&public_key);
-                            self.mailboxes.insert(public_key, peer);
-                        }
-                        Message::Dialable { responder } => {
-                            let _ = responder.send(self.directory.dialable());
-                        }
-                        Message::Dial {
-                            public_key,
-                            reservation,
-                        } => {
-                            let _ = reservation.send(self.directory.dial(&public_key));
-                        }
-                        Message::Listenable {
-                            public_key,
-                            responder,
-                        } => {
-                            let _ = responder.send(self.directory.listenable(&public_key));
-                        }
-                        Message::Listen {
-                            public_key,
-                            reservation,
-                        } => {
-                            let _ = reservation.send(self.directory.listen(&public_key));
-                        }
-                        Message::Block { public_key } => {
-                            // Block the peer
-                            self.directory.block(&public_key);
-
-                            // Kill the peer if we're connected to it.
-                            if let Some(mut peer) = self.mailboxes.remove(&public_key) {
-                                peer.kill().await;
-                            }
-
-                            // Send the updated registered IP addresses to the listener.
-                            let _ = self.listener.send(self.directory.registered()).await;
-                        }
-                        _ => panic!("unexpected message"),
-                    }
+                    self.handle_msg(msg).await;
                 },
                 msg = self.unbound_receiver.next() => {
                     let Some(msg) = msg else {
                         break 'run;
                     };
-                    match msg {
-                        Message::Release { metadata } => self.handle_release(metadata),
-                        _ => panic!("unexpected message"),
-                    }
+                    self.handle_msg(msg).await;
                 }
             }
         }
         debug!("tracker shutdown");
     }
 
-    /// Handle a [`Message::Release`] message.
-    fn handle_release(&mut self, metadata: Metadata<C::PublicKey>) {
-        // Clear the peer handle if it exists
-        self.mailboxes.remove(metadata.public_key());
+    /// Handle a [`Message`].
+    async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
+        match msg {
+            Message::Register { index, peers } => {
+                // If we are no longer interested in a peer, release them.
+                for peer in self.directory.add_set(index, peers) {
+                    if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
+                        mailbox.kill().await;
+                    }
+                }
 
-        // Release the peer
-        self.directory.release(metadata);
+                // Send the updated registered IP addresses to the listener.
+                let _ = self.listener.send(self.directory.registered()).await;
+            }
+            Message::Connect {
+                public_key,
+                mut peer,
+            } => {
+                // Kill if peer is not authorized
+                if !self.directory.allowed(&public_key) {
+                    peer.kill().await;
+                    return;
+                }
+
+                // Mark the record as connected
+                self.directory.connect(&public_key);
+                self.mailboxes.insert(public_key, peer);
+            }
+            Message::Dialable { responder } => {
+                let _ = responder.send(self.directory.dialable());
+            }
+            Message::Dial {
+                public_key,
+                reservation,
+            } => {
+                let _ = reservation.send(self.directory.dial(&public_key));
+            }
+            Message::Listenable {
+                public_key,
+                responder,
+            } => {
+                let _ = responder.send(self.directory.listenable(&public_key));
+            }
+            Message::Listen {
+                public_key,
+                reservation,
+            } => {
+                let _ = reservation.send(self.directory.listen(&public_key));
+            }
+            Message::Block { public_key } => {
+                // Block the peer
+                self.directory.block(&public_key);
+
+                // Kill the peer if we're connected to it.
+                if let Some(mut peer) = self.mailboxes.remove(&public_key) {
+                    peer.kill().await;
+                }
+
+                // Send the updated registered IP addresses to the listener.
+                let _ = self.listener.send(self.directory.registered()).await;
+            }
+            Message::Release { metadata } => {
+                // Clear the peer handle if it exists
+                self.mailboxes.remove(metadata.public_key());
+
+                // Release the peer
+                self.directory.release(metadata);
+            }
+        }
     }
 }
 
