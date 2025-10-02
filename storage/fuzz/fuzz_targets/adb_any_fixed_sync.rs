@@ -19,21 +19,75 @@ use std::sync::Arc;
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 
-#[derive(Arbitrary, Debug)]
-enum SyncOp {
+const MAX_OPERATIONS: usize = 50;
+
+#[derive(Debug)]
+enum Operation {
     // Basic ops to build source state
-    Update { key: [u8; 32], value: [u8; 32] },
-    Delete { key: [u8; 32] },
+    Update {
+        key: [u8; 32],
+        value: [u8; 32],
+    },
+    Delete {
+        key: [u8; 32],
+    },
     Commit,
     Prune,
 
     // Sync scenarios
-    SyncFull { fetch_batch_size: u64 },
+    SyncFull {
+        fetch_batch_size: u64,
+    },
+
+    // Failure simulation
+    SimulateFailure {
+        sync_log: bool,
+        sync_mmr: bool,
+        write_limit: u8,
+    },
+}
+
+impl<'a> Arbitrary<'a> for Operation {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let choice: u8 = u.arbitrary()?;
+        match choice % 8 {
+            0 | 1 => {
+                let key = u.arbitrary()?;
+                let value = u.arbitrary()?;
+                Ok(Operation::Update { key, value })
+            }
+            2 => {
+                let key = u.arbitrary()?;
+                Ok(Operation::Delete { key })
+            }
+            3 => Ok(Operation::Commit),
+            4 => Ok(Operation::Prune),
+            5 => {
+                let fetch_batch_size = u.arbitrary()?;
+                Ok(Operation::SyncFull { fetch_batch_size })
+            }
+            6 => {
+                let sync_log: bool = u.arbitrary()?;
+                let sync_mmr: bool = u.arbitrary()?;
+                let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
+                Ok(Operation::SimulateFailure {
+                    sync_log,
+                    sync_mmr,
+                    write_limit,
+                })
+            }
+            7 => {
+                let key = u.arbitrary()?;
+                Ok(Operation::Delete { key })
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    ops: Vec<SyncOp>,
+    ops: Vec<Operation>,
 }
 
 const PAGE_SIZE: usize = 128;
@@ -98,53 +152,55 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut src =
-            Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config("src"))
-                .await
-                .expect("Failed to init source db");
+        let mut db = Any::<_, Key, Value, Sha256, TwoCap>::init(
+            context.clone(),
+            test_config("adb_any_fixed_fuzz_test"),
+        )
+        .await
+        .expect("Failed to init source db");
 
         let mut sync_id = 0;
 
-        for op in input.ops.iter().take(50) {
+        for op in input.ops.iter().take(MAX_OPERATIONS) {
             match op {
-                SyncOp::Update { key, value } => {
-                    src.update(Key::new(*key), Value::new(*value))
+                Operation::Update { key, value } => {
+                    db.update(Key::new(*key), Value::new(*value))
                         .await
                         .expect("Update should not fail");
                 }
 
-                SyncOp::Delete { key } => {
-                    src.delete(Key::new(*key))
+                Operation::Delete { key } => {
+                    db.delete(Key::new(*key))
                         .await
                         .expect("Delete should not fail");
                 }
 
-                SyncOp::Commit => {
-                    src.commit().await.expect("Commit should not fail");
+                Operation::Commit => {
+                    db.commit().await.expect("Commit should not fail");
                 }
 
-                SyncOp::Prune => {
-                    src.prune(src.inactivity_floor_loc())
+                Operation::Prune => {
+                    db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
                 }
 
-                SyncOp::SyncFull { fetch_batch_size } => {
-                    if src.op_count() == 0 {
+                Operation::SyncFull { fetch_batch_size } => {
+                    if db.op_count() == 0 {
                         continue;
                     }
-                    src.commit()
+                    db.commit()
                         .await
                         .expect("Commit before sync should not fail");
 
                     let mut hasher = Standard::<Sha256>::new();
                     let target = sync::Target {
-                        root: src.root(&mut hasher),
-                        lower_bound: src.inactivity_floor_loc(),
-                        upper_bound: src.op_count() - 1,
+                        root: db.root(&mut hasher),
+                        lower_bound: db.inactivity_floor_loc(),
+                        upper_bound: db.op_count() - 1,
                     };
 
-                    let wrapped_src = Arc::new(RwLock::new(src));
+                    let wrapped_src = Arc::new(RwLock::new(db));
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
@@ -153,15 +209,32 @@ fn fuzz(input: FuzzInput) {
                         &format!("full_{sync_id}"),
                     )
                     .await;
-                    src = Arc::try_unwrap(wrapped_src)
+                    db = Arc::try_unwrap(wrapped_src)
                         .unwrap_or_else(|_| panic!("Failed to unwrap src"))
                         .into_inner();
                     sync_id += 1;
                 }
+
+                Operation::SimulateFailure {
+                    sync_log,
+                    sync_mmr,
+                    write_limit,
+                } => {
+                    db.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
+                        .await
+                        .expect("Simulate failure should not fail");
+
+                    db = Any::<_, Key, Value, Sha256, TwoCap>::init(
+                        context.clone(),
+                        test_config("src"),
+                    )
+                    .await
+                    .expect("Failed to init source db");
+                }
             }
         }
 
-        src.destroy().await.expect("Destroy should not fail");
+        db.destroy().await.expect("Destroy should not fail");
     });
 }
 

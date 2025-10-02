@@ -37,6 +37,9 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// The mailbox for the listener.
     listener: Mailbox<HashSet<IpAddr>>,
 
+    /// The mailbox for the listener.
+    listener: Mailbox<HashSet<IpAddr>>,
+
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C::PublicKey>,

@@ -126,13 +126,11 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     /// Start the dialer actor.
     #[allow(clippy::type_complexity)]
     pub fn start(
-        self,
+        mut self,
         tracker: Mailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(tracker, supervisor))
+        self.context.spawn_ref()(self.run(tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]
