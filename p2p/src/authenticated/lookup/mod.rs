@@ -21,6 +21,9 @@
 //! On startup, the application supplies the initial set of peers. The `Oracle` actor allows
 //! the application to update peer --> address mappings so that peers can find each other.
 //!
+//! Any inbound connection attempts from an IP address that is not in the union of all registered
+//! peer sets will be rejected.
+//!
 //! ## Messages
 //!
 //! Application-level data is exchanged using the `Data` message type. This structure contains:
