@@ -19,7 +19,8 @@ use std::collections::VecDeque;
 mod prunable;
 pub use prunable::Prunable;
 
-pub const DEFAULT_CHUNK_SIZE: usize = 32;
+/// The default [BitMap] chunk size in bytes.
+pub const DEFAULT_CHUNK_SIZE: usize = 8;
 
 /// A bitmap that stores data in chunks of N bytes.
 ///
