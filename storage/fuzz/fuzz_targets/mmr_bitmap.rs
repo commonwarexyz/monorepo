@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::bitmap::Bitmap;
+use commonware_storage::mmr::bitmap::MerkleizedBitMap as Bitmap;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 100;
@@ -12,13 +12,11 @@ const CHUNK_SIZE: usize = 32;
 #[derive(Arbitrary, Debug, Clone)]
 enum BitmapOperation {
     Append { bit: bool },
-    AppendByte { byte: u8 },
-    AppendChunk { chunk_data: Vec<u8> },
     GetBit { bit_offset: u64 },
     SetBit { bit_offset: u64, bit: bool },
     GetChunk { bit_offset: u64 },
     LastChunk,
-    BitCount,
+    Len,
     PrunedBits,
     PruneToBit { bit_offset: u64 },
     Sync,
@@ -63,32 +61,10 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations {
             match op {
                 BitmapOperation::Append { bit } => {
-                    bitmap.append(bit);
+                    bitmap.push(bit);
                     bit_count += 1;
 
-                    assert_eq!(bitmap.bit_count(), bit_count);
-                }
-
-                BitmapOperation::AppendByte { byte } => {
-                    if bit_count.is_multiple_of(8) {
-                        bitmap.append_byte_unchecked(byte);
-                        bit_count += 8;
-
-                        assert_eq!(bitmap.bit_count(), bit_count);
-                    }
-                }
-
-                BitmapOperation::AppendChunk { chunk_data } => {
-                    if chunk_data.len() >= CHUNK_SIZE
-                        && bit_count.is_multiple_of(CHUNK_SIZE as u64 * 8)
-                    {
-                        let mut chunk = [0u8; CHUNK_SIZE];
-                        chunk.copy_from_slice(&chunk_data[0..CHUNK_SIZE]);
-                        bitmap.append_chunk_unchecked(&chunk);
-                        bit_count += (CHUNK_SIZE * 8) as u64;
-
-                        assert_eq!(bitmap.bit_count(), bit_count);
-                    }
+                    assert_eq!(bitmap.len(), bit_count);
                 }
 
                 BitmapOperation::GetBit { bit_offset } => {
@@ -130,8 +106,8 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                BitmapOperation::BitCount => {
-                    let count = bitmap.bit_count();
+                BitmapOperation::Len => {
+                    let count = bitmap.len();
                     assert_eq!(count, bit_count);
                 }
 
