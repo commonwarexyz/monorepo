@@ -1,7 +1,5 @@
 //! Implementation of an `authenticated` network.
 
-use std::{collections::HashSet, net::IpAddr};
-
 use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
@@ -17,6 +15,7 @@ use commonware_utils::union;
 use futures::channel::mpsc;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
+use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info, warn};
 
 /// Unique suffix for all messages signed in a stream.
