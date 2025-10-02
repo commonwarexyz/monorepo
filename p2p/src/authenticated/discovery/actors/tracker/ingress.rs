@@ -251,16 +251,20 @@ pub struct ReleaserHandle<C: PublicKey> {
 
 impl<C: PublicKey> ReleaserHandle<C> {
     /// Releases a reservation, queueing it if the tracker mailbox is currently full.
-    pub fn release(&mut self, metadata: Metadata<C>) {
+    ///
+    /// Returns `true` when the release request was sent to the tracker immediately (or
+    /// the tracker mailbox was already closed), and `false` when it was queued in the
+    /// backlog for the worker to replay.
+    pub fn release(&mut self, metadata: Metadata<C>) -> bool {
         match self.sender.try_send(Message::Release {
             metadata: metadata.clone(),
         }) {
-            Ok(()) => {}
-            Err(e) if e.is_disconnected() => {}
-            Err(e) if e.is_full() => {
+            Ok(()) => true,
+            Err(e) if e.is_disconnected() => true,
+            Err(_) => {
                 let _ = self.backlog.unbounded_send(metadata);
+                false
             }
-            Err(_) => {}
         }
     }
 }
@@ -327,9 +331,9 @@ mod tests {
             let metadata_b = Metadata::Listener(PrivateKey::from_seed(2).public_key());
 
             // the first release request should go through directly to the mailbox
-            handle.release(metadata_a.clone());
+            assert!(handle.release(metadata_a.clone()));
             // the second release request should be queued in the backlog
-            handle.release(metadata_b.clone());
+            assert!(!handle.release(metadata_b.clone()));
 
             let first = receiver.next().await.unwrap();
             assert!(matches!(

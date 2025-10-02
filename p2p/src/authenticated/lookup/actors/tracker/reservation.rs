@@ -26,6 +26,6 @@ impl<P: PublicKey> Reservation<P> {
 
 impl<P: PublicKey> Drop for Reservation<P> {
     fn drop(&mut self) {
-        self.releaser.release(self.metadata.clone());
+        let _ = self.releaser.release(self.metadata.clone());
     }
 }

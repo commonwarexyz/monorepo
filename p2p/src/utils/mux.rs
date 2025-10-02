@@ -236,14 +236,18 @@ impl<R: Receiver> Clone for DeregistrarHandle<R> {
 impl<R: Receiver> DeregistrarHandle<R> {
     /// Attempts to deregister the `subchannel` immediately, deferring to the backlog if the
     /// bounded control channel is currently full.
-    fn deregister(&mut self, subchannel: Channel) {
+    ///
+    /// Returns `true` when the deregister request was sent directly (or the control
+    /// channel was already closed), and `false` when it was queued in the backlog for the
+    /// worker to replay.
+    fn deregister(&mut self, subchannel: Channel) -> bool {
         match self.control_tx.try_send(Control::Deregister { subchannel }) {
-            Ok(()) => {}
-            Err(err) if err.is_disconnected() => {}
-            Err(err) if err.is_full() => {
+            Ok(()) => true,
+            Err(err) if err.is_disconnected() => true,
+            Err(_) => {
                 let _ = self.backlog.unbounded_send(subchannel);
+                false
             }
-            Err(_) => {}
         }
     }
 }
@@ -339,7 +343,7 @@ impl<R: Receiver> Debug for SubReceiver<R> {
 impl<R: Receiver> Drop for SubReceiver<R> {
     fn drop(&mut self) {
         if let Some(mut deregistrar) = self.deregistrar.take() {
-            deregistrar.deregister(self.subchannel);
+            let _ = deregistrar.deregister(self.subchannel);
         }
     }
 }
@@ -642,9 +646,9 @@ mod tests {
             deregistrar.start();
 
             // the first deregister request should go through directly to the mailbox
-            handle.deregister(1);
+            assert!(handle.deregister(1));
             // the second deregister request should be queued in the backlog
-            handle.deregister(2);
+            assert!(!handle.deregister(2));
 
             let first = control_rx.next().await.unwrap();
             assert!(matches!(first, Control::Deregister { subchannel } if subchannel == 1));
