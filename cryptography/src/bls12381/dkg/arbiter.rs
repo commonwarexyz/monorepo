@@ -11,6 +11,8 @@
 //! replicated log allows us to provide both reliable broadcast (all honest dealers see all messages from
 //! all other honest dealers) and to enforce a "timeout" (using log index).
 //!
+//! _For an example of this approach, refer to <https://docs.rs/commonware-reshare>._
+//!
 //! ## Alternative: Trusted Process
 //!
 //! It is possible to run the arbiter as a standalone process that dealers
