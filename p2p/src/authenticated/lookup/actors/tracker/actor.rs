@@ -1,7 +1,7 @@
 use super::{
     directory::{self, Directory},
     ingress::{Message, Oracle},
-    Config,
+    Config, Metadata,
 };
 use crate::authenticated::{
     lookup::actors::{peer, tracker::ingress::Releaser},
@@ -10,7 +10,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
-use futures::{channel::mpsc, StreamExt};
+use futures::{channel::mpsc, FutureExt, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
@@ -91,14 +91,25 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     async fn run(mut self) {
-        loop {
-            // We explicitly prefer messages required to keep a connection alive over
-            // connection cleanup.
+        'run: loop {
+            // Drain any queued release messages (to prevent starvation under load)
+            while let Some(msg) = self.unbound_receiver.next().now_or_never() {
+                let Some(msg) = msg else {
+                    break 'run;
+                };
+                match msg {
+                    Message::Release { metadata } => self.handle_release(metadata),
+                    _ => panic!("unexpected message"),
+                }
+            }
+
+            // Wait for the next message to process
             select! {
                 msg = self.receiver.next() => {
                     let Some(msg) = msg else {
-                        break;
+                        break 'run;
                     };
+
                     match msg {
                         Message::Register { index, peers } => {
                             // If we are no longer interested in a peer, release them.
@@ -163,22 +174,25 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 },
                 msg = self.unbound_receiver.next() => {
                     let Some(msg) = msg else {
-                        break;
+                        break 'run;
                     };
                     match msg {
-                        Message::Release { metadata } => {
-                            // Clear the peer handle if it exists
-                            self.mailboxes.remove(metadata.public_key());
-
-                            // Release the peer
-                            self.directory.release(metadata);
-                        }
+                        Message::Release { metadata } => self.handle_release(metadata),
                         _ => panic!("unexpected message"),
                     }
                 }
             }
         }
         debug!("tracker shutdown");
+    }
+
+    /// Handle a [`Message::Release`] message.
+    fn handle_release(&mut self, metadata: Metadata<C::PublicKey>) {
+        // Clear the peer handle if it exists
+        self.mailboxes.remove(metadata.public_key());
+
+        // Release the peer
+        self.directory.release(metadata);
     }
 }
 
