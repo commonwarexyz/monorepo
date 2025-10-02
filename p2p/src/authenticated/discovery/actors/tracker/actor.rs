@@ -1,7 +1,7 @@
 use super::{
     directory::{self, Directory},
     ingress::{Message, Oracle},
-    Config, Error, Metadata,
+    Config, Error,
 };
 use crate::authenticated::{
     discovery::{actors::tracker::ingress::Releaser, types},
@@ -167,10 +167,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 let Some(msg) = msg else {
                     break 'run;
                 };
-                match msg {
-                    Message::Release { metadata } => self.handle_release(metadata),
-                    _ => panic!("unexpected message"),
-                }
+                self.handle_msg(msg).await;
             }
 
             // Wait for the next message to process
@@ -179,125 +176,123 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     let Some(msg) = msg else {
                         break 'run;
                     };
-                    match msg {
-                        Message::Register { index, peers } => {
-                            // Ensure that peer set is not too large.
-                            // Panic since there is no way to recover from this.
-                            let len = peers.len();
-                            let max = self.max_peer_set_size;
-                            assert!(len <= max, "peer set too large: {len} > {max}");
-
-                            self.directory.add_set(index, peers);
-                        }
-                        Message::Connect {
-                            public_key,
-                            dialer,
-                            mut peer,
-                        } => {
-                            // Kill if peer is not authorized
-                            if !self.directory.allowed(&public_key) {
-                                peer.kill().await;
-                                continue;
-                            }
-
-                            // Mark the record as connected
-                            self.directory.connect(&public_key, dialer);
-
-                            // Proactively send our own info to the peer
-                            let info = self.directory.info(&self.crypto.public_key()).unwrap();
-                            let _ = peer.peers(vec![info]).await;
-                        }
-                        Message::Construct {
-                            public_key,
-                            mut peer,
-                        } => {
-                            // Kill if peer is not authorized
-                            if !self.directory.allowed(&public_key) {
-                                peer.kill().await;
-                                continue;
-                            }
-
-                            if let Some(bit_vec) = self.directory.get_random_bit_vec() {
-                                let _ = peer.bit_vec(bit_vec).await;
-                            } else {
-                                debug!("no peer sets available");
-                            };
-                        }
-                        Message::BitVec { bit_vec, mut peer } => {
-                            let Some(mut infos) = self.directory.infos(bit_vec) else {
-                                peer.kill().await;
-                                continue;
-                            };
-
-                            // Truncate to a random selection of peers if we have too many infos
-                            let max = self.peer_gossip_max_count;
-                            if infos.len() > max {
-                                infos.partial_shuffle(&mut self.context, max);
-                                infos.truncate(max);
-                            }
-
-                            // Send the info
-                            if !infos.is_empty() {
-                                peer.peers(infos).await;
-                            }
-                        }
-                        Message::Peers { peers, mut peer } => {
-                            if let Err(e) = self.validate(&peers) {
-                                debug!(error = ?e, "failed to handle peers");
-                                peer.kill().await;
-                                continue;
-                            }
-                            self.directory.update_peers(peers);
-                        }
-                        Message::Dialable { responder } => {
-                            let _ = responder.send(self.directory.dialable());
-                        }
-                        Message::Dial {
-                            public_key,
-                            reservation,
-                        } => {
-                            let _ = reservation.send(self.directory.dial(&public_key));
-                        }
-                        Message::Listenable {
-                            public_key,
-                            responder,
-                        } => {
-                            let _ = responder.send(self.directory.listenable(&public_key));
-                        }
-                        Message::Listen {
-                            public_key,
-                            reservation,
-                        } => {
-                            let _ = reservation.send(self.directory.listen(&public_key));
-                        }
-                        Message::Block { public_key } => {
-                            // Block the peer
-                            self.directory.block(&public_key);
-
-                            // We don't have to kill the peer now. It will be sent a `Kill` message the next
-                            // time it sends the `Connect` or `Construct` message to the tracker.
-                        }
-                        _ => panic!("unexpected message"),
-                    }
-
+                    self.handle_msg(msg).await;
                 },
                 msg = self.unbound_receiver.next() => {
                     let Some(msg) = msg else {
                         break 'run;
                     };
-                    match msg {
-                        Message::Release { metadata } => self.handle_release(metadata),
-                        _ => panic!("unexpected message"),
-                    }
+                    self.handle_msg(msg).await;
                 }
             }
         }
         debug!("tracker shutdown");
     }
 
-    /// Handle a [`Message::Release`] message.
-    fn handle_release(&mut self, metadata: Metadata<C::PublicKey>) {
-        self.directory.release(metadata);
+    /// Handle a [`Message`].
+    async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
+        match msg {
+            Message::Register { index, peers } => {
+                // Ensure that peer set is not too large.
+                // Panic since there is no way to recover from this.
+                let len = peers.len();
+                let max = self.max_peer_set_size;
+                assert!(len <= max, "peer set too large: {len} > {max}");
+
+                self.directory.add_set(index, peers);
+            }
+            Message::Connect {
+                public_key,
+                dialer,
+                mut peer,
+            } => {
+                // Kill if peer is not authorized
+                if !self.directory.allowed(&public_key) {
+                    peer.kill().await;
+                    return;
+                }
+
+                // Mark the record as connected
+                self.directory.connect(&public_key, dialer);
+
+                // Send the peer info to the peer
+                let info = self.directory.info(&self.crypto.public_key()).unwrap();
+                let _ = peer.peers(vec![info]).await;
+            }
+            Message::Construct {
+                public_key,
+                mut peer,
+            } => {
+                // Kill if peer is not authorized
+                if !self.directory.allowed(&public_key) {
+                    peer.kill().await;
+                    return;
+                }
+
+                if let Some(bit_vec) = self.directory.get_random_bit_vec() {
+                    let _ = peer.bit_vec(bit_vec).await;
+                } else {
+                    debug!("no peer sets available");
+                };
+            }
+            Message::BitVec { bit_vec, mut peer } => {
+                let Some(mut infos) = self.directory.infos(bit_vec) else {
+                    peer.kill().await;
+                    return;
+                };
+
+                // Truncate to a random selection of peers if we have too many infos
+                let max = self.peer_gossip_max_count;
+                if infos.len() > max {
+                    infos.partial_shuffle(&mut self.context, max);
+                    infos.truncate(max);
+                }
+
+                // Send the info
+                if !infos.is_empty() {
+                    peer.peers(infos).await;
+                }
+            }
+            Message::Peers { peers, mut peer } => {
+                if let Err(e) = self.validate(&peers) {
+                    debug!(error = ?e, "failed to handle peers");
+                    peer.kill().await;
+                    return;
+                }
+                self.directory.update_peers(peers);
+            }
+            Message::Dialable { responder } => {
+                let _ = responder.send(self.directory.dialable());
+            }
+            Message::Dial {
+                public_key,
+                reservation,
+            } => {
+                let _ = reservation.send(self.directory.dial(&public_key));
+            }
+            Message::Listenable {
+                public_key,
+                responder,
+            } => {
+                let _ = responder.send(self.directory.listenable(&public_key));
+            }
+            Message::Listen {
+                public_key,
+                reservation,
+            } => {
+                let _ = reservation.send(self.directory.listen(&public_key));
+            }
+            Message::Block { public_key } => {
+                // Block the peer
+                self.directory.block(&public_key);
+
+                // We don't have to kill the peer now. It will be sent a `Kill` message the next
+                // time it sends the `Connect` or `Construct` message to the tracker.
+            }
+            Message::Release { metadata } => {
+                self.directory.release(metadata);
+            }
+        }
     }
 }
 
