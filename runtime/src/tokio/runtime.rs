@@ -19,7 +19,6 @@ use crate::{
     Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
-use futures::channel::oneshot;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -216,7 +215,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
-    panicker: Option<Panicker>,
+    panicker: Panicker,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -259,12 +258,7 @@ impl crate::Runner for Runner {
             .expect("failed to create Tokio runtime");
 
         // Initialize panicker
-        let (panicker, panicked) = if self.cfg.catch_panics {
-            (None, None)
-        } else {
-            let (panic_tx, panic_rx) = oneshot::channel();
-            (Some(Panicker::new(panic_tx)), Some(panic_rx))
-        };
+        let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
 
         // Collect process metrics.
         //
@@ -348,9 +342,7 @@ impl crate::Runner for Runner {
             network,
             children: Arc::new(Mutex::new(Vec::new())),
         };
-        let output = executor
-            .runtime
-            .block_on(Panicker::interrupt(panicked, f(context)));
+        let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
 
         output
@@ -426,7 +418,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, children, executor.panicker.clone());
+        let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
 
         // Spawn the task
         executor.runtime.spawn(f);
@@ -454,7 +446,7 @@ impl crate::Spawner for Context {
 
         move |f: F| {
             let (f, handle) =
-                Handle::init_future(f, metric, children.clone(), executor.panicker.clone());
+                Handle::init_future(f, metric, executor.panicker.clone(), children.clone());
 
             // Spawn the task
             executor.runtime.spawn(f);

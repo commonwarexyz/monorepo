@@ -34,8 +34,8 @@ where
     pub(crate) fn init_future<F>(
         f: F,
         metric: MetricHandle,
+        panicker: Panicker,
         children: Arc<Mutex<Vec<Aborter>>>,
-        panicker: Option<Panicker>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -53,12 +53,7 @@ where
             let result = match result {
                 Ok(result) => Ok(result),
                 Err(panic) => {
-                    let err = extract_panic_message(&*panic);
-                    error!(?err, "task panicked");
-                    if let Some(panicker) = panicker.as_ref() {
-                        panicker.notify(panic);
-                    }
-
+                    panicker.notify(panic);
                     Err(Error::Exited)
                 }
             };
@@ -92,7 +87,7 @@ where
     pub(crate) fn init_blocking<F>(
         f: F,
         metric: MetricHandle,
-        panicker: Option<Panicker>,
+        panicker: Panicker,
     ) -> (impl FnOnce(), Self)
     where
         F: FnOnce() -> T + Send + 'static,
@@ -112,12 +107,7 @@ where
                 let result = match result {
                     Ok(value) => Ok(value),
                     Err(panic) => {
-                        let err = extract_panic_message(&*panic);
-                        error!(?err, "task panicked");
-                        if let Some(panicker) = panicker.as_ref() {
-                            panicker.notify(panic);
-                        }
-
+                        panicker.notify(panic);
                         Err(Error::Exited)
                     }
                 };
@@ -204,56 +194,104 @@ impl MetricHandle {
     }
 }
 
-/// A type alias for a panic.
-pub(crate) type Panic = Box<dyn Any + Send + 'static>;
+/// A panic that has occurred in a spawned task.
+struct Panic {
+    sender: Option<oneshot::Sender<()>>,
+    panic: Option<Box<dyn Any + Send + 'static>>,
+}
 
 /// Notifies the runtime when a spawned task panics, so it can propagate the failure.
 #[derive(Clone)]
 pub(crate) struct Panicker {
-    sender: Arc<Mutex<Option<oneshot::Sender<Panic>>>>,
+    catch: bool,
+    inner: Arc<Mutex<Panic>>,
 }
 
 impl Panicker {
-    /// Creates a new [Panicker] with the provided sender.
-    pub(crate) fn new(sender: oneshot::Sender<Panic>) -> Self {
-        Self {
-            sender: Arc::new(Mutex::new(Some(sender))),
-        }
+    /// Creates a new [Panicker].
+    pub(crate) fn new(catch: bool) -> (Self, Panicked) {
+        let (sender, receiver) = oneshot::channel();
+        let panic = Arc::new(Mutex::new(Panic {
+            sender: Some(sender),
+            panic: None,
+        }));
+        let panicker = Self {
+            catch,
+            inner: panic.clone(),
+        };
+        let panicked = Panicked {
+            receiver,
+            inner: panic,
+        };
+        (panicker, panicked)
+    }
+
+    /// Returns whether the [Panicker] is configured to catch panics.
+    pub(crate) fn catch(&self) -> bool {
+        self.catch
     }
 
     /// Notifies the [Panicker] that a panic has occurred.
-    pub(crate) fn notify(&self, panic: Panic) {
-        if let Some(sender) = self.sender.lock().unwrap().take() {
-            let _ = sender.send(panic);
-        }
-    }
+    pub(crate) fn notify(&self, panic: Box<dyn Any + Send + 'static>) {
+        // Log the panic
+        let err = extract_panic_message(&*panic);
+        error!(?err, "task panicked");
 
+        // If we are catching panics, just return
+        if self.catch {
+            return;
+        }
+
+        // If there is already a panic, ignore the new one
+        let mut inner = self.inner.lock().unwrap();
+        if inner.panic.is_some() {
+            return;
+        }
+
+        // Store the panic and notify `Panicked`
+        inner.panic = Some(panic);
+        let sender = inner.sender.take().unwrap();
+        let _ = sender.send(());
+    }
+}
+
+/// A handle that will be notified when a panic occurs.
+pub(crate) struct Panicked {
+    receiver: oneshot::Receiver<()>,
+    inner: Arc<Mutex<Panic>>,
+}
+
+impl Panicked {
     /// Polls a task that should be interrupted by a panic.
-    pub(crate) async fn interrupt<Fut>(
-        panicked: Option<oneshot::Receiver<Panic>>,
-        task: Fut,
-    ) -> Fut::Output
+    pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output
     where
         Fut: Future,
     {
-        // Wait for task to complete (if we are catching panics)
-        let Some(panicked) = panicked else {
-            return task.await;
-        };
-
         // Wait for task to complete or panic
+        let panicked = self.receiver;
         pin_mut!(panicked);
         pin_mut!(task);
         match select(panicked, task).await {
             Either::Left((panic, task)) => match panic {
                 // If there is a panic, resume the unwind
-                Ok(panic) => resume_unwind(panic),
+                Ok(()) => {
+                    let panic = self.inner.lock().unwrap().panic.take().unwrap();
+                    resume_unwind(panic);
+                }
                 // If there can never be a panic (oneshot is closed), wait for the task to complete
                 // and return the output
                 Err(_) => task.await,
             },
             // If the task completes, return the output
-            Either::Right((output, _)) => output,
+            Either::Right((output, _)) => {
+                // Check if there is a panic we haven't processed (will always be registered before a task completes)
+                if let Some(panic) = self.inner.lock().unwrap().panic.take() {
+                    resume_unwind(panic);
+                }
+
+                // Return the output
+                output
+            }
         }
     }
 }
