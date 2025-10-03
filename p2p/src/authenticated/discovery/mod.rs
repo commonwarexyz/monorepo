@@ -510,7 +510,7 @@ mod tests {
         }
     }
 
-    #[test_traced("DEBUG")]
+    #[test_traced]
     fn test_tokio_connectivity() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
