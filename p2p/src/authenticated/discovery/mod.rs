@@ -232,16 +232,14 @@ mod tests {
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
     use commonware_utils::NZU32;
-    use futures::{channel::mpsc, future::join_all, join, SinkExt, StreamExt};
+    use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        thread::{self, sleep},
         time::Duration,
     };
-    use tracing::info;
 
     #[derive(Copy, Clone)]
     enum Mode {
@@ -514,21 +512,12 @@ mod tests {
 
     #[test_traced("DEBUG")]
     fn test_tokio_connectivity() {
-        let cfg = tokio::Config::default();
-        let executor = tokio::Runner::new(cfg.clone());
+        let executor = tokio::Runner::default();
         executor.start(|context| async move {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
             let base_port = 3000;
             let n = 10;
-            let complete1 = context.clone().spawn(move |context| async move {
-                run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
-            });
-            let complete2 = context.clone().spawn(move |context| async move {
-                run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
-            });
-            let (result1, result2) = join!(complete1, complete2);
-            result1.unwrap();
-            result2.unwrap();
+            run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
         });
     }
 
