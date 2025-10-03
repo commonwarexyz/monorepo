@@ -68,8 +68,9 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
-                // Convert operation range to position range
-                range: Position::from(range.start)..Position::from(range.end),
+                // The last node of an MMR with `range.end - 1` operations is at the position
+                // right before where the next leaf (at location `range.end`) goes.
+                range: Position::from(range.start)..Position::from(range.end + 1),
                 pinned_nodes,
             },
         )
@@ -499,7 +500,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: sha256::Digest::from([1u8; 32]),
-                    range: Location::new(31)..Location::new(30), // Invalid: lower > upper
+                    range: Location::new(31)..Location::new(30), // Invalid range: start > end
                 },
                 context,
                 resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
@@ -991,7 +992,7 @@ mod tests {
             };
             let client: Engine<AnyTest, _> = Engine::new(config).await.unwrap();
 
-            // Send target update with invalid bounds (lower > upper)
+            // Send target update with invalid range (start > end)
             update_sender
                 .send(Target {
                     root: initial_root,
