@@ -19,7 +19,6 @@ use crate::{
     Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
-use futures::channel::oneshot;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -259,11 +258,10 @@ impl crate::Runner for Runner {
             .expect("failed to create Tokio runtime");
 
         // Initialize panicker
-        let (panicker, panicked) = if self.cfg.catch_panics {
-            (None, None)
+        let panicker = if self.cfg.catch_panics {
+            None
         } else {
-            let (panic_tx, panic_rx) = oneshot::channel();
-            (Some(Panicker::new(panic_tx)), Some(panic_rx))
+            Some(Panicker::new())
         };
 
         // Collect process metrics.
@@ -350,7 +348,7 @@ impl crate::Runner for Runner {
         };
         let output = executor
             .runtime
-            .block_on(Panicker::interrupt(panicked, f(context)));
+            .block_on(Panicker::interrupt(executor.panicker.clone(), f(context)));
         gauge.dec();
 
         output
