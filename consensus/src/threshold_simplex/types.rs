@@ -607,35 +607,35 @@ impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
     }
 }
 
-// impl<V: Variant, D: Digest> Epochable for Voter<V, D> {
-//     type Epoch = Epoch;
+impl<S: SigningScheme, D: Digest> Epochable for Voter<S, D> {
+    type Epoch = Epoch;
 
-//     fn epoch(&self) -> Epoch {
-//         match self {
-//             Voter::Notarize(v) => v.epoch(),
-//             Voter::Notarization(v) => v.epoch(),
-//             Voter::Nullify(v) => v.epoch(),
-//             Voter::Nullification(v) => v.epoch(),
-//             Voter::Finalize(v) => v.epoch(),
-//             Voter::Finalization(v) => v.epoch(),
-//         }
-//     }
-// }
+    fn epoch(&self) -> Epoch {
+        match self {
+            Voter::Notarize(v) => v.proposal.epoch(),
+            Voter::Notarization(v) => v.proposal.epoch(),
+            Voter::Nullify(v) => v.round.epoch(),
+            Voter::Nullification(v) => v.round.epoch(),
+            Voter::Finalize(v) => v.proposal.epoch(),
+            Voter::Finalization(v) => v.proposal.epoch(),
+        }
+    }
+}
 
-// impl<V: Variant, D: Digest> Viewable for Voter<V, D> {
-//     type View = View;
+impl<S: SigningScheme, D: Digest> Viewable for Voter<S, D> {
+    type View = View;
 
-//     fn view(&self) -> View {
-//         match self {
-//             Voter::Notarize(v) => v.view(),
-//             Voter::Notarization(v) => v.view(),
-//             Voter::Nullify(v) => v.view(),
-//             Voter::Nullification(v) => v.view(),
-//             Voter::Finalize(v) => v.view(),
-//             Voter::Finalization(v) => v.view(),
-//         }
-//     }
-// }
+    fn view(&self) -> View {
+        match self {
+            Voter::Notarize(v) => v.proposal.view(),
+            Voter::Notarization(v) => v.proposal.view(),
+            Voter::Nullify(v) => v.round.view(),
+            Voter::Nullification(v) => v.round.view(),
+            Voter::Finalize(v) => v.proposal.view(),
+            Voter::Finalization(v) => v.proposal.view(),
+        }
+    }
+}
 
 /// Proposal represents a proposed block in the protocol.
 /// It includes the view number, the parent view, and the actual payload (typically a digest of block data).

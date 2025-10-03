@@ -58,10 +58,16 @@ pub enum VoteContext<'a, D: Digest> {
 }
 
 /// Signed vote emitted by a participant.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq, Hash)]
 pub struct Vote<S: SigningScheme> {
     pub signer: u32,
     pub signature: S::Signature,
+}
+
+impl<S: SigningScheme> PartialEq for Vote<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.signer == other.signer && self.signature == other.signature
+    }
 }
 
 /// Result of verifying a batch of votes.
@@ -104,10 +110,16 @@ impl<S: SigningScheme> Read for Vote<S> {
 }
 
 /// Partial notarize vote carrying the proposal and signatures.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq, Hash)]
 pub struct Notarize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
+}
+
+impl<S: SigningScheme, D: Digest> PartialEq for Notarize<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.proposal == other.proposal && self.vote == other.vote
+    }
 }
 
 impl<S: SigningScheme, D: Digest> Write for Notarize<S, D> {
@@ -135,7 +147,7 @@ impl<S: SigningScheme, D: Digest> Read for Notarize<S, D> {
 }
 
 /// Partial nullify vote for a given round.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq, Hash)]
 pub struct Nullify<S: SigningScheme> {
     pub round: Round,
     pub vote: Vote<S>,
@@ -145,6 +157,12 @@ impl<S: SigningScheme> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
         self.vote.write(writer);
+    }
+}
+
+impl<S: SigningScheme> PartialEq for Nullify<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.round == other.round && self.vote == other.vote
     }
 }
 
@@ -166,10 +184,16 @@ impl<S: SigningScheme> Read for Nullify<S> {
 }
 
 /// Partial finalize vote carrying the proposal and signatures.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq, Hash)]
 pub struct Finalize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
+}
+
+impl<S: SigningScheme, D: Digest> PartialEq for Finalize<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.proposal == other.proposal && self.vote == other.vote
+    }
 }
 
 impl<S: SigningScheme, D: Digest> Write for Finalize<S, D> {
@@ -302,6 +326,8 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         + PartialEq
         + Eq
         + Hash
+        + Send
+        + Sync
         + EncodeSize
         + Write
         + Read<Cfg = Self::SignatureReadCfg>;
@@ -311,6 +337,7 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         + PartialEq
         + Eq
         + Hash
+        + Send
         + EncodeSize
         + Write
         + Read<Cfg = Self::CertificateReadCfg>;

@@ -1,23 +1,23 @@
-use crate::threshold_simplex::types::Voter;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use crate::threshold_simplex::{new_types::SigningScheme, types::Voter};
+use commonware_cryptography::Digest;
 use futures::{channel::mpsc, stream, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
-pub enum Message<V: Variant, D: Digest> {
-    Verified(Voter<V, D>),
+pub enum Message<S: SigningScheme, D: Digest> {
+    Verified(Voter<S, D>),
 }
 
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, D: Digest> {
-    sender: mpsc::Sender<Message<V, D>>,
+pub struct Mailbox<S: SigningScheme, D: Digest> {
+    sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
-    pub fn new(sender: mpsc::Sender<Message<V, D>>) -> Self {
+impl<S: SigningScheme, D: Digest> Mailbox<S, D> {
+    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
-    pub async fn verified(&mut self, voters: Vec<Voter<V, D>>) {
+    pub async fn verified(&mut self, voters: Vec<Voter<S, D>>) {
         self.sender
             .send_all(&mut stream::iter(
                 voters.into_iter().map(|voter| Ok(Message::Verified(voter))),
