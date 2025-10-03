@@ -108,6 +108,8 @@ where
         let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
         let (lower_bound, upper_bound) = range.clone().into_inner();
+        assert!(upper_bound < u64::MAX, "upper_bound must be < u64::MAX");
+
         if size <= lower_bound {
             // Close existing journal and create new one
             journal.into_inner().destroy().await?;

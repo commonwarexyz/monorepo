@@ -20,6 +20,11 @@ pub trait Database: Sized {
     /// - Reuse any on-disk data whose logical locations lie within the range.
     /// - Discard/ignore any data outside the range.
     /// - Report `size()` equal to the next location to be filled.
+    ///
+    /// # Panics
+    ///
+    /// - Panics if `upper_bound` == `u64::MAX`
+    /// - Panics if `upper_bound` < `lower_bound`
     fn create_journal(
         context: Self::Context,
         config: &Self::Config,
@@ -27,6 +32,11 @@ pub trait Database: Sized {
     ) -> impl Future<Output = Result<Self::Journal, crate::adb::Error>>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
+    ///
+    /// # Panics
+    ///
+    /// - Panics if `upper_bound` == `u64::MAX`
+    /// - Panics if `upper_bound` < `lower_bound`
     fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
@@ -46,6 +56,11 @@ pub trait Database: Sized {
     ///   (equivalent to `create_journal`).
     /// - Else: prune/discard data outside the range.
     /// - Report `size()` as the next location to be set by the sync engine.
+    ///
+    /// # Panics
+    ///
+    /// - Panics if `upper_bound` == `u64::MAX`
+    /// - Panics if `upper_bound` < `lower_bound`
     fn resize_journal(
         journal: Self::Journal,
         context: Self::Context,

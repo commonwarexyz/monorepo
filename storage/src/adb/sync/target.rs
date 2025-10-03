@@ -13,6 +13,9 @@ pub struct Target<D: Digest> {
     /// The root digest we're syncing to
     pub root: D,
     /// Range of operations to sync
+    /// Invariants:
+    /// - lower_bound <= upper_bound
+    /// - upper_bound < u64::MAX
     pub range: RangeInclusive<Location>,
 }
 
@@ -41,6 +44,12 @@ impl<D: Digest> Read for Target<D> {
                 "lower_bound > upper_bound",
             ));
         }
+        if upper_bound == u64::MAX {
+            return Err(CodecError::Invalid(
+                "storage::adb::sync::Target",
+                "upper_bound == u64::MAX (must be < u64::MAX to avoid overflow)",
+            ));
+        }
         Ok(Self {
             root,
             range: Location::new(lower_bound)..=Location::new(upper_bound),
@@ -58,7 +67,7 @@ where
     D: Digest,
 {
     let (new_lower, new_upper) = new_target.range.clone().into_inner();
-    if new_lower > new_upper {
+    if new_lower > new_upper || *new_upper == u64::MAX {
         return Err(sync::Error::Engine(EngineError::InvalidTarget {
             lower_bound_pos: new_lower,
             upper_bound_pos: new_upper,
@@ -129,6 +138,23 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_sync_target_read_max_upper_bound() {
+        let target = Target {
+            root: sha256::Digest::from([42; 32]),
+            range: Location::new(0)..=Location::new(u64::MAX), // invalid: upper_bound == u64::MAX
+        };
+
+        let mut buffer = Vec::new();
+        target.write(&mut buffer);
+
+        let mut cursor = Cursor::new(buffer);
+        assert!(matches!(
+            Target::<sha256::Digest>::read(&mut cursor),
+            Err(CodecError::Invalid(_, _))
+        ));
+    }
+
     type TestError = sync::Error<std::io::Error, sha256::Digest>;
 
     #[test_case(
@@ -163,6 +189,12 @@ mod tests {
         Target { root: sha256::Digest::from([0; 32]), range: Location::new(50)..=Location::new(200) },
         Err(TestError::Engine(EngineError::SyncTargetRootUnchanged));
         "same root"
+    )]
+    #[test_case(
+        Target { root: sha256::Digest::from([0; 32]), range: Location::new(0)..=Location::new(100) },
+        Target { root: sha256::Digest::from([1; 32]), range: Location::new(0)..=Location::new(u64::MAX) },
+        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: Location::new(0), upper_bound_pos: Location::new(u64::MAX) }));
+        "upper_bound is u64::MAX"
     )]
     fn test_validate_update(
         old_target: Target<sha256::Digest>,

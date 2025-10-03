@@ -60,6 +60,7 @@ where
         let (lower_bound_loc, upper_bound_loc) = range.clone().into_inner();
         // The last node of an MMR with `upper_bound_loc` + 1 operations is at the position
         // right before where the next leaf goes.
+        // SAFETY: upper_bound_loc < u64::MAX is enforced by Target validation
         let upper_bound_pos = Position::from(upper_bound_loc + 1) - 1;
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
@@ -161,7 +162,8 @@ where
 ///
 /// # Invariants
 ///
-/// The returned [fixed::Journal] has size in [`lower_bound`, `upper_bound + 1`].
+/// - The returned [fixed::Journal] has size in [`lower_bound`, `upper_bound + 1`].
+/// - upper_bound < u64::MAX
 pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     context: E,
     cfg: fixed::Config,
@@ -173,6 +175,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
         lower_bound <= upper_bound,
         "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
     );
+    assert!(upper_bound < u64::MAX, "upper_bound must be < u64::MAX");
 
     let mut journal = fixed::Journal::<E, A>::init(context.clone(), cfg.clone()).await?;
     let journal_size = journal.size().await?;

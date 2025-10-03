@@ -47,6 +47,9 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 ///
 /// # Errors
 /// Returns [adb::Error::UnexpectedData] if existing data extends beyond `upper_bound`.
+///
+/// # Panics
+/// Panics if `upper_bound` == `u64::MAX`
 pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     context: E,
     cfg: VConfig<V::Cfg>,
@@ -59,6 +62,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
         lower_bound <= upper_bound,
         "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
     );
+    assert!(upper_bound < u64::MAX, "upper_bound must be < u64::MAX");
 
     // Calculate the section ranges based on item locations
     let items_per_section = items_per_section.get();

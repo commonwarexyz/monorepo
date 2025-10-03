@@ -209,6 +209,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
+                // SAFETY: cfg.range.end() < u64::MAX is enforced by Target validation
                 range: Position::from(*cfg.range.start())
                     ..=Position::from(*cfg.range.end() + 1) - 1,
                 pinned_nodes: cfg.pinned_nodes,
