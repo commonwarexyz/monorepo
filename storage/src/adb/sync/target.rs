@@ -57,7 +57,7 @@ where
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
-    let (new_lower, new_upper) = (*new_target.range.start(), *new_target.range.end());
+    let (new_lower, new_upper) = new_target.range.clone().into_inner();
     if new_lower > new_upper {
         return Err(sync::Error::Engine(EngineError::InvalidTarget {
             lower_bound_pos: new_lower,
@@ -65,7 +65,7 @@ where
         }));
     }
 
-    let (old_lower, old_upper) = (*old_target.range.start(), *old_target.range.end());
+    let (old_lower, old_upper) = old_target.range.clone().into_inner();
     if new_lower < old_lower || new_upper < old_upper {
         return Err(sync::Error::Engine(EngineError::SyncTargetMovedBackward {
             old: old_target.clone(),
