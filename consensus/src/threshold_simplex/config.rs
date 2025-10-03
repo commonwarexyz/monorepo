@@ -2,12 +2,9 @@ use super::types::{Activity, Context};
 use crate::{
     threshold_simplex::new_types::SigningScheme,
     types::{Epoch, View},
-    Automaton, Relay, Reporter, ThresholdSupervisor,
+    Automaton, Relay, Reporter,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
-    Digest, Signer,
-};
+use commonware_cryptography::{Digest, Signer};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use governor::Quota;
@@ -16,23 +13,21 @@ use std::{num::NonZeroUsize, time::Duration};
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Signer,
+    S: SigningScheme,
     B: Blocker<PublicKey = C::PublicKey>,
-    V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay,
-    F: Reporter<Activity = Activity<V, D>>,
-    S: ThresholdSupervisor<
-        Index = View,
-        Identity = V::Public,
-        Seed = V::Signature,
-        PublicKey = C::PublicKey,
-        Share = group::Share,
-    >,
-    G: SigningScheme,
+    F: Reporter<Activity = Activity<S, D>>,
 > {
     /// Cryptographic primitives.
     pub crypto: C,
+
+    /// List of validators for the consensus engine.
+    pub participants: Vec<C::PublicKey>,
+
+    /// Signing scheme for the consensus engine.
+    pub signing: S,
 
     /// Blocker for the network.
     ///
@@ -50,9 +45,6 @@ pub struct Config<
 
     /// Supervisor for the consensus engine.
     pub supervisor: S,
-
-    /// Signing scheme for the consensus engine.
-    pub signing: G,
 
     /// Partition for the consensus engine.
     pub partition: String,
@@ -116,21 +108,13 @@ pub struct Config<
 
 impl<
         C: Signer,
+        S: SigningScheme,
         B: Blocker<PublicKey = C::PublicKey>,
-        V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>>,
         R: Relay,
-        F: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<
-            Seed = V::Signature,
-            Index = View,
-            Share = group::Share,
-            Identity = V::Public,
-            PublicKey = C::PublicKey,
-        >,
-        G: SigningScheme,
-    > Config<C, B, V, D, A, R, F, S, G>
+        F: Reporter<Activity = Activity<S, D>>,
+    > Config<C, S, B, D, A, R, F>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
