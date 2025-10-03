@@ -6,7 +6,7 @@ use super::{
 use crate::authenticated::{
     discovery::{
         actors::tracker::ingress::Releaser,
-        types::{self, PeerValidator},
+        types::{self, PeerInfoVerifier},
     },
     mailbox::UnboundedMailbox,
 };
@@ -58,7 +58,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         Self,
         UnboundedMailbox<Message<C::PublicKey>>,
         Oracle<C::PublicKey>,
-        PeerValidator<C::PublicKey>,
+        PeerInfoVerifier<C::PublicKey>,
     ) {
         // Sign my own information
         let socket = cfg.address;
@@ -89,7 +89,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         // Create peer validator
         let public_key = cfg.crypto.public_key();
-        let peer_validator = PeerValidator::new(
+        let peer_validator = PeerInfoVerifier::new(
             cfg.allow_private_ips,
             cfg.peer_gossip_max_count,
             cfg.synchrony_bound,

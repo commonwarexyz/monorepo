@@ -6,7 +6,7 @@ use crate::authenticated::{
             tracker::{self, Metadata},
         },
         metrics,
-        types::PeerValidator,
+        types::PeerInfoVerifier,
     },
     mailbox::UnboundedMailbox,
     Mailbox,
@@ -34,7 +34,7 @@ pub struct Actor<
     max_peer_set_size: usize,
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
-    peer_validator: PeerValidator<C>,
+    peer_validator: PeerInfoVerifier<C>,
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
 

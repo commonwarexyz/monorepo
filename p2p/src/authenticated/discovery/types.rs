@@ -181,7 +181,7 @@ pub struct PeerInfo<C: PublicKey> {
 
 /// Validate peer gossip payloads against configurability and basic safety checks.
 #[derive(Clone)]
-pub struct PeerValidator<C: PublicKey> {
+pub struct PeerInfoVerifier<C: PublicKey> {
     allow_private_ips: bool,
     peer_gossip_max_count: usize,
     synchrony_bound: Duration,
@@ -189,8 +189,8 @@ pub struct PeerValidator<C: PublicKey> {
     ip_namespace: Vec<u8>,
 }
 
-impl<C: PublicKey> PeerValidator<C> {
-    /// Create a new `PeerValidator` with the provided configuration.
+impl<C: PublicKey> PeerInfoVerifier<C> {
+    /// Create a new `PeerInfoVerifier` with the provided configuration.
     pub fn new(
         allow_private_ips: bool,
         peer_gossip_max_count: usize,
@@ -440,7 +440,7 @@ mod tests {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
-            let validator = PeerValidator::new(
+            let validator = PeerInfoVerifier::new(
                 false,
                 4,
                 Duration::from_secs(30),
@@ -483,7 +483,7 @@ mod tests {
                 );
                 vec![peer_a, peer_b]
             };
-            let validator = PeerValidator::new(
+            let validator = PeerInfoVerifier::new(
                 true,
                 1,
                 synchrony_bound,
@@ -502,7 +502,7 @@ mod tests {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
-            let validator = PeerValidator::new(
+            let validator = PeerInfoVerifier::new(
                 false,
                 4,
                 Duration::from_secs(30),
@@ -527,7 +527,7 @@ mod tests {
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
-            let validator = PeerValidator::new(
+            let validator = PeerInfoVerifier::new(
                 true,
                 4,
                 Duration::from_secs(30),
@@ -554,7 +554,7 @@ mod tests {
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
             let synchrony_bound = Duration::from_secs(30);
-            let validator = PeerValidator::new(
+            let validator = PeerInfoVerifier::new(
                 true,
                 4,
                 synchrony_bound,
@@ -582,7 +582,7 @@ mod tests {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
-            let validator = PeerValidator::new(
+            let validator = PeerInfoVerifier::new(
                 true,
                 4,
                 Duration::from_secs(30),

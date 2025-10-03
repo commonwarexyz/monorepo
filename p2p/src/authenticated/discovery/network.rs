@@ -7,7 +7,7 @@ use super::{
     types,
 };
 use crate::{
-    authenticated::{discovery::types::PeerValidator, mailbox::UnboundedMailbox, Mailbox},
+    authenticated::{discovery::types::PeerInfoVerifier, mailbox::UnboundedMailbox, Mailbox},
     Channel,
 };
 use commonware_cryptography::Signer;
@@ -38,7 +38,7 @@ pub struct Network<
     tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
-    peer_validator: PeerValidator<C::PublicKey>,
+    peer_validator: PeerInfoVerifier<C::PublicKey>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
