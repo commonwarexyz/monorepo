@@ -1,6 +1,6 @@
 use futures::{channel::mpsc, SinkExt as _};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Relay<T> {
     low: mpsc::Sender<T>,
     high: mpsc::Sender<T>,

@@ -4,6 +4,7 @@ use crate::authenticated::{
         actors::{peer, router, tracker},
         metrics,
     },
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
@@ -62,7 +63,7 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
         (
             Self {
@@ -76,13 +77,13 @@ impl<
                 received_messages,
                 rate_limited,
             },
-            Mailbox::new(sender),
+            sender,
         )
     }
 
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<C>>,
+        tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
@@ -90,7 +91,7 @@ impl<
 
     async fn run(
         mut self,
-        tracker: Mailbox<tracker::Message<C>>,
+        tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
         while let Some(msg) = self.receiver.next().await {

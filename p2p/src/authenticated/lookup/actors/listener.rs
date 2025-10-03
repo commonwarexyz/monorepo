@@ -2,6 +2,7 @@
 
 use crate::authenticated::{
     lookup::actors::{spawner, tracker},
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::Signer;
@@ -122,7 +123,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Perform handshake
@@ -157,7 +158,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, supervisor))
@@ -166,7 +167,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Start listening for incoming connections
@@ -317,7 +318,7 @@ mod tests {
                 .await
                 .expect("update registered ips");
 
-            let (tracker_mailbox, mut tracker_rx) = Mailbox::test();
+            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
@@ -333,7 +334,7 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
             let supervisor_task = context
                 .clone()
                 .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
@@ -476,7 +477,7 @@ mod tests {
                 updates_rx,
             );
 
-            let (tracker_mailbox, mut tracker_rx) = Mailbox::test();
+            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
@@ -492,7 +493,7 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
             let supervisor_task = context
                 .clone()
                 .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });

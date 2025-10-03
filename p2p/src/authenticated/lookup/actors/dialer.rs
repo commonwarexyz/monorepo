@@ -8,6 +8,7 @@ use crate::authenticated::{
         },
         metrics,
     },
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::Signer;
@@ -127,7 +128,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, supervisor))
@@ -136,7 +137,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        mut tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let mut dial_deadline = self.context.current();

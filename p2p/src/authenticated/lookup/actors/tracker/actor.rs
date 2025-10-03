@@ -5,10 +5,10 @@ use super::{
 };
 use crate::authenticated::{
     lookup::actors::{peer, tracker::ingress::Releaser},
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
@@ -24,15 +24,12 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     context: E,
 
     // ---------- Message-Passing ----------
-    /// The mailbox for the actor.
-    receiver: mpsc::Receiver<Message<C::PublicKey>>,
-
     /// The unbounded mailbox for the actor.
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
     /// during [`Drop`]. While this channel is unbounded, it is practically bounded by
     /// the number of peers we can connect to at one time.
-    unbound_receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
+    receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
 
     /// The mailbox for the listener.
     listener: Mailbox<HashSet<IpAddr>>,
@@ -52,7 +49,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (Self, Mailbox<Message<C::PublicKey>>, Oracle<C::PublicKey>) {
+    ) -> (
+        Self,
+        UnboundedMailbox<Message<C::PublicKey>>,
+        Oracle<C::PublicKey>,
+    ) {
         // General initialization
         let directory_cfg = directory::Config {
             max_sets: cfg.tracked_peer_sets,
@@ -61,11 +62,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         };
 
         // Create the mailboxes
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::new(sender.clone());
-        let oracle = Oracle::new(sender);
-        let (unbound_sender, unbound_receiver) = mpsc::unbounded();
-        let releaser = Releaser::new(unbound_sender);
+        let (mailbox, receiver) = UnboundedMailbox::new();
+        let oracle = Oracle::new(mailbox.clone());
+        let releaser = Releaser::new(mailbox.clone());
 
         // Create the directory
         let myself = (cfg.crypto.public_key(), cfg.address);
@@ -75,7 +74,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             Self {
                 context,
                 receiver,
-                unbound_receiver,
                 directory,
                 listener: cfg.listener,
                 mailboxes: HashMap::new(),
@@ -91,18 +89,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     async fn run(mut self) {
-        loop {
-            // We prefer the unbounded mailbox because `receiver` will
-            // already block when full (providing backpressure).
-            let msg = select! {
-                msg = self.unbound_receiver.next() => { msg },
-                msg = self.receiver.next() => { msg },
-            };
-
-            // Handle the message (if any)
-            let Some(msg) = msg else {
-                break;
-            };
+        while let Some(msg) = self.receiver.next().await {
             self.handle_msg(msg).await;
         }
         debug!("tracker shutdown");
@@ -205,16 +192,15 @@ mod tests {
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(crypto: C) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
-        let (registered_ips_sender, registered_ips_receiver) = mpsc::channel(1);
+        let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(1);
         (
             Config {
                 crypto,
                 address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                mailbox_size: 32,
                 tracked_peer_sets: 2,
                 allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
                 allow_private_ips: true,
-                listener: Mailbox::new(registered_ips_sender),
+                listener: registered_ips_sender,
             },
             registered_ips_receiver,
         )
@@ -229,7 +215,7 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Mailbox<Message<PublicKey>>,
+        mailbox: UnboundedMailbox<Message<PublicKey>>,
         oracle: Oracle<PublicKey>,
     }
 
@@ -252,7 +238,7 @@ mod tests {
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
 
             // Connect as listener
             mailbox.connect(unauth_pk.clone(), peer_mailbox).await;
@@ -486,7 +472,7 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::test();
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
             mailbox.connect(peer_pk.clone(), peer_mailbox).await;
 
             // 3) Block it → should see exactly one Kill
@@ -545,7 +531,7 @@ mod tests {
             let reservation = mailbox.listen(pk_1.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::test();
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
             mailbox.connect(my_pk.clone(), peer_mailbox).await;
 
             // Register another set which doesn't include first peer

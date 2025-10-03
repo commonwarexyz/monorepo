@@ -4,13 +4,11 @@ use crate::authenticated::{
         actors::{peer, tracker::Metadata},
         types,
     },
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
+use futures::channel::oneshot;
 
 /// Messages that can be sent to the tracker actor.
 pub enum Message<C: PublicKey> {
@@ -123,7 +121,7 @@ pub enum Message<C: PublicKey> {
     },
 }
 
-impl<C: PublicKey> Mailbox<Message<C>> {
+impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Connect` message to the tracker.
     pub async fn connect(&mut self, public_key: C, dialer: bool, peer: Mailbox<peer::Message<C>>) {
         self.send(Message::Connect {
@@ -131,33 +129,28 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             dialer,
             peer,
         })
-        .await
         .unwrap();
     }
 
     /// Send a `Construct` message to the tracker.
     pub async fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Construct { public_key, peer })
-            .await
-            .unwrap();
+        self.send(Message::Construct { public_key, peer }).unwrap();
     }
 
     /// Send a `BitVec` message to the tracker.
     pub async fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::BitVec { bit_vec, peer }).await.unwrap();
+        self.send(Message::BitVec { bit_vec, peer }).unwrap();
     }
 
     /// Send a `Peers` message to the tracker.
     pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Peers { peers, peer }).await.unwrap();
+        self.send(Message::Peers { peers, peer }).unwrap();
     }
 
     /// Send a `Block` message to the tracker.
     pub async fn dialable(&mut self) -> Vec<C> {
         let (sender, receiver) = oneshot::channel();
-        self.send(Message::Dialable { responder: sender })
-            .await
-            .unwrap();
+        self.send(Message::Dialable { responder: sender }).unwrap();
         receiver.await.unwrap()
     }
 
@@ -168,7 +161,6 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             public_key,
             reservation: tx,
         })
-        .await
         .unwrap();
         rx.await.unwrap()
     }
@@ -180,7 +172,6 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             public_key,
             responder: tx,
         })
-        .await
         .unwrap();
         rx.await.unwrap()
     }
@@ -192,7 +183,6 @@ impl<C: PublicKey> Mailbox<Message<C>> {
             public_key,
             reservation: tx,
         })
-        .await
         .unwrap();
         rx.await.unwrap()
     }
@@ -201,18 +191,18 @@ impl<C: PublicKey> Mailbox<Message<C>> {
 /// Allows releasing reservations
 #[derive(Clone)]
 pub struct Releaser<C: PublicKey> {
-    sender: mpsc::UnboundedSender<Message<C>>,
+    sender: UnboundedMailbox<Message<C>>,
 }
 
 impl<C: PublicKey> Releaser<C> {
     /// Create a new releaser.
-    pub(super) fn new(sender: mpsc::UnboundedSender<Message<C>>) -> Self {
+    pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 
     /// Release a reservation.
     pub fn release(&mut self, metadata: Metadata<C>) {
-        let _ = self.sender.unbounded_send(Message::Release { metadata });
+        let _ = self.sender.send(Message::Release { metadata });
     }
 }
 
@@ -222,11 +212,11 @@ impl<C: PublicKey> Releaser<C> {
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
 pub struct Oracle<C: PublicKey> {
-    sender: mpsc::Sender<Message<C>>,
+    sender: UnboundedMailbox<Message<C>>,
 }
 
 impl<C: PublicKey> Oracle<C> {
-    pub(super) fn new(sender: mpsc::Sender<Message<C>>) -> Self {
+    pub(super) fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 
@@ -242,7 +232,7 @@ impl<C: PublicKey> Oracle<C> {
     ///   Should be monotonically increasing.
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     pub async fn register(&mut self, index: u64, peers: Vec<C>) {
-        let _ = self.sender.send(Message::Register { index, peers }).await;
+        let _ = self.sender.send(Message::Register { index, peers });
     }
 }
 
@@ -250,6 +240,6 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
     async fn block(&mut self, public_key: Self::PublicKey) {
-        let _ = self.sender.send(Message::Block { public_key }).await;
+        let _ = self.sender.send(Message::Block { public_key });
     }
 }
