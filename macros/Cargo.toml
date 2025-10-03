@@ -24,3 +24,7 @@ proc-macro2 = "1.0"
 
 [dev-dependencies]
 futures-timer = "3.0.3"
+
+# `futures-timer` is exercised only in doctests, so cargo-udeps flags it falsely.
+[package.metadata.cargo-udeps.ignore]
+development = ["futures-timer"]
