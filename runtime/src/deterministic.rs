@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Panicked, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -247,7 +247,7 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
-    panicker: Option<Panicker>,
+    panicker: Panicker,
 }
 
 /// An artifact that can be used to recover the state of the runtime.
@@ -326,15 +326,14 @@ impl Runner {
         Fut: Future,
     {
         // Setup context and return strong reference to executor
-        let (context, executor) = match self.state {
+        let (context, executor, panicked) = match self.state {
             State::Config(config) => Context::new(config),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
 
         // Pin root task to the heap
         let storage = context.storage.clone();
-        let panicker = executor.panicker.clone();
-        let mut root = Box::pin(Panicker::interrupt(panicker, f(context)));
+        let mut root = Box::pin(panicked.interrupt(f(context)));
 
         // Register the root task
         Tasks::register_root(&executor.tasks);
@@ -521,7 +520,7 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
-            catch_panics: executor.panicker.is_none(),
+            catch_panics: executor.panicker.catch(),
         };
 
         (output, checkpoint)
@@ -707,7 +706,7 @@ pub struct Context {
 }
 
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>) {
+    fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -727,11 +726,7 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize panicker
-        let panicker = if cfg.catch_panics {
-            None
-        } else {
-            Some(Panicker::new())
-        };
+        let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
@@ -757,6 +752,7 @@ impl Context {
                 children: Arc::new(Mutex::new(Vec::new())),
             },
             executor,
+            panicked,
         )
     }
 
@@ -771,7 +767,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>) {
+    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -783,11 +779,7 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize panicker
-        let panicker = if checkpoint.catch_panics {
-            None
-        } else {
-            Some(Panicker::new())
-        };
+        let (panicker, panicked) = Panicker::new(checkpoint.catch_panics);
 
         let executor = Arc::new(Executor {
             // Copied from the checkpoint
@@ -815,6 +807,7 @@ impl Context {
                 children: Arc::new(Mutex::new(Vec::new())),
             },
             executor,
+            panicked,
         )
     }
 
@@ -868,7 +861,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, children, executor.panicker.clone());
+        let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -895,7 +888,7 @@ impl crate::Spawner for Context {
         let executor = self.executor();
 
         move |f: F| {
-            let (f, handle) = Handle::init_future(f, metric, children, executor.panicker.clone());
+            let (f, handle) = Handle::init_future(f, metric, executor.panicker.clone(), children);
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));

@@ -226,6 +226,10 @@ impl Panicker {
         (panicker, panicked)
     }
 
+    pub(crate) fn catch(&self) -> bool {
+        self.catch
+    }
+
     /// Notifies the [Panicker] that a panic has occurred.
     pub(crate) fn notify(&self, panic: Box<dyn Any + Send + 'static>) {
         // Log the panic
