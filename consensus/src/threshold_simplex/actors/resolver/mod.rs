@@ -11,11 +11,12 @@ pub use ingress::Mailbox;
 pub use ingress::Message;
 use std::time::Duration;
 
-pub struct Config<C: PublicKey, B: Blocker, S: Supervisor, G: SigningScheme> {
-    pub crypto: C,
+pub struct Config<P: PublicKey, S: SigningScheme, B: Blocker> {
+    pub crypto: P,
+    pub participants: Vec<P>,
+    pub signing: S,
+
     pub blocker: B,
-    pub supervisor: S,
-    pub signing: G,
 
     pub epoch: Epoch,
     pub namespace: Vec<u8>,

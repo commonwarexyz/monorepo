@@ -1,20 +1,20 @@
 use crate::{
-    threshold_simplex::types::{Notarization, Nullification},
+    threshold_simplex::new_types::{Notarization, Nullification, SigningScheme},
     types::View,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<V: Variant, D: Digest> {
+pub enum Message<S: SigningScheme, D: Digest> {
     Fetch {
         notarizations: Vec<View>,
         nullifications: Vec<View>,
     },
     Notarized {
-        notarization: Notarization<V, D>,
+        notarization: Notarization<S, D>,
     },
     Nullified {
-        nullification: Nullification<V>,
+        nullification: Nullification<S>,
     },
     Finalized {
         // Used to indicate when to prune old notarizations/nullifications.
@@ -23,12 +23,12 @@ pub enum Message<V: Variant, D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, D: Digest> {
-    sender: mpsc::Sender<Message<V, D>>,
+pub struct Mailbox<S: SigningScheme, D: Digest> {
+    sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
-    pub fn new(sender: mpsc::Sender<Message<V, D>>) -> Self {
+impl<S: SigningScheme, D: Digest> Mailbox<S, D> {
+    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
@@ -42,14 +42,14 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
             .expect("Failed to send notarizations");
     }
 
-    pub async fn notarized(&mut self, notarization: Notarization<V, D>) {
+    pub async fn notarized(&mut self, notarization: Notarization<S, D>) {
         self.sender
             .send(Message::Notarized { notarization })
             .await
             .expect("Failed to send notarization");
     }
 
-    pub async fn nullified(&mut self, nullification: Nullification<V>) {
+    pub async fn nullified(&mut self, nullification: Nullification<S>) {
         self.sender
             .send(Message::Nullified { nullification })
             .await
