@@ -99,7 +99,7 @@
             <img src="/imgs/mmr-certificate.png" alt="Wrapping the MMR root with a consensus certificate">
             <div class="image-caption">Figure 3: Wrapping the MMR root with a consensus certificate</div>
         </div>
-        <p>MMRs and <a href="https://commonware.xyz/blogs/threshold-simplex.html">threshold consensus signatures</a> make for a powerful combination. Consider, for example, using an MMR to store successfully executed blockchain transactions in the order of their execution. If the MMR root is included in the block digest, then a user (or external blockchain) running a lite client can prove successful execution of any historical transaction from a consensus certificate and the latest MMR root. Have a proof from an old MMR root? The latest MMR root (effectively) includes references to all previous roots and can be combined with some recent intermediate hashes to verify it.</p>
+        <p>MMRs and <a href="/blogs/threshold-simplex.html">threshold consensus signatures</a> make for a powerful combination. Consider, for example, using an MMR to store successfully executed blockchain transactions in the order of their execution. If the MMR root is included in the block digest, then a user (or external blockchain) running a lite client can prove successful execution of any historical transaction from a consensus certificate and the latest MMR root. Have a proof from an old MMR root? The latest MMR root (effectively) includes references to all previous roots and can be combined with some recent intermediate hashes to verify it.</p>
         <p>Generating a lot of data but need a proof of inclusion (and order)? Reach for the MMR.</p>
     </div>
 

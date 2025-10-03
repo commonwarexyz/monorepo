@@ -1,17 +1,5 @@
 function getRelativePathToIndex() {
-    const path = window.location.pathname;
-    const pathSegments = path.split('/').filter(segment => segment !== '');
-    let relativePath = '';
-
-    if (pathSegments.length <= 1) {
-        // At root directory or /index.html
-        relativePath = 'index.html';
-    } else if (pathSegments.length >= 2) {
-        // In a subdirectory
-        relativePath = '../'.repeat(pathSegments.length - 1) + 'index.html';
-    }
-
-    return relativePath;
+    return '/index.html';
 }
 
 
