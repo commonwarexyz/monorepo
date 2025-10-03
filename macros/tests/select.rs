@@ -2,56 +2,36 @@
 mod tests {
     use commonware_macros::select;
     use futures::{channel::mpsc, executor::block_on, SinkExt, StreamExt};
-    use futures_timer::Delay;
-    use std::{thread, time::Duration};
 
     #[test]
     fn test_select_macro() {
         block_on(async move {
-            // Create channels to track futures that complete at different times
-            let (tx, mut rx) = mpsc::unbounded();
+            // Populate channels
+            let (mut high_tx, mut high_rx) = mpsc::unbounded();
+            high_tx.send(3).await.unwrap();
+            let (mut mid_tx, mut mid_rx) = mpsc::unbounded();
+            mid_tx.send(2).await.unwrap();
+            let (mut low_tx, mut low_rx) = mpsc::unbounded();
+            low_tx.send(1).await.unwrap();
 
-            // Spawn another future with a shorter delay
-            thread::spawn({
-                let mut tx = tx.clone();
-                move || {
-                    block_on(async move {
-                        Delay::new(Duration::from_millis(50)).await;
-                        tx.send(2).await.unwrap();
-                    });
-                }
-            });
-
-            // Spawn a future that sends a message immediately
-            thread::spawn({
-                let mut tx = tx.clone();
-                move || {
-                    block_on(async move {
-                        tx.send(3).await.unwrap();
-                    });
-                }
-            });
-
-            // Wait for task to complete
+            // Process messages on all channels
             let mut completed = Vec::new();
             while completed.len() < 3 {
                 select! {
-                    // Use wildcard pattern for the first future
-                    _ = Delay::new(Duration::from_millis(45)) => {
-                        completed.push(1);
+                    result = high_rx.next() => {
+                        completed.push(result.unwrap());
                     },
-                    // Bind the result to a variable 'result' for the second future
-                    result = rx.next() => {
+                    result = mid_rx.next() => {
+                        completed.push(result.unwrap());
+                    },
+                    result = low_rx.next() => {
                         completed.push(result.unwrap());
                     },
                 }
             }
 
-            // Ensure that the futures completed in the correct order
-            assert_eq!(completed, vec![3, 1, 2]);
-
-            // Wait to drop the sender until we will no longer poll the receiver
-            drop(tx);
+            // Ensure messages were processed in the correct order
+            assert_eq!(completed, vec![3, 2, 1]);
         });
     }
 }
