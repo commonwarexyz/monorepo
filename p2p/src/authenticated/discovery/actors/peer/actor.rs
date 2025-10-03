@@ -97,9 +97,17 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
     /// Handle an incoming list of peer information.
     ///
     /// Returns an error if the list itself or any entries can be considered malformed.
-    fn validate_peers(&mut self, infos: &Vec<types::PeerInfo<C>>) -> Result<(), Error> {
+    fn validate_peers(
+        context: &impl Clock,
+        allow_private_ips: bool,
+        public_key: &C,
+        ip_namespace: &[u8],
+        peer_gossip_max_count: usize,
+        synchrony_bound: Duration,
+        infos: &Vec<types::PeerInfo<C>>,
+    ) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
-        if infos.len() > self.peer_gossip_max_count {
+        if infos.len() > peer_gossip_max_count {
             return Err(Error::TooManyPeers(infos.len()));
         }
 
@@ -109,24 +117,22 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         for info in infos {
             // Check if IP is allowed
             #[allow(unstable_name_collisions)]
-            if !self.allow_private_ips && !info.socket.ip().is_global() {
+            if !allow_private_ips && !info.socket.ip().is_global() {
                 return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
             }
 
             // Check if peer is us
-            if info.public_key == self.public_key {
+            if info.public_key == *public_key {
                 return Err(Error::ReceivedSelf);
             }
 
             // If any timestamp is too far into the future, disconnect from the peer
-            if Duration::from_millis(info.timestamp)
-                > self.context.current().epoch() + self.synchrony_bound
-            {
+            if Duration::from_millis(info.timestamp) > context.current().epoch() + synchrony_bound {
                 return Err(Error::SynchronyBound);
             }
 
             // If any signature is invalid, disconnect from the peer
-            if !info.verify(&self.ip_namespace) {
+            if !info.verify(ip_namespace) {
                 return Err(Error::InvalidSignature);
             }
         }
@@ -283,12 +289,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         }
                         types::Payload::Peers(peers) => {
                             // Verify all peer info is valid
-                            for peer in &peers {
-                                if !peer.verify(&self.ip_namespace) {
-                                    debug!(?peer, "invalid peer info");
-                                    return Err(Error::InvalidSignature);
-                                }
-                            }
+                            Self::validate_peers(&context, self.allow_private_ips, &self.public_key, &self.ip_namespace, self.peer_gossip_max_count, self.synchrony_bound, &peers)?;
 
                             // Send peers to tracker
                             tracker.peers(peers);

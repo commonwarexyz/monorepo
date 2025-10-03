@@ -33,6 +33,10 @@ pub struct Actor<
     max_peer_set_size: usize,
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
+    allow_private_ips: bool,
+    ip_namespace: Vec<u8>,
+    public_key: C,
+    synchrony_bound: Duration,
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
 
@@ -50,7 +54,7 @@ impl<
     > Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<O, I, C>>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -82,6 +86,10 @@ impl<
                 max_peer_set_size: cfg.max_peer_set_size,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
+                allow_private_ips: cfg.allow_private_ips,
+                ip_namespace: cfg.ip_namespace,
+                public_key: cfg.public_key,
+                synchrony_bound: cfg.synchrony_bound,
                 receiver,
                 connections,
                 sent_messages,
@@ -115,19 +123,18 @@ impl<
                     // Mark peer as connected
                     self.connections.inc();
 
-                    // Clone required variables
-                    let connections = self.connections.clone();
-                    let sent_messages = self.sent_messages.clone();
-                    let received_messages = self.received_messages.clone();
-                    let rate_limited = self.rate_limited.clone();
-                    let mut tracker = tracker.clone();
-                    let mut router = router.clone();
-                    let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
-
                     // Spawn peer
-                    self.context
-                        .with_label("peer")
-                        .spawn(move |context| async move {
+                    self.context.with_label("peer").spawn({
+                        let connections = self.connections.clone();
+                        let sent_messages = self.sent_messages.clone();
+                        let received_messages = self.received_messages.clone();
+                        let rate_limited = self.rate_limited.clone();
+                        let mut tracker = tracker.clone();
+                        let mut router = router.clone();
+                        let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
+                        let ip_namespace = self.ip_namespace.clone();
+                        let public_key = self.public_key.clone();
+                        move |context| async move {
                             // Create peer
                             debug!(?peer, "peer started");
                             let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
@@ -136,6 +143,10 @@ impl<
                                     sent_messages,
                                     received_messages,
                                     rate_limited,
+                                    ip_namespace,
+                                    public_key,
+                                    allow_private_ips: self.allow_private_ips,
+                                    synchrony_bound: self.synchrony_bound,
                                     mailbox_size: self.mailbox_size,
                                     gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
                                     allowed_bit_vec_rate: self.allowed_bit_vec_rate,
@@ -162,7 +173,8 @@ impl<
                             router.release(peer).await;
                             // Release the reservation
                             drop(reservation);
-                        });
+                        }
+                    });
                 }
             }
         }

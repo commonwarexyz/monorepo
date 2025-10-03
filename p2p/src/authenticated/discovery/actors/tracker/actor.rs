@@ -13,7 +13,6 @@ use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
-use std::time::Duration;
 use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
@@ -26,16 +25,6 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     // ---------- Configuration ----------
     /// For signing and verifying messages.
     crypto: C,
-
-    /// The namespace used to sign and verify [types::PeerInfo] messages.
-    ip_namespace: Vec<u8>,
-
-    /// Whether to allow private IPs.
-    allow_private_ips: bool,
-
-    /// The time bound for synchrony. Messages with timestamps greater than this far into the
-    /// future will be considered malformed.
-    synchrony_bound: Duration,
 
     /// The maximum number of peers in a set.
     max_peer_set_size: usize,
@@ -98,9 +87,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             Self {
                 context,
                 crypto: cfg.crypto,
-                ip_namespace,
-                allow_private_ips: cfg.allow_private_ips,
-                synchrony_bound: cfg.synchrony_bound,
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
@@ -267,8 +253,6 @@ mod tests {
             namespace: b"test_tracker_actor_namespace".to_vec(),
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
-            allow_private_ips: true,
-            synchrony_bound: Duration::from_secs(10),
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
             peer_gossip_max_count: 5,
@@ -340,7 +324,6 @@ mod tests {
         oracle: Oracle<PublicKey>,
         ip_namespace: Vec<u8>,
         tracker_pk: PublicKey,
-        tracker_signer: PrivateKey,
         cfg: Config<PrivateKey>, // Store cloned config for access to its values
     }
 
@@ -363,7 +346,6 @@ mod tests {
             oracle,
             ip_namespace,
             tracker_pk,
-            tracker_signer,
             cfg: stored_cfg,
         }
     }
@@ -686,12 +668,11 @@ mod tests {
                 mut oracle,
                 ip_namespace,
                 tracker_pk,
-                cfg,
                 ..
             } = setup_actor(context.clone(), cfg_initial);
 
             let ts_new = context.current().epoch_millis();
-            let ts_old = ts_new.saturating_sub(cfg.synchrony_bound.as_millis() as u64 / 2);
+            let ts_old = ts_new.saturating_sub(100);
 
             let (_, pk1) = new_signer_and_pk(1);
             let (mut s2_signer, pk2) = new_signer_and_pk(2);

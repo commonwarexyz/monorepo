@@ -61,8 +61,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 namespace: union(&cfg.namespace, TRACKER_SUFFIX),
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
-                allow_private_ips: cfg.allow_private_ips,
-                synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
@@ -142,6 +140,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 max_peer_set_size: self.cfg.max_peer_set_size,
                 allowed_peers_rate: self.cfg.allowed_peers_rate,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
+                allow_private_ips: self.cfg.allow_private_ips,
+                ip_namespace: union(&self.cfg.namespace, TRACKER_SUFFIX),
+                public_key: self.cfg.crypto.public_key(),
+                synchrony_bound: self.cfg.synchrony_bound,
             },
         );
         let mut spawner_task =
