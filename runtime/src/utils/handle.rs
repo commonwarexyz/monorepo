@@ -226,6 +226,7 @@ impl Panicker {
         (panicker, panicked)
     }
 
+    /// Returns whether the [Panicker] is configured to catch panics.
     pub(crate) fn catch(&self) -> bool {
         self.catch
     }
@@ -254,6 +255,7 @@ impl Panicker {
     }
 }
 
+/// A handle that will be notified when a panic occurs.
 pub(crate) struct Panicked {
     receiver: oneshot::Receiver<()>,
     inner: Arc<Mutex<Panic>>,
@@ -282,7 +284,7 @@ impl Panicked {
             },
             // If the task completes, return the output
             Either::Right((output, _)) => {
-                // Check if there is a panic we haven't processed
+                // Check if there is a panic we haven't processed (will always be registered before a task completes)
                 if let Some(panic) = self.inner.lock().unwrap().panic.take() {
                     resume_unwind(panic);
                 }
