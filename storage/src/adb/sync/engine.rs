@@ -237,7 +237,7 @@ where
                 .collect();
 
             // Find the next gap in the sync range that needs to be fetched.
-            let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next(
+            let Some(gap_range) = crate::adb::sync::gaps::find_next(
                 Location::new(log_size)..self.target.range.end,
                 &operation_counts,
                 self.outstanding_requests.locations(),
@@ -247,19 +247,22 @@ where
             };
 
             // Calculate batch size for this gap
-            let diff = end_loc.checked_sub(start_loc.into()).unwrap();
-            let gap_size = NZU64!(*diff + 1);
+            let gap_size = *gap_range.end.checked_sub(*gap_range.start).unwrap();
+            let gap_size: NonZeroU64 = gap_size.try_into().unwrap();
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
-                start_loc,
+                gap_range.start,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc, batch_size)
+                        .get_operations(target_size, gap_range.start, batch_size)
                         .await;
-                    IndexedFetchResult { start_loc, result }
+                    IndexedFetchResult {
+                        start_loc: gap_range.start,
+                        result,
+                    }
                 }),
             );
         }

@@ -1,11 +1,11 @@
 //! Gap detection algorithm for sync operations.
 
 use crate::mmr::Location;
-use core::num::NonZeroU64;
+use core::{num::NonZeroU64, ops::Range};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Find the next gap in operations that needs to be fetched.
-/// Returns [start, end] inclusive range, or None if no gaps.
+/// Returns a Range of operations to fetch, or None if no gaps.
 ///
 /// We assume that all outstanding requests will return `fetch_batch_size` operations,
 /// but the resolver may return fewer. In that case, we'll fetch the remaining operations
@@ -24,11 +24,11 @@ use std::collections::{BTreeMap, BTreeSet};
 /// - All start locations in `outstanding_requests` are in `range`
 /// - All operation counts in `fetched_operations` are > 0
 pub fn find_next(
-    range: std::ops::Range<Location>,
+    range: Range<Location>,
     fetched_operations: &BTreeMap<Location, u64>, // start_loc -> operation_count
     outstanding_requests: &BTreeSet<Location>,
     fetch_batch_size: NonZeroU64,
-) -> Option<(Location, Location)> {
+) -> Option<Range<Location>> {
     let lower_bound = range.start;
     let upper_bound = range.end - 1; // Convert exclusive end to inclusive for internal logic
     if lower_bound > upper_bound {
@@ -76,16 +76,14 @@ pub fn find_next(
                 // This is the first range.
                 if lower_bound < range_start {
                     // There's a gap between the lower bound and the start of the first range.
-                    let gap_end = range_start - 1;
-                    return Some((lower_bound, gap_end));
+                    return Some(lower_bound..range_start);
                 }
             }
             Some(covered_end) => {
                 // Check if there's a gap between current coverage and this range
                 if covered_end + 1 < range_start {
                     let gap_start = covered_end + 1;
-                    let gap_end = range_start - 1;
-                    return Some((gap_start, gap_end));
+                    return Some(gap_start..range_start);
                 }
             }
         }
@@ -106,13 +104,13 @@ pub fn find_next(
     match current_covered_end {
         None => {
             // No ranges at all - entire range is a gap
-            Some((lower_bound, upper_bound))
+            Some(lower_bound..upper_bound + 1)
         }
         Some(covered_end) => {
             // Check if there's a gap after the last covered location
             if covered_end < upper_bound {
                 let gap_start = covered_end + 1;
-                Some((gap_start, upper_bound))
+                Some(gap_start..upper_bound + 1)
             } else {
                 None
             }
@@ -133,7 +131,7 @@ mod tests {
         fetched_ops: Vec<(u64, u64)>, // (start location, num_operations)
         requested_ops: Vec<u64>,
         fetch_batch_size: u64,
-        expected: Option<(u64, u64)>,
+        expected: Option<std::ops::Range<u64>>,
     }
 
     #[test_case(FindNextTestCase {
@@ -142,7 +140,7 @@ mod tests {
         fetched_ops: vec![],
         requested_ops: vec![],
         fetch_batch_size: 5,
-        expected: Some((0, 10)),
+        expected: Some(0..11),
     }; "empty_state_full_range")]
     #[test_case(FindNextTestCase {
         lower_bound: 10,
@@ -158,7 +156,7 @@ mod tests {
         fetched_ops: vec![],
         requested_ops: vec![],
         fetch_batch_size: 5,
-        expected: Some((5, 5)),
+        expected: Some(5..6),
     }; "zero_length_range")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -174,7 +172,7 @@ mod tests {
         fetched_ops: vec![],
         requested_ops: vec![8],
         fetch_batch_size: 5,
-        expected: Some((0, 7)),
+        expected: Some(0..8),
     }; "outstanding_request_beyond_upper_bound")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -182,7 +180,7 @@ mod tests {
         fetched_ops: vec![],
         requested_ops: vec![0, 7],
         fetch_batch_size: 4,
-        expected: Some((4, 6)),
+        expected: Some(4..7),
     }; "outstanding_requests_only")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -190,7 +188,7 @@ mod tests {
         fetched_ops: vec![(0, 1), (2, 1), (4, 1)],
         requested_ops: vec![],
         fetch_batch_size: 5,
-        expected: Some((1, 1)),
+        expected: Some(1..2),
     }; "single_ops_with_gaps")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -198,7 +196,7 @@ mod tests {
         fetched_ops: vec![(0, 3)],
         requested_ops: vec![],
         fetch_batch_size: 5,
-        expected: Some((3, 10)),
+        expected: Some(3..11),
     }; "multi_op_batch_gap_after")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -206,7 +204,7 @@ mod tests {
         fetched_ops: vec![(0, 1), (1, 1)],
         requested_ops: vec![],
         fetch_batch_size: 5,
-        expected: Some((2, 10)),
+        expected: Some(2..11),
     }; "adjacent_single_ops")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -222,7 +220,7 @@ mod tests {
         fetched_ops: vec![],
         requested_ops: vec![2, 5, 8],
         fetch_batch_size: 1,
-        expected: Some((0, 1)),
+        expected: Some(0..2),
     }; "fetch_batch_size_one")]
     #[test_case(FindNextTestCase {
         lower_bound: 5,
@@ -230,7 +228,7 @@ mod tests {
         fetched_ops: vec![(0, 8)],
         requested_ops: vec![],
         fetch_batch_size: 5,
-        expected: Some((8, 10)),
+        expected: Some(8..11),
     }; "fetched_ops_starts_before_lower_bound")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -238,7 +236,7 @@ mod tests {
         fetched_ops: vec![(4, 5)],
         requested_ops: vec![],
         fetch_batch_size: 5,
-        expected: Some((0, 3)),
+        expected: Some(0..4),
     }; "fetched_ops_extends_beyond_upper_bound")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -246,7 +244,7 @@ mod tests {
         fetched_ops: vec![],
         requested_ops: vec![2],
         fetch_batch_size: 100,
-        expected: Some((0, 1)),
+        expected: Some(0..2),
     }; "fetch_batch_size_larger_than_range")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -254,7 +252,7 @@ mod tests {
         fetched_ops: vec![(0, 5), (8, 3)],
         requested_ops: vec![],
         fetch_batch_size: 5,
-        expected: Some((5, 7)),
+        expected: Some(5..8),
     }; "coverage_exactly_reaches_upper_bound")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -262,7 +260,7 @@ mod tests {
         fetched_ops: vec![(2, 3), (10, 2)],
         requested_ops: vec![6, 13],
         fetch_batch_size: 3,
-        expected: Some((0, 1)),
+        expected: Some(0..2),
     }; "mixed_coverage_gap_at_start")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -270,7 +268,7 @@ mod tests {
         fetched_ops: vec![(0, 2), (8, 2)],
         requested_ops: vec![3, 12],
         fetch_batch_size: 4,
-        expected: Some((2, 2)),
+        expected: Some(2..3),
     }; "mixed_coverage_gap_in_middle")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
@@ -278,7 +276,7 @@ mod tests {
         fetched_ops: vec![(1, 2), (6, 2)],
         requested_ops: vec![3, 8],
         fetch_batch_size: 2,
-        expected: Some((0, 0)),
+        expected: Some(0..1),
     }; "mixed_coverage_interleaved_ranges")]
     fn test_find_next(test_case: FindNextTestCase) {
         let fetched_ops: BTreeMap<Location, u64> = test_case
@@ -301,7 +299,7 @@ mod tests {
             result,
             test_case
                 .expected
-                .map(|(start, end)| (Location::new(start), Location::new(end)))
+                .map(|range| Location::new(range.start)..Location::new(range.end))
         );
     }
 }
