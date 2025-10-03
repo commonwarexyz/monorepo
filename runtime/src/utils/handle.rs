@@ -242,9 +242,10 @@ impl Panicker {
             return;
         }
 
-        // If there is already a panic, ignore the new one
+        // If we've already sent a panic, ignore the new one (we check sender
+        // here because we take panic when handling it)
         let mut inner = self.inner.lock().unwrap();
-        if inner.panic.is_some() {
+        if inner.sender.is_none() {
             return;
         }
 
