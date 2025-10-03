@@ -2,7 +2,7 @@
 //!
 //! # Panics
 //!
-//! If any task panics, the runtime will panic (and shutdown).
+//! Unless configured otherwise, any task panic will lead to a runtime panic.
 //!
 //! # Example
 //!
@@ -34,13 +34,14 @@ use crate::{
     telemetry::metrics::task::Label,
     utils::{
         signal::{Signal, Stopper},
-        Aborter,
+        Aborter, Panicker,
     },
-    Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Panic, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 use futures::{
+    channel::oneshot,
     task::{waker, ArcWake},
     Future,
 };
@@ -56,6 +57,7 @@ use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
     net::SocketAddr,
+    panic::resume_unwind,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
@@ -160,6 +162,9 @@ pub struct Config {
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
+
+    /// Whether spawned tasks should catch panics instead of propagating them.
+    catch_panics: bool,
 }
 
 impl Config {
@@ -169,6 +174,7 @@ impl Config {
             seed: 42,
             cycle: Duration::from_millis(1),
             timeout: None,
+            catch_panics: false,
         }
     }
 
@@ -188,6 +194,11 @@ impl Config {
         self.timeout = timeout;
         self
     }
+    /// See [Config]
+    pub fn with_catch_panics(mut self, catch_panics: bool) -> Self {
+        self.catch_panics = catch_panics;
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -201,6 +212,10 @@ impl Config {
     /// See [Config]
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+    /// See [Config]
+    pub fn catch_panics(&self) -> bool {
+        self.catch_panics
     }
 
     /// Assert that the configuration is valid.
@@ -234,6 +249,7 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
+    panicker: Option<Panicker>,
 }
 
 /// An artifact that can be used to recover the state of the runtime.
@@ -246,6 +262,7 @@ pub struct Checkpoint {
     rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
+    catch_panics: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -311,14 +328,29 @@ impl Runner {
         Fut: Future,
     {
         // Setup context and return strong reference to executor
-        let (context, executor) = match self.state {
+        let (context, executor, panicked) = match self.state {
             State::Config(config) => Context::new(config),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
 
         // Pin root task to the heap
         let storage = context.storage.clone();
-        let mut root = Box::pin(f(context));
+        let mut root = Box::pin(async move {
+            // Wait for task to complete (if we are catching panics)
+            let Some(panicked) = panicked else {
+                return f(context).await;
+            };
+
+            // Wait for task to complete or panic
+            select! {
+                panic = panicked => {
+                    resume_unwind(panic.unwrap());
+                },
+                output = f(context) => {
+                    output
+                },
+            }
+        });
 
         // Register the root task
         Tasks::register_root(&executor.tasks);
@@ -505,6 +537,7 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
+            catch_panics: executor.panicker.is_none(),
         };
 
         (output, checkpoint)
@@ -690,7 +723,7 @@ pub struct Context {
 }
 
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>) {
+    fn new(cfg: Config) -> (Self, Arc<Executor>, Option<oneshot::Receiver<Panic>>) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -709,6 +742,14 @@ impl Context {
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        // Initialize panicker
+        let (panicker, panicked) = if cfg.catch_panics {
+            (None, None)
+        } else {
+            let (panic_tx, panic_rx) = oneshot::channel();
+            (Some(Panicker::new(panic_tx)), Some(panic_rx))
+        };
+
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
@@ -720,6 +761,7 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
+            panicker,
         });
 
         (
@@ -732,6 +774,7 @@ impl Context {
                 children: Arc::new(Mutex::new(Vec::new())),
             },
             executor,
+            panicked,
         )
     }
 
@@ -746,7 +789,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>) {
+    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Option<oneshot::Receiver<Panic>>) {
         // Rebuild metrics
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -756,6 +799,14 @@ impl Context {
         let network =
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
+
+        // Initialize panicker
+        let (panicker, panicked) = if checkpoint.catch_panics {
+            (None, None)
+        } else {
+            let (panic_tx, panic_rx) = oneshot::channel();
+            (Some(Panicker::new(panic_tx)), Some(panic_rx))
+        };
 
         let executor = Arc::new(Executor {
             // Copied from the checkpoint
@@ -771,6 +822,7 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
+            panicker,
         });
         (
             Self {
@@ -782,6 +834,7 @@ impl Context {
                 children: Arc::new(Mutex::new(Vec::new())),
             },
             executor,
+            panicked,
         )
     }
 
@@ -835,7 +888,7 @@ impl crate::Spawner for Context {
         self.children = children.clone();
 
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, metric, false, children);
+        let (f, handle) = Handle::init_future(future, metric, children, executor.panicker.clone());
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -862,7 +915,7 @@ impl crate::Spawner for Context {
         let executor = self.executor();
 
         move |f: F| {
-            let (f, handle) = Handle::init_future(f, metric, false, children);
+            let (f, handle) = Handle::init_future(f, metric, children, executor.panicker.clone());
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -903,7 +956,7 @@ impl crate::Spawner for Context {
 
         // Initialize the blocking task
         let executor = self.executor();
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, false);
+        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
 
         // Spawn the task
         let f = async move { f() };
@@ -926,7 +979,7 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor();
         move |f: F| {
-            let (f, handle) = Handle::init_blocking(f, metric, false);
+            let (f, handle) = Handle::init_blocking(f, metric, executor.panicker.clone());
 
             // Spawn the task
             let f = async move { f() };

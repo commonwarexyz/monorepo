@@ -6,8 +6,9 @@ use futures::{
 };
 use prometheus_client::metrics::gauge::Gauge;
 use std::{
+    any::Any,
     future::Future,
-    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    panic::{catch_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Once},
     task::{Context, Poll},
@@ -31,8 +32,8 @@ where
     pub(crate) fn init_future<F>(
         f: F,
         metric: MetricHandle,
-        catch_panic: bool,
         children: Arc<Mutex<Vec<Aborter>>>,
+        panicker: Option<Panicker>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -49,12 +50,13 @@ where
             // Handle result
             let result = match result {
                 Ok(result) => Ok(result),
-                Err(err) => {
-                    if !catch_panic {
-                        resume_unwind(err);
-                    }
-                    let err = extract_panic_message(&*err);
+                Err(panic) => {
+                    let err = extract_panic_message(&*panic);
                     error!(?err, "task panicked");
+                    if let Some(panicker) = panicker.as_ref() {
+                        panicker.notify(panic);
+                    }
+
                     Err(Error::Exited)
                 }
             };
@@ -88,7 +90,7 @@ where
     pub(crate) fn init_blocking<F>(
         f: F,
         metric: MetricHandle,
-        catch_panic: bool,
+        panicker: Option<Panicker>,
     ) -> (impl FnOnce(), Self)
     where
         F: FnOnce() -> T + Send + 'static,
@@ -98,6 +100,7 @@ where
 
         // Wrap the closure with panic handling
         let f = {
+            let panicker = panicker.clone();
             let metric = metric.clone();
             move || {
                 // Run blocking task
@@ -106,12 +109,13 @@ where
                 // Handle result
                 let result = match result {
                     Ok(value) => Ok(value),
-                    Err(err) => {
-                        if !catch_panic {
-                            resume_unwind(err);
-                        }
-                        let err = extract_panic_message(&*err);
+                    Err(panic) => {
+                        let err = extract_panic_message(&*panic);
                         error!(?err, "task panicked");
+                        if let Some(panicker) = panicker.as_ref() {
+                            panicker.notify(panic);
+                        }
+
                         Err(Error::Exited)
                     }
                 };
@@ -195,6 +199,29 @@ impl MetricHandle {
         self.finished.call_once(move || {
             gauge.dec();
         });
+    }
+}
+
+/// A type alias for a panic.
+pub(crate) type Panic = Box<dyn Any + Send + 'static>;
+
+/// Notifies the runtime when a spawned task panics, so it can propagate the failure.
+#[derive(Clone)]
+pub(crate) struct Panicker {
+    sender: Arc<Mutex<Option<oneshot::Sender<Panic>>>>,
+}
+
+impl Panicker {
+    pub(crate) fn new(sender: oneshot::Sender<Panic>) -> Self {
+        Self {
+            sender: Arc::new(Mutex::new(Some(sender))),
+        }
+    }
+
+    pub(crate) fn notify(&self, panic: Panic) {
+        if let Some(sender) = self.sender.lock().unwrap().take() {
+            let _ = sender.send(panic);
+        }
     }
 }
 
