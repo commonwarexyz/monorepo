@@ -29,37 +29,35 @@ pub fn find_next(
     outstanding_requests: &BTreeSet<Location>,
     fetch_batch_size: NonZeroU64,
 ) -> Option<Range<Location>> {
-    let lower_bound = range.start;
-    let upper_bound = range.end - 1; // Convert exclusive end to inclusive for internal logic
-    if lower_bound > upper_bound {
+    if range.is_empty() {
         return None;
     }
 
-    let mut current_covered_end: Option<Location> = None; // Nothing covered yet
+    // Track the next uncovered location (exclusive end of covered range)
+    let mut next_uncovered: Location = range.start;
 
     // Create iterators for both data structures (already sorted)
     let mut fetched_ops_iter = fetched_operations
         .iter()
         .map(|(&start_loc, &operation_count)| {
-            let end_loc = start_loc.checked_add(operation_count - 1).unwrap();
-            (start_loc, end_loc)
+            let end_loc = start_loc.checked_add(operation_count).unwrap();
+            start_loc..end_loc
         })
         .peekable();
 
     let mut outstanding_reqs_iter = outstanding_requests
         .iter()
         .map(|&start_loc| {
-            let end_loc = start_loc.checked_add(fetch_batch_size.get() - 1).unwrap();
-            (start_loc, end_loc)
+            let end_loc = start_loc.checked_add(fetch_batch_size.get()).unwrap();
+            start_loc..end_loc
         })
         .peekable();
 
     // Merge process both iterators in sorted order
     loop {
-        let (range_start, range_end) = match (fetched_ops_iter.peek(), outstanding_reqs_iter.peek())
-        {
-            (Some(&(f_start, _)), Some(&(o_start, _))) => {
-                if f_start <= o_start {
+        let covered_range = match (fetched_ops_iter.peek(), outstanding_reqs_iter.peek()) {
+            (Some(f_range), Some(o_range)) => {
+                if f_range.start <= o_range.start {
                     fetched_ops_iter.next().unwrap()
                 } else {
                     outstanding_reqs_iter.next().unwrap()
@@ -70,51 +68,27 @@ pub fn find_next(
             (None, None) => break,
         };
 
-        // Check if there's a gap before this range
-        match current_covered_end {
-            None => {
-                // This is the first range.
-                if lower_bound < range_start {
-                    // There's a gap between the lower bound and the start of the first range.
-                    return Some(lower_bound..range_start);
-                }
-            }
-            Some(covered_end) => {
-                // Check if there's a gap between current coverage and this range
-                if covered_end + 1 < range_start {
-                    let gap_start = covered_end + 1;
-                    return Some(gap_start..range_start);
-                }
-            }
+        // Check if there's a gap before this covered range
+        if next_uncovered < covered_range.start {
+            // Found a gap between next_uncovered and the start of this range
+            return Some(next_uncovered..covered_range.start);
         }
 
-        // Update current covered end (merge overlapping ranges)
-        current_covered_end = Some(match current_covered_end {
-            None => range_end,
-            Some(covered_end) => covered_end.max(range_end),
-        });
+        // Update next_uncovered to the end of this covered range (or keep current if overlapping)
+        next_uncovered = next_uncovered.max(covered_range.end);
 
-        // Early exit if we've covered everything up to upper_bound
-        if current_covered_end.unwrap() >= upper_bound {
+        // Early exit if we've covered everything up to range.end
+        if next_uncovered >= range.end {
             return None;
         }
     }
 
-    // Check if there's a gap after all ranges
-    match current_covered_end {
-        None => {
-            // No ranges at all - entire range is a gap
-            Some(lower_bound..upper_bound + 1)
-        }
-        Some(covered_end) => {
-            // Check if there's a gap after the last covered location
-            if covered_end < upper_bound {
-                let gap_start = covered_end + 1;
-                Some(gap_start..upper_bound + 1)
-            } else {
-                None
-            }
-        }
+    // Check if there's a gap after all covered ranges
+    if next_uncovered < range.end {
+        // There's a gap from next_uncovered to the end of the range
+        Some(next_uncovered..range.end)
+    } else {
+        None
     }
 }
 
