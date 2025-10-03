@@ -315,8 +315,7 @@ mod tests {
                 fetch_batch_size,
                 target: Target {
                     root: target_root,
-                    lower_bound: target_oldest_retained_loc,
-                    upper_bound: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
+                    range: target_oldest_retained_loc..=(target_op_count - 1), // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -399,8 +398,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    lower_bound: target_oldest_retained_loc,
-                    upper_bound: target_op_count - 1,
+                    range: target_oldest_retained_loc..=(target_op_count - 1),
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -455,8 +453,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: target_root,
-                    lower_bound,
-                    upper_bound,
+                    range: lower_bound..=upper_bound,
                 },
                 context,
                 resolver: target_db.clone(),
@@ -542,8 +539,7 @@ mod tests {
                     db_config: create_sync_config(&format!("update_test_{}", context.next_u64())),
                     target: Target {
                         root: initial_root,
-                        lower_bound: initial_lower_bound,
-                        upper_bound: initial_upper_bound,
+                        range: initial_lower_bound..=initial_upper_bound,
                     },
                     resolver: target_db.clone(),
                     fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
@@ -569,8 +565,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: final_root,
-                    lower_bound: initial_lower_bound,
-                    upper_bound: final_upper_bound,
+                    range: initial_lower_bound..=final_upper_bound,
                 })
                 .await
                 .unwrap();
@@ -619,8 +614,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: sha256::Digest::from([1u8; 32]),
-                    lower_bound: Location::new(31),
-                    upper_bound: Location::new(30),
+                    range: Location::new(31)..=Location::new(30),
                 },
                 context,
                 resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
@@ -669,8 +663,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    lower_bound,
-                    upper_bound,
+                    range: lower_bound..=upper_bound,
                 },
                 context,
                 resolver: target_db.clone(),
@@ -734,8 +727,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    lower_bound,
-                    upper_bound,
+                    range: lower_bound..=upper_bound,
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -795,8 +787,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    lower_bound,
-                    upper_bound,
+                    range: lower_bound..=upper_bound,
                 },
                 context,
                 resolver: resolver.clone(),
@@ -846,8 +837,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    lower_bound: initial_lower_bound,
-                    upper_bound: initial_upper_bound,
+                    range: initial_lower_bound..=initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -860,8 +850,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    lower_bound: initial_lower_bound.checked_sub(1).unwrap(),
-                    upper_bound: initial_upper_bound,
+                    range: initial_lower_bound.checked_sub(1).unwrap()..=initial_upper_bound,
                 })
                 .await
                 .unwrap();
@@ -907,8 +896,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    lower_bound: initial_lower_bound,
-                    upper_bound: initial_upper_bound,
+                    range: initial_lower_bound..=initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -921,8 +909,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    lower_bound: initial_lower_bound,
-                    upper_bound: initial_upper_bound - 1,
+                    range: initial_lower_bound..=(initial_upper_bound - 1),
                 })
                 .await
                 .unwrap();
@@ -986,8 +973,7 @@ mod tests {
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
-                    lower_bound: initial_lower_bound,
-                    upper_bound: initial_upper_bound,
+                    range: initial_lower_bound..=initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -999,8 +985,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: final_root,
-                    lower_bound: final_lower_bound,
-                    upper_bound: final_upper_bound,
+                    range: final_lower_bound..=final_upper_bound,
                 })
                 .await
                 .unwrap();
@@ -1048,8 +1033,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    lower_bound: initial_lower_bound,
-                    upper_bound: initial_upper_bound,
+                    range: initial_lower_bound..=initial_upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1062,8 +1046,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    lower_bound: initial_upper_bound,
-                    upper_bound: initial_lower_bound,
+                    range: initial_upper_bound..=initial_lower_bound,
                 })
                 .await
                 .unwrap();
@@ -1107,8 +1090,7 @@ mod tests {
                 fetch_batch_size: NZU64!(20),
                 target: Target {
                     root,
-                    lower_bound,
-                    upper_bound,
+                    range: lower_bound..=upper_bound,
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1123,8 +1105,7 @@ mod tests {
             let _ = update_sender
                 .send(Target {
                     root: sha256::Digest::from([2u8; 32]),
-                    lower_bound: lower_bound + 1,
-                    upper_bound: upper_bound + 1,
+                    range: lower_bound + 1..=upper_bound + 1,
                 })
                 .await;
 

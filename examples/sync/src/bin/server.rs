@@ -165,8 +165,7 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound,
-            upper_bound,
+            range: lower_bound..=upper_bound,
         },
     };
 

@@ -377,8 +377,7 @@ fn fuzz(input: FuzzInput) {
 
                     let sync_config = SyncConfig {
                         config: test_config("sync"),
-                        lower_bound_pos: safe_lower,
-                        upper_bound_pos: safe_upper,
+                        range: safe_lower..=safe_upper,
                         pinned_nodes: None,
                     };
 

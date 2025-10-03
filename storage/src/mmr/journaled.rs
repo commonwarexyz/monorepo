@@ -62,20 +62,19 @@ pub struct Config {
 /// Configuration for initializing a journaled MMR for synchronization.
 ///
 /// Determines how to handle existing persistent data based on sync boundaries:
-/// - **Fresh Start**: Existing data < lower_bound → discard and start fresh
-/// - **Prune and Reuse**: lower_bound ≤ existing data ≤ upper_bound → prune and reuse
-/// - **Prune and Rewind**: existing data > upper_bound → prune and rewind to upper_bound
+/// - **Fresh Start**: Existing data < range start → discard and start fresh
+/// - **Prune and Reuse**: range contains existing data → prune and reuse
+/// - **Prune and Rewind**: existing data > range end → prune and rewind to range end
 pub struct SyncConfig<D: Digest> {
     /// Base MMR configuration (journal, metadata, etc.)
     pub config: Config,
 
-    /// Pruning boundary - nodes below this position are considered pruned.
-    pub lower_bound_pos: Position,
+    /// Sync range - nodes outside this range are pruned/rewound.
+    /// The start is the pruning boundary, the end is the sync boundary.
+    /// Nodes beyond the range end are rewound if present.
+    pub range: std::ops::RangeInclusive<Position>,
 
-    /// Sync boundary - nodes above this position are rewound if present.
-    pub upper_bound_pos: Position,
-
-    /// The pinned nodes the MMR needs at the pruning boundary given by `lower_bound`, in the order
+    /// The pinned nodes the MMR needs at the pruning boundary (range start), in the order
     /// specified by `nodes_to_pin`. If `None`, the pinned nodes are expected to already be in the
     /// MMR's metadata/journal.
     pub pinned_nodes: Option<Vec<D>>,
@@ -340,6 +339,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         context: E,
         cfg: SyncConfig<H::Digest>,
     ) -> Result<Self, crate::adb::Error> {
+        let (lower_bound, upper_bound) = cfg.range.clone().into_inner();
+
         let journal = init_journal(
             context.with_label("mmr_journal"),
             JConfig {
@@ -348,11 +349,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 write_buffer: cfg.config.write_buffer,
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
-            *cfg.lower_bound_pos..=*cfg.upper_bound_pos,
+            *lower_bound..=*upper_bound,
         )
         .await?;
         let journal_size = Position::new(journal.size().await?);
-        assert!(journal_size <= cfg.upper_bound_pos + 1);
+        assert!(journal_size <= upper_bound + 1);
 
         // Open the metadata.
         let metadata_cfg = MConfig {
@@ -363,14 +364,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Write the pruning boundary.
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        metadata.put(
-            pruning_boundary_key,
-            (*cfg.lower_bound_pos).to_be_bytes().into(),
-        );
+        metadata.put(pruning_boundary_key, (*lower_bound).to_be_bytes().into());
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
-            let nodes_to_pin_persisted = nodes_to_pin(cfg.lower_bound_pos);
+            let nodes_to_pin_persisted = nodes_to_pin(lower_bound);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
@@ -392,9 +390,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         });
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
-        if cfg.lower_bound_pos < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound_pos)
-                .await?;
+        if lower_bound < journal_size {
+            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, lower_bound).await?;
         }
         metadata.sync().await?;
 
@@ -403,7 +400,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             journal,
             journal_size,
             metadata,
-            pruned_to_pos: cfg.lower_bound_pos,
+            pruned_to_pos: lower_bound,
         })
     }
 
@@ -1738,8 +1735,7 @@ mod tests {
             // Test fresh start scenario with completely new MMR (no existing data)
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(),
-                lower_bound_pos: Position::new(0),
-                upper_bound_pos: Position::new(100),
+                range: Position::new(0)..=Position::new(100),
                 pinned_nodes: None,
             };
 
@@ -1795,8 +1791,7 @@ mod tests {
             }
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(),
-                lower_bound_pos,
-                upper_bound_pos,
+                range: lower_bound_pos..=upper_bound_pos,
                 pinned_nodes: None,
             };
 
@@ -1859,8 +1854,7 @@ mod tests {
 
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(),
-                lower_bound_pos,
-                upper_bound_pos,
+                range: lower_bound_pos..=upper_bound_pos,
                 pinned_nodes: None,
             };
 
