@@ -116,6 +116,28 @@ pub struct Notarize<S: SigningScheme, D: Digest> {
     pub vote: Vote<S>,
 }
 
+impl<S: SigningScheme, D: Digest> Notarize<S, D> {
+    pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
+        let context = VoteContext::Notarize {
+            namespace,
+            proposal: &proposal,
+        };
+        let vote = scheme.sign_vote(context);
+
+        Self { proposal, vote }
+    }
+
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
+        let context = VoteContext::Notarize {
+            namespace,
+            proposal: &self.proposal,
+        };
+        // FIXME: avoid cloning
+        let verification = scheme.verify_votes(context, std::iter::once(self.vote.clone()));
+        !verification.verified.is_empty()
+    }
+}
+
 impl<S: SigningScheme, D: Digest> PartialEq for Notarize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.vote == other.vote
@@ -151,6 +173,26 @@ impl<S: SigningScheme, D: Digest> Read for Notarize<S, D> {
 pub struct Nullify<S: SigningScheme> {
     pub round: Round,
     pub vote: Vote<S>,
+}
+
+impl<S: SigningScheme> Nullify<S> {
+    pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Self {
+        let context: VoteContext<D> = VoteContext::Nullify { namespace, round };
+        let vote = scheme.sign_vote(context);
+
+        Self { round, vote }
+    }
+
+    // FIXME: this D sucks
+    pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
+        let context: VoteContext<D> = VoteContext::Nullify {
+            namespace,
+            round: self.round,
+        };
+        // FIXME: avoid cloning
+        let verification = scheme.verify_votes(context, std::iter::once(self.vote.clone()));
+        !verification.verified.is_empty()
+    }
 }
 
 impl<S: SigningScheme> Write for Nullify<S> {
@@ -190,6 +232,28 @@ pub struct Finalize<S: SigningScheme, D: Digest> {
     pub vote: Vote<S>,
 }
 
+impl<S: SigningScheme, D: Digest> Finalize<S, D> {
+    pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Self {
+        let context = VoteContext::Finalize {
+            namespace,
+            proposal: &proposal,
+        };
+        let vote = scheme.sign_vote(context);
+
+        Self { proposal, vote }
+    }
+
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
+        let context = VoteContext::Finalize {
+            namespace,
+            proposal: &self.proposal,
+        };
+        // FIXME: avoid cloning
+        let verification = scheme.verify_votes(context, std::iter::once(self.vote.clone()));
+        !verification.verified.is_empty()
+    }
+}
+
 impl<S: SigningScheme, D: Digest> PartialEq for Finalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.proposal == other.proposal && self.vote == other.vote
@@ -225,6 +289,18 @@ impl<S: SigningScheme, D: Digest> Read for Finalize<S, D> {
 pub struct Notarization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
+}
+
+impl<S: SigningScheme, D: Digest> Notarization<S, D> {
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
+        let context = VoteContext::Notarize {
+            namespace,
+            proposal: &self.proposal,
+        };
+        scheme
+            .verify_certificate(context, &self.certificate)
+            .is_ok()
+    }
 }
 
 impl<S: SigningScheme, D: Digest> Write for Notarization<S, D> {
@@ -268,6 +344,18 @@ impl<S: SigningScheme> Write for Nullification<S> {
     }
 }
 
+impl<S: SigningScheme> Nullification<S> {
+    pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
+        let context: VoteContext<D> = VoteContext::Nullify {
+            namespace,
+            round: self.round,
+        };
+        scheme
+            .verify_certificate(context, &self.certificate)
+            .is_ok()
+    }
+}
+
 impl<S: SigningScheme> EncodeSize for Nullification<S> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.certificate.encode_size()
@@ -290,6 +378,18 @@ impl<S: SigningScheme> Read for Nullification<S> {
 pub struct Finalization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
+}
+
+impl<S: SigningScheme, D: Digest> Finalization<S, D> {
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
+        let context = VoteContext::Finalize {
+            namespace,
+            proposal: &self.proposal,
+        };
+        scheme
+            .verify_certificate(context, &self.certificate)
+            .is_ok()
+    }
 }
 
 impl<S: SigningScheme, D: Digest> Write for Finalization<S, D> {
@@ -338,16 +438,17 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         + Eq
         + Hash
         + Send
+        + Sync
         + EncodeSize
         + Write
         + Read<Cfg = Self::CertificateReadCfg>;
 
-    type Randomness;
+    type Randomness: Send;
 
     type SignatureReadCfg;
     type CertificateReadCfg;
 
-    fn sign_vote<D: Digest>(&self, context: VoteContext<'_, D>) -> Result<Vote<Self>, Error>
+    fn sign_vote<D: Digest>(&self, context: VoteContext<'_, D>) -> Vote<Self>
     where
         Self: Sized;
 
@@ -373,6 +474,8 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         context: VoteContext<'_, D>,
         certificate: &Self::Certificate,
     ) -> Result<Option<Self::Randomness>, Error>;
+
+    fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
 
     // FIXME: this probably doesn't make sense, only needed for certificates
     fn signature_read_cfg() -> Self::SignatureReadCfg;
@@ -410,12 +513,12 @@ impl<V: Variant> BlsThresholdScheme<V> {
 impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
     type Signature = (V::Signature, V::Signature);
     type Certificate = (V::Signature, V::Signature);
-    type Randomness = (Round, V::Signature);
+    type Randomness = V::Signature;
 
     type SignatureReadCfg = ((), ());
     type CertificateReadCfg = ((), ());
 
-    fn sign_vote<D: Digest>(&self, context: VoteContext<'_, D>) -> Result<Vote<Self>, Error> {
+    fn sign_vote<D: Digest>(&self, context: VoteContext<'_, D>) -> Vote<Self> {
         let signature = match context {
             VoteContext::Notarize {
                 namespace,
@@ -487,10 +590,10 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             }
         };
 
-        Ok(Vote {
+        Vote {
             signer: self.signer,
             signature,
-        })
+        }
     }
 
     fn assemble_certificate<D: Digest>(
@@ -750,7 +853,11 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             }
         };
 
-        Ok(Some((round, certificate.1.clone())))
+        Ok(Some(certificate.1.clone()))
+    }
+
+    fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness> {
+        Some(certificate.1.clone())
     }
 
     fn signature_read_cfg() -> Self::SignatureReadCfg {

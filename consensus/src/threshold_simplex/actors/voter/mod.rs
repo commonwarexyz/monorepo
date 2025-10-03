@@ -7,13 +7,10 @@ use crate::{
         types::{Activity, Context},
     },
     types::{Epoch, View},
-    Automaton, Relay, Reporter, ThresholdSupervisor,
+    Automaton, Relay, Reporter,
 };
 pub use actor::Actor;
-use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
-    Digest, Signer,
-};
+use commonware_cryptography::{Digest, Signer};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 pub use ingress::{Mailbox, Message};
@@ -21,22 +18,20 @@ use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
     C: Signer,
+    S: SigningScheme,
     B: Blocker,
-    V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<V, D>>,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    G: SigningScheme,
+    F: Reporter<Activity = Activity<S, D>>,
 > {
     pub crypto: C,
+    pub participants: Vec<C::PublicKey>,
+    pub signing: S,
     pub blocker: B,
     pub automaton: A,
     pub relay: R,
     pub reporter: F,
-    pub supervisor: S,
-    pub signing: G,
 
     pub partition: String,
     pub epoch: Epoch,
