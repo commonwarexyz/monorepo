@@ -330,8 +330,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///    - Prunes the journal to `range.start`
     ///
     /// 3. **Prune and Rewind**: existing_size > range.end
-    ///    - Rewinds the journal to size `range.end+1`
-    ///    - Sets in-memory MMR size to `range.end+1`
+    ///    - Rewinds the journal to size `range.end`
+    ///    - Sets in-memory MMR size to `range.end`
     ///    - Prunes the journal to `range.start`
     pub async fn init_sync(
         context: E,
