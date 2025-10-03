@@ -343,8 +343,7 @@ impl Runner {
             // Wait for task to complete or panic
             select! {
                 message = panicked => {
-                    let message = message.expect("panic notifier dropped without message");
-                    panic!("task panicked: {message}");
+                    panic!("task panicked: {}", message.unwrap());
                 },
                 output = f(context) => {
                     output
