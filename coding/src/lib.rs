@@ -15,7 +15,7 @@ use commonware_codec::{Codec, FixedSize, Read, Write};
 use std::fmt::Debug;
 
 mod field;
-mod ntt;
+mod poly;
 
 mod reed_solomon;
 use commonware_cryptography::Digest;
