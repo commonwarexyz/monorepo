@@ -634,12 +634,16 @@ mod tests {
 
     fn test_panic_aborts_spawn<R: Runner>(runner: R)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
         let result = runner.start(|context| async move {
-            let result = context.spawn(|_| async move {
+            let result = context.clone().spawn(|_| async move {
                 panic!("blah");
             });
+
+            // Ensure runtime has time to unwind
+            context.sleep(Duration::from_millis(100)).await;
+
             assert!(matches!(result.await, Err(Error::Exited)));
             Result::<(), Error>::Ok(())
         });
@@ -650,7 +654,7 @@ mod tests {
 
     fn test_multiple_panics<R: Runner>(runner: R)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
         let result = runner.start(|context| async move {
             let handle1 = context.clone().spawn(|_| async move {
@@ -659,9 +663,12 @@ mod tests {
             let handle2 = context.clone().spawn(|_| async move {
                 panic!("boom 2");
             });
-            let handle3 = context.spawn(|_| async move {
+            let handle3 = context.clone().spawn(|_| async move {
                 panic!("boom 3");
             });
+
+            // Ensure runtime has time to unwind
+            context.sleep(Duration::from_millis(100)).await;
 
             let (res1, res2, res3) = join!(handle1, handle2, handle3);
             assert!(matches!(res1, Err(Error::Exited)));
@@ -1625,12 +1632,16 @@ mod tests {
 
     fn test_spawn_blocking_panic<R: Runner>(runner: R, dedicated: bool)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            let handle = context.spawn_blocking(dedicated, |_| {
+            let handle = context.clone().spawn_blocking(dedicated, |_| {
                 panic!("blocking task panicked");
             });
+
+            // Ensure runtime has time to unwind
+            context.sleep(Duration::from_millis(100)).await;
+
             handle.await.unwrap_err();
         });
     }
