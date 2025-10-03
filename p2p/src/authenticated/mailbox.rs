@@ -36,3 +36,34 @@ impl<T> Mailbox<T> {
         self.0.is_closed()
     }
 }
+
+/// A mailbox wraps an unbounded sender for messages of type `T`.
+#[derive(Debug)]
+pub struct UnboundedMailbox<T>(mpsc::UnboundedSender<T>);
+
+impl<T> UnboundedMailbox<T> {
+    /// Returns a new mailbox with the given sender.
+    pub fn new(sender: mpsc::UnboundedSender<T>) -> Self {
+        Self(sender)
+    }
+
+    /// Returns a new mailbox and the corresponding receiver.
+    #[cfg(test)]
+    pub fn test() -> (Self, mpsc::UnboundedReceiver<T>) {
+        let (sender, receiver) = mpsc::unbounded();
+        (Self(sender), receiver)
+    }
+}
+
+impl<T> Clone for UnboundedMailbox<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T> UnboundedMailbox<T> {
+    /// Sends a message to the corresponding receiver.
+    pub fn send(&mut self, message: T) -> Result<(), mpsc::TrySendError<T>> {
+        self.0.unbounded_send(message)
+    }
+}

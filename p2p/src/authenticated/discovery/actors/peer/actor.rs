@@ -2,6 +2,7 @@ use super::{Config, Error, Message};
 use crate::authenticated::{
     data::Data,
     discovery::{actors::tracker, channels::Channels, metrics, types},
+    mailbox::UnboundedMailbox,
     relay::Relay,
     Mailbox,
 };
@@ -100,7 +101,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         mut self,
         peer: C,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
-        mut tracker: Mailbox<tracker::Message<C>>,
+        mut tracker: UnboundedMailbox<tracker::Message<C>>,
         channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type

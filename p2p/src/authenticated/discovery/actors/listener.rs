@@ -2,6 +2,7 @@
 
 use crate::authenticated::{
     discovery::actors::{spawner, tracker},
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::Signer;
@@ -107,7 +108,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let (peer, send, recv) = match listen(
@@ -141,7 +142,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, supervisor))
@@ -150,7 +151,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     #[allow(clippy::type_complexity)]
     async fn run(
         self,
-        tracker: Mailbox<tracker::Message<C::PublicKey>>,
+        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Start listening for incoming connections
@@ -274,7 +275,7 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) = Mailbox::test();
+            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::test();
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {

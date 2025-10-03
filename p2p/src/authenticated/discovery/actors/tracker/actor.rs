@@ -5,10 +5,9 @@ use super::{
 };
 use crate::authenticated::{
     discovery::{actors::tracker::ingress::Releaser, types},
-    Mailbox,
+    mailbox::UnboundedMailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, IpAddrExt, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
@@ -45,15 +44,12 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     peer_gossip_max_count: usize,
 
     // ---------- Message-Passing ----------
-    /// The bounded mailbox for the actor.
-    receiver: mpsc::Receiver<Message<C::PublicKey>>,
-
     /// The unbounded mailbox for the actor.
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
     /// during [`Drop`]. While this channel is unbounded, it is practically bounded by
     /// the number of peers we can connect to at one time.
-    unbound_receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
+    receiver: mpsc::UnboundedReceiver<Message<C::PublicKey>>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -66,7 +62,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (Self, Mailbox<Message<C::PublicKey>>, Oracle<C::PublicKey>) {
+    ) -> (
+        Self,
+        UnboundedMailbox<Message<C::PublicKey>>,
+        Oracle<C::PublicKey>,
+    ) {
         // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
@@ -81,11 +81,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         };
 
         // Create the mailboxes
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::new(sender.clone());
-        let oracle = Oracle::new(sender);
-        let (unbound_sender, unbound_receiver) = mpsc::unbounded();
-        let releaser = Releaser::new(unbound_sender);
+        let (sender, receiver) = mpsc::unbounded();
+        let mailbox = UnboundedMailbox::new(sender.clone());
+        let oracle = Oracle::new(mailbox.clone());
+        let releaser = Releaser::new(mailbox.clone());
 
         // Create the directory
         let directory = Directory::init(
@@ -106,7 +105,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
-                unbound_receiver,
                 directory,
             },
             mailbox,
@@ -161,18 +159,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     async fn run(mut self) {
-        loop {
-            // We prefer the unbounded mailbox because `receiver` will
-            // already block when full (providing backpressure).
-            let msg = select! {
-                msg = self.unbound_receiver.next() => { msg },
-                msg = self.receiver.next() => { msg },
-            };
-
-            // Handle the message (if any)
-            let Some(msg) = msg else {
-                break;
-            };
+        while let Some(msg) = self.receiver.next().await {
             self.handle_msg(msg).await;
         }
         debug!("tracker shutdown");
@@ -290,10 +277,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 mod tests {
     use super::*;
     use crate::{
-        authenticated::discovery::{
-            actors::{peer, tracker},
-            config::Bootstrapper,
-            types,
+        authenticated::{
+            discovery::{
+                actors::{peer, tracker},
+                config::Bootstrapper,
+                types,
+            },
+            Mailbox,
         },
         Blocker,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
@@ -325,7 +315,6 @@ mod tests {
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
             allow_private_ips: true,
-            mailbox_size: 32,
             synchrony_bound: Duration::from_secs(10),
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
@@ -371,7 +360,7 @@ mod tests {
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
     // sent an initialization.
     async fn connect_to_peer(
-        mailbox: &mut Mailbox<Message<PublicKey>>,
+        mailbox: &mut UnboundedMailbox<Message<PublicKey>>,
         peer: &PublicKey,
         peer_mailbox: &Mailbox<peer::Message<PublicKey>>,
         peer_receiver: &mut mpsc::Receiver<peer::Message<PublicKey>>,
@@ -394,7 +383,7 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Mailbox<Message<PublicKey>>,
+        mailbox: UnboundedMailbox<Message<PublicKey>>,
         oracle: Oracle<PublicKey>,
         ip_namespace: Vec<u8>,
         tracker_pk: PublicKey,
