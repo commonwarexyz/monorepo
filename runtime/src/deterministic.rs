@@ -327,14 +327,30 @@ impl Runner {
         Fut: Future,
     {
         // Setup context and return strong reference to executor
-        let (context, executor) = match self.state {
+        let (context, executor, panicked) = match self.state {
             State::Config(config) => Context::new(config),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
 
         // Pin root task to the heap
         let storage = context.storage.clone();
-        let mut root = Box::pin(f(context));
+        let mut root = Box::pin(async move {
+            // Wait for task to complete (if we are catching panics)
+            let Some(panicked) = panicked else {
+                return f(context).await;
+            };
+
+            // Wait for task to complete or panic
+            select! {
+                message = panicked => {
+                    let message = message.expect("panic notifier dropped without message");
+                    panic!("task panicked: {message}");
+                },
+                output = f(context) => {
+                    output
+                },
+            }
+        });
 
         // Register the root task
         Tasks::register_root(&executor.tasks);
@@ -707,7 +723,7 @@ pub struct Context {
 }
 
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>) {
+    fn new(cfg: Config) -> (Self, Arc<Executor>, Option<oneshot::Receiver<String>>) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -726,11 +742,12 @@ impl Context {
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
-        let panicker = if cfg.catch_panics {
-            None
+        // Initialize panicker
+        let (panicker, panicked) = if cfg.catch_panics {
+            (None, None)
         } else {
-            let (panic_tx, _panic_rx) = oneshot::channel();
-            Some(Panicker::new(panic_tx))
+            let (panic_tx, panic_rx) = oneshot::channel();
+            (Some(Panicker::new(panic_tx)), Some(panic_rx))
         };
 
         let executor = Arc::new(Executor {
@@ -757,6 +774,7 @@ impl Context {
                 children: Arc::new(Mutex::new(Vec::new())),
             },
             executor,
+            panicked,
         )
     }
 
@@ -771,7 +789,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>) {
+    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Option<oneshot::Receiver<String>>) {
         // Rebuild metrics
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -782,11 +800,11 @@ impl Context {
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
-        let panicker = if checkpoint.catch_panics {
-            None
+        let (panicker, panicked) = if checkpoint.catch_panics {
+            (None, None)
         } else {
-            let (panic_tx, _panic_rx) = oneshot::channel();
-            Some(Panicker::new(panic_tx))
+            let (panic_tx, panic_rx) = oneshot::channel();
+            (Some(Panicker::new(panic_tx)), Some(panic_rx))
         };
 
         let executor = Arc::new(Executor {
@@ -815,6 +833,7 @@ impl Context {
                 children: Arc::new(Mutex::new(Vec::new())),
             },
             executor,
+            panicked,
         )
     }
 
