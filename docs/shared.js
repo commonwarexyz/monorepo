@@ -1,8 +1,3 @@
-function getRelativePathToIndex() {
-    return '/index.html';
-}
-
-
 function insertLogo() {
     const path = window.location.pathname;
     const isHomePage = path === '/' || path === '/index.html';
@@ -49,9 +44,8 @@ function insertLogo() {
 
     if (!isHomePage) {
         // Wrap the logo in an anchor tag linking back to the homepage
-        const hrefToIndex = getRelativePathToIndex();
         logoHTML = `
-        <a href="${hrefToIndex}" class="logo-link">
+        <a href="/index.html" class="logo-link">
             ${logoHTML}
         </a>
         `;
