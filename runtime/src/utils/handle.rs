@@ -87,7 +87,7 @@ where
     pub(crate) fn init_blocking<F>(
         f: F,
         metric: MetricHandle,
-        panicker: Option<Panicker>,
+        panicker: Panicker,
     ) -> (impl FnOnce(), Self)
     where
         F: FnOnce() -> T + Send + 'static,
@@ -107,12 +107,7 @@ where
                 let result = match result {
                     Ok(value) => Ok(value),
                     Err(panic) => {
-                        let err = extract_panic_message(&*panic);
-                        error!(?err, "task panicked");
-                        if let Some(panicker) = panicker.as_ref() {
-                            panicker.notify(panic);
-                        }
-
+                        panicker.notify(panic);
                         Err(Error::Exited)
                     }
                 };
