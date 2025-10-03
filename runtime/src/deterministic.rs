@@ -971,12 +971,14 @@ impl crate::Spawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
+        // Normalize label: replace '-' with '_' for Prometheus compatibility
+        let normalized_label = label.replace('-', "_");
         let name = {
             let prefix = self.name.clone();
             if prefix.is_empty() {
-                label.to_string()
+                normalized_label
             } else {
-                format!("{prefix}_{label}")
+                format!("{prefix}_{normalized_label}")
             }
         };
         assert!(

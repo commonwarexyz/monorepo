@@ -275,10 +275,12 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// Unlike `with_label`, this method does not create a new context.
     fn scoped_label(&self, label: &str) -> String {
+        // Normalize label: replace '-' with '_' for Prometheus compatibility
+        let normalized_label = label.replace('-', "_");
         let label = if self.label().is_empty() {
-            label.to_string()
+            normalized_label
         } else {
-            format!("{}_{}", self.label(), label)
+            format!("{}_{}", self.label(), normalized_label)
         };
         assert!(
             !label.starts_with(METRICS_PREFIX),
