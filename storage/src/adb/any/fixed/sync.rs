@@ -68,8 +68,7 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
-                // The last node of an MMR with `upper_bound` + 1 operations is at the position
-                // right before where the next leaf goes.
+                // Convert operation range to position range
                 range: Position::from(range.start)..Position::from(range.end),
                 pinned_nodes,
             },
@@ -143,20 +142,20 @@ where
 ///
 /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
 ///
-/// 1. **Fresh Start**: existing_size ≤ lower_bound
+/// 1. **Fresh Start**: existing_size ≤ range.start
 ///    - Deletes existing data (if any)
-///    - Creates new [fixed::Journal] pruned to `lower_bound` and size `lower_bound`
+///    - Creates new [fixed::Journal] pruned to `range.start` and size `range.start`
 ///
-/// 2. **Prune and Reuse**: lower_bound < existing_size ≤ upper_bound
-///    - Prunes the journal to `lower_bound`
+/// 2. **Prune and Reuse**: range.start < existing_size ≤ range.end
+///    - Prunes the journal to `range.start`
 ///    - Reuses existing journal data overlapping with the sync range
 ///
-/// 3. **Unexpected Data**: existing_size > upper_bound
+/// 3. **Unexpected Data**: existing_size > range.end
 ///    - Returns [adb::Error::UnexpectedData]
 ///
 /// # Invariants
 ///
-/// The returned [fixed::Journal] has size in [`lower_bound`, `upper_bound`].
+/// The returned [fixed::Journal] has size in the given range.
 pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     context: E,
     cfg: fixed::Config,

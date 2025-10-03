@@ -321,18 +321,18 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
     ///
-    /// 1. **Fresh Start**: existing_size < lower_bound
+    /// 1. **Fresh Start**: existing_size < range.start
     ///    - Deletes existing data (if any)
-    ///    - Creates new [Journal] with pruning boundary and size `lower_bound`
+    ///    - Creates new [Journal] with pruning boundary and size `range.start`
     ///
-    /// 2. **Prune and Reuse**: lower_bound ≤ existing_size ≤ upper_bound
+    /// 2. **Prune and Reuse**: range.start ≤ existing_size ≤ range.end
     ///    - Sets in-memory MMR size to `existing_size`
-    ///    - Prunes the journal to `lower_bound`
+    ///    - Prunes the journal to `range.start`
     ///
-    /// 3. **Prune and Rewind**: existing_size > upper_bound
-    ///    - Rewinds the journal to size `upper_bound+1`
-    ///    - Sets in-memory MMR size to `upper_bound+1`
-    ///    - Prunes the journal to `lower_bound`
+    /// 3. **Prune and Rewind**: existing_size > range.end
+    ///    - Rewinds the journal to size `range.end+1`
+    ///    - Sets in-memory MMR size to `range.end+1`
+    ///    - Prunes the journal to `range.start`
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<H::Digest>,

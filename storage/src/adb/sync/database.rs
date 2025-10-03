@@ -42,7 +42,7 @@ pub trait Database: Sized {
     /// Resize an existing journal to a new range.
     ///
     /// The implementation must:
-    /// - If current `size() <= range.start()`: close the journal and return a newly prepared one
+    /// - If current `size() <= range.start`: close the journal and return a newly prepared one
     ///   (equivalent to `create_journal`).
     /// - Else: prune/discard data outside the range.
     /// - Report `size()` as the next location to be set by the sync engine.

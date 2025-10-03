@@ -22,14 +22,14 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 ///
 /// Behavior by existing on-disk state:
 /// - Fresh (no data): returns an empty journal.
-/// - Stale (all data strictly before `lower_bound`): destroys existing data and returns an
+/// - Stale (all data strictly before `range.start`): destroys existing data and returns an
 ///   empty journal.
-/// - Overlap within [`lower_bound`, `upper_bound`]:
-///   - Prunes sections strictly below `lower_bound / items_per_section` (section-aligned).
-/// - Unexpected data beyond `upper_bound`: returns [adb::Error::UnexpectedData].
+/// - Overlap within [`range.start`, `range.end`]:
+///   - Prunes sections strictly below `range.start / items_per_section` (section-aligned).
+/// - Unexpected data beyond `range.end`: returns [adb::Error::UnexpectedData].
 ///
 /// Note that lower-bound pruning is section-aligned. This means the first retained section may
-/// still contain items whose locations are < `lower_bound`. Callers should ignore these.
+/// still contain items whose locations are < `range.start`. Callers should ignore these.
 ///
 /// # Arguments
 /// - `context`: storage context
@@ -39,13 +39,13 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 ///
 /// # Returns
 /// (journal, size) where:
-/// - No section index < `lower_bound / items_per_section` exists.
-/// - No section index > `upper_bound / items_per_section` exists.
-/// - No item with location > `upper_bound` exists.
+/// - No section index < `range.start / items_per_section` exists.
+/// - No section index > `(range.end - 1) / items_per_section` exists.
+/// - No item with location >= `range.end` exists.
 /// - `size` is the next location that should be appended to by the sync engine.
 ///
 /// # Errors
-/// Returns [adb::Error::UnexpectedData] if existing data extends beyond `upper_bound`.
+/// Returns [adb::Error::UnexpectedData] if existing data extends beyond `range.end`.
 pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     context: E,
     cfg: VConfig<V::Cfg>,
