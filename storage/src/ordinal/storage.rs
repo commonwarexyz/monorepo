@@ -13,6 +13,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
     mem::take,
+    sync::Mutex,
 };
 use tracing::{debug, warn};
 
@@ -70,6 +71,9 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
 
     // Pending index entries to be synced, grouped by section
     pending: BTreeSet<u64>,
+
+    // Reusable buffer for read operations to avoid allocations
+    read_buffer: Mutex<Vec<u8>>,
 
     // Metrics
     puts: Counter,
@@ -228,6 +232,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             blobs,
             intervals,
             pending: BTreeSet::new(),
+            read_buffer: Mutex::new(Vec::with_capacity(Record::<V>::SIZE)),
             puts,
             gets,
             has,
@@ -280,9 +285,16 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let read_buf = vec![0u8; Record::<V>::SIZE];
-        let read_buf = blob.read_at(read_buf, offset).await?;
-        let record = Record::<V>::read(&mut read_buf.as_ref())?;
+
+        // Reuse the read buffer to avoid allocation
+        let mut buf = {
+            let mut read_buf = self.read_buffer.lock().unwrap();
+            read_buf.clear();
+            read_buf.resize(Record::<V>::SIZE, 0);
+            take(&mut *read_buf)
+        };
+        buf = blob.read_at(buf, offset).await?.into();
+        let record = Record::<V>::read(&mut buf.as_slice())?;
 
         // If record is valid, return it
         if record.is_valid() {
