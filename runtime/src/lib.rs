@@ -1600,6 +1600,18 @@ mod tests {
         });
     }
 
+    fn test_spawn_blocking_panic<R: Runner>(runner: R, dedicated: bool)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let handle = context.spawn_blocking(dedicated, |_| {
+                panic!("blocking task panicked");
+            });
+            handle.await.unwrap_err();
+        });
+    }
+
     fn test_spawn_blocking_ref<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -1877,6 +1889,13 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_panic_aborts_spawn_caught() {
+        let cfg = deterministic::Config::default().with_catch_panics(true);
+        let executor = deterministic::Runner::new(cfg);
+        test_panic_aborts_spawn(executor);
+    }
+
+    #[test]
     fn test_deterministic_select() {
         let executor = deterministic::Runner::default();
         test_select(executor);
@@ -2034,12 +2053,16 @@ mod tests {
     fn test_deterministic_spawn_blocking_panic() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
-            executor.start(|context| async move {
-                let handle = context.spawn_blocking(dedicated, |_| {
-                    panic!("blocking task panicked");
-                });
-                handle.await.unwrap();
-            });
+            test_spawn_blocking_panic(executor, dedicated);
+        }
+    }
+
+    #[test]
+    fn test_deterministic_spawn_blocking_panic_caught() {
+        for dedicated in [false, true] {
+            let cfg = deterministic::Config::default().with_catch_panics(true);
+            let executor = deterministic::Runner::new(cfg);
+            test_spawn_blocking_panic(executor, dedicated);
         }
     }
 
@@ -2139,6 +2162,13 @@ mod tests {
     #[should_panic(expected = "task panicked: blah")]
     fn test_tokio_panic_aborts_spawn() {
         let executor = tokio::Runner::default();
+        test_panic_aborts_spawn(executor);
+    }
+
+    #[test]
+    fn test_tokio_panic_aborts_spawn_caught() {
+        let cfg = tokio::Config::default().with_catch_panics(true);
+        let executor = tokio::Runner::new(cfg);
         test_panic_aborts_spawn(executor);
     }
 
@@ -2300,13 +2330,16 @@ mod tests {
     fn test_tokio_spawn_blocking_panic() {
         for dedicated in [false, true] {
             let executor = tokio::Runner::default();
-            executor.start(|context| async move {
-                let handle = context.spawn_blocking(dedicated, |_| {
-                    panic!("blocking task panicked");
-                });
-                let result = handle.await;
-                assert!(matches!(result, Err(Error::Exited)));
-            });
+            test_spawn_blocking_panic(executor, dedicated);
+        }
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking_panic_caught() {
+        for dedicated in [false, true] {
+            let cfg = tokio::Config::default().with_catch_panics(true);
+            let executor = tokio::Runner::new(cfg);
+            test_spawn_blocking_panic(executor, dedicated);
         }
     }
 
