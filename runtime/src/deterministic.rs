@@ -1252,7 +1252,7 @@ impl crate::Storage for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, utils::run_tasks, Blob, Runner as _, Storage};
+    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Runner as _, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
@@ -1387,6 +1387,22 @@ mod tests {
             assert_eq!(len, data.len() as u64);
             let read = blob.read_at(vec![0; data.len()], 0).await.unwrap();
             assert_eq!(read.as_ref(), data);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "goodbye")]
+    fn test_recover_panic_handling() {
+        // Initialize the first runtime
+        let executor1 = deterministic::Runner::default();
+        let (_, checkpoint) = executor1.start_and_recover(|_| async move {
+            reschedule().await;
+        });
+
+        // Ensure that panic setting is preserved
+        let executor = Runner::from(checkpoint);
+        executor.start(|_| async move {
+            panic!("goodbye");
         });
     }
 
