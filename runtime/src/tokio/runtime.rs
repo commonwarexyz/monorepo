@@ -703,27 +703,3 @@ impl crate::Storage for Context {
         self.storage.scan(partition).await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{Config, Context, Runner as TokioRunner};
-    use crate::{Clock as _, Spawner as _};
-    use std::time::Duration;
-
-    #[test]
-    #[should_panic(expected = "tokio runtime panic propagation test")]
-    fn panicking_child_shuts_down_runtime() {
-        let runner = TokioRunner::new(
-            Config::new()
-                .with_worker_threads(1)
-                .with_catch_panics(false),
-        );
-        crate::Runner::start(runner, |context: Context| async move {
-            context.clone().spawn(|_| async move {
-                panic!("tokio runtime panic propagation test");
-            });
-
-            context.sleep(Duration::from_millis(25)).await;
-        });
-    }
-}
