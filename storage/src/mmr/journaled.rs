@@ -348,8 +348,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 write_buffer: cfg.config.write_buffer,
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
-            *cfg.lower_bound_pos,
-            *cfg.upper_bound_pos,
+            *cfg.lower_bound_pos..=*cfg.upper_bound_pos,
         )
         .await?;
         let journal_size = Position::new(journal.size().await?);

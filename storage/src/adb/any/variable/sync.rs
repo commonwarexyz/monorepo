@@ -8,7 +8,7 @@ use commonware_runtime::{Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, ops::RangeInclusive};
 use tracing::debug;
 
 /// The size of the read buffer to use for replaying log operations.
@@ -50,10 +50,11 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     context: E,
     cfg: VConfig<V::Cfg>,
-    lower_bound: u64,
-    upper_bound: u64,
+    range: RangeInclusive<u64>,
     items_per_section: NonZeroU64,
 ) -> Result<(VJournal<E, V>, u64), adb::Error> {
+    let (lower_bound, upper_bound) = range.into_inner();
+
     assert!(
         lower_bound <= upper_bound,
         "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
@@ -166,8 +167,7 @@ mod tests {
             let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound,
-                upper_bound,
+                lower_bound..=upper_bound,
                 items_per_section,
             )
             .await
@@ -233,8 +233,7 @@ mod tests {
             let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound,
-                upper_bound,
+                lower_bound..=upper_bound,
                 items_per_section,
             )
             .await
@@ -297,11 +296,11 @@ mod tests {
                 buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
+            #[allow(clippy::reversed_empty_ranges)]
             let _result = init_journal::<deterministic::Context, u64>(
                 context.clone(),
                 cfg.clone(),
-                10,        // lower_bound
-                5,         // upper_bound (invalid: < lower_bound)
+                10..=5,    // invalid range: lower > upper
                 NZU64!(5), // items_per_section
             )
             .await;
@@ -342,8 +341,7 @@ mod tests {
             let (journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound,
-                upper_bound,
+                lower_bound..=upper_bound,
                 items_per_section,
             )
             .await
@@ -429,8 +427,7 @@ mod tests {
                 let result = init_journal::<deterministic::Context, u64>(
                     context.clone(),
                     cfg.clone(),
-                    lower_bound,
-                    upper_bound,
+                    lower_bound..=upper_bound,
                     items_per_section,
                 )
                 .await;
@@ -475,8 +472,7 @@ mod tests {
             let (journal, size) = init_journal::<deterministic::Context, u64>(
                 context.clone(),
                 cfg.clone(),
-                lower_bound,
-                upper_bound,
+                lower_bound..=upper_bound,
                 items_per_section,
             )
             .await
@@ -530,8 +526,7 @@ mod tests {
             let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound,
-                upper_bound,
+                lower_bound..=upper_bound,
                 items_per_section,
             )
             .await
@@ -604,8 +599,7 @@ mod tests {
             let (journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound,
-                upper_bound,
+                lower_bound..=upper_bound,
                 items_per_section,
             )
             .await

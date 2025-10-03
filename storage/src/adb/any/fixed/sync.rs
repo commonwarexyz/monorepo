@@ -11,7 +11,7 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::Append, Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::{collections::BTreeMap, marker::PhantomData};
+use std::{collections::BTreeMap, marker::PhantomData, ops::RangeInclusive};
 use tracing::debug;
 
 impl<E, K, V, H, T> adb::sync::Database for any::fixed::Any<E, K, V, H, T>
@@ -32,8 +32,7 @@ where
     async fn create_journal(
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: Location,
-        upper_bound: Location,
+        range: RangeInclusive<Location>,
     ) -> Result<Self::Journal, adb::Error> {
         let journal_config = fixed::Config {
             partition: config.log_journal_partition.clone(),
@@ -45,8 +44,7 @@ where
         init_journal(
             context.with_label("log"),
             journal_config,
-            *lower_bound,
-            *upper_bound,
+            **range.start()..=**range.end(),
         )
         .await
     }
@@ -56,10 +54,11 @@ where
         db_config: Self::Config,
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        lower_bound: Location,
-        upper_bound: Location,
+        range: RangeInclusive<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, adb::Error> {
+        let lower_bound = *range.start();
+        let upper_bound = *range.end();
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
@@ -127,15 +126,15 @@ where
         mut journal: Self::Journal,
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: Location,
-        upper_bound: Location,
+        range: RangeInclusive<Location>,
     ) -> Result<Self::Journal, adb::Error> {
         let size = journal.size().await?;
 
+        let lower_bound = *range.start();
         if size <= lower_bound {
             // Create a new journal with the new bounds
             journal.destroy().await?;
-            Self::create_journal(context, config, lower_bound, upper_bound).await
+            Self::create_journal(context, config, range).await
         } else {
             // Just prune to the lower bound
             journal.prune(*lower_bound).await?;
@@ -165,9 +164,10 @@ where
 pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     context: E,
     cfg: fixed::Config,
-    lower_bound: u64,
-    upper_bound: u64,
+    range: RangeInclusive<u64>,
 ) -> Result<fixed::Journal<E, A>, adb::Error> {
+    let (lower_bound, upper_bound) = range.into_inner();
+
     assert!(
         lower_bound <= upper_bound,
         "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
@@ -1363,8 +1363,7 @@ mod tests {
                 any_db_config("sync_basic"),
                 log,
                 None,
-                Location::new(0),
-                Location::new(0),
+                Location::new(0)..=Location::new(0),
                 1024,
             )
             .await
@@ -1435,8 +1434,7 @@ mod tests {
                     write_buffer: NZUsize!(64),
                     buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 },
-                *lower_bound,
-                *upper_bound,
+                *lower_bound..=*upper_bound,
             )
             .await
             .unwrap();
@@ -1453,8 +1451,7 @@ mod tests {
                     any_db_config("sync_basic"),
                     log,
                     Some(pinned_nodes),
-                    lower_bound,
-                    upper_bound,
+                    lower_bound..=upper_bound,
                     1024,
                 )
                 .await
@@ -1525,8 +1522,7 @@ mod tests {
                         write_buffer: NZUsize!(64),
                         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                     },
-                    lower_bound,
-                    upper_bound,
+                    lower_bound..=upper_bound,
                 )
                 .await
                 .unwrap();
@@ -1551,8 +1547,7 @@ mod tests {
                     create_test_config(context.next_u64()),
                     log,
                     Some(pinned_nodes),
-                    Location::new(lower_bound),
-                    Location::new(upper_bound),
+                    Location::new(lower_bound)..=Location::new(upper_bound),
                     1024,
                 )
                 .await
@@ -1652,8 +1647,7 @@ mod tests {
                     sync_db_config,
                     log,
                     Some(pinned_nodes),
-                    sync_lower_bound,
-                    sync_upper_bound,
+                    sync_lower_bound..=sync_upper_bound,
                     1024,
                 )
                 .await
@@ -1734,8 +1728,7 @@ mod tests {
                     db_config,
                     log,
                     Some(pinned_nodes),
-                    sync_lower_bound,
-                    sync_upper_bound,
+                    sync_lower_bound..=sync_upper_bound,
                     1024,
                 )
                 .await
@@ -1768,7 +1761,7 @@ mod tests {
             let lower_bound = 10;
             let upper_bound = 25;
             let mut sync_journal =
-                init_journal(context.clone(), cfg.clone(), lower_bound, upper_bound)
+                init_journal(context.clone(), cfg.clone(), lower_bound..=upper_bound)
                     .await
                     .expect("Failed to initialize journal with sync boundaries");
 
@@ -1832,7 +1825,7 @@ mod tests {
             // Upper bound: 30 (beyond existing data, so existing data should be kept)
             let lower_bound = 8;
             let upper_bound = 30;
-            let mut journal = init_journal(context.clone(), cfg.clone(), lower_bound, upper_bound)
+            let mut journal = init_journal(context.clone(), cfg.clone(), lower_bound..=upper_bound)
                 .await
                 .expect("Failed to initialize journal with overlap");
 
@@ -1901,7 +1894,7 @@ mod tests {
             // Upper bound: 19 (existing data ends at 19, so no rewinding needed)
             let lower_bound = 6;
             let upper_bound = 19;
-            let mut journal = init_journal(context.clone(), cfg.clone(), lower_bound, upper_bound)
+            let mut journal = init_journal(context.clone(), cfg.clone(), lower_bound..=upper_bound)
                 .await
                 .expect("Failed to initialize journal with exact match");
 
@@ -1971,8 +1964,7 @@ mod tests {
                 let result = init_journal::<Context, Digest>(
                     context.clone(),
                     cfg.clone(),
-                    lower_bound,
-                    upper_bound,
+                    lower_bound..=upper_bound,
                 )
                 .await;
 
@@ -1999,8 +1991,7 @@ mod tests {
             let _result = init_journal::<Context, Digest>(
                 context.clone(),
                 cfg.clone(),
-                lower_bound,
-                upper_bound,
+                lower_bound..=upper_bound,
             )
             .await;
         });

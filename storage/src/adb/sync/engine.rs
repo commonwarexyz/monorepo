@@ -178,8 +178,7 @@ where
         let journal = DB::create_journal(
             config.context.clone(),
             &config.db_config,
-            config.target.lower_bound,
-            config.target.upper_bound,
+            config.target.lower_bound..=config.target.upper_bound,
         )
         .await?;
 
@@ -278,8 +277,7 @@ where
             self.journal,
             self.context.clone(),
             &self.config,
-            new_target.lower_bound,
-            new_target.upper_bound,
+            new_target.lower_bound..=new_target.upper_bound,
         )
         .await?;
 
@@ -465,8 +463,7 @@ where
                 self.config,
                 self.journal,
                 self.pinned_nodes,
-                self.target.lower_bound,
-                self.target.upper_bound,
+                self.target.lower_bound..=self.target.upper_bound,
                 self.apply_batch_size,
             )
             .await?;

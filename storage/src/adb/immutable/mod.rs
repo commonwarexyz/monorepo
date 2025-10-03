@@ -225,8 +225,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 write_buffer: cfg.db_config.log_write_buffer,
                 buffer_pool: cfg.db_config.buffer_pool.clone(),
             },
-            *cfg.lower_bound,
-            *cfg.upper_bound,
+            *cfg.lower_bound..=*cfg.upper_bound,
         )
         .await?;
 

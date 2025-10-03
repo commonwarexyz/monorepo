@@ -14,6 +14,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use std::ops::RangeInclusive;
 
 mod journal;
 
@@ -35,8 +36,7 @@ where
     async fn create_journal(
         context: Self::Context,
         config: &Self::Config,
-        lower_bound_loc: Location,
-        upper_bound_loc: Location,
+        range: RangeInclusive<Location>,
     ) -> Result<Self::Journal, Error> {
         // Open the journal and discard operations outside the sync range.
         let (journal, size) = init_journal(
@@ -48,8 +48,7 @@ where
                 write_buffer: config.log_write_buffer,
                 buffer_pool: config.buffer_pool.clone(),
             },
-            *lower_bound_loc,
-            *upper_bound_loc,
+            **range.start()..=**range.end(),
             config.log_items_per_section,
         )
         .await?;
@@ -66,31 +65,30 @@ where
     /// # Behavior
     ///
     /// This method handles different initialization scenarios based on existing data:
-    /// - If the MMR journal is empty or the last item is before `lower_bound`, it creates a
+    /// - If the MMR journal is empty or the last item is before the range start, it creates a
     ///   fresh MMR from the provided `pinned_nodes`
-    /// - If the MMR journal has data but is incomplete (< `upper_bound`), missing operations
+    /// - If the MMR journal has data but is incomplete (< range end), missing operations
     ///   from the log are applied to bring it up to the target state
-    /// - If the MMR journal has data beyond the `upper_bound`, it is rewound to match the sync target
+    /// - If the MMR journal has data beyond the range end, it is rewound to match the sync target
     ///
     /// # Returns
     ///
-    /// A [super::Immutable] db populated with the state from `lower_bound` to `upper_bound`, inclusive.
-    /// The pruning boundary is set to `lower_bound`.
+    /// A [super::Immutable] db populated with the state from the given range, inclusive.
+    /// The pruning boundary is set to the range start.
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        lower_bound: Location,
-        upper_bound: Location,
+        range: RangeInclusive<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, Error> {
         let journal = journal.into_inner();
         let sync_config = Config {
             db_config,
             log: journal,
-            lower_bound,
-            upper_bound,
+            lower_bound: *range.start(),
+            upper_bound: *range.end(),
             pinned_nodes,
             apply_batch_size,
         };
@@ -106,15 +104,15 @@ where
         journal: Self::Journal,
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: Location,
-        upper_bound: Location,
+        range: RangeInclusive<Location>,
     ) -> Result<Self::Journal, Error> {
         let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
+        let (lower_bound, upper_bound) = range.clone().into_inner();
         if size <= lower_bound {
             // Close existing journal and create new one
             journal.into_inner().destroy().await?;
-            Self::create_journal(context, config, lower_bound, upper_bound).await
+            Self::create_journal(context, config, range).await
         } else {
             // Extract the Variable journal to perform section-based pruning
             let mut variable_journal = journal.into_inner();
