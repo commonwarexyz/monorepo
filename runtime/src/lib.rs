@@ -519,7 +519,6 @@ mod tests {
     use prometheus_client::metrics::counter::Counter;
     use std::{
         collections::HashMap,
-        panic::{catch_unwind, AssertUnwindSafe},
         pin::Pin,
         str::FromStr,
         sync::{
@@ -627,54 +626,83 @@ mod tests {
     }
 
     fn test_panic_aborts_root<R: Runner>(runner: R) {
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            runner.start(|_| async move {
-                panic!("blah");
-            });
-        }));
+        let result: Result<(), Error> = runner.start(|_| async move {
+            panic!("blah");
+        });
         result.unwrap_err();
     }
 
     fn test_panic_aborts_spawn<R: Runner>(runner: R)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
-        let result = runner.start(|context| async move {
-            let result = context.spawn(|_| async move {
+        runner.start(|context| async move {
+            context.clone().spawn(|_| async move {
                 panic!("blah");
             });
-            assert!(matches!(result.await, Err(Error::Exited)));
-            Result::<(), Error>::Ok(())
-        });
 
-        // Ensure panic was caught
-        result.unwrap();
+            // Loop until panic
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    fn test_panic_aborts_spawn_caught<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        let result: Result<(), Error> = runner.start(|context| async move {
+            let result = context.clone().spawn(|_| async move {
+                panic!("blah");
+            });
+            result.await
+        });
+        assert!(matches!(result, Err(Error::Exited)));
     }
 
     fn test_multiple_panics<R: Runner>(runner: R)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
-        let result = runner.start(|context| async move {
+        runner.start(|context| async move {
+            context.clone().spawn(|_| async move {
+                panic!("boom 1");
+            });
+            context.clone().spawn(|_| async move {
+                panic!("boom 2");
+            });
+            context.clone().spawn(|_| async move {
+                panic!("boom 3");
+            });
+
+            // Loop until panic
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    fn test_multiple_panics_caught<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        let (res1, res2, res3) = runner.start(|context| async move {
             let handle1 = context.clone().spawn(|_| async move {
                 panic!("boom 1");
             });
             let handle2 = context.clone().spawn(|_| async move {
                 panic!("boom 2");
             });
-            let handle3 = context.spawn(|_| async move {
+            let handle3 = context.clone().spawn(|_| async move {
                 panic!("boom 3");
             });
 
-            let (res1, res2, res3) = join!(handle1, handle2, handle3);
-            assert!(matches!(res1, Err(Error::Exited)));
-            assert!(matches!(res2, Err(Error::Exited)));
-            assert!(matches!(res3, Err(Error::Exited)));
-
-            Result::<(), Error>::Ok(())
+            join!(handle1, handle2, handle3)
         });
-
-        result.unwrap();
+        assert!(matches!(res1, Err(Error::Exited)));
+        assert!(matches!(res2, Err(Error::Exited)));
+        assert!(matches!(res3, Err(Error::Exited)));
     }
 
     fn test_select<R: Runner>(runner: R) {
@@ -1628,14 +1656,31 @@ mod tests {
 
     fn test_spawn_blocking_panic<R: Runner>(runner: R, dedicated: bool)
     where
-        R::Context: Spawner,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            let handle = context.spawn_blocking(dedicated, |_| {
+            context.clone().spawn_blocking(dedicated, |_| {
                 panic!("blocking task panicked");
             });
-            handle.await.unwrap_err();
+
+            // Loop until panic
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
         });
+    }
+
+    fn test_spawn_blocking_panic_caught<R: Runner>(runner: R, dedicated: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        let result: Result<(), Error> = runner.start(|context| async move {
+            let handle = context.clone().spawn_blocking(dedicated, |_| {
+                panic!("blocking task panicked");
+            });
+            handle.await
+        });
+        assert!(matches!(result, Err(Error::Exited)));
     }
 
     fn test_spawn_blocking_ref<R: Runner>(runner: R, dedicated: bool)
@@ -1902,8 +1947,17 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "blah")]
     fn test_deterministic_panic_aborts_root() {
         let runner = deterministic::Runner::default();
+        test_panic_aborts_root(runner);
+    }
+
+    #[test]
+    #[should_panic(expected = "blah")]
+    fn test_deterministic_panic_aborts_root_caught() {
+        let cfg = deterministic::Config::default().with_catch_panics(true);
+        let runner = deterministic::Runner::new(cfg);
         test_panic_aborts_root(runner);
     }
 
@@ -1918,7 +1972,7 @@ mod tests {
     fn test_deterministic_panic_aborts_spawn_caught() {
         let cfg = deterministic::Config::default().with_catch_panics(true);
         let executor = deterministic::Runner::new(cfg);
-        test_panic_aborts_spawn(executor);
+        test_panic_aborts_spawn_caught(executor);
     }
 
     #[test]
@@ -1932,7 +1986,7 @@ mod tests {
     fn test_deterministic_multiple_panics_caught() {
         let cfg = deterministic::Config::default().with_catch_panics(true);
         let executor = deterministic::Runner::new(cfg);
-        test_multiple_panics(executor);
+        test_multiple_panics_caught(executor);
     }
 
     #[test]
@@ -2102,7 +2156,7 @@ mod tests {
         for dedicated in [false, true] {
             let cfg = deterministic::Config::default().with_catch_panics(true);
             let executor = deterministic::Runner::new(cfg);
-            test_spawn_blocking_panic(executor, dedicated);
+            test_spawn_blocking_panic_caught(executor, dedicated);
         }
     }
 
@@ -2193,8 +2247,17 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "blah")]
     fn test_tokio_panic_aborts_root() {
         let executor = tokio::Runner::default();
+        test_panic_aborts_root(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "blah")]
+    fn test_tokio_panic_aborts_root_caught() {
+        let cfg = tokio::Config::default().with_catch_panics(true);
+        let executor = tokio::Runner::new(cfg);
         test_panic_aborts_root(executor);
     }
 
@@ -2209,7 +2272,7 @@ mod tests {
     fn test_tokio_panic_aborts_spawn_caught() {
         let cfg = tokio::Config::default().with_catch_panics(true);
         let executor = tokio::Runner::new(cfg);
-        test_panic_aborts_spawn(executor);
+        test_panic_aborts_spawn_caught(executor);
     }
 
     #[test]
@@ -2223,7 +2286,7 @@ mod tests {
     fn test_tokio_multiple_panics_caught() {
         let cfg = tokio::Config::default().with_catch_panics(true);
         let executor = tokio::Runner::new(cfg);
-        test_multiple_panics(executor);
+        test_multiple_panics_caught(executor);
     }
 
     #[test]
@@ -2393,7 +2456,7 @@ mod tests {
         for dedicated in [false, true] {
             let cfg = tokio::Config::default().with_catch_panics(true);
             let executor = tokio::Runner::new(cfg);
-            test_spawn_blocking_panic(executor, dedicated);
+            test_spawn_blocking_panic_caught(executor, dedicated);
         }
     }
 
