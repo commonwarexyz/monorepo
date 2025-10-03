@@ -879,6 +879,38 @@ mod tests {
     }
 
     #[test]
+    fn test_bitvec_kill_on_length_mismatch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                tracker_pk,
+                ..
+            } = setup_actor(context.clone(), cfg_initial);
+
+            let (_s1, pk1) = new_signer_and_pk(1);
+            let (_s2, pk2) = new_signer_and_pk(2);
+            oracle
+                .register(0, vec![tracker_pk, pk1.clone(), pk2.clone()])
+                .await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
+            let invalid_bit_vec = types::BitVec {
+                index: 0,
+                bits: UtilsBitVec::ones(2),
+            };
+            mailbox.bit_vec(invalid_bit_vec, peer_mailbox.clone());
+            assert!(matches!(
+                peer_receiver.next().await,
+                Some(peer::Message::Kill)
+            ));
+        });
+    }
+
+    #[test]
     fn test_bit_vec_comprehensive() {
         // Combines and clarifies parts of the old test_bit_vec
         let executor = deterministic::Runner::default();
