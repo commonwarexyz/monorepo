@@ -519,7 +519,6 @@ mod tests {
     use prometheus_client::metrics::counter::Counter;
     use std::{
         collections::HashMap,
-        panic::{catch_unwind, AssertUnwindSafe},
         pin::Pin,
         str::FromStr,
         sync::{
@@ -627,11 +626,9 @@ mod tests {
     }
 
     fn test_panic_aborts_root<R: Runner>(runner: R) {
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            runner.start(|_| async move {
-                panic!("blah");
-            });
-        }));
+        let result: Result<(), Error> = runner.start(|_| async move {
+            panic!("blah");
+        });
         result.unwrap_err();
     }
 
@@ -1902,8 +1899,17 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "blah")]
     fn test_deterministic_panic_aborts_root() {
         let runner = deterministic::Runner::default();
+        test_panic_aborts_root(runner);
+    }
+
+    #[test]
+    #[should_panic(expected = "blah")]
+    fn test_deterministic_panic_aborts_root_caught() {
+        let cfg = deterministic::Config::default().with_catch_panics(true);
+        let runner = deterministic::Runner::new(cfg);
         test_panic_aborts_root(runner);
     }
 
@@ -2193,8 +2199,17 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "blah")]
     fn test_tokio_panic_aborts_root() {
         let executor = tokio::Runner::default();
+        test_panic_aborts_root(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "blah")]
+    fn test_tokio_panic_aborts_root_caught() {
+        let cfg = tokio::Config::default().with_catch_panics(true);
+        let executor = tokio::Runner::new(cfg);
         test_panic_aborts_root(executor);
     }
 
