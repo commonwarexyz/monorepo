@@ -1006,7 +1006,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    range: initial_upper_bound..=initial_lower_bound, // Invalid: lower > upper
+                    range: initial_upper_bound..=initial_lower_bound,
                 })
                 .await
                 .unwrap();
