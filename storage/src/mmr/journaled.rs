@@ -389,7 +389,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         });
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
-        if *cfg.range.start < journal_size {
+        if cfg.range.start < journal_size {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.range.start)
                 .await?;
         }

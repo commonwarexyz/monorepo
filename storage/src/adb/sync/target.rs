@@ -12,7 +12,7 @@ use std::ops::Range;
 pub struct Target<D: Digest> {
     /// The root digest we're syncing to
     pub root: D,
-    /// Range of operations to sync (exclusive end)
+    /// Range of operations to sync
     pub range: Range<Location>,
 }
 
@@ -57,7 +57,7 @@ where
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
-    if new_target.range.start >= new_target.range.end {
+    if new_target.range.is_empty() {
         return Err(sync::Error::Engine(EngineError::InvalidTarget {
             lower_bound_pos: new_target.range.start,
             upper_bound_pos: new_target.range.end,
@@ -117,7 +117,7 @@ mod tests {
     fn test_sync_target_read_invalid_bounds() {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
-            range: Location::new(100)..Location::new(51), // invalid: lower > upper
+            range: Location::new(100)..Location::new(50), // invalid: lower > upper
         };
 
         let mut buffer = Vec::new();

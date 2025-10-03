@@ -52,22 +52,16 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     range: Range<u64>,
     items_per_section: NonZeroU64,
 ) -> Result<(VJournal<E, V>, u64), adb::Error> {
-    let lower_bound = range.start;
-    let upper_bound = range.end;
-
-    assert!(
-        lower_bound <= upper_bound,
-        "lower_bound ({lower_bound}) must be <= upper_bound ({upper_bound})"
-    );
+    assert!(!range.is_empty(), "range must not be empty");
 
     // Calculate the section ranges based on item locations
     let items_per_section = items_per_section.get();
-    let lower_section = lower_bound / items_per_section;
-    let upper_section = (upper_bound - 1) / items_per_section;
+    let lower_section = range.start / items_per_section;
+    let upper_section = (range.end - 1) / items_per_section;
 
     debug!(
-        lower_bound,
-        upper_bound,
+        range.start,
+        range.end,
         lower_section,
         upper_section,
         items_per_section = items_per_section,
@@ -82,7 +76,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     // No existing data
     let Some(last_section) = last_section else {
         debug!("no existing journal data, creating fresh journal");
-        return Ok((journal, lower_bound));
+        return Ok((journal, range.start));
     };
 
     // If all existing data is before our sync range, destroy and recreate fresh
@@ -93,7 +87,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
         );
         journal.destroy().await?;
         let journal = VJournal::init(context, cfg).await?;
-        return Ok((journal, lower_bound));
+        return Ok((journal, range.start));
     }
 
     // Prune sections below the lower bound.
@@ -108,7 +102,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     }
 
     let size = get_size(&journal, items_per_section).await?;
-    if size > upper_bound {
+    if size > range.end {
         return Err(adb::Error::UnexpectedData(Location::new(size)));
     }
 
@@ -227,7 +221,7 @@ mod tests {
             journal.close().await.unwrap();
 
             // Initialize with sync boundaries that overlap with existing data
-            // lower_bound: 8 (section 1), upper_bound: 30 (section 6)
+            // lower_bound: 8 (section 1), upper_bound: 31 (last location 30, section 6)
             let lower_bound = 8;
             let upper_bound = 31;
             let (mut journal, size) = init_journal(

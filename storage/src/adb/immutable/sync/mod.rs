@@ -67,7 +67,7 @@ where
     /// This method handles different initialization scenarios based on existing data:
     /// - If the MMR journal is empty or the last item is before the range start, it creates a
     ///   fresh MMR from the provided `pinned_nodes`
-    /// - If the MMR journal has data but is incomplete (< range end), missing operations
+    /// - If the MMR journal has data but is incomplete (has length < range end), missing operations
     ///   from the log are applied to bring it up to the target state
     /// - If the MMR journal has data beyond the range end, it is rewound to match the sync target
     ///
@@ -107,7 +107,7 @@ where
     ) -> Result<Self::Journal, Error> {
         let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
-        if size <= *range.start {
+        if size <= range.start {
             // Close existing journal and create new one
             journal.into_inner().destroy().await?;
             Self::create_journal(context, config, range).await
@@ -125,7 +125,7 @@ where
 
             // Get the size of the journal
             let size = get_size(&variable_journal, config.log_items_per_section.get()).await?;
-            if size > *range.end {
+            if size > range.end {
                 return Err(crate::adb::Error::UnexpectedData(Location::new(size)));
             }
 

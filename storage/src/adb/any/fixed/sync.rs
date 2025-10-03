@@ -127,7 +127,7 @@ where
     ) -> Result<Self::Journal, adb::Error> {
         let size = journal.size().await?;
 
-        if size <= *range.start {
+        if size <= range.start {
             // Create a new journal with the new bounds
             journal.destroy().await?;
             Self::create_journal(context, config, range).await
