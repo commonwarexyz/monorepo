@@ -168,7 +168,6 @@ where
     /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
         let (lower_bound, upper_bound) = config.target.range.clone().into_inner();
-
         if lower_bound > upper_bound {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
                 lower_bound_pos: lower_bound,
