@@ -14,7 +14,7 @@ mod tests {
             let (mut low_tx, mut low_rx) = mpsc::unbounded();
             low_tx.send(1).await.unwrap();
 
-            // Process messages on all channels
+            // Process messages on all channels (preferring higher priority channels)
             let mut completed = Vec::new();
             while completed.len() < 3 {
                 select! {
