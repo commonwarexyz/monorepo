@@ -6,15 +6,10 @@ use crate::{
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_utils::union;
-use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    hash::Hash,
-};
+use std::{collections::HashSet, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.

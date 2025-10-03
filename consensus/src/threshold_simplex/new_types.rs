@@ -809,7 +809,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             aggregate_verify_multiple_messages::<V, _>(&self.identity, messages, &signature, 1)
         };
 
-        let round = match context {
+        match context {
             VoteContext::Notarize {
                 namespace,
                 proposal,
@@ -823,7 +823,6 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                 let seed_message = (Some(seed_ns.as_ref()), seed_bytes.as_ref());
 
                 aggregate_pair(&[notarize_message, seed_message], certificate)?;
-                proposal.round
             }
             VoteContext::Nullify { namespace, round } => {
                 let nullify_ns = nullify_namespace(namespace);
@@ -834,7 +833,6 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                 let seed_message = (Some(seed_ns.as_ref()), round_bytes.as_ref());
 
                 aggregate_pair(&[nullify_message, seed_message], certificate)?;
-                round
             }
             VoteContext::Finalize {
                 namespace,
@@ -849,7 +847,6 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                 let seed_message = (Some(seed_ns.as_ref()), seed_bytes.as_ref());
 
                 aggregate_pair(&[finalize_message, seed_message], certificate)?;
-                proposal.round
             }
         };
 

@@ -34,9 +34,6 @@ struct Round<
     R: Reporter<Activity = Activity<S, D>>,
 > {
     participants: Vec<P>,
-    signing: S,
-
-    view: View,
 
     blocker: B,
     reporter: R,
@@ -62,7 +59,6 @@ impl<
         blocker: B,
         reporter: R,
         inbound_messages: Family<Inbound, Counter>,
-        view: View,
         batch: bool,
     ) -> Self {
         // Configure quorum params
@@ -79,9 +75,6 @@ impl<
         // Initialize data structures
         Self {
             participants,
-            signing: signing.clone(),
-
-            view,
 
             blocker,
             reporter,
@@ -445,7 +438,6 @@ impl<
                                     self.blocker.clone(),
                                     self.reporter.clone(),
                                     self.inbound_messages.clone(),
-                                    current,
                                     initialized
                                 )
                             ).set_leader(leader_index as u32);
@@ -501,7 +493,6 @@ impl<
                                     self.blocker.clone(),
                                     self.reporter.clone(),
                                     self.inbound_messages.clone(),
-                                    view,
                                     initialized
                                 )
                             ).add_constructed(message).await;
@@ -552,7 +543,6 @@ impl<
                             self.blocker.clone(),
                             self.reporter.clone(),
                             self.inbound_messages.clone(),
-                            view,
                             initialized
                         )
                     ).add(sender, message).await;
