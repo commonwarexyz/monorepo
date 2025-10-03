@@ -12,6 +12,21 @@ use std::{
 };
 use thiserror::Error;
 
+/// Errors that can occur when interacting with [crate::authenticated::discovery::types].
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("too many peers: {0}")]
+    TooManyPeers(usize),
+    #[error("private IPs not allowed: {0}")]
+    PrivateIPsNotAllowed(IpAddr),
+    #[error("received self")]
+    ReceivedSelf,
+    #[error("invalid signature")]
+    InvalidSignature,
+    #[error("synchrony bound violated")]
+    SynchronyBound,
+}
+
 /// The maximum overhead (in bytes) when encoding a `message` into a [Payload::Data].
 ///
 /// The byte overhead is calculated as the sum of the following:
@@ -144,20 +159,6 @@ impl Read for BitVec {
         let bits = UtilsBitVec::read_cfg(buf, &(..=*max_bits).into())?;
         Ok(Self { index, bits })
     }
-}
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("too many peers: {0}")]
-    TooManyPeers(usize),
-    #[error("private IPs not allowed: {0}")]
-    PrivateIPsNotAllowed(IpAddr),
-    #[error("received self")]
-    ReceivedSelf,
-    #[error("invalid signature")]
-    InvalidSignature,
-    #[error("synchrony bound violated")]
-    SynchronyBound,
 }
 
 /// A signed message from a peer attesting to its own socket address and public key at a given time.
