@@ -83,19 +83,6 @@ where
     }
 }
 
-/// Threshold randomness recovered from consensus certificates.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Seed<V: Variant> {
-    pub round: Round,
-    pub signature: V::Signature,
-}
-
-impl<V: Variant> Seed<V> {
-    fn new(round: Round, signature: V::Signature) -> Self {
-        Seed { round, signature }
-    }
-}
-
 /// Result of verifying a batch of votes.
 pub struct VoteVerification<S: SigningScheme> {
     pub verified: Vec<Vote<S>>,
@@ -494,7 +481,7 @@ impl<V: Variant> BlsThresholdScheme<V> {
 impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
     type Signature = (V::Signature, V::Signature);
     type Certificate = (V::Signature, V::Signature);
-    type Randomness = Seed<V>;
+    type Randomness = (Round, V::Signature);
 
     type SignatureReadCfg = ((), ());
     type CertificateReadCfg = ((), ());
@@ -834,7 +821,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             }
         };
 
-        Ok(Some(Seed::new(round, certificate.1.clone())))
+        Ok(Some((round, certificate.1.clone())))
     }
 
     fn signature_read_cfg() -> Self::SignatureReadCfg {
