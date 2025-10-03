@@ -268,10 +268,10 @@ impl Panicked {
         Fut: Future,
     {
         // Wait for task to complete or panic
-        let panic = self.receiver;
-        pin_mut!(panic);
+        let panicked = self.receiver;
+        pin_mut!(panicked);
         pin_mut!(task);
-        match select(panic, task).await {
+        match select(panicked, task).await {
             Either::Left((panic, task)) => match panic {
                 // If there is a panic, resume the unwind
                 Ok(()) => {
