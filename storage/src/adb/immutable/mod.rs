@@ -209,8 +209,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
-                range: Position::from(*cfg.range.start())
-                    ..=Position::from(*cfg.range.end() + 1) - 1,
+                range: Position::from(cfg.range.start)..Position::from(cfg.range.end + 1),
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
@@ -225,7 +224,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 write_buffer: cfg.db_config.log_write_buffer,
                 buffer_pool: cfg.db_config.buffer_pool.clone(),
             },
-            **cfg.range.start()..=**cfg.range.end(),
+            *cfg.range.start..*cfg.range.end,
         )
         .await?;
 

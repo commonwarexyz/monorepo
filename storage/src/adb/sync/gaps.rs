@@ -13,24 +13,24 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// # Arguments
 ///
-/// * `lower_bound` - The lower bound of the sync range (inclusive)
-/// * `upper_bound` - The upper bound of the sync range (inclusive)
+/// * `range` - The sync range
 /// * `fetched_operations` - Map of start_loc -> operation count for fetched batches
 /// * `outstanding_requests` - Set of start locations for outstanding requests
 /// * `fetch_batch_size` - Expected size of each fetch batch
 ///
 /// # Invariants
 ///
-/// - All start locations in `fetched_operations` are in [lower_bound, upper_bound]
-/// - All start locations in `outstanding_requests` are in [lower_bound, upper_bound]
+/// - All start locations in `fetched_operations` are in `range`
+/// - All start locations in `outstanding_requests` are in `range`
 /// - All operation counts in `fetched_operations` are > 0
 pub fn find_next(
-    lower_bound: Location,
-    upper_bound: Location,
+    range: std::ops::Range<Location>,
     fetched_operations: &BTreeMap<Location, u64>, // start_loc -> operation_count
     outstanding_requests: &BTreeSet<Location>,
     fetch_batch_size: NonZeroU64,
 ) -> Option<(Location, Location)> {
+    let lower_bound = range.start;
+    let upper_bound = range.end - 1; // Convert exclusive end to inclusive for internal logic
     if lower_bound > upper_bound {
         return None;
     }
@@ -138,7 +138,7 @@ mod tests {
 
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -146,7 +146,7 @@ mod tests {
     }; "empty_state_full_range")]
     #[test_case(FindNextTestCase {
         lower_bound: 10,
-        upper_bound: 5,
+        upper_bound: 6,
         fetched_ops: vec![],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -154,7 +154,7 @@ mod tests {
     }; "invalid_bounds")]
     #[test_case(FindNextTestCase {
         lower_bound: 5,
-        upper_bound: 5,
+        upper_bound: 6,
         fetched_ops: vec![],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -162,7 +162,7 @@ mod tests {
     }; "zero_length_range")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![],
         requested_ops: vec![0, 3, 8],
         fetch_batch_size: 5,
@@ -170,7 +170,7 @@ mod tests {
     }; "overlapping_outstanding_requests")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![],
         requested_ops: vec![8],
         fetch_batch_size: 5,
@@ -178,7 +178,7 @@ mod tests {
     }; "outstanding_request_beyond_upper_bound")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![],
         requested_ops: vec![0, 7],
         fetch_batch_size: 4,
@@ -186,7 +186,7 @@ mod tests {
     }; "outstanding_requests_only")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![(0, 1), (2, 1), (4, 1)],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -194,7 +194,7 @@ mod tests {
     }; "single_ops_with_gaps")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![(0, 3)],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -202,7 +202,7 @@ mod tests {
     }; "multi_op_batch_gap_after")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![(0, 1), (1, 1)],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -210,7 +210,7 @@ mod tests {
     }; "adjacent_single_ops")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1)],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -218,7 +218,7 @@ mod tests {
     }; "no_gaps_all_covered_by_fetched_ops")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![],
         requested_ops: vec![2, 5, 8],
         fetch_batch_size: 1,
@@ -226,7 +226,7 @@ mod tests {
     }; "fetch_batch_size_one")]
     #[test_case(FindNextTestCase {
         lower_bound: 5,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![(0, 8)],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -234,7 +234,7 @@ mod tests {
     }; "fetched_ops_starts_before_lower_bound")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 6,
+        upper_bound: 7,
         fetched_ops: vec![(4, 5)],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -242,7 +242,7 @@ mod tests {
     }; "fetched_ops_extends_beyond_upper_bound")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 5,
+        upper_bound: 6,
         fetched_ops: vec![],
         requested_ops: vec![2],
         fetch_batch_size: 100,
@@ -250,7 +250,7 @@ mod tests {
     }; "fetch_batch_size_larger_than_range")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![(0, 5), (8, 3)],
         requested_ops: vec![],
         fetch_batch_size: 5,
@@ -258,7 +258,7 @@ mod tests {
     }; "coverage_exactly_reaches_upper_bound")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 15,
+        upper_bound: 16,
         fetched_ops: vec![(2, 3), (10, 2)],
         requested_ops: vec![6, 13],
         fetch_batch_size: 3,
@@ -266,7 +266,7 @@ mod tests {
     }; "mixed_coverage_gap_at_start")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 15,
+        upper_bound: 16,
         fetched_ops: vec![(0, 2), (8, 2)],
         requested_ops: vec![3, 12],
         fetch_batch_size: 4,
@@ -274,7 +274,7 @@ mod tests {
     }; "mixed_coverage_gap_in_middle")]
     #[test_case(FindNextTestCase {
         lower_bound: 0,
-        upper_bound: 10,
+        upper_bound: 11,
         fetched_ops: vec![(1, 2), (6, 2)],
         requested_ops: vec![3, 8],
         fetch_batch_size: 2,
@@ -292,8 +292,7 @@ mod tests {
             .map(Location::new)
             .collect();
         let result = find_next(
-            Location::new(test_case.lower_bound),
-            Location::new(test_case.upper_bound),
+            Location::new(test_case.lower_bound)..Location::new(test_case.upper_bound),
             &fetched_ops,
             &outstanding_requests,
             NonZeroU64::new(test_case.fetch_batch_size).unwrap(),

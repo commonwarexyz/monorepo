@@ -196,7 +196,7 @@ fn fuzz(input: FuzzInput) {
                     let mut hasher = Standard::<Sha256>::new();
                     let target = sync::Target {
                         root: db.root(&mut hasher),
-                        range: db.inactivity_floor_loc()..=db.op_count() - 1,
+                        range: db.inactivity_floor_loc()..db.op_count(),
                     };
 
                     let wrapped_src = Arc::new(RwLock::new(db));

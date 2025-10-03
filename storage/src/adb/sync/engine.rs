@@ -167,11 +167,10 @@ where
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
-        let (lower_bound, upper_bound) = config.target.range.clone().into_inner();
-        if lower_bound > upper_bound {
+        if config.target.range.is_empty() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
-                lower_bound_pos: lower_bound,
-                upper_bound_pos: upper_bound,
+                lower_bound_pos: config.target.range.start,
+                upper_bound_pos: config.target.range.end,
             }));
         }
 
@@ -204,12 +203,12 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let (start_loc, end_loc) = self.target.range.clone().into_inner();
-        let target_size = end_loc.checked_add(1).unwrap();
+        let target_size = self.target.range.end;
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
         if self.pinned_nodes.is_none() {
+            let start_loc = self.target.range.start;
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
                 start_loc,
@@ -239,8 +238,7 @@ where
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next(
-                Location::new(log_size),
-                end_loc,
+                Location::new(log_size)..self.target.range.end,
                 &operation_counts,
                 self.outstanding_requests.locations(),
                 self.fetch_batch_size,
@@ -369,9 +367,7 @@ where
     /// Check if sync is complete based on the current journal size and target
     pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await?;
-
-        // Calculate the target journal size (upper bound is inclusive)
-        let target_journal_size = *self.target.range.end() + 1;
+        let target_journal_size = self.target.range.end;
 
         // Check if we've completed sync
         if journal_size >= target_journal_size {
@@ -430,7 +426,7 @@ where
 
         if proof_valid {
             // Extract pinned nodes if we don't have them and this is the first batch
-            if self.pinned_nodes.is_none() && start_loc == *self.target.range.start() {
+            if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
                 if let Ok(nodes) =
                     crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
                 {

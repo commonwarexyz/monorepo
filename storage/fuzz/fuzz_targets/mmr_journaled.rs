@@ -377,14 +377,14 @@ fn fuzz(input: FuzzInput) {
 
                     let sync_config = SyncConfig {
                         config: test_config("sync"),
-                        range: safe_lower..=safe_upper,
+                        range: safe_lower..safe_upper,
                         pinned_nodes: None,
                     };
 
                     if let Ok(sync_mmr) =
                         Mmr::<_, Sha256>::init_sync(context.clone(), sync_config).await
                     {
-                        assert!(sync_mmr.size() <= safe_upper + 1);
+                        assert!(sync_mmr.size() <= safe_upper);
                         assert_eq!(sync_mmr.pruned_to_pos(), safe_lower);
                         sync_mmr.destroy().await.unwrap();
                     }

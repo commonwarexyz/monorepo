@@ -6,9 +6,9 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::NZUsize;
-use core::num::NonZeroUsize;
+use core::{num::NonZeroUsize, ops::Range};
 use futures::{pin_mut, StreamExt as _};
-use std::{num::NonZeroU64, ops::RangeInclusive};
+use std::num::NonZeroU64;
 use tracing::debug;
 
 /// The size of the read buffer to use for replaying log operations.
@@ -34,9 +34,8 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 /// # Arguments
 /// - `context`: storage context
 /// - `cfg`: journal configuration
-/// - `lower_bound`: first item location to retain (inclusive)
-/// - `upper_bound`: last item location to retain (inclusive)
 /// - `items_per_section`: number of items per section
+/// - `range`: range of item locations to retain
 ///
 /// # Returns
 /// (journal, size) where:
@@ -50,10 +49,11 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 14);
 pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     context: E,
     cfg: VConfig<V::Cfg>,
-    range: RangeInclusive<u64>,
+    range: Range<u64>,
     items_per_section: NonZeroU64,
 ) -> Result<(VJournal<E, V>, u64), adb::Error> {
-    let (lower_bound, upper_bound) = range.into_inner();
+    let lower_bound = range.start;
+    let upper_bound = range.end;
 
     assert!(
         lower_bound <= upper_bound,
@@ -63,7 +63,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     // Calculate the section ranges based on item locations
     let items_per_section = items_per_section.get();
     let lower_section = lower_bound / items_per_section;
-    let upper_section = upper_bound / items_per_section;
+    let upper_section = (upper_bound - 1) / items_per_section;
 
     debug!(
         lower_bound,
@@ -108,7 +108,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     }
 
     let size = get_size(&journal, items_per_section).await?;
-    if size > upper_bound + 1 {
+    if size > upper_bound {
         return Err(adb::Error::UnexpectedData(Location::new(size)));
     }
 
@@ -162,12 +162,12 @@ mod tests {
 
             // Initialize journal with sync boundaries when no existing data exists
             let lower_bound = 10;
-            let upper_bound = 25;
+            let upper_bound = 26;
             let items_per_section = NZU64!(5);
             let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound..=upper_bound,
+                lower_bound..upper_bound,
                 items_per_section,
             )
             .await
@@ -229,11 +229,11 @@ mod tests {
             // Initialize with sync boundaries that overlap with existing data
             // lower_bound: 8 (section 1), upper_bound: 30 (section 6)
             let lower_bound = 8;
-            let upper_bound = 30;
+            let upper_bound = 31;
             let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound..=upper_bound,
+                lower_bound..upper_bound,
                 items_per_section,
             )
             .await
@@ -300,7 +300,7 @@ mod tests {
             let _result = init_journal::<deterministic::Context, u64>(
                 context.clone(),
                 cfg.clone(),
-                10..=5,    // invalid range: lower > upper
+                10..5,     // invalid range: lower > upper
                 NZU64!(5), // items_per_section
             )
             .await;
@@ -337,11 +337,11 @@ mod tests {
 
             // Initialize with sync boundaries that exactly match existing data
             let lower_bound = 5; // section 1
-            let upper_bound = 19; // section 3
+            let upper_bound = 20; // section 3
             let (journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound..=upper_bound,
+                lower_bound..upper_bound,
                 items_per_section,
             )
             .await
@@ -423,11 +423,11 @@ mod tests {
 
             // Initialize with sync boundaries that are exceeded by existing data
             let lower_bound = 8; // section 1
-            for upper_bound in 9..28 {
+            for upper_bound in 9..29 {
                 let result = init_journal::<deterministic::Context, u64>(
                     context.clone(),
                     cfg.clone(),
-                    lower_bound..=upper_bound,
+                    lower_bound..upper_bound,
                     items_per_section,
                 )
                 .await;
@@ -468,11 +468,11 @@ mod tests {
 
             // Initialize with sync boundaries beyond all existing data
             let lower_bound = 15; // section 3
-            let upper_bound = 25; // section 5
+            let upper_bound = 26; // last element in section 5
             let (journal, size) = init_journal::<deterministic::Context, u64>(
                 context.clone(),
                 cfg.clone(),
-                lower_bound..=upper_bound,
+                lower_bound..upper_bound,
                 items_per_section,
             )
             .await
@@ -522,11 +522,11 @@ mod tests {
 
             // Test sync boundaries exactly at section boundaries
             let lower_bound = 15; // Exactly at section boundary (15/5 = 3)
-            let upper_bound = 24; // Exactly at section boundary (24/5 = 4)
+            let upper_bound = 25; // Last element exactly at section boundary (24/5 = 4)
             let (mut journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound..=upper_bound,
+                lower_bound..upper_bound,
                 items_per_section,
             )
             .await
@@ -595,11 +595,11 @@ mod tests {
 
             // Test sync boundaries within the same section
             let lower_bound = 10; // operation 10 (section 2: 10/5 = 2)
-            let upper_bound = 14; // operation 14 (section 2: 14/5 = 2)
+            let upper_bound = 15; // Last operation 14 (section 2: 14/5 = 2)
             let (journal, size) = init_journal(
                 context.clone(),
                 cfg.clone(),
-                lower_bound..=upper_bound,
+                lower_bound..upper_bound,
                 items_per_section,
             )
             .await
