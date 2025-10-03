@@ -182,27 +182,37 @@ pub struct PeerInfo<C: PublicKey> {
 /// Validate peer gossip payloads against configurability and basic safety checks.
 #[derive(Clone)]
 pub struct PeerInfoVerifier<C: PublicKey> {
+    /// The [PublicKey] of the verifier.
+    me: C,
+
+    /// Whether to allow private IPs.
     allow_private_ips: bool,
+
+    /// The maximum number of [PeerInfo] allowable in a single message.
     peer_gossip_max_count: usize,
+
+    /// The time bound for synchrony. Messages with timestamps greater than this far into the
+    /// future will be considered malformed.
     synchrony_bound: Duration,
-    public_key: C,
+
+    /// The namespace used to sign and verify [PeerInfo] messages.
     ip_namespace: Vec<u8>,
 }
 
 impl<C: PublicKey> PeerInfoVerifier<C> {
     /// Create a new `PeerInfoVerifier` with the provided configuration.
     pub fn new(
+        me: C,
         allow_private_ips: bool,
         peer_gossip_max_count: usize,
         synchrony_bound: Duration,
-        public_key: C,
         ip_namespace: Vec<u8>,
     ) -> Self {
         Self {
+            me,
             allow_private_ips,
             peer_gossip_max_count,
             synchrony_bound,
-            public_key,
             ip_namespace,
         }
     }
@@ -227,7 +237,7 @@ impl<C: PublicKey> PeerInfoVerifier<C> {
             }
 
             // Check if peer is us
-            if info.public_key == self.public_key {
+            if info.public_key == self.me {
                 return Err(Error::ReceivedSelf);
             }
 
@@ -434,17 +444,17 @@ mod tests {
     }
 
     #[test]
-    fn peer_validator_accepts_valid_peer() {
+    fn peer_info_verifier_accepts_valid_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
             let validator = PeerInfoVerifier::new(
+                validator_key.public_key(),
                 false,
                 4,
                 Duration::from_secs(30),
-                validator_key.public_key(),
                 namespace.clone(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
@@ -459,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_validator_rejects_too_many_peers() {
+    fn peer_info_verifier_rejects_too_many_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
@@ -484,10 +494,10 @@ mod tests {
                 vec![peer_a, peer_b]
             };
             let validator = PeerInfoVerifier::new(
+                validator_key.public_key(),
                 true,
                 1,
                 synchrony_bound,
-                validator_key.public_key(),
                 namespace,
             );
             let err = validator.validate(&context, &peers).unwrap_err();
@@ -496,17 +506,17 @@ mod tests {
     }
 
     #[test]
-    fn peer_validator_rejects_private_ips_when_disallowed() {
+    fn peer_info_verifier_rejects_private_ips_when_disallowed() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
             let validator = PeerInfoVerifier::new(
+                validator_key.public_key(),
                 false,
                 4,
                 Duration::from_secs(30),
-                validator_key.public_key(),
                 namespace.clone(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
@@ -522,16 +532,16 @@ mod tests {
     }
 
     #[test]
-    fn peer_validator_rejects_self() {
+    fn peer_info_verifier_rejects_self() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
             let validator = PeerInfoVerifier::new(
+                validator_key.public_key(),
                 true,
                 4,
                 Duration::from_secs(30),
-                validator_key.public_key(),
                 namespace.clone(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
@@ -547,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_validator_rejects_future_timestamp() {
+    fn peer_info_verifier_rejects_future_timestamp() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
@@ -555,10 +565,10 @@ mod tests {
             let namespace = b"namespace".to_vec();
             let synchrony_bound = Duration::from_secs(30);
             let validator = PeerInfoVerifier::new(
+                validator_key.public_key(),
                 true,
                 4,
                 synchrony_bound,
-                validator_key.public_key(),
                 namespace.clone(),
             );
             let future_timestamp =
@@ -576,17 +586,17 @@ mod tests {
     }
 
     #[test]
-    fn peer_validator_rejects_invalid_signature() {
+    fn peer_info_verifier_rejects_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
             let validator = PeerInfoVerifier::new(
+                validator_key.public_key(),
                 true,
                 4,
                 Duration::from_secs(30),
-                validator_key.public_key(),
                 namespace.clone(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;

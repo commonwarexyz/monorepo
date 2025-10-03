@@ -29,7 +29,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
-    peer_validator: PeerInfoVerifier<C>,
+    peer_info_verifier: PeerInfoVerifier<C>,
 
     codec_config: types::Config,
 
@@ -57,7 +57,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
-                peer_validator: cfg.peer_validator,
+                peer_info_verifier: cfg.peer_info_verifier,
                 codec_config: types::Config {
                     max_bit_vec: cfg.max_peer_set_size,
                     max_peers: cfg.peer_gossip_max_count,
@@ -239,7 +239,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         }
                         types::Payload::Peers(peers) => {
                             // Verify all info is valid
-                            self.peer_validator.validate(&context, &peers).map_err(Error::Types)?;
+                            self.peer_info_verifier.validate(&context, &peers).map_err(Error::Types)?;
 
                             // Send peers to tracker
                             tracker.peers(peers);

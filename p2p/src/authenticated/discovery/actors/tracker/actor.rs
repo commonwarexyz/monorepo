@@ -88,12 +88,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         );
 
         // Create peer validator
-        let public_key = cfg.crypto.public_key();
-        let peer_validator = PeerInfoVerifier::new(
+        let peer_info_verifier = PeerInfoVerifier::new(
+            cfg.crypto.public_key(),
             cfg.allow_private_ips,
             cfg.peer_gossip_max_count,
             cfg.synchrony_bound,
-            public_key,
             ip_namespace,
         );
 
@@ -108,7 +107,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             },
             mailbox,
             oracle,
-            peer_validator,
+            peer_info_verifier,
         )
     }
 

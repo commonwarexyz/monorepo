@@ -34,7 +34,7 @@ pub struct Actor<
     max_peer_set_size: usize,
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
-    peer_validator: PeerInfoVerifier<C>,
+    peer_info_verifier: PeerInfoVerifier<C>,
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
 
@@ -84,7 +84,7 @@ impl<
                 max_peer_set_size: cfg.max_peer_set_size,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
-                peer_validator: cfg.peer_validator,
+                peer_info_verifier: cfg.peer_info_verifier,
                 receiver,
                 connections,
                 sent_messages,
@@ -127,7 +127,7 @@ impl<
                         let mut tracker = tracker.clone();
                         let mut router = router.clone();
                         let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
-                        let peer_validator = self.peer_validator.clone();
+                        let peer_info_verifier = self.peer_info_verifier.clone();
                         move |context| async move {
                             // Create peer
                             debug!(?peer, "peer started");
@@ -143,7 +143,7 @@ impl<
                                     max_peer_set_size: self.max_peer_set_size,
                                     allowed_peers_rate: self.allowed_peers_rate,
                                     peer_gossip_max_count: self.peer_gossip_max_count,
-                                    peer_validator,
+                                    peer_info_verifier,
                                 },
                             );
 
