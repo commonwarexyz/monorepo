@@ -1,3 +1,4 @@
+use crate::authenticated::discovery::types::PeerValidator;
 use commonware_cryptography::PublicKey;
 use governor::Quota;
 use std::time::Duration;
@@ -7,8 +8,6 @@ mod ingress;
 
 pub use actor::Actor;
 pub use ingress::Message;
-
-use crate::authenticated::discovery::types::PeerValidator;
 
 /// Configuration for the spawner [Actor].
 pub struct Config<C: PublicKey> {
