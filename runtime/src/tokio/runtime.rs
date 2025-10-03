@@ -350,7 +350,7 @@ impl crate::Runner for Runner {
         };
         let output = executor
             .runtime
-            .block_on(Panicker::handle(panicked, f(context)));
+            .block_on(Panicker::interrupt(panicked, f(context)));
         gauge.dec();
 
         output

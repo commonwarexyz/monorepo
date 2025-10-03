@@ -334,7 +334,7 @@ impl Runner {
 
         // Pin root task to the heap
         let storage = context.storage.clone();
-        let mut root = Box::pin(Panicker::handle(panicked, f(context)));
+        let mut root = Box::pin(Panicker::interrupt(panicked, f(context)));
 
         // Register the root task
         Tasks::register_root(&executor.tasks);

@@ -214,19 +214,22 @@ pub(crate) struct Panicker {
 }
 
 impl Panicker {
+    /// Creates a new [Panicker] with the provided sender.
     pub(crate) fn new(sender: oneshot::Sender<Panic>) -> Self {
         Self {
             sender: Arc::new(Mutex::new(Some(sender))),
         }
     }
 
+    /// Notifies the [Panicker] that a panic has occurred.
     pub(crate) fn notify(&self, panic: Panic) {
         if let Some(sender) = self.sender.lock().unwrap().take() {
             let _ = sender.send(panic);
         }
     }
 
-    pub(crate) async fn handle<Fut>(
+    /// Polls a task that should be interrupted by a panic.
+    pub(crate) async fn interrupt<Fut>(
         panicked: Option<oneshot::Receiver<Panic>>,
         task: Fut,
     ) -> Fut::Output
