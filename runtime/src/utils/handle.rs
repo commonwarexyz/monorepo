@@ -1,7 +1,8 @@
 use crate::{utils::extract_panic_message, Error};
-use commonware_macros::select;
 use futures::{
     channel::oneshot,
+    future::{select, Either},
+    pin_mut,
     stream::{AbortHandle, Abortable},
     FutureExt as _,
 };
@@ -227,24 +228,28 @@ impl Panicker {
 
     pub(crate) async fn handle<Fut>(
         panicked: Option<oneshot::Receiver<Panic>>,
-        future: Fut,
+        task: Fut,
     ) -> Fut::Output
     where
         Fut: Future,
     {
         // Wait for task to complete (if we are catching panics)
         let Some(panicked) = panicked else {
-            return future.await;
+            return task.await;
         };
 
         // Wait for task to complete or panic
-        select! {
-            panic = panicked => {
-                resume_unwind(panic.unwrap());
+        pin_mut!(panicked);
+        pin_mut!(task);
+        match select(panicked, task).await {
+            Either::Left((panic, task)) => match panic {
+                // If the oneshot completes, resume the unwind
+                Ok(panic) => resume_unwind(panic),
+                // If the oneshot closes, wait for the task to complete
+                Err(_) => task.await,
             },
-            output = future => {
-                output
-            },
+            // If the task completes, return the output
+            Either::Right((output, _)) => output,
         }
     }
 }
