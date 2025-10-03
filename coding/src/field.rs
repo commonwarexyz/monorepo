@@ -195,6 +195,83 @@ impl F {
             Self((u64::from(carry) << 63) | (addition >> 1))
         }
     }
+
+    /// Convert a stream of u64s into a stream of field elements.
+    pub fn stream_from_u64s(inner: impl Iterator<Item = u64>) -> impl Iterator<Item = Self> {
+        struct Iter<I> {
+            acc: u128,
+            acc_bits: u32,
+            inner: I,
+        }
+
+        impl<I: Iterator<Item = u64>> Iterator for Iter<I> {
+            type Item = F;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                while self.acc_bits < 63 {
+                    let Some(x) = self.inner.next() else {
+                        break;
+                    };
+                    let x = u128::from(x);
+                    self.acc = self.acc | (x << self.acc_bits);
+                    self.acc_bits += 64;
+                }
+                if self.acc_bits > 0 {
+                    self.acc_bits = self.acc_bits.saturating_sub(63);
+                    let out = F((self.acc as u64) & ((1 << 63) - 1));
+                    self.acc >>= 63;
+                    return Some(out);
+                }
+                None
+            }
+        }
+
+        Iter {
+            acc: 0,
+            acc_bits: 0,
+            inner,
+        }
+    }
+
+    /// Convert a stream produced by [F::stream_from_u64s] back to the original stream.
+    ///
+    /// This may produce a single extra 0 element.
+    pub fn stream_to_u64s(inner: impl Iterator<Item = Self>) -> impl Iterator<Item = u64> {
+        struct Iter<I> {
+            acc: u128,
+            acc_bits: u32,
+            inner: I,
+        }
+
+        impl<I: Iterator<Item = F>> Iterator for Iter<I> {
+            type Item = u64;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                // Try and fill acc with 64 bits of data.
+                while self.acc_bits < 64 {
+                    let Some(F(x)) = self.inner.next() else {
+                        break;
+                    };
+                    // Ignore any upper bits of x
+                    let x = u128::from(x & ((1 << 63) - 1));
+                    self.acc = self.acc | (x << self.acc_bits);
+                    self.acc_bits += 63;
+                }
+                if self.acc_bits > 0 {
+                    self.acc_bits = self.acc_bits.saturating_sub(64);
+                    let out = self.acc as u64;
+                    self.acc >>= 64;
+                    return Some(out);
+                }
+                None
+            }
+        }
+        Iter {
+            acc: 0,
+            acc_bits: 0,
+            inner,
+        }
+    }
 }
 
 impl Add for F {
@@ -269,6 +346,13 @@ mod test {
         any::<u64>().prop_map(F)
     }
 
+    fn test_stream_roundtrip_inner(data: Vec<u64>) {
+        let mut roundtrip =
+            F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter())).collect::<Vec<_>>();
+        roundtrip.truncate(data.len());
+        assert_eq!(data, roundtrip);
+    }
+
     proptest! {
         #[test]
         fn test_add_zero_does_nothing(x in any_f()) {
@@ -317,6 +401,11 @@ mod test {
         #[test]
         fn test_div2(x in any_f()) {
             assert_eq!((x + x).div_2(), x)
+        }
+
+        #[test]
+        fn test_stream_roundtrip(xs in proptest::collection::vec(any::<u64>(), 0..128)) {
+            test_stream_roundtrip_inner(xs);
         }
     }
 }
