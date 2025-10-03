@@ -149,9 +149,14 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// are not aborted when the parent finishes). If you want child supervision to apply, obtain the
     /// `spawn_ref` closure first and then clone/label inside the task:
     ///
-    /// ```ignore
-    /// context.spawn_ref()(async move {
-    ///     context.clone().spawn_child(|_| async move { /* ... */ });
+    /// ```rust
+    /// use commonware_runtime::{deterministic, Runner, Spawner};
+    ///
+    /// let executor = deterministic::Runner::default();
+    /// executor.start(|mut context| async move {
+    ///     context.spawn_ref()(async move {
+    ///         context.clone().spawn_child(|_| async move { /* ... */ });
+    ///     });
     /// });
     /// ```
     fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
