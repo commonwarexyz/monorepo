@@ -1300,7 +1300,6 @@ name = "commonware-macros"
 version = "0.0.62"
 dependencies = [
  "futures",
- "futures-timer",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
