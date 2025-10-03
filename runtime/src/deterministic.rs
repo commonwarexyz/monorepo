@@ -800,6 +800,7 @@ impl Context {
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        // Initialize panicker
         let (panicker, panicked) = if checkpoint.catch_panics {
             (None, None)
         } else {
