@@ -186,13 +186,13 @@ impl<const N: usize> Prunable<N> {
     /// # Panics
     ///
     /// Panics if the chunk is pruned or out of bounds.
-    pub(super) fn set_chunk_by_index(&mut self, raw_chunk_idx: usize, chunk_data: &[u8; N]) {
+    pub(super) fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
         assert!(
-            raw_chunk_idx >= self.pruned_chunks,
-            "cannot set pruned chunk {raw_chunk_idx} (pruned_chunks: {})",
+            chunk_index >= self.pruned_chunks,
+            "cannot set pruned chunk {chunk_index} (pruned_chunks: {})",
             self.pruned_chunks
         );
-        let bitmap_chunk_idx = raw_chunk_idx - self.pruned_chunks;
+        let bitmap_chunk_idx = chunk_index - self.pruned_chunks;
         self.bitmap.set_chunk_by_index(bitmap_chunk_idx, chunk_data);
     }
 

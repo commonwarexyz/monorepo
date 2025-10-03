@@ -399,12 +399,14 @@ impl<const N: usize> Historical<N> {
             target_pruned <= newer_pruned,
             "invariant violation: target_pruned ({target_pruned}) > newer_pruned ({newer_pruned})"
         );
-        for raw_chunk_idx in (target_pruned..newer_pruned).rev() {
-            let Some(ChunkChange::Pruned(chunk)) = diff.changes.get(&raw_chunk_idx) else {
-                panic!("chunk {raw_chunk_idx} should be Pruned in diff");
+        let mut chunks_to_unprune = Vec::with_capacity(newer_pruned - target_pruned);
+        for chunk_index in (target_pruned..newer_pruned).rev() {
+            let Some(ChunkChange::Pruned(chunk)) = diff.changes.get(&chunk_index) else {
+                panic!("chunk {chunk_index} should be Pruned in diff");
             };
-            newer_state.unprune_chunks(&[*chunk]);
+            chunks_to_unprune.push(*chunk);
         }
+        newer_state.unprune_chunks(&chunks_to_unprune);
 
         // Phase 2: Adjust bitmap structure to target length
         if newer_state.len() < target_len {
@@ -414,22 +416,25 @@ impl<const N: usize> Historical<N> {
         }
 
         // Phase 3: Update chunk data
-        for (&raw_chunk_idx, change) in diff
+        for (&chunk_index, change) in diff
             .changes
             .iter()
-            .filter(|(chunk_idx, _)| **chunk_idx >= newer_pruned)
+            .filter(|(chunk_index, _)| **chunk_index >= newer_pruned)
         {
             match change {
                 ChunkChange::Modified(old_data) | ChunkChange::Removed(old_data) => {
                     // Both cases: chunk exists in target, just update its data
-                    newer_state.set_chunk_by_index(raw_chunk_idx, old_data);
+                    newer_state.set_chunk_by_index(chunk_index, old_data);
                 }
                 ChunkChange::Added => {
-                    // Chunk didn't exist in target - already handled by shrinking in Phase 2
+                    // Chunk didn't exist in target - already handled by pop_to_length.
+                    // We can break here because there are no more modifications to apply.
+                    // Added can only occur after all Modified. If we encounter Added, we know
+                    // there are no Removed. (diff.changes can't have both Added and Removed.)
                     break;
                 }
                 ChunkChange::Pruned(_) => {
-                    panic!("pruned chunk {raw_chunk_idx} should have been handled")
+                    panic!("pruned chunk found at unexpected index {chunk_index}")
                 }
             }
         }
@@ -500,22 +505,6 @@ impl<const N: usize> Historical<N> {
         let keys_to_remove: Vec<u64> = self
             .commits
             .range(..commit_number)
-            .map(|(k, _)| *k)
-            .collect();
-        let count = keys_to_remove.len();
-        for key in keys_to_remove {
-            self.commits.remove(&key);
-        }
-        count
-    }
-
-    /// Remove all commits with numbers at or below the commit number.
-    ///
-    /// Returns the number of commits removed.
-    pub fn prune_commits_at_or_below(&mut self, commit_number: u64) -> usize {
-        let keys_to_remove: Vec<u64> = self
-            .commits
-            .range(..=commit_number)
             .map(|(k, _)| *k)
             .collect();
         let count = keys_to_remove.len();
@@ -1393,7 +1382,7 @@ mod tests {
     ///
     /// Covers:
     /// - Monotonic commit number validation
-    /// - Pruning commits (prune_commits_before, prune_commits_at_or_below)
+    /// - Pruning commits (prune_commits_before)
     /// - Commit queries (earliest_commit, latest_commit, commit_exists)
     /// - Clearing all history (clear_history)
     #[test]
@@ -1467,10 +1456,6 @@ mod tests {
         let removed = historical.prune_commits_before(30);
         assert_eq!(removed, 2);
         assert_eq!(historical.commits().count(), 3);
-
-        let removed = historical.prune_commits_at_or_below(40);
-        assert_eq!(removed, 2);
-        assert_eq!(historical.commits().count(), 1);
 
         // Clear history
         historical.clear_history();
