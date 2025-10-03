@@ -1,12 +1,11 @@
-use crate::Block;
-use commonware_cryptography::bls12381::primitives::variant::Variant;
+use crate::{threshold_simplex::new_types::SigningScheme, Block};
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<V: Variant, B: Block> {
-    /// The identity of the network.
-    pub identity: V::Public,
+pub struct Config<S: SigningScheme, B: Block> {
+    /// Signing scheme for the consensus engine.
+    pub signing: S,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,

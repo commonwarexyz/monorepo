@@ -10,13 +10,13 @@ use super::{
 };
 use crate::{
     marshal::ingress::mailbox::Identifier as BlockID,
-    threshold_simplex::types::{Finalization, Notarization},
+    threshold_simplex::new_types::{Finalization, Notarization, SigningScheme},
     types::Round,
     Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
+use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
@@ -57,17 +57,18 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> {
+pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: SigningScheme>
+{
     // ---------- Context ----------
     context: E,
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<V, B>>,
+    mailbox: mpsc::Receiver<Message<S, B>>,
 
     // ---------- Configuration ----------
-    // Identity
-    identity: V::Public,
+    // Signing scheme for the consensus engine
+    signing: S,
     // Mailbox size
     mailbox_size: usize,
     // Unique application namespace
@@ -89,9 +90,9 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, V>,
+    cache: cache::Manager<E, B, S>,
     // Finalizations stored by height
-    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<V, B::Commitment>>,
+    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
     // Finalized blocks stored by height
     finalized_blocks: immutable::Archive<E, B::Commitment, B>,
 
@@ -102,9 +103,11 @@ pub struct Actor<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage
     processed_height: Gauge,
 }
 
-impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant> Actor<B, E, V> {
+impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, S: SigningScheme>
+    Actor<B, E, S>
+{
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<V, B>) -> (Self, Mailbox<V, B>) {
+    pub async fn init(context: E, config: Config<S, B>) -> (Self, Mailbox<S, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -211,7 +214,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
             Self {
                 context,
                 mailbox,
-                identity: config.identity,
+                signing: config.signing,
                 mailbox_size: config.mailbox_size,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
@@ -326,7 +329,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                             self.cache_verified(round, block.commitment(), block).await;
                         }
                         Message::Notarization { notarization } => {
-                            let round = notarization.round();
+                            let round = notarization.proposal.round;
                             let commitment = notarization.proposal.payload;
 
                             // Store notarization by view
@@ -343,7 +346,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                         }
                         Message::Finalization { finalization } => {
                             // Cache finalization by round
-                            let round = finalization.round();
+                            let round = finalization.proposal.round;
                             let commitment = finalization.proposal.payload;
                             self.cache.put_finalization(round, commitment, finalization.clone()).await;
 
@@ -456,7 +459,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 self.cache.prune(prune_round).await;
 
                                 // Update the last processed round
-                                let round = finalization.round();
+                                let round = finalization.proposal.round;
                                 self.last_processed_round = round;
 
                                 // Cancel useless requests
@@ -579,7 +582,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 },
                                 Request::Finalized { height } => {
                                     // Parse finalization
-                                    let Ok((finalization, block)) = <(Finalization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((finalization, block)) = <(Finalization<S, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -587,7 +590,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                     // Validation
                                     if block.height() != height
                                         || finalization.proposal.payload != block.commitment()
-                                        || !finalization.verify(&self.namespace, &self.identity)
+                                        || !finalization.verify(&self.signing, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -600,15 +603,15 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
                                 },
                                 Request::Notarized { round } => {
                                     // Parse notarization
-                                    let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((notarization, block)) = <(Notarization<S, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
 
                                     // Validation
-                                    if notarization.round() != round
+                                    if notarization.proposal.round != round
                                         || notarization.proposal.payload != block.commitment()
-                                        || !notarization.verify(&self.namespace, &self.identity)
+                                        || !notarization.verify(&self.signing, &self.namespace)
                                     {
                                         let _ = response.send(false);
                                         continue;
@@ -681,7 +684,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
     async fn get_finalization_by_height(
         &self,
         height: u64,
-    ) -> Option<Finalization<V, B::Commitment>> {
+    ) -> Option<Finalization<S, B::Commitment>> {
         match self
             .finalizations_by_height
             .get(ArchiveID::Index(height))
@@ -701,7 +704,7 @@ impl<B: Block, E: Rng + Spawner + Metrics + Clock + GClock + Storage, V: Variant
         height: u64,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<V, B::Commitment>>,
+        finalization: Option<Finalization<S, B::Commitment>>,
         notifier: &mut mpsc::Sender<()>,
     ) {
         self.notify_subscribers(commitment, &block).await;
