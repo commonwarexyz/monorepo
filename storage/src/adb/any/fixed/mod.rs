@@ -584,7 +584,7 @@ impl<
     /// since it applies at least one operation.
     async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         // special case for empty db, allowing us to raise the floor to the tip.
-        if self.op_count() == 0 {
+        if self.snapshot.keys() == 0 {
             self.inactivity_floor_loc = self.op_count();
         } else {
             for _ in 0..max_steps {
