@@ -246,9 +246,10 @@ impl Panicker {
         pin_mut!(task);
         match select(panicked, task).await {
             Either::Left((panic, task)) => match panic {
-                // If the oneshot completes, resume the unwind
+                // If there is a panic, resume the unwind
                 Ok(panic) => resume_unwind(panic),
-                // If the oneshot closes, wait for the task to complete
+                // If there can never be a panic (oneshot is closed), wait for the task to complete
+                // and return the output
                 Err(_) => task.await,
             },
             // If the task completes, return the output
