@@ -7,7 +7,7 @@ use super::{
     types,
 };
 use crate::{
-    authenticated::{mailbox::UnboundedMailbox, Mailbox},
+    authenticated::{discovery::types::PeerValidator, mailbox::UnboundedMailbox, Mailbox},
     Channel,
 };
 use commonware_cryptography::Signer;
@@ -38,6 +38,7 @@ pub struct Network<
     tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    peer_validator: PeerValidator<C::PublicKey>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -54,13 +55,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
+        let (tracker, tracker_mailbox, oracle, peer_validator) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 namespace: union(&cfg.namespace, TRACKER_SUFFIX),
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
+                allow_private_ips: cfg.allow_private_ips,
+                synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
@@ -86,6 +89,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracker_mailbox,
                 router,
                 router_mailbox,
+                peer_validator,
             },
             oracle,
         )
@@ -140,10 +144,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 max_peer_set_size: self.cfg.max_peer_set_size,
                 allowed_peers_rate: self.cfg.allowed_peers_rate,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
-                allow_private_ips: self.cfg.allow_private_ips,
-                ip_namespace: union(&self.cfg.namespace, TRACKER_SUFFIX),
-                public_key: self.cfg.crypto.public_key(),
-                synchrony_bound: self.cfg.synchrony_bound,
+                peer_validator: self.peer_validator,
             },
         );
         let mut spawner_task =

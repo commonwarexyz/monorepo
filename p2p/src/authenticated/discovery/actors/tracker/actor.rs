@@ -4,7 +4,10 @@ use super::{
     Config,
 };
 use crate::authenticated::{
-    discovery::{actors::tracker::ingress::Releaser, types},
+    discovery::{
+        actors::tracker::ingress::Releaser,
+        types::{self, PeerValidator},
+    },
     mailbox::UnboundedMailbox,
 };
 use commonware_cryptography::Signer;
@@ -55,6 +58,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         Self,
         UnboundedMailbox<Message<C::PublicKey>>,
         Oracle<C::PublicKey>,
+        PeerValidator<C::PublicKey>,
     ) {
         // Sign my own information
         let socket = cfg.address;
@@ -83,6 +87,16 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             releaser,
         );
 
+        // Create peer validator
+        let public_key = cfg.crypto.public_key();
+        let peer_validator = PeerValidator::new(
+            cfg.allow_private_ips,
+            cfg.peer_gossip_max_count,
+            cfg.synchrony_bound,
+            public_key,
+            ip_namespace,
+        );
+
         (
             Self {
                 context,
@@ -94,6 +108,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             },
             mailbox,
             oracle,
+            peer_validator,
         )
     }
 
@@ -253,6 +268,8 @@ mod tests {
             namespace: b"test_tracker_actor_namespace".to_vec(),
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
+            allow_private_ips: true,
+            synchrony_bound: Duration::from_secs(10),
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
             peer_gossip_max_count: 5,
@@ -337,7 +354,7 @@ mod tests {
         let stored_cfg = cfg_to_clone.clone(); // Clone for storing in harness
 
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
-        let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
+        let (actor, mailbox, oracle, _) = Actor::new(runner_context.clone(), cfg_to_clone);
         let ip_namespace = union(&ip_namespace_base, super::NAMESPACE_SUFFIX_IP);
         runner_context.spawn(|_| actor.run());
 

@@ -1,7 +1,12 @@
 use super::{Config, Error, Message};
 use crate::authenticated::{
     data::Data,
-    discovery::{actors::tracker, channels::Channels, metrics, types},
+    discovery::{
+        actors::tracker,
+        channels::Channels,
+        metrics,
+        types::{self, PeerValidator},
+    },
     mailbox::UnboundedMailbox,
     relay::Relay,
     Mailbox,
@@ -20,15 +25,11 @@ use tracing::{debug, info};
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey + Clone> {
     context: E,
-    public_key: C,
 
-    allow_private_ips: bool,
-    peer_gossip_max_count: usize,
-    ip_namespace: Vec<u8>,
-    synchrony_bound: Duration,
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
+    peer_validator: PeerValidator<C>,
 
     codec_config: types::Config,
 
@@ -52,15 +53,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         (
             Self {
                 context,
-                public_key: cfg.public_key,
-                allow_private_ips: cfg.allow_private_ips,
-                peer_gossip_max_count: cfg.peer_gossip_max_count,
-                ip_namespace: cfg.ip_namespace,
-                synchrony_bound: cfg.synchrony_bound,
                 mailbox: control_sender.clone(),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
+                peer_validator: cfg.peer_validator,
                 codec_config: types::Config {
                     max_bit_vec: cfg.max_peer_set_size,
                     max_peers: cfg.peer_gossip_max_count,
@@ -122,15 +119,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
-
-        // Instantiate peer validator
-        let peer_validator = types::PeerValidator::new(
-            self.allow_private_ips,
-            self.peer_gossip_max_count,
-            self.synchrony_bound,
-            self.public_key,
-            self.ip_namespace,
-        );
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
@@ -251,7 +239,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         }
                         types::Payload::Peers(peers) => {
                             // Verify all info is valid
-                            peer_validator.validate(&context, &peers).map_err(Error::Types)?;
+                            self.peer_validator.validate(&context, &peers).map_err(Error::Types)?;
 
                             // Send peers to tracker
                             tracker.peers(peers);

@@ -8,6 +8,8 @@ mod ingress;
 pub use actor::Actor;
 pub use ingress::Message;
 
+use crate::authenticated::discovery::types::PeerValidator;
+
 /// Configuration for the spawner [Actor].
 pub struct Config<C: PublicKey> {
     pub mailbox_size: usize,
@@ -16,8 +18,5 @@ pub struct Config<C: PublicKey> {
     pub max_peer_set_size: usize,
     pub allowed_peers_rate: Quota,
     pub peer_gossip_max_count: usize,
-    pub allow_private_ips: bool,
-    pub ip_namespace: Vec<u8>,
-    pub public_key: C,
-    pub synchrony_bound: Duration,
+    pub peer_validator: PeerValidator<C>,
 }

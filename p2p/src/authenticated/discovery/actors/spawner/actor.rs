@@ -6,6 +6,7 @@ use crate::authenticated::{
             tracker::{self, Metadata},
         },
         metrics,
+        types::PeerValidator,
     },
     mailbox::UnboundedMailbox,
     Mailbox,
@@ -33,10 +34,7 @@ pub struct Actor<
     max_peer_set_size: usize,
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
-    allow_private_ips: bool,
-    ip_namespace: Vec<u8>,
-    public_key: C,
-    synchrony_bound: Duration,
+    peer_validator: PeerValidator<C>,
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
 
@@ -86,10 +84,7 @@ impl<
                 max_peer_set_size: cfg.max_peer_set_size,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
-                allow_private_ips: cfg.allow_private_ips,
-                ip_namespace: cfg.ip_namespace,
-                public_key: cfg.public_key,
-                synchrony_bound: cfg.synchrony_bound,
+                peer_validator: cfg.peer_validator,
                 receiver,
                 connections,
                 sent_messages,
@@ -132,8 +127,7 @@ impl<
                         let mut tracker = tracker.clone();
                         let mut router = router.clone();
                         let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
-                        let ip_namespace = self.ip_namespace.clone();
-                        let public_key = self.public_key.clone();
+                        let peer_validator = self.peer_validator.clone();
                         move |context| async move {
                             // Create peer
                             debug!(?peer, "peer started");
@@ -143,16 +137,13 @@ impl<
                                     sent_messages,
                                     received_messages,
                                     rate_limited,
-                                    ip_namespace,
-                                    public_key,
-                                    allow_private_ips: self.allow_private_ips,
-                                    synchrony_bound: self.synchrony_bound,
                                     mailbox_size: self.mailbox_size,
                                     gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
                                     allowed_bit_vec_rate: self.allowed_bit_vec_rate,
                                     max_peer_set_size: self.max_peer_set_size,
                                     allowed_peers_rate: self.allowed_peers_rate,
                                     peer_gossip_max_count: self.peer_gossip_max_count,
+                                    peer_validator,
                                 },
                             );
 

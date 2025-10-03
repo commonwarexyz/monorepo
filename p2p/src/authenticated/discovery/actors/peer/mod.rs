@@ -1,6 +1,9 @@
 //! Peer
 
-use crate::authenticated::discovery::{metrics, types};
+use crate::authenticated::discovery::{
+    metrics,
+    types::{self, PeerValidator},
+};
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
 use governor::Quota;
@@ -16,15 +19,12 @@ pub use ingress::Message;
 
 pub struct Config<C: PublicKey> {
     pub mailbox_size: usize,
-    pub synchrony_bound: Duration,
     pub gossip_bit_vec_frequency: Duration,
     pub allowed_bit_vec_rate: Quota,
     pub max_peer_set_size: usize,
     pub allowed_peers_rate: Quota,
     pub peer_gossip_max_count: usize,
-    pub allow_private_ips: bool,
-    pub ip_namespace: Vec<u8>,
-    pub public_key: C,
+    pub peer_validator: PeerValidator<C>,
 
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
