@@ -204,12 +204,12 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let target_size = self.target.range.end().checked_add(1).unwrap();
+        let (start_loc, end_loc) = self.target.range.clone().into_inner();
+        let target_size = end_loc.checked_add(1).unwrap();
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
         if self.pinned_nodes.is_none() {
-            let start_loc = *self.target.range.start();
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
                 start_loc,
@@ -240,7 +240,7 @@ where
             // Find the next gap in the sync range that needs to be fetched.
             let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next(
                 Location::new(log_size),
-                *self.target.range.end(),
+                end_loc,
                 &operation_counts,
                 self.outstanding_requests.locations(),
                 self.fetch_batch_size,
