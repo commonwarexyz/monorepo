@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Panic, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -57,6 +57,7 @@ use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
     net::SocketAddr,
+    panic::resume_unwind,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
@@ -342,8 +343,8 @@ impl Runner {
 
             // Wait for task to complete or panic
             select! {
-                message = panicked => {
-                    panic!("task panicked: {}", message.unwrap());
+                err = panicked => {
+                    resume_unwind(err.unwrap());
                 },
                 output = f(context) => {
                     output
@@ -722,7 +723,7 @@ pub struct Context {
 }
 
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>, Option<oneshot::Receiver<String>>) {
+    fn new(cfg: Config) -> (Self, Arc<Executor>, Option<oneshot::Receiver<Panic>>) {
         // Create a new registry
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
@@ -788,7 +789,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Option<oneshot::Receiver<String>>) {
+    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Option<oneshot::Receiver<Panic>>) {
         // Rebuild metrics
         let mut registry = Registry::default();
         let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);

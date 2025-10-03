@@ -6,6 +6,7 @@ use futures::{
 };
 use prometheus_client::metrics::gauge::Gauge;
 use std::{
+    any::Any,
     future::Future,
     panic::{catch_unwind, AssertUnwindSafe},
     pin::Pin,
@@ -49,13 +50,13 @@ where
             // Handle result
             let result = match result {
                 Ok(result) => Ok(result),
-                Err(err) => {
-                    let message = extract_panic_message(&*err);
-                    error!(?message, "task panicked");
-
+                Err(panic) => {
+                    let err = extract_panic_message(&*panic);
+                    error!(?err, "task panicked");
                     if let Some(panicker) = panicker.as_ref() {
-                        panicker.notify(message);
+                        panicker.notify(panic);
                     }
+
                     Err(Error::Exited)
                 }
             };
@@ -108,13 +109,13 @@ where
                 // Handle result
                 let result = match result {
                     Ok(value) => Ok(value),
-                    Err(err) => {
-                        let message = extract_panic_message(&*err);
-                        error!(?message, "task panicked");
-
+                    Err(panic) => {
+                        let err = extract_panic_message(&*panic);
+                        error!(?err, "task panicked");
                         if let Some(panicker) = panicker.as_ref() {
-                            panicker.notify(message);
+                            panicker.notify(panic);
                         }
+
                         Err(Error::Exited)
                     }
                 };
@@ -201,22 +202,25 @@ impl MetricHandle {
     }
 }
 
+/// A type alias for a panic.
+pub(crate) type Panic = Box<dyn Any + Send + 'static>;
+
 /// Notifies the runtime when a spawned task panics, so it can propagate the failure.
 #[derive(Clone)]
 pub(crate) struct Panicker {
-    sender: Arc<Mutex<Option<oneshot::Sender<String>>>>,
+    sender: Arc<Mutex<Option<oneshot::Sender<Panic>>>>,
 }
 
 impl Panicker {
-    pub(crate) fn new(sender: oneshot::Sender<String>) -> Self {
+    pub(crate) fn new(sender: oneshot::Sender<Panic>) -> Self {
         Self {
             sender: Arc::new(Mutex::new(Some(sender))),
         }
     }
 
-    pub(crate) fn notify(&self, message: String) {
+    pub(crate) fn notify(&self, panic: Panic) {
         if let Some(sender) = self.sender.lock().unwrap().take() {
-            let _ = sender.send(message);
+            let _ = sender.send(panic);
         }
     }
 }

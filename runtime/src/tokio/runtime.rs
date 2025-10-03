@@ -31,6 +31,7 @@ use std::{
     env,
     future::Future,
     net::SocketAddr,
+    panic::resume_unwind,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
@@ -262,7 +263,7 @@ impl crate::Runner for Runner {
         let (panicker, panicked) = if self.cfg.catch_panics {
             (None, None)
         } else {
-            let (panic_tx, panic_rx) = oneshot::channel::<String>();
+            let (panic_tx, panic_rx) = oneshot::channel();
             (Some(Panicker::new(panic_tx)), Some(panic_rx))
         };
 
@@ -356,8 +357,8 @@ impl crate::Runner for Runner {
 
             // Wait for task to complete or panic
             select! {
-                message = panicked => {
-                    panic!("task panicked: {}", message.unwrap());
+                err = panicked => {
+                    resume_unwind(err.unwrap());
                 },
                 output = f(context) => {
                     output
