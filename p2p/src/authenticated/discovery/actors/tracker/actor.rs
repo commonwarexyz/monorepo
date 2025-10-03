@@ -1,7 +1,7 @@
 use super::{
     directory::{self, Directory},
     ingress::{Message, Oracle},
-    Config, Error,
+    Config,
 };
 use crate::authenticated::{
     discovery::{actors::tracker::ingress::Releaser, types},
@@ -9,7 +9,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{union, IpAddrExt, SystemTimeExt};
+use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom, Rng};
@@ -111,47 +111,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         )
     }
 
-    /// Handle an incoming list of peer information.
-    ///
-    /// Returns an error if the list itself or any entries can be considered malformed.
-    fn validate(&mut self, infos: &Vec<types::PeerInfo<C::PublicKey>>) -> Result<(), Error> {
-        // Ensure there aren't too many peers sent
-        if infos.len() > self.peer_gossip_max_count {
-            return Err(Error::TooManyPeers(infos.len()));
-        }
-
-        // We allow peers to be sent in any order when responding to a bit vector (allows
-        // for selecting a random subset of peers when there are too many) and allow
-        // for duplicates (no need to create an additional set to check this)
-        let my_public_key = self.crypto.public_key();
-        for info in infos {
-            // Check if IP is allowed
-            #[allow(unstable_name_collisions)]
-            if !self.allow_private_ips && !info.socket.ip().is_global() {
-                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
-            }
-
-            // Check if peer is us
-            if info.public_key == my_public_key {
-                return Err(Error::ReceivedSelf);
-            }
-
-            // If any timestamp is too far into the future, disconnect from the peer
-            if Duration::from_millis(info.timestamp)
-                > self.context.current().epoch() + self.synchrony_bound
-            {
-                return Err(Error::SynchronyBound);
-            }
-
-            // If any signature is invalid, disconnect from the peer
-            if !info.verify(&self.ip_namespace) {
-                return Err(Error::InvalidSignature);
-            }
-        }
-
-        Ok(())
-    }
-
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
         self.context.spawn_ref()(self.run())
@@ -228,12 +187,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     peer.peers(infos).await;
                 }
             }
-            Message::Peers { peers, mut peer } => {
-                if let Err(e) = self.validate(&peers) {
-                    debug!(error = ?e, "failed to handle peers");
-                    peer.kill().await;
-                    return;
-                }
+            Message::Peers { peers } => {
                 self.directory.update_peers(peers);
             }
             Message::Dialable { responder } => {
@@ -535,46 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_peers_received_self() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let TestHarness {
-                mut mailbox,
-                mut oracle,
-                ip_namespace,
-                tracker_pk,
-                mut tracker_signer,
-                cfg,
-                ..
-            } = setup_actor(context.clone(), cfg_initial);
-
-            let (_, pk1) = new_signer_and_pk(1);
-            oracle
-                .register(0, vec![tracker_pk.clone(), pk1.clone()])
-                .await;
-            context.sleep(Duration::from_millis(10)).await;
-
-            let self_info = new_peer_info(
-                &mut tracker_signer,
-                &ip_namespace,
-                cfg.address,
-                context.current().epoch_millis(),
-                Some(tracker_pk.clone()),
-                false,
-            );
-
-            let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::new(1);
-            mailbox.peers(vec![self_info], peer_mailbox_s1.clone());
-
-            assert!(
-                matches!(peer_receiver_s1.next().await, Some(peer::Message::Kill)),
-                "Peer should be killed for sending tracker's own info"
-            );
-        });
-    }
-
-    #[test]
     fn test_handle_bit_vec_for_unknown_index_sends_no_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -731,7 +645,7 @@ mod tests {
 
             let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::new(1);
             let (peer_mailbox_s2, mut peer_receiver_s2) = Mailbox::new(1);
-            mailbox.peers(vec![pk2_info.clone()], peer_mailbox_s1.clone());
+            mailbox.peers(vec![pk2_info.clone()]);
             context.sleep(Duration::from_millis(10)).await;
 
             let _r1 =
@@ -805,7 +719,7 @@ mod tests {
             let _r2 =
                 connect_to_peer(&mut mailbox, &pk2, &peer_mailbox_s2, &mut peer_receiver_s2).await;
 
-            mailbox.peers(vec![pk2_info_initial.clone()], peer_mailbox_s1.clone());
+            mailbox.peers(vec![pk2_info_initial.clone()]);
             context.sleep(Duration::from_millis(10)).await;
 
             let pk2_info_older = new_peer_info(
@@ -816,7 +730,7 @@ mod tests {
                 Some(pk2.clone()),
                 false,
             );
-            mailbox.peers(vec![pk2_info_older], peer_mailbox_s1.clone());
+            mailbox.peers(vec![pk2_info_older]);
             context.sleep(Duration::from_millis(10)).await;
 
             let mut sorted_set0_peers = peer_set_0_peers.clone();
@@ -967,193 +881,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_kill_on_too_many() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let max_gossip = 2;
-            cfg.peer_gossip_max_count = max_gossip;
-            let TestHarness {
-                mut mailbox,
-                ip_namespace,
-                ..
-            } = setup_actor(context.clone(), cfg);
-
-            let (mut s1, _pk1) = new_signer_and_pk(1);
-            let (_s2, pk2) = new_signer_and_pk(2);
-            let (_s3, pk3) = new_signer_and_pk(3);
-            let (_s4, pk4) = new_signer_and_pk(4);
-
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
-            let infos = vec![
-                new_peer_info(
-                    &mut s1,
-                    &ip_namespace,
-                    SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002),
-                    context.current().epoch_millis(),
-                    Some(pk2),
-                    false,
-                ),
-                new_peer_info(
-                    &mut s1,
-                    &ip_namespace,
-                    SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1003),
-                    context.current().epoch_millis(),
-                    Some(pk3),
-                    false,
-                ),
-                new_peer_info(
-                    &mut s1,
-                    &ip_namespace,
-                    SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1004),
-                    context.current().epoch_millis(),
-                    Some(pk4),
-                    false,
-                ),
-            ];
-            assert!(infos.len() > max_gossip);
-            mailbox.peers(infos, peer_mailbox.clone());
-            assert!(matches!(
-                peer_receiver.next().await,
-                Some(peer::Message::Kill)
-            ));
-        });
-    }
-
-    #[test]
-    fn test_validate_kill_on_private_ip_disallowed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            cfg.allow_private_ips = false;
-            let TestHarness {
-                mut mailbox,
-                ip_namespace,
-                ..
-            } = setup_actor(context.clone(), cfg);
-
-            let (mut s2, pk2) = new_signer_and_pk(2);
-            let private_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-            let info = new_peer_info(
-                &mut s2,
-                &ip_namespace,
-                private_socket,
-                context.current().epoch_millis(),
-                Some(pk2),
-                false,
-            );
-
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
-            mailbox.peers(vec![info], peer_mailbox.clone());
-            assert!(matches!(
-                peer_receiver.next().await,
-                Some(peer::Message::Kill)
-            ));
-        });
-    }
-
-    #[test]
-    fn test_validate_kill_on_synchrony_bound() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let TestHarness {
-                mut mailbox,
-                ip_namespace,
-                cfg,
-                ..
-            } = setup_actor(context.clone(), cfg_initial);
-
-            let (mut s2, pk2) = new_signer_and_pk(2);
-            let far_future_ts =
-                context.current().epoch_millis() + cfg.synchrony_bound.as_millis() as u64 + 1000;
-            let info = new_peer_info(
-                &mut s2,
-                &ip_namespace,
-                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002),
-                far_future_ts,
-                Some(pk2),
-                false,
-            );
-
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
-            mailbox.peers(vec![info], peer_mailbox.clone());
-            assert!(matches!(
-                peer_receiver.next().await,
-                Some(peer::Message::Kill)
-            ));
-        });
-    }
-
-    #[test]
-    fn test_validate_kill_on_invalid_signature() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let TestHarness {
-                mut mailbox,
-                mut oracle,
-                ip_namespace,
-                tracker_pk,
-                ..
-            } = setup_actor(context.clone(), cfg_initial);
-
-            let (_, pk1) = new_signer_and_pk(1);
-            let (mut s2, pk2) = new_signer_and_pk(2);
-            oracle.register(0, vec![tracker_pk, pk1, pk2.clone()]).await;
-            context.sleep(Duration::from_millis(10)).await;
-
-            let info = new_peer_info(
-                &mut s2,
-                &ip_namespace,
-                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002),
-                context.current().epoch_millis(),
-                Some(pk2),
-                true,
-            );
-
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
-            mailbox.peers(vec![info], peer_mailbox.clone());
-            assert!(matches!(
-                peer_receiver.next().await,
-                Some(peer::Message::Kill)
-            ));
-        });
-    }
-
-    #[test]
-    fn test_bitvec_kill_on_length_mismatch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let TestHarness {
-                mut mailbox,
-                mut oracle,
-                tracker_pk,
-                ..
-            } = setup_actor(context.clone(), cfg_initial);
-
-            let (_s1, pk1) = new_signer_and_pk(1);
-            let (_s2, pk2) = new_signer_and_pk(2);
-            oracle
-                .register(0, vec![tracker_pk, pk1.clone(), pk2.clone()])
-                .await;
-            context.sleep(Duration::from_millis(10)).await;
-
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
-            let invalid_bit_vec = types::BitVec {
-                index: 0,
-                bits: UtilsBitVec::ones(2),
-            };
-            mailbox.bit_vec(invalid_bit_vec, peer_mailbox.clone());
-            assert!(matches!(
-                peer_receiver.next().await,
-                Some(peer::Message::Kill)
-            ));
-        });
-    }
-
-    #[test]
     fn test_bit_vec_comprehensive() {
         // Combines and clarifies parts of the old test_bit_vec
         let executor = deterministic::Runner::default();
@@ -1211,7 +938,7 @@ mod tests {
                 Some(peer1_pk.clone()),
                 false,
             );
-            mailbox.peers(vec![peer1_info], peer_mailbox1.clone());
+            mailbox.peers(vec![peer1_info]);
             context.sleep(Duration::from_millis(10)).await;
 
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());

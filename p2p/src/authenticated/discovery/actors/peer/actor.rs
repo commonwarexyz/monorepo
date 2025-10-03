@@ -11,6 +11,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
+use commonware_utils::{IpAddrExt, SystemTimeExt};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -20,7 +21,12 @@ use tracing::{debug, info};
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
+    public_key: C,
 
+    allow_private_ips: bool,
+    peer_gossip_max_count: usize,
+    ip_namespace: Vec<u8>,
+    synchrony_bound: Duration,
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
@@ -40,13 +46,18 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 context,
+                public_key: cfg.public_key,
+                allow_private_ips: cfg.allow_private_ips,
+                peer_gossip_max_count: cfg.peer_gossip_max_count,
+                ip_namespace: cfg.ip_namespace,
+                synchrony_bound: cfg.synchrony_bound,
                 mailbox: control_sender.clone(),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -81,6 +92,46 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             "outbound message on invalid channel"
         );
         Ok(data)
+    }
+
+    /// Handle an incoming list of peer information.
+    ///
+    /// Returns an error if the list itself or any entries can be considered malformed.
+    fn validate_peers(&mut self, infos: &Vec<types::PeerInfo<C>>) -> Result<(), Error> {
+        // Ensure there aren't too many peers sent
+        if infos.len() > self.peer_gossip_max_count {
+            return Err(Error::TooManyPeers(infos.len()));
+        }
+
+        // We allow peers to be sent in any order when responding to a bit vector (allows
+        // for selecting a random subset of peers when there are too many) and allow
+        // for duplicates (no need to create an additional set to check this)
+        for info in infos {
+            // Check if IP is allowed
+            #[allow(unstable_name_collisions)]
+            if !self.allow_private_ips && !info.socket.ip().is_global() {
+                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
+            }
+
+            // Check if peer is us
+            if info.public_key == self.public_key {
+                return Err(Error::ReceivedSelf);
+            }
+
+            // If any timestamp is too far into the future, disconnect from the peer
+            if Duration::from_millis(info.timestamp)
+                > self.context.current().epoch() + self.synchrony_bound
+            {
+                return Err(Error::SynchronyBound);
+            }
+
+            // If any signature is invalid, disconnect from the peer
+            if !info.verify(&self.ip_namespace) {
+                return Err(Error::InvalidSignature);
+            }
+        }
+
+        Ok(())
     }
 
     /// Creates a message from a payload, then sends and increments metrics.
@@ -231,8 +282,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             tracker.bit_vec(bit_vec, self.mailbox.clone());
                         }
                         types::Payload::Peers(peers) => {
+                            // Verify all peer info is valid
+                            for peer in &peers {
+                                if !peer.verify(&self.ip_namespace) {
+                                    debug!(?peer, "invalid peer info");
+                                    return Err(Error::InvalidSignature);
+                                }
+                            }
+
                             // Send peers to tracker
-                            tracker.peers(peers, self.mailbox.clone());
+                            tracker.peers(peers);
                         }
                         types::Payload::Data(data) => {
                             // Send message to client

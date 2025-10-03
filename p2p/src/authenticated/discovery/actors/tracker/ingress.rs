@@ -65,9 +65,6 @@ pub enum Message<C: PublicKey> {
     Peers {
         /// The list of peers received.
         peers: Vec<types::PeerInfo<C>>,
-
-        /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
     },
 
     // ---------- Used by dialer ----------
@@ -143,8 +140,8 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send a `Peers` message to the tracker.
-    pub fn peers(&mut self, peers: Vec<types::PeerInfo<C>>, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Peers { peers, peer }).unwrap();
+    pub fn peers(&mut self, peers: Vec<types::PeerInfo<C>>) {
+        self.send(Message::Peers { peers }).unwrap();
     }
 
     /// Send a `Block` message to the tracker.
