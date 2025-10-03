@@ -87,8 +87,7 @@ where
         let sync_config = Config {
             db_config,
             log: journal,
-            lower_bound: *range.start(),
-            upper_bound: *range.end(),
+            range,
             pinned_nodes,
             apply_batch_size,
         };
@@ -152,19 +151,15 @@ where
     /// Database configuration.
     pub db_config: immutable::Config<T, C>,
 
-    /// The [immutable::Immutable]'s log of operations. It has elements from `lower_bound` to
-    /// `upper_bound`, inclusive. Reports `lower_bound` as its pruning boundary (oldest retained
-    /// operation index).
+    /// The [immutable::Immutable]'s log of operations. It has elements within the range.
+    /// Reports the range start as its pruning boundary (oldest retained operation index).
     pub log: variable::Journal<E, Variable<K, V>>,
 
-    /// Sync lower boundary (inclusive) - operations below this index are pruned.
-    pub lower_bound: Location,
+    /// Sync range - operations outside this range are pruned or not synced.
+    pub range: RangeInclusive<Location>,
 
-    /// Sync upper boundary (inclusive) - operations above this index are not synced.
-    pub upper_bound: Location,
-
-    /// The pinned nodes the MMR needs at the pruning boundary given by
-    /// `lower_bound`, in the order specified by `Proof::nodes_to_pin`.
+    /// The pinned nodes the MMR needs at the pruning boundary (range start), in the order
+    /// specified by `Proof::nodes_to_pin`.
     /// If `None`, the pinned nodes will be computed from the MMR's journal and metadata,
     /// which are expected to have the necessary pinned nodes.
     pub pinned_nodes: Option<Vec<D>>,
