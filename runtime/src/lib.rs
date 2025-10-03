@@ -651,6 +651,32 @@ mod tests {
         result.unwrap();
     }
 
+    fn test_multiple_panics<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        let result = runner.start(|context| async move {
+            let handle1 = context.clone().spawn(|_| async move {
+                panic!("boom 1");
+            });
+            let handle2 = context.clone().spawn(|_| async move {
+                panic!("boom 2");
+            });
+            let handle3 = context.spawn(|_| async move {
+                panic!("boom 3");
+            });
+
+            let (res1, res2, res3) = join!(handle1, handle2, handle3);
+            assert!(matches!(res1, Err(Error::Exited)));
+            assert!(matches!(res2, Err(Error::Exited)));
+            assert!(matches!(res3, Err(Error::Exited)));
+
+            Result::<(), Error>::Ok(())
+        });
+
+        result.unwrap();
+    }
+
     fn test_select<R: Runner>(runner: R) {
         runner.start(|_| async move {
             // Test first branch
@@ -1896,6 +1922,20 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "boom")]
+    fn test_deterministic_multiple_panics() {
+        let executor = deterministic::Runner::default();
+        test_multiple_panics(executor);
+    }
+
+    #[test]
+    fn test_deterministic_multiple_panics_caught() {
+        let cfg = deterministic::Config::default().with_catch_panics(true);
+        let executor = deterministic::Runner::new(cfg);
+        test_multiple_panics(executor);
+    }
+
+    #[test]
     fn test_deterministic_select() {
         let executor = deterministic::Runner::default();
         test_select(executor);
@@ -2170,6 +2210,20 @@ mod tests {
         let cfg = tokio::Config::default().with_catch_panics(true);
         let executor = tokio::Runner::new(cfg);
         test_panic_aborts_spawn(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "boom")]
+    fn test_tokio_multiple_panics() {
+        let executor = tokio::Runner::default();
+        test_multiple_panics(executor);
+    }
+
+    #[test]
+    fn test_tokio_multiple_panics_caught() {
+        let cfg = tokio::Config::default().with_catch_panics(true);
+        let executor = tokio::Runner::new(cfg);
+        test_multiple_panics(executor);
     }
 
     #[test]
