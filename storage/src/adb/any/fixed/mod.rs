@@ -838,7 +838,7 @@ pub(super) mod test {
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
             // Re-opening the DB without a clean shutdown should still recover the correct state.
-            let db = open_db(context.clone()).await;
+            let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(&mut hasher), root);
 
@@ -852,12 +852,16 @@ pub(super) mod test {
             ));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
-            // non-empty db.  TODO: The db does fall further and further behind!
-            /*db.update(d1, d2).await.unwrap();
-            for _ in 1..1000 {
+            // non-empty db.
+            db.update(d1, d2).await.unwrap();
+            for _ in 1..100 {
                 db.commit().await.unwrap();
-                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
-            }*/
+                //assert_eq!(db.op_count() - 1, db.inactivity_floor_loc); //TODO: The db does fall further and further behind!
+            }
+            // Confirm the inactivity floor is raised to tip when the db is empty.
+            db.delete(d1).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
 
             db.destroy().await.unwrap();
         });
