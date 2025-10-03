@@ -7,7 +7,7 @@ use futures::{
 use prometheus_client::metrics::gauge::Gauge;
 use std::{
     future::Future,
-    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    panic::{catch_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Once},
     task::{Context, Poll},
@@ -51,11 +51,11 @@ where
                 Ok(result) => Ok(result),
                 Err(err) => {
                     let message = extract_panic_message(&*err);
+                    error!(?message, "task panicked");
+
                     if let Some(panicker) = panicker.as_ref() {
                         panicker.notify(message);
-                        resume_unwind(err);
                     }
-                    error!(?message, "task panicked");
                     Err(Error::Exited)
                 }
             };
@@ -110,11 +110,11 @@ where
                     Ok(value) => Ok(value),
                     Err(err) => {
                         let message = extract_panic_message(&*err);
+                        error!(?message, "task panicked");
+
                         if let Some(panicker) = panicker.as_ref() {
                             panicker.notify(message);
-                            resume_unwind(err);
                         }
-                        error!(?message, "task panicked");
                         Err(Error::Exited)
                     }
                 };
