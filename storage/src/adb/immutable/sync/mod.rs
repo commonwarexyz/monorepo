@@ -73,7 +73,7 @@ where
     ///
     /// # Returns
     ///
-    /// A [super::Immutable] db populated with the state from the given range, inclusive.
+    /// A [super::Immutable] db populated with the state from the given range.
     /// The pruning boundary is set to the range start.
     async fn from_sync_result(
         context: Self::Context,
@@ -310,7 +310,7 @@ mod tests {
                 fetch_batch_size,
                 target: Target {
                     root: target_root,
-                    range: target_oldest_retained_loc..=(target_op_count - 1), // target_op_count is the count, operations are 0-indexed
+                    range: target_oldest_retained_loc..=target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
@@ -393,7 +393,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    range: target_oldest_retained_loc..=(target_op_count - 1),
+                    range: target_oldest_retained_loc..=target_op_count - 1,
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
