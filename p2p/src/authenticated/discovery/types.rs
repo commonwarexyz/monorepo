@@ -190,7 +190,7 @@ pub struct PeerValidator<C: PublicKey> {
 }
 
 impl<C: PublicKey> PeerValidator<C> {
-    /// Create a new `PeerValidator` with the provided configuration knobs.
+    /// Create a new `PeerValidator` with the provided configuration.
     pub fn new(
         allow_private_ips: bool,
         peer_gossip_max_count: usize,
@@ -207,28 +207,38 @@ impl<C: PublicKey> PeerValidator<C> {
         }
     }
 
-    /// Check the provided peer infos, returning an error for the first violation encountered.
+    /// Handle an incoming list of peer information.
+    ///
+    /// Returns an error if the list itself or any entries can be considered malformed.
     pub fn validate(&self, clock: &impl Clock, infos: &[PeerInfo<C>]) -> Result<(), Error> {
+        // Ensure there aren't too many peers sent
         if infos.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(infos.len()));
         }
 
+        // We allow peers to be sent in any order when responding to a bit vector (allows
+        // for selecting a random subset of peers when there are too many) and allow
+        // for duplicates (no need to create an additional set to check this)
         for info in infos {
+            // Check if IP is allowed
             #[allow(unstable_name_collisions)]
             if !self.allow_private_ips && !info.socket.ip().is_global() {
                 return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
             }
 
+            // Check if peer is us
             if info.public_key == self.public_key {
                 return Err(Error::ReceivedSelf);
             }
 
+            // If any timestamp is too far into the future, disconnect from the peer
             if Duration::from_millis(info.timestamp)
                 > clock.current().epoch() + self.synchrony_bound
             {
                 return Err(Error::SynchronyBound);
             }
 
+            // If any signature is invalid, disconnect from the peer
             if !info.verify(self.ip_namespace.as_ref()) {
                 return Err(Error::InvalidSignature);
             }
