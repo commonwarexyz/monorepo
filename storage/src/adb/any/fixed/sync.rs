@@ -95,11 +95,11 @@ where
         // Build the snapshot from the log.
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        any::fixed::Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
+        any::fixed::Any::<E, K, V, H, T>::build_snapshot_from_log(
             range.start,
             &log,
             &mut snapshot,
-            None,
+            |_, _| {},
         )
         .await?;
 

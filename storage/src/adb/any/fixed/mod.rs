@@ -12,7 +12,6 @@ use crate::{
     index::{Cursor, Index as _, Unordered as Index},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
-        bitmap::Bitmap,
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
@@ -31,10 +30,6 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 pub mod sync;
-
-/// Indicator that the generic parameter N is unused by the call. N is only
-/// needed if the caller is providing the optional bitmap.
-const UNUSED_N: usize = 0;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
@@ -138,13 +133,7 @@ impl<
         let (inactivity_floor_loc, mmr, log) =
             Self::init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        Self::build_snapshot_from_log(
-            inactivity_floor_loc,
-            &log,
-            &mut snapshot,
-            None::<&mut Bitmap<H, UNUSED_N>>,
-        )
-        .await?;
+        Self::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
         let db = Any {
             mmr,
@@ -244,70 +233,41 @@ impl<
 
     /// Builds the database's snapshot by replaying the log starting at the inactivity floor.
     /// Assumes the log and mmr have the same number of operations and are not pruned beyond the
-    /// inactivity floor.
-    ///
-    /// If a bitmap is provided, then a bit is appended for each operation in the operation log,
-    /// with its value reflecting its activity status. The caller is responsible for syncing any
-    /// changes made to the bitmap.
-    pub(crate) async fn build_snapshot_from_log<const N: usize>(
+    /// inactivity floor. The callback is invoked for each replayed operation, indicating activity
+    /// status updates.
+    pub(crate) async fn build_snapshot_from_log<F>(
         inactivity_floor_loc: Location,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, Location>,
-        mut bitmap: Option<&mut Bitmap<H, N>>,
-    ) -> Result<(), Error> {
-        if let Some(ref bitmap) = bitmap {
-            assert_eq!(inactivity_floor_loc, bitmap.bit_count());
-        }
-
+        mut callback: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(bool, Option<Location>),
+    {
         let stream = log
             .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), *inactivity_floor_loc)
             .await?;
         pin_mut!(stream);
+        let last_commit_loc = log.size().await?.saturating_sub(1);
         while let Some(result) = stream.next().await {
             match result {
                 Err(e) => {
                     return Err(Error::Journal(e));
                 }
                 Ok((i, op)) => {
+                    let loc = Location::new(i);
                     match op {
                         Operation::Delete(key) => {
-                            let result = Any::<E, K, V, H, T>::delete_key(
-                                snapshot,
-                                log,
-                                &key,
-                                Location::new(i),
-                            )
-                            .await?;
-                            if let Some(ref mut bitmap) = bitmap {
-                                // Mark previous location (if any) of the deleted key as inactive.
-                                if let Some(old_loc) = result {
-                                    bitmap.set_bit(*old_loc, false);
-                                }
-                            }
+                            let result =
+                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, loc).await?;
+                            callback(false, result);
                         }
                         Operation::Update(key, _) => {
-                            let result = Any::<E, K, V, H, T>::update_loc(
-                                snapshot,
-                                log,
-                                &key,
-                                Location::new(i),
-                            )
-                            .await?;
-                            if let Some(ref mut bitmap) = bitmap {
-                                if let Some(old_loc) = result {
-                                    bitmap.set_bit(*old_loc, false);
-                                }
-                                bitmap.append(true);
-                            }
+                            let result =
+                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, loc).await?;
+                            callback(true, result);
                         }
-                        Operation::CommitFloor(_) => {}
-                    }
-                    if let Some(ref mut bitmap) = bitmap {
-                        // If we reach this point and a bit hasn't been added for the operation, then it's
-                        // an inactive operation and we need to tag it as such in the bitmap.
-                        if bitmap.bit_count() == i {
-                            bitmap.append(false);
-                        }
+                        Operation::CommitFloor(_) => callback(i == last_commit_loc, None),
                     }
                 }
             }
@@ -730,7 +690,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::verify_proof,
-        mmr::{mem::Mmr as MemMmr, StandardHasher as Standard},
+        mmr::{bitmap::Bitmap, mem::Mmr as MemMmr, StandardHasher as Standard},
         translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
@@ -853,8 +813,8 @@ pub(super) mod test {
             let d2 = Sha256::fill(2u8);
             db.update(d1, d2).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), empty_root);
             assert_eq!(db.op_count(), 0);
+            assert_eq!(db.root(&mut hasher), empty_root);
 
             let empty_proof = Proof::default();
             assert!(verify_proof(
@@ -1387,11 +1347,16 @@ pub(super) mod test {
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot = Index::init(context.with_label("snapshot"), TwoCap);
-            AnyTest::build_snapshot_from_log::<SHA256_SIZE>(
+            AnyTest::build_snapshot_from_log(
                 inactivity_floor_loc,
                 &log,
                 &mut snapshot,
-                Some(&mut bitmap),
+                |append, loc| {
+                    bitmap.append(append);
+                    if let Some(loc) = loc {
+                        bitmap.set_bit(*loc, false);
+                    }
+                },
             )
             .await
             .unwrap();
@@ -1429,11 +1394,10 @@ pub(super) mod test {
                 }
             }
             // This loop checks that the expected false bits are false in the bitmap.
-            for pos in *db.inactivity_floor_loc..items {
-                if !active_positions.contains(&pos) {
-                    assert!(!bitmap.get_bit(pos));
-                }
+            for pos in *db.inactivity_floor_loc..items - 1 {
+                assert_eq!(bitmap.get_bit(pos), active_positions.contains(&pos));
             }
+            assert!(bitmap.get_bit(items - 1)); // last commit should always be active
 
             db.destroy().await.unwrap();
         });

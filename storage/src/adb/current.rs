@@ -88,6 +88,8 @@ pub struct Current<
     /// order to further prove whether a key _currently_ has a specific value.
     pub status: Bitmap<H, N>,
 
+    last_commit_loc: Option<Location>,
+
     context: E,
 
     bitmap_metadata_partition: String,
@@ -182,13 +184,24 @@ impl<
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
         let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
-        Any::build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, Some(&mut status))
-            .await
-            .unwrap();
+        Any::<_, _, _, H, _>::build_snapshot_from_log(
+            inactivity_floor_loc,
+            &log,
+            &mut snapshot,
+            |append, loc| {
+                status.append(append);
+                if let Some(loc) = loc {
+                    status.set_bit(*loc, false);
+                }
+            },
+        )
+        .await
+        .unwrap();
         grafter
             .load_grafted_digests(&status.dirty_chunks(), &mmr)
             .await?;
         status.sync(&mut grafter).await?;
+        let last_commit_loc = log.size().await?.checked_sub(1).map(Location::new);
 
         let any = Any {
             mmr,
@@ -202,6 +215,7 @@ impl<
         Ok(Self {
             any,
             status,
+            last_commit_loc,
             context,
             bitmap_metadata_partition: config.bitmap_metadata_partition,
         })
@@ -312,7 +326,12 @@ impl<
         self.any
             .apply_op(Fixed::CommitFloor(self.any.inactivity_floor_loc))
             .await?;
-        self.status.append(false);
+        // Most recent commit operation should be the only one "active".
+        self.status.append(true);
+        if let Some(last_commit_loc) = self.last_commit_loc {
+            self.status.set_bit(*last_commit_loc, false);
+        }
+        self.last_commit_loc = Some(Location::new(self.status.bit_count() - 1));
 
         Ok(())
     }
@@ -797,10 +816,11 @@ pub mod test {
             assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 2 moves, 1 delete.
             assert_eq!(db.root(&mut hasher).await.unwrap(), root2);
 
-            // Confirm all activity bits are false
-            for i in 0..*db.op_count() {
+            // Confirm all activity bits are false except for the last commit.
+            for i in 0..*db.op_count() - 1 {
                 assert!(!db.status.get_bit(i));
             }
+            assert!(db.status.get_bit(*db.op_count() - 1));
 
             db.destroy().await.unwrap();
         });
@@ -1025,9 +1045,13 @@ pub mod test {
                 if !db.status.get_bit(i) {
                     continue;
                 }
-                // Found an active operation! Create a proof for its active current key/value.
+                // Found an active operation! Create a proof for its active current key/value if
+                // it's a key-updating operation.
                 let op = db.any.log.read(i).await.unwrap();
-                let key = op.key().unwrap();
+                let Some(key) = op.key() else {
+                    // Must be the last commit operation which doesn't update a key.
+                    continue;
+                };
                 let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
                 assert_eq!(info.value, *op.value().unwrap());
                 // Proof should validate against the current value and correct root.
