@@ -251,7 +251,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         }
                         types::Payload::Peers(peers) => {
                             // Verify all info is valid
-                            peer_validator.validate(&context, &peers).map_err(Error::InvalidPeerInfo)?;
+                            peer_validator.validate(&context, &peers).map_err(Error::Types)?;
 
                             // Send peers to tracker
                             tracker.peers(peers);

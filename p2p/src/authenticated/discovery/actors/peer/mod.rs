@@ -5,7 +5,7 @@ use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use std::{net::IpAddr, time::Duration};
+use std::time::Duration;
 use thiserror::Error;
 
 mod actor;
@@ -47,6 +47,6 @@ pub enum Error {
     UnexpectedFailure(commonware_runtime::Error),
     #[error("invalid channel")]
     InvalidChannel,
-    #[error("invalid peer info: {0}")]
-    InvalidPeerInfo(types::Error),
+    #[error("types: {0}")]
+    Types(types::Error),
 }
