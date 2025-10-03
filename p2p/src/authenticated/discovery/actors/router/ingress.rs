@@ -4,12 +4,10 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
+use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
+#[derive(Debug)]
 pub enum Message<P: PublicKey> {
     /// Notify the router that a peer is ready to communicate.
     Ready {
@@ -52,13 +50,13 @@ impl<P: PublicKey> Mailbox<Message<P>> {
 #[derive(Clone, Debug)]
 /// Sends messages containing content to the router to send to peers.
 pub struct Messenger<P: PublicKey> {
-    sender: mpsc::Sender<Message<P>>,
+    sender: Mailbox<Message<P>>,
 }
 
 impl<P: PublicKey> Messenger<P> {
     /// Returns a new [Messenger] with the given sender.
     /// (The router has the corresponding receiver.)
-    pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
+    pub fn new(sender: Mailbox<Message<P>>) -> Self {
         Self { sender }
     }
 

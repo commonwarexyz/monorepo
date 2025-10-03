@@ -334,7 +334,7 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
             let supervisor_task = context
                 .clone()
                 .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
@@ -493,7 +493,7 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
             let supervisor_task = context
                 .clone()
                 .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });

@@ -71,7 +71,7 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
         (
             Self {
@@ -88,7 +88,7 @@ impl<
                 received_messages,
                 rate_limited,
             },
-            Mailbox::new(sender),
+            sender,
         )
     }
 

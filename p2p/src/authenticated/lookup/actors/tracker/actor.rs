@@ -192,7 +192,7 @@ mod tests {
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(crypto: C) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
-        let (registered_ips_sender, registered_ips_receiver) = mpsc::channel(1);
+        let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(1);
         (
             Config {
                 crypto,
@@ -200,7 +200,7 @@ mod tests {
                 tracked_peer_sets: 2,
                 allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
                 allow_private_ips: true,
-                listener: Mailbox::new(registered_ips_sender),
+                listener: registered_ips_sender,
             },
             registered_ips_receiver,
         )
@@ -238,7 +238,7 @@ mod tests {
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
 
             // Connect as listener
             mailbox.connect(unauth_pk.clone(), peer_mailbox).await;
@@ -472,7 +472,7 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::test();
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
             mailbox.connect(peer_pk.clone(), peer_mailbox).await;
 
             // 3) Block it → should see exactly one Kill
@@ -531,7 +531,7 @@ mod tests {
             let reservation = mailbox.listen(pk_1.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::test();
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
             mailbox.connect(my_pk.clone(), peer_mailbox).await;
 
             // Register another set which doesn't include first peer

@@ -54,7 +54,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let (listener_mailbox, listener) = mpsc::channel::<HashSet<IpAddr>>(cfg.mailbox_size);
+        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size);
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
@@ -63,7 +63,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
-                listener: Mailbox::new(listener_mailbox),
+                listener: listener_mailbox,
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(

@@ -6,15 +6,8 @@ pub struct Mailbox<T>(mpsc::Sender<T>);
 
 impl<T> Mailbox<T> {
     /// Returns a new mailbox with the given sender.
-    pub fn new(sender: mpsc::Sender<T>) -> Self {
-        Self(sender)
-    }
-
-    /// Returns a new mailbox and the corresponding receiver.
-    /// The capacity of the channel is 1.
-    #[cfg(test)]
-    pub fn test() -> (Self, mpsc::Receiver<T>) {
-        let (sender, receiver) = mpsc::channel(1);
+    pub fn new(size: usize) -> (Self, mpsc::Receiver<T>) {
+        let (sender, receiver) = mpsc::channel(size);
         (Self(sender), receiver)
     }
 }
