@@ -636,27 +636,58 @@ mod tests {
     where
         R::Context: Spawner + Clock,
     {
-        let result = runner.start(|context| async move {
-            let result = context.clone().spawn(|_| async move {
+        runner.start(|context| async move {
+            context.clone().spawn(|_| async move {
                 panic!("blah");
             });
 
-            // Ensure runtime has time to unwind
-            context.sleep(Duration::from_millis(100)).await;
-
-            assert!(matches!(result.await, Err(Error::Exited)));
-            Result::<(), Error>::Ok(())
+            // Loop until panic
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
         });
+    }
 
-        // Ensure panic was caught
-        result.unwrap();
+    fn test_panic_aborts_spawn_caught<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        let result: Result<(), Error> = runner.start(|context| async move {
+            let result = context.clone().spawn(|_| async move {
+                panic!("blah");
+            });
+            result.await
+        });
+        assert!(matches!(result, Err(Error::Exited)));
     }
 
     fn test_multiple_panics<R: Runner>(runner: R)
     where
         R::Context: Spawner + Clock,
     {
-        let result = runner.start(|context| async move {
+        runner.start(|context| async move {
+            context.clone().spawn(|_| async move {
+                panic!("boom 1");
+            });
+            context.clone().spawn(|_| async move {
+                panic!("boom 2");
+            });
+            context.clone().spawn(|_| async move {
+                panic!("boom 3");
+            });
+
+            // Loop until panic
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    fn test_multiple_panics_caught<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        let (res1, res2, res3) = runner.start(|context| async move {
             let handle1 = context.clone().spawn(|_| async move {
                 panic!("boom 1");
             });
@@ -667,18 +698,11 @@ mod tests {
                 panic!("boom 3");
             });
 
-            // Ensure runtime has time to unwind
-            context.sleep(Duration::from_millis(100)).await;
-
-            let (res1, res2, res3) = join!(handle1, handle2, handle3);
-            assert!(matches!(res1, Err(Error::Exited)));
-            assert!(matches!(res2, Err(Error::Exited)));
-            assert!(matches!(res3, Err(Error::Exited)));
-
-            Result::<(), Error>::Ok(())
+            join!(handle1, handle2, handle3)
         });
-
-        result.unwrap();
+        assert!(matches!(res1, Err(Error::Exited)));
+        assert!(matches!(res2, Err(Error::Exited)));
+        assert!(matches!(res3, Err(Error::Exited)));
     }
 
     fn test_select<R: Runner>(runner: R) {
@@ -1635,15 +1659,28 @@ mod tests {
         R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            let handle = context.clone().spawn_blocking(dedicated, |_| {
+            context.clone().spawn_blocking(dedicated, |_| {
                 panic!("blocking task panicked");
             });
 
-            // Ensure runtime has time to unwind
-            context.sleep(Duration::from_millis(100)).await;
-
-            handle.await.unwrap_err();
+            // Loop until panic
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
         });
+    }
+
+    fn test_spawn_blocking_panic_caught<R: Runner>(runner: R, dedicated: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        let result: Result<(), Error> = runner.start(|context| async move {
+            let handle = context.clone().spawn_blocking(dedicated, |_| {
+                panic!("blocking task panicked");
+            });
+            handle.await
+        });
+        assert!(matches!(result, Err(Error::Exited)));
     }
 
     fn test_spawn_blocking_ref<R: Runner>(runner: R, dedicated: bool)
@@ -1935,7 +1972,7 @@ mod tests {
     fn test_deterministic_panic_aborts_spawn_caught() {
         let cfg = deterministic::Config::default().with_catch_panics(true);
         let executor = deterministic::Runner::new(cfg);
-        test_panic_aborts_spawn(executor);
+        test_panic_aborts_spawn_caught(executor);
     }
 
     #[test]
@@ -1949,7 +1986,7 @@ mod tests {
     fn test_deterministic_multiple_panics_caught() {
         let cfg = deterministic::Config::default().with_catch_panics(true);
         let executor = deterministic::Runner::new(cfg);
-        test_multiple_panics(executor);
+        test_multiple_panics_caught(executor);
     }
 
     #[test]
@@ -2119,7 +2156,7 @@ mod tests {
         for dedicated in [false, true] {
             let cfg = deterministic::Config::default().with_catch_panics(true);
             let executor = deterministic::Runner::new(cfg);
-            test_spawn_blocking_panic(executor, dedicated);
+            test_spawn_blocking_panic_caught(executor, dedicated);
         }
     }
 
@@ -2235,7 +2272,7 @@ mod tests {
     fn test_tokio_panic_aborts_spawn_caught() {
         let cfg = tokio::Config::default().with_catch_panics(true);
         let executor = tokio::Runner::new(cfg);
-        test_panic_aborts_spawn(executor);
+        test_panic_aborts_spawn_caught(executor);
     }
 
     #[test]
@@ -2249,7 +2286,7 @@ mod tests {
     fn test_tokio_multiple_panics_caught() {
         let cfg = tokio::Config::default().with_catch_panics(true);
         let executor = tokio::Runner::new(cfg);
-        test_multiple_panics(executor);
+        test_multiple_panics_caught(executor);
     }
 
     #[test]
@@ -2419,7 +2456,7 @@ mod tests {
         for dedicated in [false, true] {
             let cfg = tokio::Config::default().with_catch_panics(true);
             let executor = tokio::Runner::new(cfg);
-            test_spawn_blocking_panic(executor, dedicated);
+            test_spawn_blocking_panic_caught(executor, dedicated);
         }
     }
 
