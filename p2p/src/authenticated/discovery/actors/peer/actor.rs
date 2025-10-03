@@ -43,7 +43,6 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-#[derive(Clone)]
 struct PeerValidator<C> {
     allow_private_ips: bool,
     peer_gossip_max_count: usize,
