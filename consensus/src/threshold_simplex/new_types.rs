@@ -21,7 +21,7 @@ use commonware_cryptography::{
     },
     Digest,
 };
-use std::{collections::BTreeSet, fmt::Debug};
+use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 use thiserror::Error;
 
 /// Errors emitted by signing scheme implementations.
@@ -58,7 +58,7 @@ pub enum VoteContext<'a, D: Digest> {
 }
 
 /// Signed vote emitted by a participant.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Vote<S: SigningScheme> {
     pub signer: u32,
     pub signature: S::Signature,
@@ -104,7 +104,7 @@ impl<S: SigningScheme> Read for Vote<S> {
 }
 
 /// Partial notarize vote carrying the proposal and signatures.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Notarize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
@@ -135,7 +135,7 @@ impl<S: SigningScheme, D: Digest> Read for Notarize<S, D> {
 }
 
 /// Partial nullify vote for a given round.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullify<S: SigningScheme> {
     pub round: Round,
     pub vote: Vote<S>,
@@ -166,7 +166,7 @@ impl<S: SigningScheme> Read for Nullify<S> {
 }
 
 /// Partial finalize vote carrying the proposal and signatures.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Finalize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
@@ -197,7 +197,7 @@ impl<S: SigningScheme, D: Digest> Read for Finalize<S, D> {
 }
 
 /// Aggregated notarization certificate with randomness seed.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Notarization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
@@ -231,7 +231,7 @@ impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
 }
 
 /// Aggregated nullification certificate for a round.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullification<S: SigningScheme> {
     pub round: Round,
     pub certificate: S::Certificate,
@@ -262,7 +262,7 @@ impl<S: SigningScheme> Read for Nullification<S> {
 }
 
 /// Aggregated finalization certificate.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Finalization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
@@ -300,6 +300,8 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
     type Signature: Clone
         + Debug
         + PartialEq
+        + Eq
+        + Hash
         + EncodeSize
         + Write
         + Read<Cfg = Self::SignatureReadCfg>;
@@ -307,6 +309,8 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
     type Certificate: Clone
         + Debug
         + PartialEq
+        + Eq
+        + Hash
         + EncodeSize
         + Write
         + Read<Cfg = Self::CertificateReadCfg>;
@@ -343,6 +347,7 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         certificate: &Self::Certificate,
     ) -> Result<Option<Self::Randomness>, Error>;
 
+    // FIXME: this probably doesn't make sense, only needed for certificates
     fn signature_read_cfg() -> Self::SignatureReadCfg;
     fn certificate_read_cfg() -> Self::CertificateReadCfg;
 }
