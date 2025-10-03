@@ -564,7 +564,7 @@ mod tests {
         });
     }
 
-    /// Test `init_journal` when lower_bound and upper_bound are in the same section.
+    /// Test `init_journal` when range.start and range.end-1 are in the same section.
     #[test_traced]
     fn test_init_journal_same_section_bounds() {
         let executor = deterministic::Runner::default();
