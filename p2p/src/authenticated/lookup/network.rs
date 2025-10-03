@@ -6,7 +6,10 @@ use super::{
     config::Config,
     types,
 };
-use crate::{authenticated::Mailbox, Channel};
+use crate::{
+    authenticated::{mailbox::UnboundedMailbox, Mailbox},
+    Channel,
+};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
@@ -31,7 +34,7 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: Mailbox<tracker::Message<C::PublicKey>>,
+    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
     listener: mpsc::Receiver<HashSet<IpAddr>>,
@@ -57,7 +60,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 address: cfg.dialable,
-                mailbox_size: cfg.mailbox_size,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,

@@ -267,7 +267,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::lookup::actors::tracker::directory::Directory;
+    use crate::authenticated::{
+        lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox,
+    };
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
@@ -280,6 +282,7 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
         let (tx, _rx) = mpsc::unbounded();
+        let tx = UnboundedMailbox::new(tx);
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
