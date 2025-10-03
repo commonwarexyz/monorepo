@@ -447,4 +447,147 @@ mod tests {
             assert!(validator.validate(&context, &[peer]).is_ok());
         });
     }
+
+    #[test]
+    fn peer_validator_rejects_too_many_peers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let namespace = b"namespace".to_vec();
+            let synchrony_bound = Duration::from_secs(30);
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let peers = {
+                let addr_a = SocketAddr::from(([8, 8, 8, 8], 9000));
+                let addr_b = SocketAddr::from(([8, 8, 4, 4], 9001));
+                let peer_a = PeerInfo::sign(
+                    &secp256r1::PrivateKey::from_rng(&mut context),
+                    namespace.as_ref(),
+                    addr_a,
+                    timestamp,
+                );
+                let peer_b = PeerInfo::sign(
+                    &secp256r1::PrivateKey::from_rng(&mut context),
+                    namespace.as_ref(),
+                    addr_b,
+                    timestamp,
+                );
+                vec![peer_a, peer_b]
+            };
+            let validator = PeerValidator::new(
+                true,
+                1,
+                synchrony_bound,
+                validator_key.public_key(),
+                namespace,
+            );
+            let err = validator.validate(&context, &peers).unwrap_err();
+            assert!(matches!(err, Error::TooManyPeers(count) if count == 2));
+        });
+    }
+
+    #[test]
+    fn peer_validator_rejects_private_ips_when_disallowed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let namespace = b"namespace".to_vec();
+            let validator = PeerValidator::new(
+                false,
+                4,
+                Duration::from_secs(30),
+                validator_key.public_key(),
+                namespace.clone(),
+            );
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let peer = PeerInfo::sign(
+                &peer_key,
+                namespace.as_ref(),
+                SocketAddr::from(([192, 168, 1, 1], 8080)),
+                timestamp,
+            );
+            let err = validator.validate(&context, &[peer]).unwrap_err();
+            assert!(matches!(err, Error::PrivateIPsNotAllowed(_)));
+        });
+    }
+
+    #[test]
+    fn peer_validator_rejects_self() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let namespace = b"namespace".to_vec();
+            let validator = PeerValidator::new(
+                true,
+                4,
+                Duration::from_secs(30),
+                validator_key.public_key(),
+                namespace.clone(),
+            );
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let peer = PeerInfo::sign(
+                &validator_key,
+                namespace.as_ref(),
+                SocketAddr::from(([203, 0, 113, 1], 8080)),
+                timestamp,
+            );
+            let err = validator.validate(&context, &[peer]).unwrap_err();
+            assert!(matches!(err, Error::ReceivedSelf));
+        });
+    }
+
+    #[test]
+    fn peer_validator_rejects_future_timestamp() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let namespace = b"namespace".to_vec();
+            let synchrony_bound = Duration::from_secs(30);
+            let validator = PeerValidator::new(
+                true,
+                4,
+                synchrony_bound,
+                validator_key.public_key(),
+                namespace.clone(),
+            );
+            let future_timestamp =
+                (context.current().epoch() + synchrony_bound + Duration::from_secs(1)).as_millis()
+                    as u64;
+            let peer = PeerInfo::sign(
+                &peer_key,
+                namespace.as_ref(),
+                SocketAddr::from(([198, 51, 100, 1], 8080)),
+                future_timestamp,
+            );
+            let err = validator.validate(&context, &[peer]).unwrap_err();
+            assert!(matches!(err, Error::SynchronyBound));
+        });
+    }
+
+    #[test]
+    fn peer_validator_rejects_invalid_signature() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let namespace = b"namespace".to_vec();
+            let validator = PeerValidator::new(
+                true,
+                4,
+                Duration::from_secs(30),
+                validator_key.public_key(),
+                namespace.clone(),
+            );
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let peer = PeerInfo::sign(
+                &peer_key,
+                b"wrong-namespace",
+                SocketAddr::from(([8, 8, 4, 4], 8080)),
+                timestamp,
+            );
+            let err = validator.validate(&context, &[peer]).unwrap_err();
+            assert!(matches!(err, Error::InvalidSignature));
+        });
+    }
 }
