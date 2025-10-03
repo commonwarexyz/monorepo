@@ -4,7 +4,7 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
-    <link rel="icon" href="../favicon.ico" type="image/x-icon">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Scaling Throughput with Ordered Broadcast</title>
     <meta name="description" content="Blockchains require replicating data, like transactions, across nodes in the network—but doing it efficiently and reliably is a challenge. For the last decade, best-effort broadcast has been the norm, relying on consensus to guarantee delivery. The result? Wasted bandwidth by sending the same data multiple times, bottlenecked throughput by routing messages through a single node (the leader in consensus), and degraded performance whenever that node is unresponsive.">
@@ -30,7 +30,7 @@
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@b_chou" />
 
-    <link rel="stylesheet" type="text/css" href="../style.css">
+    <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
 
 <body>
@@ -86,7 +86,7 @@
         <p>Validators acknowledge receipt and validate messages by emitting partial signatures. These partial signatures are aggregated into threshold signatures once a quorum is reached.</p>
         <p>For sequencers, each new message must also carry the threshold signature of the previous message in the sequencer's history. By induction, a single threshold signature provides cryptographic proof of the existence of the entire history of linked messages. That is, each previous message is guaranteed to have been validated by a quorum of validators. Credit goes to <a href="https://arxiv.org/abs/2401.10369">Autobahn</a>, which introduces the idea that certified messages—when linked—imply a complete, valid, and well-replicated history of messages.</p>
         <div class="image-container">
-            <img src="../imgs/ordered-broadcast.png" alt="Sequencer broadcasting messages, linking each to the previous one using threshold signatures.">
+            <img src="/imgs/ordered-broadcast.png" alt="Sequencer broadcasting messages, linking each to the previous one using threshold signatures.">
             <div class="image-caption">Figure 1: A diagram of a sequencer broadcasting messages, linking each to the previous one using threshold signatures. Multiple validators are contributing partial signatures.</div>
         </div>
         <p>The formation of threshold signatures over each message has powerful implications.</p>
@@ -96,7 +96,7 @@
             <li>The threshold signature serves as a pre-consensus receipt of inclusion. Partial signatures are broadcast to all other validators as well as the sequencer, allowing any of these parties to construct the threshold signature. The threshold signature guarantees that the message becomes an immutable part of the sequencer's history, and thus that it will eventually be included in consensus.</li>
         </ol>
         <div class="image-container">
-            <img src="../imgs/broadcast-in-consensus.png" alt="Every block references a set of sequencer tips, each with a threshold signature.">
+            <img src="/imgs/broadcast-in-consensus.png" alt="Every block references a set of sequencer tips, each with a threshold signature.">
             <div class="image-caption">Figure 2: A diagram showing how broadcast messages may be used in consensus. Every block references a set of sequencer tips, each with a threshold signature.</div>
         </div>
         <p><i>consensus::ordered_broadcast</i> also handles set reconfiguration. It is robust in the face of changing participants across epochs—distinct periods when the set of validators and sequencers may change. During changes, the aggregate set of validators must still be able to produce a threshold signature using the same threshold public key. Meanwhile, the set of sequencers may change arbitrarily. For example, the system might modify the number of active sequencers or remove and later reinstate them.</p>
@@ -107,7 +107,7 @@
     </div>
 
     <div id="footer-placeholder"></div>
-    <script src="../shared.js"></script>
+    <script src="/shared.js"></script>
 </body>
 
 </html>

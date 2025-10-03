@@ -4,7 +4,7 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
-    <link rel="icon" href="../favicon.ico" type="image/x-icon">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Binding Timelock Encryption: Only Time Will Tell</title>
     <meta name="description" content="As your parents insisted when you were growing up, good things come to those who wait. It turns out recent advances in cryptography have proven them right.">
@@ -30,7 +30,7 @@
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@_patrickogrady" />
 
-    <link rel="stylesheet" type="text/css" href="../style.css">
+    <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
 
 <body>
@@ -91,22 +91,22 @@
         <h2>BATTLEWARE: Proving BTLE is Practical</h2>
         <p>To demonstrate how to use Binding Timelock Encryption, we built <a href="https://battleware.xyz">BATTLEWARE</a>. BATTLEWARE is an onchain game where players duel each other to climb a global leaderboard (sorted by ELO score). If you've played Pokémon, you'll feel right at home.</p>
         <div class="image-container">
-            <img src="../imgs/battleware-duel.png" alt="A battle between two trainers on BATTLEWARE">
+            <img src="/imgs/battleware-duel.png" alt="A battle between two trainers on BATTLEWARE">
             <div class="image-caption">Figure 1: A battle between two trainers on BATTLEWARE. The opponent (DEVOTE RITUAL) has locked their move for this round but we can't see it yet.</div>
         </div>
         <p>It all starts when you submit a transaction to generate your "creature". The same signature generation mechanism used to power BTLE decryption doubles as the VRF used to randomly generate your creature's appearance, name, and moves.</p>
         <div class="image-container">
-            <img src="../imgs/creature-generation.png" alt="Creature generation process">
+            <img src="/imgs/creature-generation.png" alt="Creature generation process">
             <div class="image-caption">Figure 2: A creature's traits are derived from the hash of your address, nonce, and a seed by the embedded VRF. The output of a VRF is only known after a block has been notarized (or nullified), so a player can't compute the outcome of the generation prior to their transaction's inclusion in a canonical block (under healthy network conditions).</div>
         </div>
         <p>With a creature generated, you can enter the arena for matchmaking. Again using the same VRF, we randomly pair you with some other player (making it a bit more difficult to play yourself to boost your ELO).</p>
         <div class="image-container">
-            <img src="../imgs/matchmaking.png" alt="Matchmaking process">
+            <img src="/imgs/matchmaking.png" alt="Matchmaking process">
             <div class="image-caption">Figure 3: Players submit match requests onchain and after a configurable amount of time has passed or the arena is full, players are paired and battles started.</div>
         </div>
         <p>Once in a battle, you have 15 rounds to defeat your opponent. During each round, both players submit moves encrypted to the view at which the current round will resolve (50 views after matching or the end of the previous round). Once that view is reached, either player can submit the VRF output to decrypt both players' moves and resolve the round. If a player has won, the battle resolves and each player's ELO score is updated. If not, the battle continues to the next round.</p>
         <div class="image-container">
-            <img src="../imgs/timelock-decryption.png" alt="Move submission and settlement">
+            <img src="/imgs/timelock-decryption.png" alt="Move submission and settlement">
             <div class="image-caption">Figure 4: Any player can submit a settle transaction with the VRF output from the end of the round.</div>
         </div>
         <p>To make decryption performant enough for BATTLEWARE, we perform parallel decryption of moves during execution using a BATTLEWARE-specific execution environment.</p>
@@ -115,12 +115,12 @@
         <p>Instead of trusting our API to provide access to game state, we opted to build a pipeline to provide visitors with authenticated access (like we did with <a href="https://alto.commonware.xyz">alto</a>). The big difference here being that BATTLEWARE players need to verify state and events against consensus outputs (rather than just consensus outputs directly).</p>
         <p>To accomplish this, we inject state changes and execution events into our <a href="https://docs.rs/commonware-storage/latest/commonware_storage/adb/index.html">ADBs</a>. We then use <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/aggregation/index.html">consensus::aggregation</a> to generate a threshold signature over the computed roots of each ADB. Because execution relies on the output of a VRF not available during verification, we cannot just use the threshold signature emitted by threshold-simplex (unfortunately).</p>
         <div class="image-container">
-            <img src="../imgs/threshold-roots.png" alt="MMR state management">
+            <img src="/imgs/threshold-roots.png" alt="MMR state management">
             <div class="image-caption">Figure 5: After execution, the State ADB and Events ADB is updated and once wrapped by a threshold signature are pushed to Exoware.</div>
         </div>
         <p>Once a threshold signature is generated, validators then push these computed artifacts to <a href="https://exoware.xyz/">Exoware</a>. On-the-fly, Exoware generates Multi-Proofs over the events that each websocket subscriber is interested in to save bandwidth (the events for your account or the battle you're in).</p>
         <div class="image-container">
-            <img src="../imgs/multi-proof.png" alt="Multi-proof generation">
+            <img src="/imgs/multi-proof.png" alt="Multi-proof generation">
             <div class="image-caption">Figure 6: Instead of sending a full proof and all events for each block, Exoware dynamically generates Multi-Proofs over only the events that matter to the subscriber.</div>
         </div>
         <p>These updates are processed by your browser where you both verify the threshold signature attesting to some set of roots was valid and that there exists a valid proof of your events in the provided root.</p>
@@ -130,7 +130,7 @@
     </div>
 
     <div id="footer-placeholder"></div>
-    <script src="../shared.js"></script>
+    <script src="/shared.js"></script>
 </body>
 
 </html>
