@@ -282,7 +282,6 @@ impl Panicked {
                 // and return the output
                 Err(_) => task.await,
             },
-            // If the task completes, return the output
             Either::Right((output, _)) => {
                 // Check if there is a panic we haven't processed (will always be registered before a task completes)
                 if let Some(panic) = self.inner.lock().unwrap().panic.take() {
