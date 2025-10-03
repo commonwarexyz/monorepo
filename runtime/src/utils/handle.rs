@@ -13,7 +13,7 @@ use std::{
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Once},
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 use tracing::error;
 
@@ -195,34 +195,78 @@ impl MetricHandle {
 }
 
 /// A panic that has occurred in a spawned task.
-struct Panic {
-    sender: Option<oneshot::Sender<()>>,
+struct PanicState {
     panic: Option<Box<dyn Any + Send + 'static>>,
+    triggered: bool,
+    waiter: Option<Waker>,
+}
+
+struct PanicInner {
+    state: Mutex<PanicState>,
+}
+
+impl PanicInner {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(PanicState {
+                panic: None,
+                triggered: false,
+                waiter: None,
+            }),
+        }
+    }
+
+    fn store_panic(&self, panic: Box<dyn Any + Send + 'static>) {
+        let mut state = self.state.lock().unwrap();
+        if state.triggered {
+            return;
+        }
+
+        state.triggered = true;
+        state.panic = Some(panic);
+        let waiter = state.waiter.take();
+        drop(state);
+
+        if let Some(waker) = waiter {
+            waker.wake();
+        }
+    }
+
+    fn register(&self, waker: &Waker) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.triggered {
+            return true;
+        }
+
+        state.waiter = Some(waker.clone());
+        false
+    }
+
+    fn take_panic(&self) -> Option<Box<dyn Any + Send + 'static>> {
+        let mut state = self.state.lock().unwrap();
+        let panic = state.panic.take();
+        state.triggered = false;
+        state.waiter = None;
+        panic
+    }
 }
 
 /// Notifies the runtime when a spawned task panics, so it can propagate the failure.
 #[derive(Clone)]
 pub(crate) struct Panicker {
     catch: bool,
-    inner: Arc<Mutex<Panic>>,
+    inner: Arc<PanicInner>,
 }
 
 impl Panicker {
     /// Creates a new [Panicker].
     pub(crate) fn new(catch: bool) -> (Self, Panicked) {
-        let (sender, receiver) = oneshot::channel();
-        let panic = Arc::new(Mutex::new(Panic {
-            sender: Some(sender),
-            panic: None,
-        }));
+        let inner = Arc::new(PanicInner::new());
         let panicker = Self {
             catch,
-            inner: panic.clone(),
+            inner: inner.clone(),
         };
-        let panicked = Panicked {
-            receiver,
-            inner: panic,
-        };
+        let panicked = Panicked { inner };
         (panicker, panicked)
     }
 
@@ -242,24 +286,15 @@ impl Panicker {
             return;
         }
 
-        // If we've already sent a panic, ignore the new one (we check sender
-        // here because we take panic when handling it)
-        let mut inner = self.inner.lock().unwrap();
-        if inner.sender.is_none() {
-            return;
-        }
-
-        // Store the panic and notify `Panicked`
-        inner.panic = Some(panic);
-        let sender = inner.sender.take().unwrap();
-        let _ = sender.send(());
+        // Record the panic only once, subsequent panics are ignored until the
+        // runtime processes the stored value.
+        self.inner.store_panic(panic);
     }
 }
 
 /// A handle that will be notified when a panic occurs.
 pub(crate) struct Panicked {
-    receiver: oneshot::Receiver<()>,
-    inner: Arc<Mutex<Panic>>,
+    inner: Arc<PanicInner>,
 }
 
 impl Panicked {
@@ -269,29 +304,46 @@ impl Panicked {
         Fut: Future,
     {
         // Wait for task to complete or panic
-        let panicked = self.receiver;
+        let inner = self.inner;
+        let panicked = PanicNotified {
+            inner: inner.clone(),
+        };
         pin_mut!(panicked);
         pin_mut!(task);
         match select(panicked, task).await {
-            Either::Left((panic, task)) => match panic {
+            Either::Left(((), _task)) => {
                 // If there is a panic, resume the unwind
-                Ok(()) => {
-                    let panic = self.inner.lock().unwrap().panic.take().unwrap();
-                    resume_unwind(panic);
-                }
-                // If there can never be a panic (oneshot is closed), wait for the task to complete
-                // and return the output
-                Err(_) => task.await,
-            },
+                let panic = inner
+                    .take_panic()
+                    .expect("panic is always present when notified");
+                resume_unwind(panic);
+            }
             Either::Right((output, _)) => {
                 // Check if there is a panic we haven't processed (will always be registered before a task completes)
-                if let Some(panic) = self.inner.lock().unwrap().panic.take() {
+                if let Some(panic) = inner.take_panic() {
                     resume_unwind(panic);
                 }
 
                 // Return the output
                 output
             }
+        }
+    }
+}
+
+struct PanicNotified {
+    inner: Arc<PanicInner>,
+}
+
+impl Future for PanicNotified {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = &self.get_mut().inner;
+        if inner.register(cx.waker()) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
         }
     }
 }
