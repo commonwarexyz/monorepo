@@ -21,7 +21,7 @@ use commonware_cryptography::{
     },
     Digest,
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Debug};
 use thiserror::Error;
 
 /// Errors emitted by signing scheme implementations.
@@ -58,29 +58,10 @@ pub enum VoteContext<'a, D: Digest> {
 }
 
 /// Signed vote emitted by a participant.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Vote<S: SigningScheme> {
     pub signer: u32,
     pub signature: S::Signature,
-}
-
-impl<S: SigningScheme> Clone for Vote<S> {
-    fn clone(&self) -> Self {
-        Self {
-            signer: self.signer.clone(),
-            signature: self.signature.clone(),
-        }
-    }
-}
-
-impl<S> PartialEq for Vote<S>
-where
-    S: SigningScheme,
-    S::Signature: PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.signer == other.signer && self.signature == other.signature
-    }
 }
 
 /// Result of verifying a batch of votes.
@@ -98,32 +79,20 @@ impl<S: SigningScheme> VoteVerification<S> {
     }
 }
 
-impl<S> Write for Vote<S>
-where
-    S: SigningScheme,
-    S::Signature: Write,
-{
+impl<S: SigningScheme> Write for Vote<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.signer.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S> EncodeSize for Vote<S>
-where
-    S: SigningScheme,
-    S::Signature: EncodeSize,
-{
+impl<S: SigningScheme> EncodeSize for Vote<S> {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S> Read for Vote<S>
-where
-    S: SigningScheme,
-    S::Signature: Read<Cfg = S::SignatureReadCfg>,
-{
+impl<S: SigningScheme> Read for Vote<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -135,41 +104,26 @@ where
 }
 
 /// Partial notarize vote carrying the proposal and signatures.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Notarize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
 }
 
-impl<S, D> Write for Notarize<S, D>
-where
-    S: SigningScheme,
-    S::Signature: Write,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> Write for Notarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.vote.write(writer);
     }
 }
 
-impl<S, D> EncodeSize for Notarize<S, D>
-where
-    S: SigningScheme,
-    S::Signature: EncodeSize,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> EncodeSize for Notarize<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.vote.encode_size()
     }
 }
 
-impl<S, D> Read for Notarize<S, D>
-where
-    S: SigningScheme,
-    S::Signature: Read<Cfg = S::SignatureReadCfg>,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> Read for Notarize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -181,38 +135,26 @@ where
 }
 
 /// Partial nullify vote for a given round.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Nullify<S: SigningScheme> {
     pub round: Round,
     pub vote: Vote<S>,
 }
 
-impl<S> Write for Nullify<S>
-where
-    S: SigningScheme,
-    S::Signature: Write,
-{
+impl<S: SigningScheme> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
         self.vote.write(writer);
     }
 }
 
-impl<S> EncodeSize for Nullify<S>
-where
-    S: SigningScheme,
-    S::Signature: EncodeSize,
-{
+impl<S: SigningScheme> EncodeSize for Nullify<S> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.vote.encode_size()
     }
 }
 
-impl<S> Read for Nullify<S>
-where
-    S: SigningScheme,
-    S::Signature: Read<Cfg = S::SignatureReadCfg>,
-{
+impl<S: SigningScheme> Read for Nullify<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -224,41 +166,26 @@ where
 }
 
 /// Partial finalize vote carrying the proposal and signatures.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Finalize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
 }
 
-impl<S, D> Write for Finalize<S, D>
-where
-    S: SigningScheme,
-    S::Signature: Write,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> Write for Finalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.vote.write(writer);
     }
 }
 
-impl<S, D> EncodeSize for Finalize<S, D>
-where
-    S: SigningScheme,
-    S::Signature: EncodeSize,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> EncodeSize for Finalize<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.vote.encode_size()
     }
 }
 
-impl<S, D> Read for Finalize<S, D>
-where
-    S: SigningScheme,
-    S::Signature: Read<Cfg = S::SignatureReadCfg>,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> Read for Finalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -270,41 +197,26 @@ where
 }
 
 /// Aggregated notarization certificate with randomness seed.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Notarization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
 }
 
-impl<S, D> Write for Notarization<S, D>
-where
-    S: SigningScheme,
-    S::Certificate: Write,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> Write for Notarization<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<S, D> EncodeSize for Notarization<S, D>
-where
-    S: SigningScheme,
-    S::Certificate: EncodeSize,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> EncodeSize for Notarization<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<S, D> Read for Notarization<S, D>
-where
-    S: SigningScheme,
-    S::Certificate: Read<Cfg = S::CertificateReadCfg>,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -319,38 +231,26 @@ where
 }
 
 /// Aggregated nullification certificate for a round.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Nullification<S: SigningScheme> {
     pub round: Round,
     pub certificate: S::Certificate,
 }
 
-impl<S> Write for Nullification<S>
-where
-    S: SigningScheme,
-    S::Certificate: Write,
-{
+impl<S: SigningScheme> Write for Nullification<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<S> EncodeSize for Nullification<S>
-where
-    S: SigningScheme,
-    S::Certificate: EncodeSize,
-{
+impl<S: SigningScheme> EncodeSize for Nullification<S> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<S> Read for Nullification<S>
-where
-    S: SigningScheme,
-    S::Certificate: Read<Cfg = S::CertificateReadCfg>,
-{
+impl<S: SigningScheme> Read for Nullification<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -362,41 +262,26 @@ where
 }
 
 /// Aggregated finalization certificate.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Finalization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
 }
 
-impl<S, D> Write for Finalization<S, D>
-where
-    S: SigningScheme,
-    S::Certificate: Write,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> Write for Finalization<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<S, D> EncodeSize for Finalization<S, D>
-where
-    S: SigningScheme,
-    S::Certificate: EncodeSize,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> EncodeSize for Finalization<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<S, D> Read for Finalization<S, D>
-where
-    S: SigningScheme,
-    S::Certificate: Read<Cfg = S::CertificateReadCfg>,
-    D: Digest,
-{
+impl<S: SigningScheme, D: Digest> Read for Finalization<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -412,8 +297,20 @@ where
 
 /// Trait that signing schemes must implement.
 pub trait SigningScheme: Clone + Send + Sync + 'static {
-    type Signature: Clone + Debug + PartialEq;
-    type Certificate: Clone;
+    type Signature: Clone
+        + Debug
+        + PartialEq
+        + EncodeSize
+        + Write
+        + Read<Cfg = Self::SignatureReadCfg>;
+
+    type Certificate: Clone
+        + Debug
+        + PartialEq
+        + EncodeSize
+        + Write
+        + Read<Cfg = Self::CertificateReadCfg>;
+
     type Randomness;
 
     type SignatureReadCfg;
