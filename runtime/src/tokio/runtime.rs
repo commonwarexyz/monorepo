@@ -357,8 +357,8 @@ impl crate::Runner for Runner {
 
             // Wait for task to complete or panic
             select! {
-                err = panicked => {
-                    resume_unwind(err.unwrap());
+                panic = panicked => {
+                    resume_unwind(panic.unwrap());
                 },
                 output = f(context) => {
                     output

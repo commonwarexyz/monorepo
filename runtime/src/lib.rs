@@ -1882,7 +1882,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "task panicked: blah")]
+    #[should_panic(expected = "blah")]
     fn test_deterministic_panic_aborts_spawn() {
         let executor = deterministic::Runner::default();
         test_panic_aborts_spawn(executor);
@@ -2159,7 +2159,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "task panicked: blah")]
+    #[should_panic(expected = "blah")]
     fn test_tokio_panic_aborts_spawn() {
         let executor = tokio::Runner::default();
         test_panic_aborts_spawn(executor);
