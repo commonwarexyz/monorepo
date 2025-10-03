@@ -43,13 +43,7 @@ pub struct UnboundedMailbox<T>(mpsc::UnboundedSender<T>);
 
 impl<T> UnboundedMailbox<T> {
     /// Returns a new mailbox with the given sender.
-    pub fn new(sender: mpsc::UnboundedSender<T>) -> Self {
-        Self(sender)
-    }
-
-    /// Returns a new mailbox and the corresponding receiver.
-    #[cfg(test)]
-    pub fn test() -> (Self, mpsc::UnboundedReceiver<T>) {
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<T>) {
         let (sender, receiver) = mpsc::unbounded();
         (Self(sender), receiver)
     }

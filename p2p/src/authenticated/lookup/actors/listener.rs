@@ -318,7 +318,7 @@ mod tests {
                 .await
                 .expect("update registered ips");
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::test();
+            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {
@@ -477,7 +477,7 @@ mod tests {
                 updates_rx,
             );
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::test();
+            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
             let tracker_task = context.clone().spawn(|_| async move {
                 while let Some(message) = tracker_rx.next().await {
                     match message {

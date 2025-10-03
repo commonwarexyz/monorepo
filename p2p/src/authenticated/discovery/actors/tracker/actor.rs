@@ -81,8 +81,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         };
 
         // Create the mailboxes
-        let (sender, receiver) = mpsc::unbounded();
-        let mailbox = UnboundedMailbox::new(sender.clone());
+        let (mailbox, receiver) = UnboundedMailbox::new();
         let oracle = Oracle::new(mailbox.clone());
         let releaser = Releaser::new(mailbox.clone());
 

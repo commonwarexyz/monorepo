@@ -273,7 +273,6 @@ mod tests {
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
-    use futures::channel::mpsc;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
@@ -281,8 +280,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
-        let (tx, _rx) = mpsc::unbounded();
-        let tx = UnboundedMailbox::new(tx);
+        let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
