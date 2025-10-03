@@ -128,7 +128,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     select! {
                         _ = context.sleep_until(deadline) => {
                             // Get latest bitset from tracker (also used as ping)
-                            tracker.construct(peer.clone(), mailbox.clone()).await;
+                            tracker.construct(peer.clone(), mailbox.clone());
 
                             // Reset ticker
                             deadline = context.current() + self.gossip_bit_vec_frequency;
@@ -228,11 +228,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     match msg {
                         types::Payload::BitVec(bit_vec) => {
                             // Gather useful peers
-                            tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
+                            tracker.bit_vec(bit_vec, self.mailbox.clone());
                         }
                         types::Payload::Peers(peers) => {
                             // Send peers to tracker
-                            tracker.peers(peers, self.mailbox.clone()).await;
+                            tracker.peers(peers, self.mailbox.clone());
                         }
                         types::Payload::Data(data) => {
                             // Send message to client

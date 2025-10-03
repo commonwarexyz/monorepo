@@ -134,7 +134,7 @@ impl<
                             let channels = router.ready(peer.clone(), messenger).await;
 
                             // Register peer with tracker
-                            tracker.connect(peer.clone(), peer_mailbox).await;
+                            tracker.connect(peer.clone(), peer_mailbox);
 
                             // Run peer
                             let e = peer_actor.run(peer.clone(), connection, channels).await;

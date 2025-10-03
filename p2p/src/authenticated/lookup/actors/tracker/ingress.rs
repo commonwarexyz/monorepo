@@ -85,7 +85,7 @@ pub enum Message<C: PublicKey> {
 
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, peer: Mailbox<peer::Message>) {
+    pub fn connect(&mut self, public_key: C, peer: Mailbox<peer::Message>) {
         self.send(Message::Connect { public_key, peer }).unwrap();
     }
 

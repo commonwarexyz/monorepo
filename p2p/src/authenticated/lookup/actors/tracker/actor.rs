@@ -241,7 +241,7 @@ mod tests {
             let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
 
             // Connect as listener
-            mailbox.connect(unauth_pk.clone(), peer_mailbox).await;
+            mailbox.connect(unauth_pk.clone(), peer_mailbox);
             assert!(
                 matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
                 "Unauthorized peer should be killed on Connect"
@@ -473,7 +473,7 @@ mod tests {
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
-            mailbox.connect(peer_pk.clone(), peer_mailbox).await;
+            mailbox.connect(peer_pk.clone(), peer_mailbox);
 
             // 3) Block it → should see exactly one Kill
             oracle.block(peer_pk.clone()).await;
@@ -532,7 +532,7 @@ mod tests {
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
-            mailbox.connect(my_pk.clone(), peer_mailbox).await;
+            mailbox.connect(my_pk.clone(), peer_mailbox);
 
             // Register another set which doesn't include first peer
             oracle.register(1, vec![(pk_2.clone(), addr_2)]).await;
