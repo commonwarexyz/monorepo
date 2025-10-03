@@ -1779,7 +1779,7 @@ mod tests {
             let original_leaves = mmr.leaves();
             let original_root = mmr.root(&mut hasher);
 
-            // Sync with range.start ≤ existing_size < range.end should reuse data
+            // Sync with range.start ≤ existing_size ≤ range.end should reuse data
             let lower_bound_pos = mmr.pruned_to_pos();
             let upper_bound_pos = mmr.size();
             let mut expected_nodes = BTreeMap::new();
