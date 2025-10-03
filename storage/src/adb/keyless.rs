@@ -604,7 +604,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
-        let end_loc = std::cmp::min(op_count, start_loc.checked_add(max_ops.get()).unwrap());
+        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
         let mmr_size = Position::from(op_count);
         let proof = self
             .mmr

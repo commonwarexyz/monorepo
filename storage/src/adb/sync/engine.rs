@@ -111,6 +111,9 @@ where
     outstanding_requests: Requests<DB::Op, DB::Digest, R::Error>,
 
     /// Operations that have been fetched but not yet applied to the log
+    /// Invariants:
+    /// - All values are non-empty
+    /// - key + value.len() - 1 <= u64::MAX
     fetched_operations: BTreeMap<Location, Vec<DB::Op>>,
 
     /// Pinned MMR nodes extracted from proofs, used for database construction
@@ -205,7 +208,9 @@ where
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
         let (start_loc, end_loc) = self.target.range.clone().into_inner();
-        let target_size = end_loc.checked_add(1).unwrap();
+        let target_size = end_loc
+            .checked_add(1)
+            .ok_or_else(|| adb::Error::Overflow("target end_loc + 1 > u64::MAX"))?;
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
@@ -250,7 +255,10 @@ where
 
             // Calculate batch size for this gap
             let diff = end_loc.checked_sub(start_loc.into()).unwrap();
-            let gap_size = NZU64!(*diff + 1);
+            let gap_size_raw = diff
+                .checked_add(1)
+                .ok_or_else(|| adb::Error::Overflow("end_loc == u64::MAX"))?;
+            let gap_size = NZU64!(*gap_size_raw);
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
@@ -300,7 +308,12 @@ where
     }
 
     /// Store a batch of fetched operations
+    ///
+    /// # Panics
+    ///
+    /// Panics if `operations` is empty.
     pub fn store_operations(&mut self, start_loc: Location, operations: Vec<DB::Op>) {
+        assert!(!operations.is_empty());
         self.fetched_operations.insert(start_loc, operations);
     }
 
@@ -315,7 +328,10 @@ where
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
         self.fetched_operations.retain(|&start_loc, operations| {
-            let end_loc = start_loc.checked_add(operations.len() as u64 - 1).unwrap();
+            assert!(!operations.is_empty());
+            let end_loc = start_loc
+                .checked_add(operations.len() as u64 - 1)
+                .expect("fetched_operations invariant violated: start_loc + operations.len() - 1 > u64::MAX");
             end_loc >= next_loc
         });
 
@@ -327,7 +343,8 @@ where
                     .iter()
                     .find_map(|(range_start, range_ops)| {
                         let range_end =
-                            range_start.checked_add(range_ops.len() as u64 - 1).unwrap();
+                            range_start.checked_add(range_ops.len() as u64 - 1)
+                                .expect("fetched_operations invariant violated: range_start + range_ops.len() - 1 > u64::MAX");
                         if *range_start <= next_loc && next_loc <= range_end {
                             Some(*range_start)
                         } else {
@@ -371,7 +388,12 @@ where
         let journal_size = self.journal.size().await?;
 
         // Calculate the target journal size (upper bound is inclusive)
-        let target_journal_size = *self.target.range.end() + 1;
+        let target_journal_size = self
+            .target
+            .range
+            .end()
+            .checked_add(1)
+            .ok_or_else(|| adb::Error::Overflow("journal size == u64::MAX"))?;
 
         // Check if we've completed sync
         if journal_size >= target_journal_size {

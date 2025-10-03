@@ -55,6 +55,9 @@ pub enum Error {
 
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location),
+
+    #[error("arithmetic overflow: {0}")]
+    Overflow(&'static str),
 }
 
 /// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &

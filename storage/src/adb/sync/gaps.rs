@@ -24,6 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// - All start locations in `fetched_operations` are in [lower_bound, upper_bound]
 /// - All start locations in `outstanding_requests` are in [lower_bound, upper_bound]
 /// - All operation counts in `fetched_operations` are > 0
+/// - `start_loc + operation_count - 1` must not overflow for any entry in `fetched_operations`
+/// - `start_loc + fetch_batch_size - 1` must not overflow for any entry in `outstanding_requests`
 pub fn find_next(
     lower_bound: Location,
     upper_bound: Location,
@@ -41,7 +43,9 @@ pub fn find_next(
     let mut fetched_ops_iter = fetched_operations
         .iter()
         .map(|(&start_loc, &operation_count)| {
-            let end_loc = start_loc.checked_add(operation_count - 1).unwrap();
+            let end_loc = start_loc
+                .checked_add(operation_count - 1)
+                .expect("invariant violation: start_loc + operation_count - 1 > u64::Max");
             (start_loc, end_loc)
         })
         .peekable();
@@ -49,7 +53,9 @@ pub fn find_next(
     let mut outstanding_reqs_iter = outstanding_requests
         .iter()
         .map(|&start_loc| {
-            let end_loc = start_loc.checked_add(fetch_batch_size.get() - 1).unwrap();
+            let end_loc = start_loc
+                .checked_add(fetch_batch_size.get() - 1)
+                .expect("invariant violation: start_loc + fetch_batch_size - 1 > u64::Max");
             (start_loc, end_loc)
         })
         .peekable();

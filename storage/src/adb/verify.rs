@@ -24,9 +24,9 @@ where
 
 /// Extract pinned nodes from the [Proof] starting at `start_loc`.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if `start_loc + operations_len` overflows u64.
+/// Returns an error if `start_loc + operations_len` overflows u64.
 pub fn extract_pinned_nodes<D: Digest>(
     proof: &Proof<D>,
     start_loc: Location,
@@ -34,7 +34,7 @@ pub fn extract_pinned_nodes<D: Digest>(
 ) -> Result<Vec<D>, Error> {
     let end_loc = start_loc
         .checked_add(operations_len)
-        .expect("end_loc overflow");
+        .ok_or(Error::InvalidSize(u64::MAX))?;
     proof.extract_pinned_nodes(start_loc..end_loc)
 }
 
@@ -57,13 +57,20 @@ where
 }
 
 /// Calculate the digests required to construct a [Proof] for a range of operations.
+///
+/// # Note
+///
+/// If `end_loc` is `u64::MAX`, the exclusive end will saturate to `u64::MAX`.
 pub fn digests_required_for_proof<D: Digest>(
     op_count: Location,
     start_loc: Location,
     end_loc: Location,
 ) -> Vec<Position> {
     let mmr_size = Position::from(op_count);
-    proof::nodes_required_for_range_proof(mmr_size, start_loc..end_loc + 1)
+    // Use saturating_add to avoid overflow when end_loc is u64::MAX
+    // In practice, end_loc should never be u64::MAX - 1 since that would mean
+    // we have u64::MAX operations in the database, which is unrealistic.
+    proof::nodes_required_for_range_proof(mmr_size, start_loc..end_loc.saturating_add(1))
 }
 
 /// Create a [Proof] from a op_count and a list of digests.
