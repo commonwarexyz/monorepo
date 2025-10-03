@@ -1,6 +1,6 @@
 //! Peer
 
-use crate::authenticated::discovery::metrics;
+use crate::authenticated::discovery::{metrics, types};
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
 use governor::Quota;
@@ -47,14 +47,6 @@ pub enum Error {
     UnexpectedFailure(commonware_runtime::Error),
     #[error("invalid channel")]
     InvalidChannel,
-    #[error("too many peers: {0}")]
-    TooManyPeers(usize),
-    #[error("private IPs not allowed: {0}")]
-    PrivateIPsNotAllowed(IpAddr),
-    #[error("received self")]
-    ReceivedSelf,
-    #[error("invalid signature")]
-    InvalidSignature,
-    #[error("synchrony bound violated")]
-    SynchronyBound,
+    #[error("invalid peer info: {0}")]
+    InvalidPeerInfo(types::Error),
 }

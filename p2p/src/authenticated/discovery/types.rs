@@ -1,11 +1,16 @@
 use crate::authenticated::data::Data;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
+    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
-use commonware_utils::BitVec as UtilsBitVec;
-use std::net::SocketAddr;
+use commonware_runtime::Clock;
+use commonware_utils::{BitVec as UtilsBitVec, IpAddrExt, SystemTimeExt};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
+use thiserror::Error;
 
 /// The maximum overhead (in bytes) when encoding a `message` into a [Payload::Data].
 ///
@@ -81,7 +86,7 @@ impl<C: PublicKey> Write for Payload<C> {
 impl<C: PublicKey> Read for Payload<C> {
     type Cfg = Config;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             BIT_VEC_PREFIX => {
@@ -98,7 +103,7 @@ impl<C: PublicKey> Read for Payload<C> {
                 let data = Data::read_cfg(buf, &(..).into())?;
                 Ok(Payload::Data(data))
             }
-            _ => Err(Error::Invalid(
+            _ => Err(CodecError::Invalid(
                 "p2p::authenticated::discovery::Payload",
                 "Invalid type",
             )),
@@ -134,11 +139,25 @@ impl Write for BitVec {
 impl Read for BitVec {
     type Cfg = usize;
 
-    fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, CodecError> {
         let index = UInt::read(buf)?.into();
         let bits = UtilsBitVec::read_cfg(buf, &(..=*max_bits).into())?;
         Ok(Self { index, bits })
     }
+}
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("too many peers: {0}")]
+    TooManyPeers(usize),
+    #[error("private IPs not allowed: {0}")]
+    PrivateIPsNotAllowed(IpAddr),
+    #[error("received self")]
+    ReceivedSelf,
+    #[error("invalid signature")]
+    InvalidSignature,
+    #[error("synchrony bound violated")]
+    SynchronyBound,
 }
 
 /// A signed message from a peer attesting to its own socket address and public key at a given time.
@@ -158,6 +177,65 @@ pub struct PeerInfo<C: PublicKey> {
 
     /// The peer's signature over the socket and timestamp.
     pub signature: C::Signature,
+}
+
+/// Validate peer gossip payloads against configurability and basic safety checks.
+#[derive(Clone)]
+pub struct PeerValidator<C: PublicKey> {
+    allow_private_ips: bool,
+    peer_gossip_max_count: usize,
+    synchrony_bound: Duration,
+    public_key: C,
+    ip_namespace: Vec<u8>,
+}
+
+impl<C: PublicKey> PeerValidator<C> {
+    /// Create a new `PeerValidator` with the provided configuration knobs.
+    pub fn new(
+        allow_private_ips: bool,
+        peer_gossip_max_count: usize,
+        synchrony_bound: Duration,
+        public_key: C,
+        ip_namespace: Vec<u8>,
+    ) -> Self {
+        Self {
+            allow_private_ips,
+            peer_gossip_max_count,
+            synchrony_bound,
+            public_key,
+            ip_namespace,
+        }
+    }
+
+    /// Check the provided peer infos, returning an error for the first violation encountered.
+    pub fn validate(&self, clock: &impl Clock, infos: &[PeerInfo<C>]) -> Result<(), Error> {
+        if infos.len() > self.peer_gossip_max_count {
+            return Err(Error::TooManyPeers(infos.len()));
+        }
+
+        for info in infos {
+            #[allow(unstable_name_collisions)]
+            if !self.allow_private_ips && !info.socket.ip().is_global() {
+                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
+            }
+
+            if info.public_key == self.public_key {
+                return Err(Error::ReceivedSelf);
+            }
+
+            if Duration::from_millis(info.timestamp)
+                > clock.current().epoch() + self.synchrony_bound
+            {
+                return Err(Error::SynchronyBound);
+            }
+
+            if !info.verify(self.ip_namespace.as_ref()) {
+                return Err(Error::InvalidSignature);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<C: PublicKey> PeerInfo<C> {
@@ -207,7 +285,7 @@ impl<C: PublicKey> Write for PeerInfo<C> {
 impl<C: PublicKey> Read for PeerInfo<C> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let socket = SocketAddr::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
         let public_key = C::read(buf)?;
@@ -227,6 +305,10 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, DecodeRangeExt};
     use commonware_cryptography::{secp256r1, PrivateKeyExt as _};
+    use commonware_runtime::Clock;
+    use rand::{rngs::StdRng, SeedableRng};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     fn signed_peer_info() -> PeerInfo<secp256r1::PublicKey> {
         let mut rng = rand::thread_rng();
@@ -249,7 +331,7 @@ mod tests {
         assert_eq!(original, decoded);
 
         let too_short = BitVec::decode_cfg(original.encode(), &70);
-        assert!(matches!(too_short, Err(Error::InvalidLength(71))));
+        assert!(matches!(too_short, Err(CodecError::InvalidLength(71))));
     }
 
     #[test]
@@ -265,10 +347,10 @@ mod tests {
         }
 
         let too_short = Vec::<PeerInfo<secp256r1::PublicKey>>::decode_range(original.encode(), ..3);
-        assert!(matches!(too_short, Err(Error::InvalidLength(3))));
+        assert!(matches!(too_short, Err(CodecError::InvalidLength(3))));
 
         let too_long = Vec::<PeerInfo<secp256r1::PublicKey>>::decode_range(original.encode(), 4..);
-        assert!(matches!(too_long, Err(Error::InvalidLength(3))));
+        assert!(matches!(too_long, Err(CodecError::InvalidLength(3))));
     }
 
     #[test]
@@ -341,5 +423,161 @@ mod tests {
             payload.encode_size(),
             message_len + MAX_PAYLOAD_DATA_OVERHEAD
         );
+    }
+
+    #[test]
+    fn peer_validator_accepts_valid_peer() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let validator_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let peer_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let namespace = namespace();
+        let clock = base_clock();
+        let validator = PeerValidator::new(
+            false,
+            4,
+            Duration::from_secs(30),
+            validator_key.public_key(),
+            namespace.clone(),
+        );
+        let timestamp = clock.current().epoch().as_millis() as u64;
+        let peer = PeerInfo::sign(
+            &peer_key,
+            namespace.as_ref(),
+            SocketAddr::from(([8, 8, 8, 8], 8080)),
+            timestamp,
+        );
+        assert!(validator.validate(&clock, &[peer]).is_ok());
+    }
+
+    #[test]
+    fn peer_validator_rejects_too_many_peers() {
+        let mut rng = StdRng::seed_from_u64(2);
+        let validator_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let namespace = namespace();
+        let clock = base_clock();
+        let validator = PeerValidator::new(
+            true,
+            1,
+            Duration::from_secs(30),
+            validator_key.public_key(),
+            namespace.clone(),
+        );
+        let timestamp = clock.current().epoch().as_millis() as u64;
+        let peer_a = PeerInfo::sign(
+            &secp256r1::PrivateKey::from_rng(&mut rng),
+            namespace.as_ref(),
+            SocketAddr::from(([10, 0, 0, 1], 9000)),
+            timestamp,
+        );
+        let peer_b = PeerInfo::sign(
+            &secp256r1::PrivateKey::from_rng(&mut rng),
+            namespace.as_ref(),
+            SocketAddr::from(([10, 0, 0, 2], 9000)),
+            timestamp,
+        );
+        let err = validator.validate(&clock, &[peer_a, peer_b]).unwrap_err();
+        assert!(matches!(err, Error::TooManyPeers(2)));
+    }
+
+    #[test]
+    fn peer_validator_rejects_private_ips_when_disallowed() {
+        let mut rng = StdRng::seed_from_u64(3);
+        let validator_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let peer_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let namespace = namespace();
+        let clock = base_clock();
+        let validator = PeerValidator::new(
+            false,
+            4,
+            Duration::from_secs(30),
+            validator_key.public_key(),
+            namespace.clone(),
+        );
+        let timestamp = clock.current().epoch().as_millis() as u64;
+        let peer = PeerInfo::sign(
+            &peer_key,
+            namespace.as_ref(),
+            SocketAddr::from(([192, 168, 1, 1], 8080)),
+            timestamp,
+        );
+        let err = validator.validate(&clock, &[peer]).unwrap_err();
+        assert!(matches!(err, Error::PrivateIPsNotAllowed(addr) if addr.is_private()));
+    }
+
+    #[test]
+    fn peer_validator_rejects_self() {
+        let mut rng = StdRng::seed_from_u64(4);
+        let validator_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let namespace = namespace();
+        let clock = base_clock();
+        let validator = PeerValidator::new(
+            true,
+            4,
+            Duration::from_secs(30),
+            validator_key.public_key(),
+            namespace.clone(),
+        );
+        let timestamp = clock.current().epoch().as_millis() as u64;
+        let peer = PeerInfo::sign(
+            &validator_key,
+            namespace.as_ref(),
+            SocketAddr::from(([203, 0, 113, 1], 8080)),
+            timestamp,
+        );
+        let err = validator.validate(&clock, &[peer]).unwrap_err();
+        assert!(matches!(err, Error::ReceivedSelf));
+    }
+
+    #[test]
+    fn peer_validator_rejects_future_timestamp() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let validator_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let peer_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let namespace = namespace();
+        let clock = base_clock();
+        let synchrony_bound = Duration::from_secs(30);
+        let validator = PeerValidator::new(
+            true,
+            4,
+            synchrony_bound,
+            validator_key.public_key(),
+            namespace.clone(),
+        );
+        let timestamp =
+            (clock.current().epoch() + synchrony_bound + Duration::from_secs(1)).as_millis() as u64;
+        let peer = PeerInfo::sign(
+            &peer_key,
+            namespace.as_ref(),
+            SocketAddr::from(([198, 51, 100, 1], 8080)),
+            timestamp,
+        );
+        let err = validator.validate(&clock, &[peer]).unwrap_err();
+        assert!(matches!(err, Error::SynchronyBound));
+    }
+
+    #[test]
+    fn peer_validator_rejects_invalid_signature() {
+        let mut rng = StdRng::seed_from_u64(6);
+        let validator_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let peer_key = secp256r1::PrivateKey::from_rng(&mut rng);
+        let namespace = namespace();
+        let wrong_namespace = Arc::from(b"wrong".to_vec());
+        let clock = base_clock();
+        let validator = PeerValidator::new(
+            true,
+            4,
+            Duration::from_secs(30),
+            validator_key.public_key(),
+            namespace.clone(),
+        );
+        let timestamp = clock.current().epoch().as_millis() as u64;
+        let peer = PeerInfo::sign(
+            &peer_key,
+            wrong_namespace.as_ref(),
+            SocketAddr::from(([8, 8, 4, 4], 8080)),
+            timestamp,
+        );
+        let err = validator.validate(&clock, &[peer]).unwrap_err();
+        assert!(matches!(err, Error::InvalidSignature));
     }
 }

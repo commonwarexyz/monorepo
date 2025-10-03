@@ -11,7 +11,6 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
-use commonware_utils::{IpAddrExt, SystemTimeExt};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -19,7 +18,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey + Clone> {
     context: E,
     public_key: C,
 
@@ -43,73 +42,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-struct PeerValidator<C> {
-    allow_private_ips: bool,
-    peer_gossip_max_count: usize,
-    synchrony_bound: Duration,
-    public_key: C,
-    ip_namespace: Vec<u8>,
-}
-
-impl<C: PublicKey> PeerValidator<C> {
-    fn new(
-        allow_private_ips: bool,
-        peer_gossip_max_count: usize,
-        synchrony_bound: Duration,
-        public_key: C,
-        ip_namespace: Vec<u8>,
-    ) -> Self {
-        Self {
-            allow_private_ips,
-            peer_gossip_max_count,
-            synchrony_bound,
-            public_key,
-            ip_namespace,
-        }
-    }
-
-    /// Handle an incoming list of peer information.
-    ///
-    /// Returns an error if the list itself or any entries can be considered malformed.
-    fn validate(&self, clock: &impl Clock, infos: &[types::PeerInfo<C>]) -> Result<(), Error> {
-        // Ensure there aren't too many peers sent
-        if infos.len() > self.peer_gossip_max_count {
-            return Err(Error::TooManyPeers(infos.len()));
-        }
-
-        // We allow peers to be sent in any order when responding to a bit vector (allows
-        // for selecting a random subset of peers when there are too many) and allow
-        // for duplicates (no need to create an additional set to check this)
-        for info in infos {
-            // Check if IP is allowed
-            #[allow(unstable_name_collisions)]
-            if !self.allow_private_ips && !info.socket.ip().is_global() {
-                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
-            }
-
-            // Check if peer is us
-            if info.public_key == self.public_key {
-                return Err(Error::ReceivedSelf);
-            }
-
-            // If any timestamp is too far into the future, disconnect from the peer
-            if Duration::from_millis(info.timestamp)
-                > clock.current().epoch() + self.synchrony_bound
-            {
-                return Err(Error::SynchronyBound);
-            }
-
-            // If any signature is invalid, disconnect from the peer
-            if !info.verify(&self.ip_namespace) {
-                return Err(Error::InvalidSignature);
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey + Clone>
     Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
@@ -191,7 +124,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         let rate_limits = Arc::new(rate_limits);
 
         // Instantiate peer validator
-        let peer_validator = PeerValidator::new(
+        let peer_validator = types::PeerValidator::new(
             self.allow_private_ips,
             self.peer_gossip_max_count,
             self.synchrony_bound,
@@ -318,7 +251,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         }
                         types::Payload::Peers(peers) => {
                             // Verify all info is valid
-                            peer_validator.validate(&context, &peers)?;
+                            peer_validator.validate(&context, &peers).map_err(Error::InvalidPeerInfo)?;
 
                             // Send peers to tracker
                             tracker.peers(peers);
