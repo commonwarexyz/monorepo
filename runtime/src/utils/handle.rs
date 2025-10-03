@@ -1,4 +1,5 @@
 use crate::{utils::extract_panic_message, Error};
+use commonware_macros::select;
 use futures::{
     channel::oneshot,
     stream::{AbortHandle, Abortable},
@@ -8,7 +9,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use std::{
     any::Any,
     future::Future,
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Once},
     task::{Context, Poll},
@@ -221,6 +222,29 @@ impl Panicker {
     pub(crate) fn notify(&self, panic: Panic) {
         if let Some(sender) = self.sender.lock().unwrap().take() {
             let _ = sender.send(panic);
+        }
+    }
+
+    pub(crate) async fn handle<Fut>(
+        panicked: Option<oneshot::Receiver<Panic>>,
+        future: Fut,
+    ) -> Fut::Output
+    where
+        Fut: Future,
+    {
+        // Wait for task to complete (if we are catching panics)
+        let Some(panicked) = panicked else {
+            return future.await;
+        };
+
+        // Wait for task to complete or panic
+        select! {
+            panic = panicked => {
+                resume_unwind(panic.unwrap());
+            },
+            output = future => {
+                output
+            },
         }
     }
 }

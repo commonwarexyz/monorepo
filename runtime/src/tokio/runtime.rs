@@ -31,7 +31,6 @@ use std::{
     env,
     future::Future,
     net::SocketAddr,
-    panic::resume_unwind,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
@@ -349,22 +348,9 @@ impl crate::Runner for Runner {
             network,
             children: Arc::new(Mutex::new(Vec::new())),
         };
-        let output = executor.runtime.block_on(async move {
-            // Wait for task to complete (if we are catching panics)
-            let Some(panicked) = panicked else {
-                return f(context).await;
-            };
-
-            // Wait for task to complete or panic
-            select! {
-                panic = panicked => {
-                    resume_unwind(panic.unwrap());
-                },
-                output = f(context) => {
-                    output
-                },
-            }
-        });
+        let output = executor
+            .runtime
+            .block_on(Panicker::handle(panicked, f(context)));
         gauge.dec();
 
         output

@@ -57,7 +57,6 @@ use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
     net::SocketAddr,
-    panic::resume_unwind,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
@@ -335,22 +334,7 @@ impl Runner {
 
         // Pin root task to the heap
         let storage = context.storage.clone();
-        let mut root = Box::pin(async move {
-            // Wait for task to complete (if we are catching panics)
-            let Some(panicked) = panicked else {
-                return f(context).await;
-            };
-
-            // Wait for task to complete or panic
-            select! {
-                panic = panicked => {
-                    resume_unwind(panic.unwrap());
-                },
-                output = f(context) => {
-                    output
-                },
-            }
-        });
+        let mut root = Box::pin(Panicker::handle(panicked, f(context)));
 
         // Register the root task
         Tasks::register_root(&executor.tasks);
