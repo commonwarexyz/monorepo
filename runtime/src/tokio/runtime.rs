@@ -358,7 +358,7 @@ impl crate::Runner for Runner {
             select! {
                 message = panicked => {
                     let message = message.expect("panic notifier dropped without message");
-                    panic!("tokio runtime task panicked: {message}");
+                    panic!("task panicked: {message}");
                 },
                 output = f(context) => {
                     output
