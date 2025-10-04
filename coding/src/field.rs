@@ -1,5 +1,8 @@
 use std::ops::{Add, Mul, Neg, Sub};
 
+use commonware_cryptography::{Digestible, Hasher};
+use rand_core::CryptoRngCore;
+
 /// The modulus P := 2^64 - 2^32 + 1.
 ///
 /// This is a prime number, and we use it to form a field of this order.
@@ -270,6 +273,35 @@ impl F {
             acc: 0,
             acc_bits: 0,
             inner,
+        }
+    }
+
+    /// How many elements are used to encode a given number of bits?
+    ///
+    /// This is based on what [F::stream_from_u64s] does.
+    pub const fn bits_to_elements(bits: usize) -> usize {
+        bits.div_ceil(63)
+    }
+
+    /// Hash the elements in a slice of field elements.
+    pub fn slice_digest<H: Hasher>(data: &[Self]) -> H::Digest {
+        let mut h = H::new();
+        for x in data {
+            h.update(x.0.to_le_bytes().as_slice());
+        }
+        h.finalize()
+    }
+
+    /// Create a random field element.
+    ///
+    /// This will be uniformly distributed.
+    pub fn rand(mut rng: impl CryptoRngCore) -> Self {
+        // this fails only about once every 2^32 attempts
+        loop {
+            let x = rng.next_u64();
+            if x < P {
+                return Self(x);
+            }
         }
     }
 }
