@@ -9,6 +9,7 @@ use crate::{
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, SigningScheme,
             VoteContext,
         },
+        select_leader,
         types::{Activity, Attributable, Context, Proposal, Voter},
     },
     types::{Epoch, Round as Rnd, View},
@@ -159,10 +160,9 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         }
     }
 
-    pub fn set_leader(&mut self, _seed: Option<S::Randomness>) {
-        // FIXME: proper leader election logic
-        let leader = self.participants.first().unwrap();
-        let leader_index = self.participants.iter().position(|p| p == leader).unwrap() as u32;
+    pub fn set_leader(&mut self, seed: Option<S::Randomness>) {
+        let (leader, leader_index) =
+            select_leader::<S, _>(&self.participants, self.round.view(), seed);
         self.leader = Some((leader.clone(), leader_index));
     }
 

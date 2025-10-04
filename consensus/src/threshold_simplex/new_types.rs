@@ -443,7 +443,7 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         + Write
         + Read<Cfg = Self::CertificateReadCfg>;
 
-    type Randomness: Send;
+    type Randomness: EncodeSize + Write + Send;
 
     type SignatureReadCfg;
     type CertificateReadCfg;

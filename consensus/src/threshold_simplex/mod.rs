@@ -169,6 +169,8 @@ use crate::types::View;
 pub mod new_types;
 pub mod types;
 
+use new_types::SigningScheme;
+
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         mod actors;
@@ -205,6 +207,25 @@ pub(crate) fn interesting(
         return false;
     }
     true
+}
+
+pub fn select_leader<S, P>(
+    participants: &[P],
+    view: View,
+    randomness: Option<S::Randomness>,
+) -> (&P, u32)
+where
+    S: SigningScheme,
+{
+    use commonware_codec::Encode;
+
+    let idx = if let Some(seed) = randomness {
+        // FIXME: maybe require AsRef<[u8]> for seed?
+        commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
+    } else {
+        (view as usize) % participants.len()
+    };
+    (&participants[idx], idx as u32)
 }
 
 #[cfg(test)]
