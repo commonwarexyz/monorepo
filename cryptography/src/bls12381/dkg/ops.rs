@@ -57,15 +57,14 @@ pub struct VerifiedCommitment<'a, V: Variant> {
 }
 
 impl<'a, V: Variant> VerifiedCommitment<'a, V> {
+    /// Create a new verified commitment.
+    fn new(commitment: &'a poly::Public<V>) -> Self {
+        VerifiedCommitment { commitment }
+    }
+
     /// Evaluate the commitment at a given index.
     pub fn evaluate(&self, index: u32) -> poly::Eval<V::Public> {
         self.commitment.evaluate(index)
-    }
-}
-
-impl<'a, V: Variant> From<&'a poly::Public<V>> for VerifiedCommitment<'a, V> {
-    fn from(commitment: &'a poly::Public<V>) -> Self {
-        VerifiedCommitment { commitment }
     }
 }
 
@@ -86,7 +85,7 @@ pub fn verify_commitment<'a, V: Variant>(
     if commitment.degree() != t - 1 {
         return Err(Error::CommitmentWrongDegree);
     }
-    Ok(commitment.into())
+    Ok(VerifiedCommitment::new(commitment))
 }
 
 /// Verify that a given share is valid for a specified recipient.
