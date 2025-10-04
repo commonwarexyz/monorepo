@@ -1,9 +1,7 @@
-use std::ops::{Index, IndexMut};
-
+use crate::field::F;
 use commonware_utils::BitVec;
 use rand_core::CryptoRngCore;
-
-use crate::field::F;
+use std::ops::{Index, IndexMut};
 
 /// Reverse the first `bit_width` bits of `i`.
 ///
