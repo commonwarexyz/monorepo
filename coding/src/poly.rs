@@ -1,6 +1,7 @@
 use std::ops::{Index, IndexMut};
 
 use commonware_utils::BitVec;
+use rand_core::CryptoRngCore;
 
 use crate::field::F;
 
@@ -158,7 +159,7 @@ impl<'a> IndexMut<(usize, usize)> for Column<'a> {
 /// This is in row major order, so consider processing elements in the same
 /// row first, for locality.
 #[derive(Clone, PartialEq)]
-struct Matrix {
+pub struct Matrix {
     rows: usize,
     cols: usize,
     data: Vec<F>,
@@ -187,11 +188,38 @@ impl Matrix {
         }
     }
 
+    /// Initialize a matrix, with dimensions, and data to pull from.
+    ///
+    /// Any extra data is ignored, any data not supplied is treated as 0.
+    pub fn init(rows: usize, cols: usize, mut data: impl Iterator<Item = F>) -> Self {
+        let mut out = Self::zero(rows, cols);
+        'outer: for i in 0..rows {
+            for row_i in &mut out[i] {
+                let Some(x) = data.next() else {
+                    break 'outer;
+                };
+                *row_i = x;
+            }
+        }
+        out
+    }
+
+    /// Interpret the columns of this matrix as polynomials, with at least `min_coefficients`.
+    ///
+    /// This will, in fact, produce a matrix padded to the next power of 2 of that number.
+    pub fn as_polynomials(&self, min_coefficients: usize) -> PolynomialVector {
+        PolynomialVector::new(
+            min_coefficients,
+            self.cols,
+            (0..self.rows).flat_map(|i| self[i].iter().copied()),
+        )
+    }
+
     /// Multiply this matrix by another.
     ///
     /// This assumes that the number of columns in this matrix match the number
     /// of rows in the other matrix.
-    fn mul(&self, other: &Self) -> Self {
+    pub fn mul(&self, other: &Self) -> Self {
         assert_eq!(self.cols, other.rows);
         let mut out = Self::zero(self.rows, other.cols);
         for i in 0..self.rows {
@@ -208,6 +236,20 @@ impl Matrix {
 
     fn ntt<const FORWARD: bool>(&mut self) {
         ntt::<FORWARD, Self>(self.rows, self.cols, self)
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    // Iterate over the rows of this matrix.
+    pub fn iter(&self) -> impl Iterator<Item = &[F]> {
+        (0..self.rows).map(|i| &self[i])
+    }
+
+    /// Create a random matrix with certain dimensions.
+    pub fn rand(mut rng: impl CryptoRngCore, rows: usize, cols: usize) -> Self {
+        Self::init(rows, cols, (0..rows * cols).map(|_| F::rand(&mut rng)))
     }
 }
 
@@ -501,7 +543,7 @@ impl Polynomial {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct PolynomialVector {
+pub struct PolynomialVector {
     // Each column of this matrix contains the coefficients of a polynomial,
     // in reverse bit order. So, the ith coefficient appears at index i.reverse_bits().
     //
@@ -554,7 +596,7 @@ impl PolynomialVector {
     }
 
     /// Evaluate each polynomial in this vector over all points in an interpolation domain.
-    fn evaluate(mut self) -> EvaluationVector {
+    pub fn evaluate(mut self) -> EvaluationVector {
         self.data.ntt::<true>();
         let active_rows = BitVec::ones(self.data.rows);
         EvaluationVector {
@@ -680,7 +722,7 @@ impl PolynomialVector {
 /// This is used in [Self::recover], which can use the rows that are present to fill in the missing
 /// rows.
 #[derive(Debug, PartialEq)]
-struct EvaluationVector {
+pub struct EvaluationVector {
     data: Matrix,
     active_rows: BitVec,
 }
@@ -758,6 +800,11 @@ impl EvaluationVector {
         let mut out = self.interpolate();
         out.divide(vanishing);
         out
+    }
+
+    /// Get the underlying data, as a Matrix.
+    pub fn data(self) -> Matrix {
+        self.data
     }
 }
 
