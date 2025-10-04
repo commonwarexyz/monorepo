@@ -71,11 +71,6 @@ impl<V: Variant> AsRef<poly::Public<V>> for VerifiedCommitment<V> {
 }
 
 impl<V: Variant> VerifiedCommitment<V> {
-    /// Create a new verified commitment.
-    fn new(commitment: poly::Public<V>) -> Self {
-        VerifiedCommitment { commitment }
-    }
-
     /// Evaluate the commitment at a given index.
     pub fn evaluate(&self, index: u32) -> poly::Eval<V::Public> {
         self.commitment.evaluate(index)
@@ -104,7 +99,7 @@ pub fn verify_commitment<V: Variant>(
     if commitment.degree() != t - 1 {
         return Err(Error::CommitmentWrongDegree);
     }
-    Ok(VerifiedCommitment::new(commitment))
+    Ok(VerifiedCommitment { commitment })
 }
 
 /// Verify that a given share is valid for a specified recipient.
