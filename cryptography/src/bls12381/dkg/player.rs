@@ -4,7 +4,7 @@
 use crate::{
     bls12381::{
         dkg::{
-            ops::{self, Commitment},
+            ops::{recover_public_with_weights, Commitment},
             Error,
         },
         primitives::{
@@ -190,7 +190,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                     .iter()
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
-                public = ops::recover_public_with_weights::<V>(
+                public = recover_public_with_weights::<V>(
                     &previous,
                     commitments,
                     &weights,

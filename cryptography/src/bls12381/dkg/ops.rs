@@ -119,7 +119,7 @@ impl<V: Variant> Commitment<V> {
 }
 
 /// Construct a public polynomial by summing a vector of commitments.
-pub fn public<V: Variant>(
+pub fn construct_public<V: Variant>(
     commitments: Vec<Commitment<V>>,
     required: u32,
 ) -> Result<poly::Public<V>, Error> {

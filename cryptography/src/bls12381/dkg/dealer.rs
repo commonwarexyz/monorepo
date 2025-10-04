@@ -3,7 +3,7 @@
 
 use crate::{
     bls12381::{
-        dkg::{ops, Error},
+        dkg::{ops::generate_shares, Error},
         primitives::{group::Share, poly, variant::Variant},
     },
     PublicKey,
@@ -54,7 +54,7 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
         // Generate shares and commitment
         let players_len = players.len() as u32;
         let threshold = quorum(players_len);
-        let (commitment, shares) = ops::generate_shares::<_, V>(rng, share, players_len, threshold);
+        let (commitment, shares) = generate_shares::<_, V>(rng, share, players_len, threshold);
         (
             Self {
                 threshold,

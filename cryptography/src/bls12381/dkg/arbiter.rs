@@ -39,7 +39,7 @@
 use crate::{
     bls12381::{
         dkg::{
-            ops::{self, Commitment},
+            ops::{construct_public, recover_public, Commitment},
             Error,
         },
         primitives::{group::Share, poly, variant::Variant},
@@ -249,7 +249,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                 for (dealer_idx, (commitment, _, _)) in &selected {
                     commitments.insert(*dealer_idx, commitment.clone());
                 }
-                match ops::recover_public::<V>(
+                match recover_public::<V>(
                     &previous,
                     commitments,
                     self.player_threshold,
@@ -264,7 +264,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                 for (_, (commitment, _, _)) in &selected {
                     commitments.push(commitment.clone());
                 }
-                match ops::public::<V>(commitments, self.player_threshold) {
+                match construct_public::<V>(commitments, self.player_threshold) {
                     Ok(public) => public,
                     Err(e) => return (Err(e), self.disqualified),
                 }
