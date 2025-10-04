@@ -279,7 +279,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             if shares.is_empty() {
                 continue;
             }
-            reveals.insert(dealer_idx, shares.clone());
+            reveals.insert(dealer_idx, shares);
         }
         let output = Output {
             public,
