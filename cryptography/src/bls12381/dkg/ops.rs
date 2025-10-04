@@ -118,14 +118,15 @@ impl<V: Variant> Commitment<V> {
     }
 }
 
-/// Construct a new public polynomial by summing all commitments.
-pub fn construct_public<V: Variant>(
+/// Construct a public polynomial by summing a vector of commitments.
+pub fn public<V: Variant>(
     commitments: Vec<Commitment<V>>,
     required: u32,
 ) -> Result<poly::Public<V>, Error> {
     if commitments.len() < required as usize {
         return Err(Error::InsufficientDealings);
     }
+
     let mut public = poly::Public::<V>::zero();
     for commitment in commitments {
         public.add(&commitment.into());

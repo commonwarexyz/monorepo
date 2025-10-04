@@ -264,7 +264,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                 for (_, (commitment, _, _)) in &selected {
                     commitments.push(commitment.clone());
                 }
-                match ops::construct_public::<V>(commitments, self.player_threshold) {
+                match ops::public::<V>(commitments, self.player_threshold) {
                     Ok(public) => public,
                     Err(e) => return (Err(e), self.disqualified),
                 }
