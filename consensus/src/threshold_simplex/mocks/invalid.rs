@@ -1,60 +1,40 @@
 //! Byzantine participant that sends invalid notarize/finalize messages.
 
-use crate::{
-    threshold_simplex::types::{Finalize, Notarize, Voter},
-    types::View,
-    ThresholdSupervisor, Viewable,
+use crate::threshold_simplex::{
+    new_types::{Finalize, Notarize, SigningScheme},
+    types::Voter,
 };
-use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self, Element},
-        variant::Variant,
-    },
-    Hasher,
-};
+use commonware_codec::{DecodeExt, Encode, Read};
+use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
-    pub supervisor: S,
+pub struct Config<S: SigningScheme> {
+    pub signing: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Invalid<
-    E: Clock + Rng + CryptoRng + Spawner,
-    V: Variant,
-    H: Hasher,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-> {
+pub struct Invalid<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> {
     context: E,
-    supervisor: S,
+    signing: S,
 
     namespace: Vec<u8>,
 
     _hasher: PhantomData<H>,
-    _variant: PhantomData<V>,
 }
 
-impl<
-        E: Clock + Rng + CryptoRng + Spawner,
-        V: Variant,
-        H: Hasher,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Invalid<E, V, H, S>
-{
+impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Invalid<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context,
-            supervisor: cfg.supervisor,
+            signing: cfg.signing,
 
             namespace: cfg.namespace,
 
             _hasher: PhantomData,
-            _variant: PhantomData,
         }
     }
 
@@ -66,7 +46,7 @@ impl<
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<V, H::Digest>::decode(msg) {
+            let msg = match Voter::<S, H::Digest>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -78,11 +58,11 @@ impl<
             match msg {
                 Voter::Notarize(notarize) => {
                     // Notarize received digest
-                    let share = self.supervisor.share(notarize.view()).unwrap();
-                    let mut n = Notarize::<V, _>::sign(&self.namespace, share, notarize.proposal);
+                    let mut n =
+                        Notarize::<S, _>::sign(&self.signing, &self.namespace, notarize.proposal);
 
                     // Manipulate signature
-                    n.seed_signature.value.add(&V::Signature::one());
+                    n.vote.signature = corrupt_signature::<S>(&n.vote.signature);
 
                     // Send invalid message
                     let msg = Voter::Notarize(n).encode().into();
@@ -90,11 +70,11 @@ impl<
                 }
                 Voter::Finalize(finalize) => {
                     // Finalize provided digest
-                    let share = self.supervisor.share(finalize.view()).unwrap();
-                    let mut f = Finalize::<V, _>::sign(&self.namespace, share, finalize.proposal);
+                    let mut f =
+                        Finalize::<S, _>::sign(&self.signing, &self.namespace, finalize.proposal);
 
                     // Manipulate signature
-                    f.proposal_signature.value.add(&V::Signature::one());
+                    f.vote.signature = corrupt_signature::<S>(&f.vote.signature);
 
                     // Send invalid message
                     let msg = Voter::Finalize(f).encode().into();
@@ -104,4 +84,12 @@ impl<
             }
         }
     }
+}
+
+fn corrupt_signature<S: SigningScheme>(original: &S::Signature) -> S::Signature {
+    let mut buf = original.encode();
+    let last = buf.len() - 1;
+    buf[last] ^= 0x01;
+    S::Signature::read_cfg(&mut buf, &S::signature_read_cfg())
+        .expect("failed to decode tampered signature")
 }

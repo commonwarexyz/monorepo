@@ -1,52 +1,35 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
-use crate::{
-    threshold_simplex::types::{Finalize, Nullify, Voter},
-    types::View,
-    ThresholdSupervisor, Viewable,
+use crate::threshold_simplex::{
+    new_types::{Finalize, Nullify, SigningScheme},
+    types::Voter,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
-    Hasher,
-};
+use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
-    pub supervisor: S,
+pub struct Config<S: SigningScheme> {
+    pub signing: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Nuller<
-    E: Spawner,
-    V: Variant,
-    H: Hasher,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-> {
+pub struct Nuller<E: Spawner, S: SigningScheme, H: Hasher> {
     context: E,
-    supervisor: S,
+    signing: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
-    _variant: PhantomData<V>,
 }
 
-impl<
-        E: Spawner,
-        V: Variant,
-        H: Hasher,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Nuller<E, V, H, S>
-{
+impl<E: Spawner, S: SigningScheme, H: Hasher> Nuller<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context,
-            supervisor: cfg.supervisor,
+            signing: cfg.signing,
             namespace: cfg.namespace,
             _hasher: PhantomData,
-            _variant: PhantomData,
         }
     }
 
@@ -58,7 +41,7 @@ impl<
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<V, H::Digest>::decode(msg) {
+            let msg = match Voter::<S, H::Digest>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -70,15 +53,17 @@ impl<
             match msg {
                 Voter::Notarize(notarize) => {
                     // Nullify
-                    let view = notarize.view();
-                    let share = self.supervisor.share(view).unwrap();
-                    let n = Nullify::sign(&self.namespace, share, notarize.proposal.round);
-                    let msg = Voter::<V, H::Digest>::Nullify(n).encode().into();
+                    let n = Nullify::sign::<H::Digest>(
+                        &self.signing,
+                        &self.namespace,
+                        notarize.proposal.round,
+                    );
+                    let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
                     let proposal = notarize.proposal;
-                    let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
+                    let f = Finalize::<S, _>::sign(&self.signing, &self.namespace, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

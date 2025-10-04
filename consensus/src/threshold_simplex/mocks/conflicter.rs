@@ -1,53 +1,40 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
-    threshold_simplex::types::{Finalize, Notarize, Proposal, Voter},
+    threshold_simplex::{
+        new_types::{Finalize, Notarize, SigningScheme},
+        types::{Proposal, Voter},
+    },
     types::View,
-    ThresholdSupervisor, Viewable,
+    Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
-    Digest, Hasher,
-};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
-    pub supervisor: S,
+pub struct Config<S: SigningScheme> {
+    pub signing: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Conflicter<
-    E: Clock + Rng + CryptoRng + Spawner,
-    V: Variant,
-    H: Hasher,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-> {
+pub struct Conflicter<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> {
     context: E,
-    supervisor: S,
+    signing: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
-    _variant: PhantomData<V>,
 }
 
-impl<
-        E: Clock + Rng + CryptoRng + Spawner,
-        V: Variant,
-        H: Hasher,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Conflicter<E, V, H, S>
-{
+impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Conflicter<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context,
-            supervisor: cfg.supervisor,
+            signing: cfg.signing,
             namespace: cfg.namespace,
             _hasher: PhantomData,
-            _variant: PhantomData,
         }
     }
 
@@ -59,7 +46,7 @@ impl<
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<V, H::Digest>::decode(msg) {
+            let msg = match Voter::<S, H::Digest>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -71,33 +58,33 @@ impl<
             match msg {
                 Voter::Notarize(notarize) => {
                     // Notarize random digest
-                    let view = notarize.view();
-                    let share = self.supervisor.share(view).unwrap();
+                    let view = notarize.proposal.view();
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(notarize.proposal.round, notarize.proposal.parent, payload);
-                    let n = Notarize::<V, _>::sign(&self.namespace, share, proposal);
+                    let n = Notarize::<S, _>::sign(&self.signing, &self.namespace, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize received digest
-                    let n = Notarize::<V, _>::sign(&self.namespace, share, notarize.proposal);
+                    let n =
+                        Notarize::<S, _>::sign(&self.signing, &self.namespace, notarize.proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Voter::Finalize(finalize) => {
                     // Finalize random digest
-                    let view = finalize.view();
-                    let share = self.supervisor.share(view).unwrap();
+                    let view = finalize.proposal.view();
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(finalize.proposal.round, finalize.proposal.parent, payload);
-                    let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
+                    let f = Finalize::<S, _>::sign(&self.signing, &self.namespace, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize provided digest
-                    let f = Finalize::<V, _>::sign(&self.namespace, share, finalize.proposal);
+                    let f =
+                        Finalize::<S, _>::sign(&self.signing, &self.namespace, finalize.proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

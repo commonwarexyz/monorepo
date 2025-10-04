@@ -1,35 +1,29 @@
 //! Byzantine participant that sends outdated notarize and finalize messages.
 
 use crate::{
-    threshold_simplex::types::{Finalize, Notarize, Proposal, Voter},
-    types::View,
-    ThresholdSupervisor, Viewable,
+    threshold_simplex::{
+        new_types::{Finalize, Notarize, SigningScheme},
+        types::{Proposal, Voter},
+    },
+    Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
-    Hasher,
-};
+use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::debug;
 
-pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
-    pub supervisor: S,
+pub struct Config<S: SigningScheme> {
+    pub signing: S,
     pub namespace: Vec<u8>,
     pub view_delta: u64,
 }
 
-pub struct Outdated<
-    E: Clock + Rng + CryptoRng + Spawner,
-    V: Variant,
-    H: Hasher,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-> {
+pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> {
     context: E,
-    supervisor: S,
+    signing: S,
 
     namespace: Vec<u8>,
 
@@ -37,20 +31,13 @@ pub struct Outdated<
     view_delta: u64,
 
     _hasher: PhantomData<H>,
-    _variant: PhantomData<V>,
 }
 
-impl<
-        E: Clock + Rng + CryptoRng + Spawner,
-        V: Variant,
-        H: Hasher,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Outdated<E, V, H, S>
-{
+impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Outdated<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context,
-            supervisor: cfg.supervisor,
+            signing: cfg.signing,
 
             namespace: cfg.namespace,
 
@@ -58,7 +45,6 @@ impl<
             view_delta: cfg.view_delta,
 
             _hasher: PhantomData,
-            _variant: PhantomData,
         }
     }
 
@@ -70,7 +56,7 @@ impl<
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<V, H::Digest>::decode(msg) {
+            let msg = match Voter::<S, H::Digest>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -87,12 +73,12 @@ impl<
 
                     // Notarize old digest
                     let view = view.saturating_sub(self.view_delta);
-                    let share = self.supervisor.share(view).unwrap();
                     let Some(proposal) = self.history.get(&view) else {
                         continue;
                     };
                     debug!(?view, "notarizing old proposal");
-                    let n = Notarize::<V, _>::sign(&self.namespace, share, proposal.clone());
+                    let n =
+                        Notarize::<S, _>::sign(&self.signing, &self.namespace, proposal.clone());
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -102,12 +88,12 @@ impl<
 
                     // Finalize old digest
                     let view = view.saturating_sub(self.view_delta);
-                    let share = self.supervisor.share(view).unwrap();
                     let Some(proposal) = self.history.get(&view) else {
                         continue;
                     };
                     debug!(?view, "finalizing old proposal");
-                    let f = Finalize::<V, _>::sign(&self.namespace, share, proposal.clone());
+                    let f =
+                        Finalize::<S, _>::sign(&self.signing, &self.namespace, proposal.clone());
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
