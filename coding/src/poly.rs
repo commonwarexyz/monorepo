@@ -242,6 +242,10 @@ impl Matrix {
         self.rows
     }
 
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
     // Iterate over the rows of this matrix.
     pub fn iter(&self) -> impl Iterator<Item = &[F]> {
         (0..self.rows).map(|i| &self[i])
@@ -714,6 +718,26 @@ impl PolynomialVector {
         ntt::<false, _>(self.data.rows, self.data.cols, &mut self.data);
         self.divide_roots(skew_inv);
     }
+
+    /// Iterate over up to n rows of this vector.
+    ///
+    /// For example, given polynomials:
+    ///
+    ///   a0 + a1 X + a2 X^2 + ...
+    ///   b0 + b1 X + b2 X^2 + ...
+    ///
+    /// This will return:
+    ///
+    ///   a0 b0
+    ///   a1 b1
+    ///   ...
+    ///
+    /// up to n times.
+    pub fn coefficients_up_to(&self, n: usize) -> impl Iterator<Item = &[F]> {
+        let n = n.min(self.data.rows);
+        let lg_rows = self.data.rows().ilog2();
+        (0..n).map(move |i| &self.data[reverse_bits(lg_rows, i as u64) as usize])
+    }
 }
 
 /// The result of evaluating a vector of polynomials over all points in an interpolation domain.
@@ -739,7 +763,7 @@ impl EvaluationVector {
     }
 
     /// Create an empty element of this struct, with no filled rows.
-    fn empty(lg_rows: usize, cols: usize) -> Self {
+    pub fn empty(lg_rows: usize, cols: usize) -> Self {
         let data = Matrix::zero(1 << lg_rows, cols);
         let active = BitVec::zeroes(data.rows);
         Self {
@@ -749,7 +773,7 @@ impl EvaluationVector {
     }
 
     /// Fill a specific row.
-    fn fill_row(&mut self, row: usize, data: &[F]) {
+    pub fn fill_row(&mut self, row: usize, data: &[F]) {
         assert!(data.len() <= self.data.cols);
         self.data[row][..data.len()].copy_from_slice(data);
         self.active_rows.set(row);
@@ -782,7 +806,7 @@ impl EvaluationVector {
     }
 
     /// Attempt to recover the missing rows in this data.
-    fn recover(mut self) -> PolynomialVector {
+    pub fn recover(mut self) -> PolynomialVector {
         // If we had all of the rows, we could simply call [Self::interpolate],
         // in order to recover the original polynomial. If we do this while missing some
         // rows, what we get is D(X) * V(X) where D is the original polynomial,
