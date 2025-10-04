@@ -22,6 +22,7 @@ pub mod sequence;
 pub use sequence::{Array, Span};
 mod bitvec;
 pub use bitvec::{BitIterator, BitVec};
+pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
 #[cfg(feature = "std")]
