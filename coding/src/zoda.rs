@@ -1,4 +1,8 @@
-use crate::{field::F, poly::Matrix, Config, Scheme};
+use crate::{
+    field::F,
+    poly::{EvaluationVector, Matrix},
+    Config, Scheme,
+};
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, Read, Write};
 use commonware_cryptography::{
@@ -50,6 +54,15 @@ fn iter_u64_le(mut data: impl bytes::Buf) -> impl Iterator<Item = u64> {
     Iter::new(data)
 }
 
+fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(max_length);
+    for d in data {
+        out.extend_from_slice(&d.to_le_bytes());
+    }
+    out.truncate(max_length);
+    out
+}
+
 fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
     let n = min_rows as f64;
     let k = (encoded_rows - min_rows) as f64;
@@ -68,9 +81,11 @@ fn required_samples_upper_bound(n: usize, k: usize) -> usize {
 fn enough_samples(n: usize, k: usize, samples: usize) -> bool {
     let min_rows = n * samples;
     let encoded_rows = ((n + k) * samples).next_power_of_two();
-    samples >= required_samples(min_rows, encoded_rows)
+    let required = required_samples(min_rows, encoded_rows);
+    samples >= required
 }
 
+#[derive(Debug, Clone, Copy)]
 struct Topology {
     /// How many bytes the data has.
     data_bytes: usize,
@@ -84,6 +99,8 @@ struct Topology {
     samples: usize,
     /// How many column samples we need.
     column_samples: usize,
+    /// How many shards we need to recover.
+    min_shards: usize,
     /// How many shards there are in total (each shard containing multiple rows).
     total_shards: usize,
 }
@@ -95,9 +112,9 @@ impl Topology {
         let n = config.minimum_shards as usize;
         let k = config.extra_shards as usize;
         let samples_upper_bound = required_samples(n, n + k);
-        let max_samples = data_els / n;
+        let max_samples = (data_els / n).max(1);
         let mut samples = max_samples.min(samples_upper_bound);
-        while enough_samples(n, k, samples - 1) {
+        while samples > 1 && enough_samples(n, k, samples - 1) {
             samples -= 1;
         }
         let data_rows = n * samples;
@@ -118,7 +135,8 @@ impl Topology {
             encoded_rows,
             samples,
             column_samples,
-            total_shards: k,
+            min_shards: n,
+            total_shards: n + k,
         }
     }
 }
@@ -163,7 +181,7 @@ pub struct Shard<H: Hasher> {
     data_bytes: usize,
     root: H::Digest,
     inclusion_proofs: Vec<Proof<H>>,
-    rows: Matrix
+    rows: Matrix,
     checksum: Matrix,
 }
 
@@ -200,7 +218,8 @@ impl<H: Hasher> Read for Shard<H> {
 
 #[derive(Clone)]
 pub struct ReShard<H: Hasher> {
-    _marker: PhantomData<H>,
+    inclusion_proofs: Vec<Proof<H>>,
+    shard: Matrix,
 }
 
 impl<H: Hasher> PartialEq for ReShard<H> {
@@ -234,9 +253,9 @@ impl<H: Hasher> Read for ReShard<H> {
     }
 }
 
-pub struct CheckedShard<H: Hasher> {
-    reshard: ReShard<H>,
-    indices: Vec<u16>,
+pub struct CheckedShard {
+    index: usize,
+    shard: Matrix,
 }
 
 fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<usize> {
@@ -246,17 +265,93 @@ fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<usize> {
 }
 
 fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
-    Matrix::rand(&mut transcript.noise(b"checking matrix"), topology.data_rows, topology.column_samples)
+    Matrix::rand(
+        &mut transcript.noise(b"checking matrix"),
+        topology.data_cols,
+        topology.column_samples,
+    )
 }
 
 #[derive(Clone)]
 pub struct CheckingData<H: Hasher> {
-    _marker: PhantomData<H>,
+    topology: Topology,
+    root: H::Digest,
+    checking_matrix: Matrix,
+    encoded_checksum: Matrix,
+    shuffled_indices: Vec<usize>,
 }
 
 impl<H: Hasher> CheckingData<H> {
-    fn check(&self, index: u16, reshard: &ReShard<H>) -> Result<CheckedShard<H>, ZodaError> {
-        todo!()
+    fn reckon(
+        config: &Config,
+        commitment: &Summary,
+        data_bytes: usize,
+        root: H::Digest,
+        checksum: Matrix,
+    ) -> Result<Self, ZodaError> {
+        let topology = Topology::reckon(config, data_bytes);
+        let mut transcript = Transcript::new(NAMESPACE);
+        transcript.commit((topology.data_bytes as u64).encode());
+        transcript.commit(root.encode());
+        let expected_commitment = transcript.summarize();
+        if *commitment != expected_commitment {
+            return Err(ZodaError::Something);
+        }
+        let transcript = Transcript::resume(expected_commitment);
+        let checking_matrix = checking_matrix(&transcript, &topology);
+        if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
+            return Err(ZodaError::Something);
+        }
+        let encoded_checksum = checksum
+            .as_polynomials(topology.encoded_rows)
+            .evaluate()
+            .data();
+        let shuffled_indices = shuffle_indices(&transcript, topology.encoded_rows);
+
+        Ok(Self {
+            topology,
+            root: root,
+            checking_matrix,
+            encoded_checksum,
+            shuffled_indices,
+        })
+    }
+
+    fn check(&self, index: u16, reshard: &ReShard<H>) -> Result<CheckedShard, ZodaError> {
+        if reshard.shard.rows() != self.topology.samples
+            || reshard.shard.cols() != self.topology.data_cols
+        {
+            return Err(ZodaError::Something);
+        }
+        let index = index as usize;
+        let these_shuffled_indices = &self.shuffled_indices
+            [index * self.topology.samples..(index + 1) * self.topology.samples];
+        // Check every inclusion proof.
+        for ((&i, row), proof) in these_shuffled_indices
+            .iter()
+            .zip(reshard.shard.iter())
+            .zip(&reshard.inclusion_proofs)
+        {
+            proof
+                .verify(
+                    &mut H::new(),
+                    &F::slice_digest::<H>(row),
+                    i as u32,
+                    &self.root,
+                )
+                .map_err(|_| ZodaError::Something)?;
+        }
+        let shard_checksum = reshard.shard.mul(&self.checking_matrix);
+        // Check that the shard checksum rows match the encoded checksums
+        for (row, &i) in shard_checksum.iter().zip(these_shuffled_indices) {
+            if row != &self.encoded_checksum[i] {
+                return Err(ZodaError::Something);
+            }
+        }
+        Ok(CheckedShard {
+            index,
+            shard: reshard.shard.clone(),
+        })
     }
 }
 
@@ -288,13 +383,13 @@ impl<H: Hasher> Scheme for Zoda<H> {
 
     type CheckingData = CheckingData<H>;
 
-    type CheckedShard = CheckedShard<H>;
+    type CheckedShard = CheckedShard;
 
     type Error = ZodaError;
 
     fn encode(
         config: &Config,
-        mut data: impl bytes::Buf,
+        data: impl bytes::Buf,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data_bytes = data.remaining();
         let topology = Topology::reckon(config, data_bytes);
@@ -320,17 +415,29 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let checksum = data.mul(&checking_matrix);
 
         let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
-        let shards = shuffled_indices.chunks(topology.samples).map(|indices| {
-           let rows = Matrix::init(indices.len(), topology.data_cols, indices.iter().flat_map(|&i| encoded_data[i].iter().copied()));
-           let inclusion_proofs = indices.iter().map(|&i| tree.proof(i as u32).expect("TODO")).collect::<Vec<_>>();
-           Shard {
-            data_bytes,
-            root,
-            inclusion_proofs,
-            rows,
-            checksum: checksum.clone(),
-        }
-        }).collect::<Vec<_>>();
+        let shards = shuffled_indices
+            .chunks_exact(topology.samples)
+            .map(|indices| {
+                let rows = Matrix::init(
+                    indices.len(),
+                    topology.data_cols,
+                    indices
+                        .iter()
+                        .flat_map(|&i| encoded_data[i].iter().copied()),
+                );
+                let inclusion_proofs = indices
+                    .iter()
+                    .map(|&i| tree.proof(i as u32).expect("TODO"))
+                    .collect::<Vec<_>>();
+                Shard {
+                    data_bytes,
+                    root,
+                    inclusion_proofs,
+                    rows,
+                    checksum: checksum.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
         Ok((commitment, shards))
     }
 
@@ -340,7 +447,19 @@ impl<H: Hasher> Scheme for Zoda<H> {
         index: u16,
         shard: Self::Shard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
-        todo!()
+        let reshard = ReShard {
+            inclusion_proofs: shard.inclusion_proofs,
+            shard: shard.rows,
+        };
+        let checking_data = CheckingData::reckon(
+            config,
+            commitment,
+            shard.data_bytes,
+            shard.root,
+            shard.checksum,
+        )?;
+        let checked_shard = checking_data.check(index, &reshard)?;
+        Ok((checking_data, checked_shard, reshard))
     }
 
     fn check(
@@ -350,7 +469,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         index: u16,
         reshard: Self::ReShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
-        todo!()
+        checking_data.check(index, &reshard)
     }
 
     fn decode(
@@ -359,6 +478,33 @@ impl<H: Hasher> Scheme for Zoda<H> {
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
     ) -> Result<Vec<u8>, Self::Error> {
-        todo!()
+        let Topology {
+            encoded_rows,
+            data_cols,
+            samples,
+            data_rows,
+            data_bytes,
+            min_shards,
+            ..
+        } = checking_data.topology;
+        assert!(shards.len() >= min_shards, "TODO: not enough shards");
+        let mut evaluation = EvaluationVector::empty(encoded_rows.ilog2() as usize, data_cols);
+        for shard in shards {
+            let indices =
+                &checking_data.shuffled_indices[shard.index * samples..(shard.index + 1) * samples];
+            for (&i, row) in indices.iter().zip(shard.shard.iter()) {
+                evaluation.fill_row(i, row);
+            }
+        }
+        Ok(collect_u64_le(
+            data_bytes,
+            F::stream_to_u64s(
+                evaluation
+                    .recover()
+                    .coefficients_up_to(data_rows)
+                    .flatten()
+                    .copied(),
+            ),
+        ))
     }
 }
