@@ -5,6 +5,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
+use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{
@@ -12,6 +13,7 @@ use commonware_utils::{
     net::{Subnet, SubnetMask},
     IpAddrExt,
 };
+use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::ReasonablyRealtime, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -19,6 +21,7 @@ use governor::{
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
+    collections::HashSet,
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
 };
@@ -51,6 +54,9 @@ pub struct Actor<
     ip_rate_limiter: RateLimiter<IpAddr, HashMapStateStore<IpAddr>, E, NoOpMiddleware<E::Instant>>,
     subnet_rate_limiter:
         RateLimiter<Subnet, HashMapStateStore<Subnet>, E, NoOpMiddleware<E::Instant>>,
+    registered_ips: HashSet<IpAddr>,
+    mailbox: mpsc::Receiver<HashSet<IpAddr>>,
+    handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
     handshakes_subnet_rate_limited: Counter,
@@ -59,8 +65,14 @@ pub struct Actor<
 impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config<C>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
         // Create metrics
+        let handshakes_blocked = Counter::default();
+        context.register(
+            "handshakes_blocked",
+            "number of handshake attempts blocked because the IP was not registered",
+            handshakes_blocked.clone(),
+        );
         let handshakes_concurrent_rate_limited = Counter::default();
         context.register(
             "handshake_concurrent_rate_limited",
@@ -94,6 +106,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 cfg.allowed_handshake_rate_per_subnet,
                 &context,
             ),
+            registered_ips: HashSet::new(),
+            mailbox,
+            handshakes_blocked,
             handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
             handshakes_subnet_rate_limited,
@@ -141,18 +156,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     #[allow(clippy::type_complexity)]
     pub fn start(
-        self,
+        mut self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(tracker, supervisor))
+        self.context.spawn_ref()(self.run(tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]
     async fn run(
-        self,
+        mut self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
@@ -166,70 +179,88 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         // Loop over incoming connections
         let mut accepted = 0;
         loop {
-            // Accept a new connection
-            let (address, sink, stream) = match listener.accept().await {
-                Ok((address, sink, stream)) => (address, sink, stream),
-                Err(e) => {
-                    debug!(error = ?e, "failed to accept connection");
-                    continue;
-                }
-            };
-            debug!(?address, "accepted incoming connection");
+            select! {
+                update = self.mailbox.next() => {
+                    let Some(registered_ips) = update else {
+                        debug!("mailbox closed");
+                        break;
+                    };
+                    self.registered_ips = registered_ips;
+                },
+                listener = listener.accept() => {
+                    // Accept a new connection
+                    let (address, sink, stream) = match listener {
+                        Ok((address, sink, stream)) => (address, sink, stream),
+                        Err(e) => {
+                            debug!(error = ?e, "failed to accept connection");
+                            continue;
+                        }
+                    };
+                    debug!(?address, "accepted incoming connection");
 
-            // Cleanup the rate limiters periodically
-            if accepted > CLEANUP_INTERVAL {
-                self.ip_rate_limiter.shrink_to_fit();
-                self.subnet_rate_limiter.shrink_to_fit();
-                accepted = 0;
+                    // Check whether the IP is registered
+                    let ip = address.ip();
+                    if !self.registered_ips.contains(&ip) {
+                        self.handshakes_blocked.inc();
+                        debug!(?address, "rejecting unregistered address");
+                        continue;
+                    }
+
+                    // Cleanup the rate limiters periodically
+                    if accepted > CLEANUP_INTERVAL {
+                        self.ip_rate_limiter.shrink_to_fit();
+                        self.subnet_rate_limiter.shrink_to_fit();
+                        accepted = 0;
+                    }
+                    accepted += 1;
+
+                    // Check whether the IP (and subnet) exceeds its rate limit
+                    let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
+                        self.handshakes_ip_rate_limited.inc();
+                        debug!(?address, "ip exceeded handshake rate limit");
+                        true
+                    } else {
+                        false
+                    };
+                    let subnet = ip.subnet(&SUBNET_MASK);
+                    let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
+                        self.handshakes_subnet_rate_limited.inc();
+                        debug!(?address, "subnet exceeded handshake rate limit");
+                        true
+                    } else {
+                        false
+                    };
+
+                    // We wait to check whether the handshake is permitted until after updating both the ip
+                    // and subnet rate limiters
+                    if ip_limited || subnet_limited {
+                        continue;
+                    }
+
+                    // Check whether there are too many ongoing handshakes
+                    let Some(reservation) = self.handshake_limiter.try_acquire() else {
+                        self.handshakes_concurrent_rate_limited.inc();
+                        debug!(?address, "maximum concurrent handshakes reached");
+                        continue;
+                    };
+
+                    // Spawn a new handshaker to upgrade connection
+                    self.context.with_label("handshaker").spawn({
+                        let stream_cfg = self.stream_cfg.clone();
+                        let tracker = tracker.clone();
+                        let supervisor = supervisor.clone();
+                        move |context| async move {
+                            Self::handshake(
+                                context, address, stream_cfg, sink, stream, tracker, supervisor,
+                            )
+                            .await;
+
+                            // Once the handshake attempt is complete, release the reservation
+                            drop(reservation);
+                        }
+                    });
+                },
             }
-            accepted += 1;
-
-            // Check whether the IP (and subnet) exceeds its rate limit
-            let ip = address.ip();
-            let ip_limited = if self.ip_rate_limiter.check_key(&ip).is_err() {
-                self.handshakes_ip_rate_limited.inc();
-                debug!(ip = ?address.ip(), "ip exceeded handshake rate limit");
-                true
-            } else {
-                false
-            };
-            let subnet = ip.subnet(&SUBNET_MASK);
-            let subnet_limited = if self.subnet_rate_limiter.check_key(&subnet).is_err() {
-                self.handshakes_subnet_rate_limited.inc();
-                debug!(ip = ?address.ip(), "subnet exceeded handshake rate limit");
-                true
-            } else {
-                false
-            };
-
-            // We wait to check whether the handshake is permitted until after updating both the ip
-            // and subnet rate limiters
-            if ip_limited || subnet_limited {
-                continue;
-            }
-
-            // Check whether there are too many ongoing handshakes
-            let Some(reservation) = self.handshake_limiter.try_acquire() else {
-                self.handshakes_concurrent_rate_limited.inc();
-                debug!(?address, "maximum concurrent handshakes reached");
-                continue;
-            };
-
-            // Spawn a new handshaker to upgrade connection
-            self.context.with_label("handshaker").spawn({
-                let stream_cfg = self.stream_cfg.clone();
-                let tracker = tracker.clone();
-                let supervisor = supervisor.clone();
-                move |context| async move {
-                    Self::handshake(
-                        context, address, stream_cfg, sink, stream, tracker, supervisor,
-                    )
-                    .await;
-
-                    // Once the handshake attempt is complete, release the reservation
-                    drop(reservation);
-                }
-            });
         }
     }
 }
@@ -241,7 +272,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Error as RuntimeError, Runner as _, Stream};
     use commonware_utils::NZU32;
-    use futures::StreamExt as _;
+    use futures::SinkExt;
     use std::{
         net::{IpAddr, Ipv4Addr},
         time::Duration,
@@ -266,6 +297,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
+            let (mut updates_tx, updates_rx) = mpsc::channel(1);
             let actor = Actor::new(
                 context.clone(),
                 Config {
@@ -275,7 +307,15 @@ mod tests {
                     allowed_handshake_rate_per_ip,
                     allowed_handshake_rate_per_subnet,
                 },
+                updates_rx,
             );
+
+            let mut allowed = HashSet::new();
+            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            updates_tx
+                .send(allowed)
+                .await
+                .expect("update registered ips");
 
             let (tracker_mailbox, mut tracker_rx) = Mailbox::test();
             let tracker_task = context.clone().spawn(|_| async move {
@@ -299,7 +339,7 @@ mod tests {
                 .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
-            // Allow a single handshake attempt from this IP.
+            // Connect to the listener
             let (sink, mut stream) = loop {
                 match context.dial(address).await {
                     Ok(pair) => break pair,
@@ -310,16 +350,16 @@ mod tests {
                 }
             };
 
-            // Wait for some message or drop.
+            // Wait for some message or drop
             let buf = vec![0u8; 1];
             let _ = stream.recv(buf).await;
             drop((sink, stream));
 
-            // Additional attempts should be rate limited immediately.
+            // Additional attempts should be rate limited immediately
             for _ in 0..3 {
                 let (sink, mut stream) = context.dial(address).await.expect("dial");
 
-                // Wait for some message or drop.
+                // Wait for some message or drop
                 let buf = vec![0u8; 1];
                 let _ = stream.recv(buf).await;
                 drop((sink, stream));
@@ -350,6 +390,11 @@ mod tests {
                     "{}",
                     metrics
                 );
+                assert!(
+                    metrics.contains("handshakes_blocked_total 0"),
+                    "{}",
+                    metrics
+                );
             },
         );
     }
@@ -367,6 +412,11 @@ mod tests {
                 );
                 assert!(
                     metrics.contains("handshake_ip_rate_limited_total 0"),
+                    "{}",
+                    metrics
+                );
+                assert!(
+                    metrics.contains("handshakes_blocked_total 0"),
                     "{}",
                     metrics
                 );
@@ -390,7 +440,91 @@ mod tests {
                     "{}",
                     metrics
                 );
+                assert!(
+                    metrics.contains("handshakes_blocked_total 0"),
+                    "{}",
+                    metrics
+                );
             },
         );
+    }
+
+    #[test_traced("DEBUG")]
+    fn blocks_unregistered_ips() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
+            let stream_cfg = StreamConfig {
+                signing_key: PrivateKey::from_seed(1),
+                namespace: b"test-rate-limit".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_millis(5),
+            };
+
+            let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let actor = Actor::new(
+                context.clone(),
+                Config {
+                    address,
+                    stream_cfg,
+                    max_concurrent_handshakes: NZU32!(8),
+                    allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
+                    allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
+                },
+                updates_rx,
+            );
+
+            let (tracker_mailbox, mut tracker_rx) = Mailbox::test();
+            let tracker_task = context.clone().spawn(|_| async move {
+                while let Some(message) = tracker_rx.next().await {
+                    match message {
+                        tracker::Message::Listenable { responder, .. } => {
+                            let _ = responder.send(true);
+                        }
+                        tracker::Message::Listen { reservation, .. } => {
+                            let _ = reservation.send(None);
+                        }
+                        tracker::Message::Release { .. } => {}
+                        _ => panic!("unexpected tracker message"),
+                    }
+                }
+            });
+
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::test();
+            let supervisor_task = context
+                .clone()
+                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
+            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+
+            // Connect to the listener
+            let (sink, mut stream) = loop {
+                match context.dial(address).await {
+                    Ok(pair) => break pair,
+                    Err(RuntimeError::ConnectionFailed) => {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(err) => panic!("unexpected dial error: {err:?}"),
+                }
+            };
+
+            // Wait for some message or drop
+            let buf = vec![0u8; 1];
+            let _ = stream.recv(buf).await;
+            drop((sink, stream));
+
+            // Check metrics
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("handshakes_blocked_total 1"),
+                "{}",
+                metrics
+            );
+
+            listener_handle.abort();
+            tracker_task.abort();
+            supervisor_task.abort();
+        });
     }
 }

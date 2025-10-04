@@ -130,4 +130,4 @@ jobs:
       with:
         tool: just@1.43.0
     - name: Test all targets
-      run: just fuzz ${{ matrix.fuzz_dir }} 60 ${{ env.NIGHTLY_VERSION }}
+      run: just fuzz ${{ matrix.fuzz_dir }} 60 +${{ env.NIGHTLY_VERSION }}

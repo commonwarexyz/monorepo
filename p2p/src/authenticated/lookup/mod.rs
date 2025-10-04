@@ -21,6 +21,9 @@
 //! On startup, the application supplies the initial set of peers. The `Oracle` actor allows
 //! the application to update peer --> address mappings so that peers can find each other.
 //!
+//! Any inbound connection attempts from an IP address that is not in the union of all registered
+//! peer sets will be rejected.
+//!
 //! ## Messages
 //!
 //! Application-level data is exchanged using the `Data` message type. This structure contains:
@@ -454,8 +457,7 @@ mod tests {
 
     #[test_traced]
     fn test_tokio_connectivity() {
-        let cfg = tokio::Config::default();
-        let executor = tokio::Runner::new(cfg.clone());
+        let executor = tokio::Runner::default();
         executor.start(|context| async move {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
             let base_port = 4000;

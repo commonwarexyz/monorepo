@@ -12,8 +12,10 @@ use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
+use futures::channel::mpsc;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
+use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info, warn};
 
 /// Unique suffix for all messages signed in a stream.
@@ -32,6 +34,7 @@ pub struct Network<
     tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    listener: mpsc::Receiver<HashSet<IpAddr>>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -48,6 +51,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
+        let (listener_mailbox, listener) = mpsc::channel::<HashSet<IpAddr>>(cfg.mailbox_size);
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
@@ -57,6 +61,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
+                listener: Mailbox::new(listener_mailbox),
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
@@ -77,6 +82,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracker_mailbox,
                 router,
                 router_mailbox,
+                listener,
             },
             oracle,
         )
@@ -151,6 +157,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
                 allowed_handshake_rate_per_subnet: self.cfg.allowed_handshake_rate_per_subnet,
             },
+            self.listener,
         );
         let mut listener_task =
             listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());
