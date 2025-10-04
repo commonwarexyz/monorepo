@@ -1,7 +1,6 @@
-use std::ops::{Add, Mul, Neg, Sub};
-
 use commonware_cryptography::{Digestible, Hasher};
 use rand_core::CryptoRngCore;
+use std::ops::{Add, Mul, Neg, Sub};
 
 /// The modulus P := 2^64 - 2^32 + 1.
 ///
