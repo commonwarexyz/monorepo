@@ -114,14 +114,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         )?;
 
         // Verify that share is valid
-        ops::verify_share::<V>(
-            self.previous.as_ref(),
-            dealer_idx,
-            &commitment,
-            self.player_threshold,
-            share.index,
-            &share,
-        )?;
+        ops::verify_share::<V>(&commitment, share.index, &share)?;
 
         // Store dealings
         self.dealings.insert(dealer_idx, (commitment, share));
@@ -156,14 +149,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
             if share.index != self.me {
                 return Err(Error::MisdirectedShare);
             }
-            ops::verify_share::<V>(
-                self.previous.as_ref(),
-                idx,
-                commitment,
-                self.player_threshold,
-                share.index,
-                &share,
-            )?;
+            ops::verify_share::<V>(commitment, share.index, &share)?;
 
             // Store dealing
             self.dealings.insert(idx, (commitment.clone(), share));

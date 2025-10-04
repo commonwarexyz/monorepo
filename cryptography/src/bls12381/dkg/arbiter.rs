@@ -185,14 +185,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             }
 
             // Verify share
-            ops::verify_share::<V>(
-                self.previous.as_ref(),
-                idx,
-                &commitment,
-                self.player_threshold,
-                share.index,
-                share,
-            )?;
+            ops::verify_share::<V>(&commitment, share.index, share)?;
         }
 
         // Active must be equal to number of players

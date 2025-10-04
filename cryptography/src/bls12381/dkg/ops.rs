@@ -72,17 +72,15 @@ pub fn verify_commitment<V: Variant>(
 }
 
 /// Verify that a given share is valid for a specified recipient.
+///
+/// # Warning
+///
+/// This function assumes any provided commitment has already been verified.
 pub fn verify_share<V: Variant>(
-    previous: Option<&poly::Public<V>>,
-    dealer: u32,
     commitment: &poly::Public<V>,
-    t: u32,
     recipient: u32,
     share: &Share,
 ) -> Result<(), Error> {
-    // Verify that commitment is on previous public polynomial (if provided)
-    verify_commitment::<V>(previous, dealer, commitment, t)?;
-
     // Check if share is valid
     if share.index != recipient {
         return Err(Error::MisdirectedShare);
