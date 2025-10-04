@@ -52,13 +52,27 @@ pub fn evaluate_all<V: Variant>(polynomial: &poly::Public<V>, n: u32) -> Vec<V::
 }
 
 /// A verified commitment.
-pub struct VerifiedCommitment<'a, V: Variant> {
-    commitment: &'a poly::Public<V>,
+#[derive(Clone)]
+pub struct VerifiedCommitment<V: Variant> {
+    commitment: poly::Public<V>,
 }
 
-impl<'a, V: Variant> VerifiedCommitment<'a, V> {
+#[allow(clippy::from_over_into)]
+impl<V: Variant> Into<poly::Public<V>> for VerifiedCommitment<V> {
+    fn into(self) -> poly::Public<V> {
+        self.commitment
+    }
+}
+
+impl<V: Variant> AsRef<poly::Public<V>> for VerifiedCommitment<V> {
+    fn as_ref(&self) -> &poly::Public<V> {
+        &self.commitment
+    }
+}
+
+impl<V: Variant> VerifiedCommitment<V> {
     /// Create a new verified commitment.
-    fn new(commitment: &'a poly::Public<V>) -> Self {
+    fn new(commitment: poly::Public<V>) -> Self {
         VerifiedCommitment { commitment }
     }
 
@@ -66,16 +80,21 @@ impl<'a, V: Variant> VerifiedCommitment<'a, V> {
     pub fn evaluate(&self, index: u32) -> poly::Eval<V::Public> {
         self.commitment.evaluate(index)
     }
+
+    /// Get the commitment.
+    pub fn get(&self, index: u32) -> V::Public {
+        self.commitment.get(index)
+    }
 }
 
 /// Verify that a given commitment is valid for a dealer. If a previous
 /// polynomial is provided, verify that the commitment is on that polynomial.
-pub fn verify_commitment<'a, V: Variant>(
+pub fn verify_commitment<V: Variant>(
     previous: Option<&poly::Public<V>>,
-    commitment: &'a poly::Public<V>,
+    commitment: poly::Public<V>,
     dealer: u32,
     t: u32,
-) -> Result<VerifiedCommitment<'a, V>, Error> {
+) -> Result<VerifiedCommitment<V>, Error> {
     if let Some(previous) = previous {
         let expected = previous.evaluate(dealer).value;
         if expected != *commitment.constant() {
@@ -89,8 +108,8 @@ pub fn verify_commitment<'a, V: Variant>(
 }
 
 /// Verify that a given share is valid for a specified recipient.
-pub fn verify_share<'a, V: Variant>(
-    commitment: &VerifiedCommitment<'a, V>,
+pub fn verify_share<V: Variant>(
+    commitment: &VerifiedCommitment<V>,
     recipient: u32,
     share: &Share,
 ) -> Result<(), Error> {
@@ -108,7 +127,7 @@ pub fn verify_share<'a, V: Variant>(
 
 /// Construct a new public polynomial by summing all commitments.
 pub fn construct_public<V: Variant>(
-    commitments: Vec<poly::Public<V>>,
+    commitments: Vec<VerifiedCommitment<V>>,
     required: u32,
 ) -> Result<poly::Public<V>, Error> {
     if commitments.len() < required as usize {
@@ -116,7 +135,7 @@ pub fn construct_public<V: Variant>(
     }
     let mut public = poly::Public::<V>::zero();
     for commitment in commitments {
-        public.add(&commitment);
+        public.add(&commitment.into());
     }
     Ok(public)
 }
@@ -127,7 +146,7 @@ pub fn construct_public<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public_with_weights<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, poly::Public<V>>,
+    commitments: BTreeMap<u32, VerifiedCommitment<V>>,
     weights: &BTreeMap<u32, poly::Weight>,
     threshold: u32,
     concurrency: usize,
@@ -180,7 +199,7 @@ pub fn recover_public_with_weights<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, poly::Public<V>>,
+    commitments: BTreeMap<u32, VerifiedCommitment<V>>,
     threshold: u32,
     concurrency: usize,
 ) -> Result<poly::Public<V>, Error> {

@@ -38,7 +38,10 @@
 
 use crate::{
     bls12381::{
-        dkg::{ops, Error},
+        dkg::{
+            ops::{self, VerifiedCommitment},
+            Error,
+        },
         primitives::{group::Share, poly, variant::Variant},
     },
     PublicKey,
@@ -70,7 +73,7 @@ pub struct Arbiter<P: PublicKey, V: Variant> {
     players: Vec<P>,
 
     #[allow(clippy::type_complexity)]
-    commitments: BTreeMap<u32, (poly::Public<V>, Vec<u32>, Vec<Share>)>,
+    commitments: BTreeMap<u32, (VerifiedCommitment<V>, Vec<u32>, Vec<Share>)>,
     disqualified: HashSet<P>,
 }
 
@@ -135,13 +138,13 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Verify the commitment is valid
-        let verified_commitment = match ops::verify_commitment::<V>(
+        let commitment = match ops::verify_commitment::<V>(
             self.previous.as_ref(),
-            &commitment,
+            commitment,
             idx,
             self.player_threshold,
         ) {
-            Ok(verified_commitment) => verified_commitment,
+            Ok(commitment) => commitment,
             Err(e) => {
                 self.disqualified.insert(dealer);
                 return Err(e);
@@ -188,7 +191,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             }
 
             // Verify share
-            ops::verify_share::<V>(&verified_commitment, share.index, share)?;
+            ops::verify_share::<V>(&commitment, share.index, share)?;
         }
 
         // Active must be equal to number of players
@@ -272,7 +275,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         let mut commitments = HashMap::new();
         let mut reveals = HashMap::new();
         for (dealer_idx, (commitment, _, shares)) in selected {
-            commitments.insert(dealer_idx, commitment.clone());
+            commitments.insert(dealer_idx, commitment.into());
             if shares.is_empty() {
                 continue;
             }

@@ -3,7 +3,10 @@
 
 use crate::{
     bls12381::{
-        dkg::{ops, Error},
+        dkg::{
+            ops::{self, VerifiedCommitment},
+            Error,
+        },
         primitives::{
             group::{self, Element, Share},
             poly::{self, Eval},
@@ -37,7 +40,7 @@ pub struct Player<P: PublicKey, V: Variant> {
 
     dealers: HashMap<P, u32>,
 
-    dealings: HashMap<u32, (poly::Public<V>, Share)>,
+    dealings: HashMap<u32, (VerifiedCommitment<V>, Share)>,
 }
 
 impl<P: PublicKey, V: Variant> Player<P, V> {
@@ -96,7 +99,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
 
         // If already have commitment from dealer, check if matches
         if let Some((existing_commitment, existing_share)) = self.dealings.get(&dealer_idx) {
-            if existing_commitment != &commitment {
+            if existing_commitment.as_ref() != &commitment {
                 return Err(Error::MismatchedCommitment);
             }
             if existing_share != &share {
@@ -106,15 +109,15 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         }
 
         // Verify that commitment is valid
-        let verified_commitment = ops::verify_commitment::<V>(
+        let commitment = ops::verify_commitment::<V>(
             self.previous.as_ref(),
-            &commitment,
+            commitment,
             dealer_idx,
             self.player_threshold,
         )?;
 
         // Verify that share is valid
-        ops::verify_share::<V>(&verified_commitment, share.index, &share)?;
+        ops::verify_share::<V>(&commitment, share.index, &share)?;
 
         // Store dealings
         self.dealings.insert(dealer_idx, (commitment, share));
@@ -138,9 +141,9 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         for (idx, share) in reveals {
             // Verify that commitment is valid
             let commitment = commitments.get(&idx).ok_or(Error::MissingCommitment)?;
-            let verified_commitment = ops::verify_commitment::<V>(
+            let commitment = ops::verify_commitment::<V>(
                 self.previous.as_ref(),
-                commitment,
+                commitment.clone(),
                 idx,
                 self.player_threshold,
             )?;
@@ -149,10 +152,10 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
             if share.index != self.me {
                 return Err(Error::MisdirectedShare);
             }
-            ops::verify_share::<V>(&verified_commitment, share.index, &share)?;
+            ops::verify_share::<V>(&commitment, share.index, &share)?;
 
             // Store dealing
-            self.dealings.insert(idx, (commitment.clone(), share));
+            self.dealings.insert(idx, (commitment, share));
         }
 
         // Remove all dealings not in commitments
@@ -169,9 +172,9 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         match self.previous {
             None => {
                 // Add all valid commitments/dealings
-                for dealing in self.dealings.values() {
-                    public.add(&dealing.0);
-                    secret.add(&dealing.1.private);
+                for (commitment, private) in self.dealings.values() {
+                    public.add(commitment.as_ref());
+                    secret.add(private.as_ref());
                 }
             }
             Some(previous) => {
@@ -185,7 +188,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                 // While it is tempting to remove this work (given we only need the secret
                 // to generate a threshold signature), this polynomial is required to verify
                 // dealings of future resharings.
-                let commitments: BTreeMap<u32, poly::Public<V>> = self
+                let commitments: BTreeMap<u32, VerifiedCommitment<V>> = self
                     .dealings
                     .iter()
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
