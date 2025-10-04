@@ -106,15 +106,15 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         }
 
         // Verify that commitment is valid
-        ops::verify_commitment::<V>(
+        let verified_commitment = ops::verify_commitment::<V>(
             self.previous.as_ref(),
-            dealer_idx,
             &commitment,
+            dealer_idx,
             self.player_threshold,
         )?;
 
         // Verify that share is valid
-        ops::verify_share::<V>(&commitment, share.index, &share)?;
+        ops::verify_share::<V>(&verified_commitment, share.index, &share)?;
 
         // Store dealings
         self.dealings.insert(dealer_idx, (commitment, share));
@@ -138,10 +138,10 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         for (idx, share) in reveals {
             // Verify that commitment is valid
             let commitment = commitments.get(&idx).ok_or(Error::MissingCommitment)?;
-            ops::verify_commitment::<V>(
+            let verified_commitment = ops::verify_commitment::<V>(
                 self.previous.as_ref(),
-                idx,
                 commitment,
+                idx,
                 self.player_threshold,
             )?;
 
@@ -149,7 +149,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
             if share.index != self.me {
                 return Err(Error::MisdirectedShare);
             }
-            ops::verify_share::<V>(commitment, share.index, &share)?;
+            ops::verify_share::<V>(&verified_commitment, share.index, &share)?;
 
             // Store dealing
             self.dealings.insert(idx, (commitment.clone(), share));

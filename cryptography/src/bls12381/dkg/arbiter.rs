@@ -135,15 +135,18 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Verify the commitment is valid
-        if let Err(e) = ops::verify_commitment::<V>(
+        let verified_commitment = match ops::verify_commitment::<V>(
             self.previous.as_ref(),
-            idx,
             &commitment,
+            idx,
             self.player_threshold,
         ) {
-            self.disqualified.insert(dealer);
-            return Err(e);
-        }
+            Ok(verified_commitment) => verified_commitment,
+            Err(e) => {
+                self.disqualified.insert(dealer);
+                return Err(e);
+            }
+        };
 
         // Ensure acks valid range and >= threshold
         let players_len = self.players.len() as u32;
@@ -185,7 +188,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             }
 
             // Verify share
-            ops::verify_share::<V>(&commitment, share.index, share)?;
+            ops::verify_share::<V>(&verified_commitment, share.index, share)?;
         }
 
         // Active must be equal to number of players

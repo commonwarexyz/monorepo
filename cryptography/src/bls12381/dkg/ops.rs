@@ -51,14 +51,32 @@ pub fn evaluate_all<V: Variant>(polynomial: &poly::Public<V>, n: u32) -> Vec<V::
     evals
 }
 
+/// A verified commitment.
+pub struct VerifiedCommitment<'a, V: Variant> {
+    commitment: &'a poly::Public<V>,
+}
+
+impl<'a, V: Variant> VerifiedCommitment<'a, V> {
+    /// Evaluate the commitment at a given index.
+    pub fn evaluate(&self, index: u32) -> poly::Eval<V::Public> {
+        self.commitment.evaluate(index)
+    }
+}
+
+impl<'a, V: Variant> From<&'a poly::Public<V>> for VerifiedCommitment<'a, V> {
+    fn from(commitment: &'a poly::Public<V>) -> Self {
+        VerifiedCommitment { commitment }
+    }
+}
+
 /// Verify that a given commitment is valid for a dealer. If a previous
 /// polynomial is provided, verify that the commitment is on that polynomial.
-pub fn verify_commitment<V: Variant>(
+pub fn verify_commitment<'a, V: Variant>(
     previous: Option<&poly::Public<V>>,
+    commitment: &'a poly::Public<V>,
     dealer: u32,
-    commitment: &poly::Public<V>,
     t: u32,
-) -> Result<(), Error> {
+) -> Result<VerifiedCommitment<'a, V>, Error> {
     if let Some(previous) = previous {
         let expected = previous.evaluate(dealer).value;
         if expected != *commitment.constant() {
@@ -68,16 +86,12 @@ pub fn verify_commitment<V: Variant>(
     if commitment.degree() != t - 1 {
         return Err(Error::CommitmentWrongDegree);
     }
-    Ok(())
+    Ok(commitment.into())
 }
 
 /// Verify that a given share is valid for a specified recipient.
-///
-/// # Warning
-///
-/// This function assumes any provided commitment has already been verified.
-pub fn verify_share<V: Variant>(
-    commitment: &poly::Public<V>,
+pub fn verify_share<'a, V: Variant>(
+    commitment: &VerifiedCommitment<'a, V>,
     recipient: u32,
     share: &Share,
 ) -> Result<(), Error> {
