@@ -39,7 +39,7 @@
 use crate::{
     bls12381::{
         dkg::{
-            ops::{self, VerifiedCommitment},
+            ops::{self, Commitment},
             Error,
         },
         primitives::{group::Share, poly, variant::Variant},
@@ -73,7 +73,7 @@ pub struct Arbiter<P: PublicKey, V: Variant> {
     players: Vec<P>,
 
     #[allow(clippy::type_complexity)]
-    commitments: BTreeMap<u32, (VerifiedCommitment<V>, Vec<u32>, Vec<Share>)>,
+    commitments: BTreeMap<u32, (Commitment<V>, Vec<u32>, Vec<Share>)>,
     disqualified: HashSet<P>,
 }
 
@@ -138,7 +138,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Verify the commitment is valid
-        let commitment = match ops::verify_commitment::<V>(
+        let commitment = match Commitment::<V>::new(
             self.previous.as_ref(),
             commitment,
             idx,
@@ -191,7 +191,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             }
 
             // Verify share
-            ops::verify_share::<V>(&commitment, share.index, share)?;
+            commitment.verify_share(share.index, share)?;
         }
 
         // Active must be equal to number of players
