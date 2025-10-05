@@ -108,7 +108,7 @@ where
             log,
             inactivity_floor_loc: range.start,
             snapshot,
-            uncommitted_ops: 0,
+            steps: 0,
             hasher: StandardHasher::<H>::new(),
         };
         db.sync().await?;

@@ -109,8 +109,9 @@ pub struct Any<
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location,
 
-    /// The number of operations that are pending commit.
-    pub(crate) uncommitted_ops: u64,
+    /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
+    /// active operation to tip.
+    pub(crate) steps: u64,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     pub(crate) hasher: Standard<H>,
@@ -140,7 +141,7 @@ impl<
             log,
             snapshot,
             inactivity_floor_loc,
-            uncommitted_ops: 0,
+            steps: 0,
             hasher,
         };
 
@@ -385,6 +386,9 @@ impl<
         let new_loc = self.op_count();
         let res =
             Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
+        if res.is_some() {
+            self.steps += 1;
+        }
 
         let op = Operation::Update(key, value);
         self.apply_op(op).await?;
@@ -399,6 +403,7 @@ impl<
         let loc = self.op_count();
         let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
         if r.is_some() {
+            self.steps += 1;
             self.apply_op(Operation::Delete(key)).await?;
         };
 
@@ -456,7 +461,6 @@ impl<
                 .map_err(Error::Mmr),
             self.log.append(op).map_err(Error::Journal)
         )?;
-        self.uncommitted_ops += 1;
 
         Ok(())
     }
@@ -513,9 +517,19 @@ impl<
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
-        // commit op that will be appended.
-        self.raise_inactivity_floor(self.uncommitted_ops + 1)
+        // Raise the inactivity floor by taking `self.steps` steps.
+        let steps_to_take = if self.snapshot.keys() == 0 {
+            self.steps
+        } else {
+            self.steps + 1 // account for the previous commit becoming inactive.
+        };
+        for _ in 0..steps_to_take {
+            self.raise_floor().await?;
+        }
+        self.steps = 0;
+
+        // Apply the commit operation with the new inactivity floor.
+        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
             .await?;
 
         // Sync the log and process the updates to the MMR in parallel.
@@ -524,7 +538,6 @@ impl<
             Ok::<(), Error>(())
         };
         try_join!(self.log.sync().map_err(Error::Journal), mmr_fut)?;
-        self.uncommitted_ops = 0;
 
         Ok(())
     }
@@ -575,31 +588,23 @@ impl<
         Ok(None)
     }
 
-    /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
-    /// operation. Each step either advances over an inactive operation, or re-applies an active
-    /// operation to the tip and then advances over it. If the database is empty, the floor is
-    /// raised all the way to the tip.
+    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
+    /// active operation above the inactivity floor, moving it to tip, and then setting the
+    /// inactivity floor to the location following the moved operation. This method is therefore
+    /// guaranteed to raise the floor by at least one.
     ///
-    /// This method does not change the state of the db's snapshot, but it always changes the root
-    /// since it applies at least one operation.
-    async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
-        // special case for empty db, allowing us to raise the floor to the tip.
-        if self.snapshot.keys() == 0 {
-            self.inactivity_floor_loc = self.op_count();
-        } else {
-            for _ in 0..max_steps {
-                if self.inactivity_floor_loc == self.op_count() {
-                    break;
-                }
-                let op = self.log.read(*self.inactivity_floor_loc).await?;
-                self.move_op_if_active(op, self.inactivity_floor_loc)
-                    .await?;
-                self.inactivity_floor_loc += 1;
-            }
+    /// # Panics if there is not at least one active operation above the inactivity floor.
+    async fn raise_floor(&mut self) -> Result<(), Error> {
+        let mut op = self.log.read(*self.inactivity_floor_loc).await?;
+        while self
+            .move_op_if_active(op, self.inactivity_floor_loc)
+            .await?
+            .is_none()
+        {
+            self.inactivity_floor_loc += 1;
+            op = self.log.read(*self.inactivity_floor_loc).await?;
         }
-
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
-            .await?;
+        self.inactivity_floor_loc += 1;
 
         Ok(())
     }
@@ -642,13 +647,6 @@ impl<
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
     pub async fn close(mut self) -> Result<(), Error> {
-        if self.uncommitted_ops > 0 {
-            warn!(
-                op_count = self.uncommitted_ops,
-                "closing db with uncommitted operations"
-            );
-        }
-
         self.sync().await?;
 
         Ok(())
@@ -1378,7 +1376,7 @@ pub(super) mod test {
                 log,
                 snapshot,
                 inactivity_floor_loc,
-                uncommitted_ops: 0,
+                steps: 0,
                 hasher: Standard::<Sha256>::new(),
             };
             assert_eq!(db.root(&mut hasher), root);
