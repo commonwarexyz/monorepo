@@ -142,43 +142,43 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         let mut selected = BTreeMap::new();
         for (idx, commitment) in commitments {
             match self.dealings.remove(&idx) {
-                Some((existing, share)) => {
+                Some((stored, share)) => {
                     // If our stored commitment matches the one we are receiving,
                     // we do nothing (as our share is valid).
-                    if existing.as_ref() == &commitment {
-                        selected.insert(idx, (existing, share));
+                    if stored == commitment {
+                        selected.insert(idx, (stored, share));
                         continue;
                     }
 
                     // If our stored commitment does not match the one we are receiving,
                     // we must have received a reveal for this commitment (this is dealer
                     // equivocation).
-                    let commitment = Commitment::<V>::new(
+                    verify_commitment::<V>(
                         self.previous.as_ref(),
-                        commitment.clone(),
+                        &commitment,
                         idx,
                         self.player_threshold,
                     )?;
                     let share = reveals.get(&idx).ok_or(Error::MissingShare)?.clone();
 
                     // Check that share is valid
-                    commitment.verify_share(self.me, &share)?;
+                    verify_share::<V>(&commitment, self.me, &share)?;
 
                     // Store dealing
                     selected.insert(idx, (commitment, share));
                 }
                 None => {
                     // We must have received a reveal for this commitment.
-                    let commitment = Commitment::<V>::new(
+                    verify_commitment::<V>(
                         self.previous.as_ref(),
-                        commitment.clone(),
+                        &commitment,
                         idx,
                         self.player_threshold,
                     )?;
                     let share = reveals.get(&idx).ok_or(Error::MissingShare)?.clone();
 
                     // Check that share is valid
-                    commitment.verify_share(self.me, &share)?;
+                    verify_share::<V>(&commitment, self.me, &share)?;
 
                     // Store dealing
                     selected.insert(idx, (commitment, share));
