@@ -198,11 +198,10 @@ pub trait ValidatingScheme: Scheme {}
 
 #[cfg(test)]
 mod test {
-    use std::cmp::Reverse;
-
     use super::*;
     use crate::reed_solomon::ReedSolomon;
     use commonware_cryptography::Sha256;
+    use std::cmp::Reverse;
 
     fn general_test<S: Scheme>(
         name: &str,
