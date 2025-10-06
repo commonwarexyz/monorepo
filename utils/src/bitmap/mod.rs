@@ -200,8 +200,7 @@ impl<const N: usize> BitMap<N> {
         (self.chunks.back().unwrap(), self.next_bit)
     }
 
-    // Return the last chunk of the bitmap and its size in bits.
-    // The size can be 0 (meaning the last chunk is empty).
+    // Return the last chunk of the bitmap.
     #[inline]
     fn last_chunk_mut(&mut self) -> &mut [u8; N] {
         self.chunks.back_mut().unwrap()
@@ -411,6 +410,7 @@ impl<const N: usize> BitMap<N> {
         // Invariant: chunks is never empty
         if self.chunks.is_empty() {
             self.chunks.push_back(Self::EMPTY_CHUNK);
+            self.next_bit = 0;
         }
     }
 
@@ -1931,6 +1931,31 @@ mod tests {
         // Last partial chunk still has the appended bits
         assert!(bv.get(32));
         assert!(!bv.get(33));
+    }
+
+    #[test]
+    fn test_prune_all_chunks_resets_next_bit() {
+        let mut bv: BitMap<4> = BitMap::new();
+        bv.push_chunk(&[1, 2, 3, 4]);
+        bv.push_chunk(&[5, 6, 7, 8]);
+        bv.push(true);
+        bv.push(false);
+        bv.push(true);
+
+        // Bitmap has 2 full chunks + 3 bits in partial chunk
+        assert_eq!(bv.len(), 67);
+
+        // Prune all chunks (this leaves chunks empty, triggering the reset path)
+        bv.prune_chunks(3);
+
+        // Regression test: len() should be 0, not the old next_bit value (3)
+        assert_eq!(bv.len(), 0);
+        assert!(bv.is_empty());
+
+        // Bitmap should behave as freshly created
+        bv.push(true);
+        assert_eq!(bv.len(), 1);
+        assert!(bv.get(0));
     }
 
     #[test]
