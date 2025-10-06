@@ -34,7 +34,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// that can be used to send messages to the router.
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<P>>, Messenger<P>) {
         // Create mailbox
-        let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
 
         // Create metrics
         let messages_dropped = Family::<metrics::Message, Counter>::default();
@@ -52,7 +52,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                 connections: BTreeMap::new(),
                 messages_dropped,
             },
-            Mailbox::new(control_sender.clone()),
+            control_sender.clone(),
             Messenger::new(control_sender),
         )
     }

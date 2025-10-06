@@ -158,15 +158,14 @@ where
         (
             database.root(&mut hasher),
             database.lower_bound(),
-            database.op_count().saturating_sub(1),
+            database.op_count(),
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            lower_bound,
-            upper_bound,
+            range: lower_bound..upper_bound,
         },
     };
 

@@ -7,6 +7,7 @@ use crate::authenticated::{
         },
         metrics,
     },
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
@@ -33,7 +34,7 @@ pub struct Actor<
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
 
-    receiver: mpsc::Receiver<Message<E, O, I, C>>,
+    receiver: mpsc::Receiver<Message<O, I, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -49,7 +50,7 @@ impl<
     > Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, O, I, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<O, I, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -70,7 +71,7 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
         (
             Self {
@@ -87,13 +88,13 @@ impl<
                 received_messages,
                 rate_limited,
             },
-            Mailbox::new(sender),
+            sender,
         )
     }
 
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
@@ -101,7 +102,7 @@ impl<
 
     async fn run(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
         while let Some(msg) = self.receiver.next().await {
