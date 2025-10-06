@@ -197,12 +197,19 @@ impl<const N: usize> Prunable<N> {
 
     /* Pruning */
 
-    /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit.
+    /// Prune the bitmap to the most recent chunk boundary that contains the given bit.
     ///
     /// # Warning
     ///
-    /// Panics if the referenced bit is greater than the number of bits in the bitmap.
+    /// Panics if the bit is greater than the number of bits in the bitmap.
     pub fn prune_to_bit(&mut self, bit: u64) {
+        assert!(
+            bit < self.len(),
+            "bit {} out of bounds (len: {})",
+            bit,
+            self.len()
+        );
+
         let chunk = Self::unpruned_chunk(bit);
         if chunk < self.pruned_chunks {
             return;
@@ -506,6 +513,20 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "bit 25 out of bounds (len: 24)")]
+    fn test_prune_to_bit_out_of_bounds() {
+        let mut prunable: Prunable<1> = Prunable::new();
+
+        // Add 3 bytes (24 bits total)
+        prunable.push_byte(1);
+        prunable.push_byte(2);
+        prunable.push_byte(3);
+
+        // Try to prune to a bit beyond the bitmap
+        prunable.prune_to_bit(25);
+    }
+
+    #[test]
     fn test_pruning_with_partial_chunk() {
         let mut prunable: Prunable<4> = Prunable::new();
 
@@ -594,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chunk_index_with_pruning() {
+    fn test_pruned_chunk() {
         let mut prunable: Prunable<4> = Prunable::new();
 
         // Add three chunks
