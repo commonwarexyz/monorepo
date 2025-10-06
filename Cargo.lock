@@ -1056,6 +1056,7 @@ name = "commonware-codec"
 version = "0.0.62"
 dependencies = [
  "bytes",
+ "commonware-cryptography",
  "paste",
  "thiserror 2.0.12",
 ]
