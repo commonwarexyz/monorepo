@@ -972,7 +972,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, metric) = spawn_metrics!(self, blocking, self.spawn_config.is_dedicated());
+        let (label, metric) = spawn_metrics!(self, blocking);
 
         // Initialize the blocking task
         let executor = self.executor();
@@ -994,7 +994,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, metric) = spawn_metrics!(self, blocking, self.spawn_config.is_dedicated());
+        let (label, metric) = spawn_metrics!(self, blocking);
 
         // Set up the task
         let executor = self.executor();

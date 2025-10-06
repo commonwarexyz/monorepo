@@ -7,8 +7,12 @@ use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 pub struct Label {
     /// The name of the task.
     name: String,
-    /// The type of task.
-    task: Task,
+    /// The class of task (root, async, or blocking).
+    kind: Kind,
+    /// Whether the task is supervised by a parent.
+    supervision: Supervision,
+    /// Whether the task runs on a dedicated thread.
+    schedule: Schedule,
 }
 
 impl Label {
@@ -16,31 +20,41 @@ impl Label {
     pub fn root() -> Self {
         Self {
             name: String::new(),
-            task: Task::Root,
+            kind: Kind::Root,
+            supervision: Supervision::Detached,
+            schedule: Schedule::Shared,
         }
     }
 
     /// Create a new label for a future task.
-    pub fn future(name: String) -> Self {
+    pub fn future(name: String, supervised: bool, dedicated: bool) -> Self {
         Self {
             name,
-            task: Task::Future,
+            kind: Kind::Future,
+            supervision: if supervised {
+                Supervision::Supervised
+            } else {
+                Supervision::Detached
+            },
+            schedule: if dedicated {
+                Schedule::Dedicated
+            } else {
+                Schedule::Shared
+            },
         }
     }
 
-    /// Create a new label for a blocking task spawned in a shared thread pool.
-    pub fn blocking_shared(name: String) -> Self {
+    /// Create a new label for a blocking task.
+    pub fn blocking(name: String, dedicated: bool) -> Self {
         Self {
             name,
-            task: Task::BlockingShared,
-        }
-    }
-
-    /// Create a new label for a blocking task spawned on a dedicated thread.
-    pub fn blocking_dedicated(name: String) -> Self {
-        Self {
-            name,
-            task: Task::BlockingDedicated,
+            kind: Kind::Blocking,
+            supervision: Supervision::Detached,
+            schedule: if dedicated {
+                Schedule::Dedicated
+            } else {
+                Schedule::Shared
+            },
         }
     }
 
@@ -50,15 +64,31 @@ impl Label {
     }
 }
 
-/// Metric label that indicates the type of task spawned.
+/// Metric label that indicates the class of task spawned.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum Task {
+pub enum Kind {
     /// The root task.
     Root,
     /// An async task.
     Future,
-    /// A blocking task spawned in a shared thread pool.
-    BlockingShared,
-    /// A blocking task spawned on a dedicated thread.
-    BlockingDedicated,
+    /// A blocking task.
+    Blocking,
+}
+
+/// Metric label describing whether a task is supervised by its parent.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum Supervision {
+    /// Task is supervised and will be aborted with its parent.
+    Supervised,
+    /// Task is detached from parent supervision.
+    Detached,
+}
+
+/// Metric label describing whether a task runs on a dedicated thread.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum Schedule {
+    /// Task runs on the shared runtime.
+    Shared,
+    /// Task runs on a dedicated thread.
+    Dedicated,
 }

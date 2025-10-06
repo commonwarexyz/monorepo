@@ -13,19 +13,22 @@ macro_rules! spawn_metrics {
     // Handle future tasks
     ($ctx:ident, future) => {
         $crate::spawn_metrics!(
-            $crate::telemetry::metrics::task::Label::future($ctx.name.clone()),
+            $crate::telemetry::metrics::task::Label::future(
+                $ctx.name.clone(),
+                $ctx.spawn_config.is_supervised(),
+                $ctx.spawn_config.is_dedicated(),
+            ),
             @make $ctx
         )
     };
 
     // Handle blocking tasks
-    ($ctx:ident, blocking, $dedicated:expr) => {
+    ($ctx:ident, blocking) => {
         $crate::spawn_metrics!(
-            if $dedicated {
-                $crate::telemetry::metrics::task::Label::blocking_dedicated($ctx.name.clone())
-            } else {
-                $crate::telemetry::metrics::task::Label::blocking_shared($ctx.name.clone())
-            },
+            $crate::telemetry::metrics::task::Label::blocking(
+                $ctx.name.clone(),
+                $ctx.spawn_config.is_dedicated(),
+            ),
             @make $ctx
         )
     };
