@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use thiserror::Error;
 
 /// Create an iterator over the data of a buffer, interpreted as little-endian u64s.
-fn iter_u64_le(mut data: impl bytes::Buf) -> impl Iterator<Item = u64> {
+fn iter_u64_le(data: impl bytes::Buf) -> impl Iterator<Item = u64> {
     struct Iter<B> {
         remaining_u64s: usize,
         tail: usize,
@@ -66,7 +66,7 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
 fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
     let n = min_rows as f64;
     let k = (encoded_rows - min_rows) as f64;
-    let required = 128.0 / -(1.0 - (k + 1.0) / (n + k)).log2();
+    let required = 128.0 / -(1.0 - (k + 1.0) / (2.0 * (n + k))).log2();
     required.ceil() as usize
 }
 
@@ -75,7 +75,7 @@ fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
 /// The actual number of required samples for a given n * samples and k * samples
 /// will be less.
 fn required_samples_upper_bound(n: usize, k: usize) -> usize {
-    (128.0 / -(1.0 - k as f64 / (n + k) as f64).log2()).ceil() as usize
+    (128.0 / -(1.0 - k as f64 / (2.0 * (n + k) as f64)).log2()).ceil() as usize
 }
 
 fn enough_samples(n: usize, k: usize, samples: usize) -> bool {
