@@ -2300,8 +2300,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "blocking tasks cannot be supervised")]
-    fn test_deterministic_spawn_blocking_supervised_panics() {
+    fn test_deterministic_spawn_blocking_supervised_ignored() {
         let executor = deterministic::Runner::default();
         test_spawn_blocking_supervised_panics(executor);
     }
@@ -2332,8 +2331,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "blocking tasks cannot be supervised")]
-    fn test_deterministic_spawn_blocking_ref_supervised_panics() {
+    fn test_deterministic_spawn_blocking_ref_supervised_ignored() {
         let executor = deterministic::Runner::default();
         test_spawn_blocking_ref_supervised_panics(executor);
     }
@@ -2620,8 +2618,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "blocking tasks cannot be supervised")]
-    fn test_tokio_spawn_blocking_supervised_panics() {
+    fn test_tokio_spawn_blocking_supervised_ignored() {
         let executor = tokio::Runner::default();
         test_spawn_blocking_supervised_panics(executor);
     }
@@ -2652,8 +2649,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "blocking tasks cannot be supervised")]
-    fn test_tokio_spawn_blocking_ref_supervised_panics() {
+    fn test_tokio_spawn_blocking_ref_supervised_ignored() {
         let executor = tokio::Runner::default();
         test_spawn_blocking_ref_supervised_panics(executor);
     }
