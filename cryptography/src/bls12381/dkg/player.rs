@@ -137,7 +137,8 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
             return Err(Error::InvalidCommitments);
         }
 
-        // Iterate over commitments
+        // Iterate over selected commitments and confirm they match what we've acknowledged
+        // or that we have received a reveal.
         let mut selected = BTreeMap::new();
         for (idx, commitment) in commitments {
             match self.dealings.remove(&idx) {
