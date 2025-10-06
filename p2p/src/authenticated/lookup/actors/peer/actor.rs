@@ -37,7 +37,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
     Actor<E, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<Data>) {
-        let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
         (
@@ -53,7 +53,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 rate_limited: cfg.rate_limited,
                 _phantom: std::marker::PhantomData,
             },
-            Mailbox::new(control_sender),
+            control_sender,
             Relay::new(low_sender, high_sender),
         )
     }

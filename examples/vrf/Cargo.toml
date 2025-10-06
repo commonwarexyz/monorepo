@@ -27,6 +27,9 @@ tracing-subscriber = { workspace = true }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
 
+[dev-dependencies]
+rand_chacha = { workspace = true }
+
 [[bin]]
 name = "commonware-vrf"
 bench = false
