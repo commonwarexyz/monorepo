@@ -236,31 +236,6 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
-    /// Enqueue a child task to be executed that will be automatically aborted when the
-    /// parent task completes or is aborted.
-    ///
-    /// The spawned task will be tracked as a child of the current task. When
-    /// the parent task completes (either successfully or via abort), all child
-    /// tasks will be automatically aborted.
-    ///
-    /// # Context cloning and children
-    ///
-    /// When a context is cloned (via `Clone::clone`) or a new context is created (via methods
-    /// like `with_label`), you get another reference to the same context. However:
-    /// - Tasks spawned with `spawn` from any context (original or cloned) are always independent
-    /// - Only tasks spawned with `spawn_child` become children of the current task
-    /// - Child tasks are tied to the task that spawned them, not to the context itself
-    ///
-    /// # Note
-    ///
-    /// Only async tasks can be spawned as children, since blocking tasks cannot be
-    /// aborted and therefore can't support parent-child relationships.
-    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static;
-
     /// Enqueue a blocking task to be executed.
     ///
     /// This method is designed for synchronous, potentially long-running operations. Tasks can either
@@ -1459,7 +1434,7 @@ mod tests {
             let parent_handle =
                 spawn_with(&mut context, use_spawn_ref, move |context| async move {
                     // Spawn child that completes immediately
-                    let handle = context.spawn_child(|_| async {});
+                    let handle = context.supervised().spawn(|_| async {});
 
                     // Store child handle so we can test it later
                     *child_handle2.lock().unwrap() = Some(handle);
@@ -1497,7 +1472,7 @@ mod tests {
             let parent_handle =
                 spawn_with(&mut context, use_spawn_ref, move |context| async move {
                     // Spawn child task that hangs forever, should be aborted when parent aborts
-                    let handle = context.spawn_child(|_| pending::<()>());
+                    let handle = context.supervised().spawn(|_| pending::<()>());
 
                     // Store child task handle so we can test it later
                     *child_handle2.lock().unwrap() = Some(handle);
@@ -1533,7 +1508,7 @@ mod tests {
             let parent_handle =
                 spawn_with(&mut context, use_spawn_ref, move |context| async move {
                     // Spawn child task that hangs forever, should be aborted when parent completes
-                    let handle = context.spawn_child(|_| pending::<()>());
+                    let handle = context.supervised().spawn(|_| pending::<()>());
 
                     // Store child task handle so we can test it later
                     *child_handle2.lock().unwrap() = Some(handle);
@@ -1577,9 +1552,9 @@ mod tests {
                     for _ in 0..3 {
                         let handles2 = handles.clone();
                         let mut initialized_tx2 = initialized_tx.clone();
-                        let handle = context.clone().spawn_child(move |context| async move {
+                        let handle = context.supervised().spawn(move |context| async move {
                             for _ in 0..2 {
-                                let handle = context.clone().spawn_child(|_| async {
+                                let handle = context.supervised().spawn(|_| async {
                                     pending::<()>().await;
                                 });
                                 handles2.lock().unwrap().push(handle);
@@ -1629,7 +1604,7 @@ mod tests {
 
             let parent = context.spawn(move |mut context| async move {
                 // Spawn a child task
-                context.clone().spawn_child(|_| async move {
+                context.supervised().spawn(|_| async move {
                     child_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     child_complete_rx.await.unwrap();
@@ -1678,7 +1653,7 @@ mod tests {
             let cloned_context = context.clone();
             let parent = cloned_context.spawn(move |context| async move {
                 // Spawn a child task
-                context.spawn_child(|_| async move {
+                context.supervised().spawn(|_| async move {
                     child_started_tx.send(()).unwrap();
                     child_complete_rx.await.unwrap();
                 });

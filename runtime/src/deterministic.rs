@@ -952,17 +952,6 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let mut context = self;
-        context.spawn_config = context.spawn_config.supervised();
-        context.spawn(f)
-    }
-
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
