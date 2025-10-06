@@ -592,7 +592,7 @@ mod tests {
         /// - The update will not impact the root until `sync` is called.
         ///
         /// - Panics if self.next_bit is not chunk aligned.
-        pub fn push_chunk(&mut self, chunk: &[u8; N]) {
+        fn push_chunk(&mut self, chunk: &[u8; N]) {
             self.bitmap.push_chunk(chunk);
         }
     }
