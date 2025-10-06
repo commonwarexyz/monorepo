@@ -223,8 +223,8 @@ mod test {
             "you need to supply at least {min_shards} indices"
         );
         assert!(
-            total_shards > min_shards,
-            "total_shards ({total_shards}) must be > min_shards ({min_shards})"
+            total_shards >= min_shards,
+            "total_shards ({total_shards}) must be >= min_shards ({min_shards})"
         );
 
         let config = Config {
@@ -310,6 +310,10 @@ mod test {
         );
     }
 
+    fn test_no_data_two_shards<S: Scheme>() {
+        general_test::<S>("test_no_data_one_shard", b"", 1, 2, &[0]);
+    }
+
     fn test_suite<S: Scheme>() {
         test_basic::<S>();
         test_moderate::<S>();
@@ -317,6 +321,7 @@ mod test {
         test_recovery::<S>();
         test_empty_data::<S>();
         test_large_data::<S>();
+        test_no_data_two_shards::<S>();
     }
 
     #[test]
