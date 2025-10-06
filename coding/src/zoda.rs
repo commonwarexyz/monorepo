@@ -4,7 +4,7 @@ use crate::{
     Config, Scheme,
 };
 use bytes::BufMut;
-use commonware_codec::{Encode, EncodeSize, Read, Write};
+use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
@@ -85,7 +85,7 @@ fn enough_samples(n: usize, k: usize, samples: usize) -> bool {
     samples >= required
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Topology {
     /// How many bytes the data has.
     data_bytes: usize,
@@ -111,7 +111,7 @@ impl Topology {
         let data_els = F::bits_to_elements(data_bits);
         let n = config.minimum_shards as usize;
         let k = config.extra_shards as usize;
-        let samples_upper_bound = required_samples(n, n + k);
+        let samples_upper_bound = required_samples_upper_bound(n, n + k);
         let max_samples = (data_els / n).max(1);
         let mut samples = max_samples.min(samples_upper_bound);
         while samples > 1 && enough_samples(n, k, samples - 1) {
@@ -142,41 +142,6 @@ impl Topology {
 }
 
 #[derive(Clone)]
-struct Row<H: Hasher> {
-    _marker: PhantomData<H>,
-}
-
-impl<H: Hasher> PartialEq for Row<H> {
-    fn eq(&self, other: &Self) -> bool {
-        todo!()
-    }
-}
-impl<H: Hasher> Eq for Row<H> {}
-
-impl<H: Hasher> EncodeSize for Row<H> {
-    fn encode_size(&self) -> usize {
-        todo!()
-    }
-}
-
-impl<H: Hasher> Write for Row<H> {
-    fn write(&self, buf: &mut impl BufMut) {
-        todo!()
-    }
-}
-
-impl<H: Hasher> Read for Row<H> {
-    type Cfg = ();
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        todo!()
-    }
-}
-
-#[derive(Clone)]
 pub struct Shard<H: Hasher> {
     data_bytes: usize,
     root: H::Digest,
@@ -187,7 +152,11 @@ pub struct Shard<H: Hasher> {
 
 impl<H: Hasher> PartialEq for Shard<H> {
     fn eq(&self, other: &Self) -> bool {
-        todo!()
+        self.data_bytes == other.data_bytes
+            && self.root == other.root
+            && self.inclusion_proofs == other.inclusion_proofs
+            && self.rows == other.rows
+            && self.checksum == other.checksum
     }
 }
 
@@ -195,24 +164,43 @@ impl<H: Hasher> Eq for Shard<H> {}
 
 impl<H: Hasher> EncodeSize for Shard<H> {
     fn encode_size(&self) -> usize {
-        todo!()
+        self.data_bytes.encode_size()
+            + self.root.encode_size()
+            + self.inclusion_proofs.encode_size()
+            + self.rows.encode_size()
+            + self.checksum.encode_size()
     }
 }
 
 impl<H: Hasher> Write for Shard<H> {
     fn write(&self, buf: &mut impl BufMut) {
-        todo!()
+        self.data_bytes.write(buf);
+        self.root.write(buf);
+        self.inclusion_proofs.write(buf);
+        self.rows.write(buf);
+        self.checksum.write(buf);
     }
 }
 
 impl<H: Hasher> Read for Shard<H> {
-    type Cfg = ();
+    type Cfg = (usize, Config);
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
+        &(max_data_bytes, ref config): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        todo!()
+        let data_bytes = usize::read_cfg(buf, &RangeCfg::from(..=max_data_bytes))?;
+        let topology = Topology::reckon(config, data_bytes);
+        Ok(Self {
+            data_bytes,
+            root: ReadExt::read(buf)?,
+            inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=topology.samples), ()))?,
+            rows: Read::read_cfg(buf, &(topology.data_cols * topology.data_rows))?,
+            checksum: Arc::new(Read::read_cfg(
+                buf,
+                &(topology.data_cols * topology.data_rows),
+            )?),
+        })
     }
 }
 
@@ -224,7 +212,7 @@ pub struct ReShard<H: Hasher> {
 
 impl<H: Hasher> PartialEq for ReShard<H> {
     fn eq(&self, other: &Self) -> bool {
-        todo!()
+        self.inclusion_proofs == other.inclusion_proofs && self.shard == other.shard
     }
 }
 
@@ -232,24 +220,30 @@ impl<H: Hasher> Eq for ReShard<H> {}
 
 impl<H: Hasher> EncodeSize for ReShard<H> {
     fn encode_size(&self) -> usize {
-        todo!()
+        self.inclusion_proofs.encode_size() + self.shard.encode_size()
     }
 }
 
 impl<H: Hasher> Write for ReShard<H> {
     fn write(&self, buf: &mut impl BufMut) {
-        todo!()
+        self.inclusion_proofs.write(buf);
+        self.shard.write(buf);
     }
 }
 
 impl<H: Hasher> Read for ReShard<H> {
-    type Cfg = ();
+    type Cfg = usize;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
+        &max_data_bytes: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        todo!()
+        let max_data_els = max_data_bytes.div_ceil(F::SIZE);
+        Ok(Self {
+            // Worst case: every row is one data element, and the sample size is all rows.
+            inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=max_data_els), ()))?,
+            shard: Read::read_cfg(buf, &max_data_els)?,
+        })
     }
 }
 

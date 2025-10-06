@@ -1,4 +1,5 @@
 use crate::field::F;
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::BitVec;
 use rand_core::CryptoRngCore;
 use std::ops::{Index, IndexMut};
@@ -161,6 +162,36 @@ pub struct Matrix {
     rows: usize,
     cols: usize,
     data: Vec<F>,
+}
+
+impl EncodeSize for Matrix {
+    fn encode_size(&self) -> usize {
+        self.rows.encode_size() + self.cols.encode_size() + self.data.encode_size()
+    }
+}
+
+impl Write for Matrix {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.rows.write(buf);
+        self.cols.write(buf);
+        self.data.write(buf);
+    }
+}
+
+impl Read for Matrix {
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        &max_els: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let cfg = RangeCfg::from(..=max_els);
+        Ok(Self {
+            rows: Read::read_cfg(buf, &cfg)?,
+            cols: Read::read_cfg(buf, &cfg)?,
+            data: Read::read_cfg(buf, &(cfg, ()))?,
+        })
+    }
 }
 
 impl std::fmt::Debug for Matrix {
