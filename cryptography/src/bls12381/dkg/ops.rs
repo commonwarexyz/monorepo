@@ -115,7 +115,7 @@ pub fn construct_public<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public_with_weights<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, poly::Public<V>>,
+    commitments: &BTreeMap<u32, poly::Public<V>>,
     weights: &BTreeMap<u32, poly::Weight>,
     threshold: u32,
     concurrency: usize,
@@ -183,5 +183,5 @@ pub fn recover_public<V: Variant>(
     let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
     // Perform interpolation over each coefficient using the precomputed weights
-    recover_public_with_weights::<V>(previous, commitments, &weights, threshold, concurrency)
+    recover_public_with_weights::<V>(previous, &commitments, &weights, threshold, concurrency)
 }

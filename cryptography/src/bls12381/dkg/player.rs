@@ -16,7 +16,7 @@ use crate::{
     PublicKey,
 };
 use commonware_utils::quorum;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap};
 
 /// Output of a DKG/Resharing procedure.
 #[derive(Clone)]
@@ -40,7 +40,7 @@ pub struct Player<P: PublicKey, V: Variant> {
 
     dealers: HashMap<P, u32>,
 
-    dealings: HashMap<u32, (poly::Public<V>, Share)>,
+    dealings: BTreeMap<u32, (poly::Public<V>, Share)>,
 }
 
 impl<P: PublicKey, V: Variant> Player<P, V> {
@@ -75,7 +75,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
 
             dealers,
 
-            dealings: HashMap::new(),
+            dealings: BTreeMap::new(),
         }
     }
 
@@ -137,16 +137,18 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
             return Err(Error::InvalidCommitments);
         }
 
+        // Remove unnecessary dealings
+        self.dealings.retain(|idx, _| commitments.contains_key(idx));
+
         // Iterate over selected commitments and confirm they match what we've acknowledged
         // or that we have received a reveal.
-        let mut selected = BTreeMap::new();
         for (idx, commitment) in commitments {
-            match self.dealings.remove(&idx) {
-                Some((stored, share)) => {
+            match self.dealings.entry(idx) {
+                Entry::Occupied(mut entry) => {
                     // If our stored commitment matches the one we are receiving,
                     // we do nothing (as our share is valid).
-                    if stored == commitment {
-                        selected.insert(idx, (stored, share));
+                    let (stored_commitment, stored_share) = entry.get_mut();
+                    if stored_commitment == &commitment {
                         continue;
                     }
 
@@ -161,14 +163,13 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                     )?;
                     let share = reveals.get(&idx).ok_or(Error::MissingShare)?.clone();
 
-                    // Check that share is valid
+                    // Check that reveal is valid
                     verify_share::<V>(&commitment, self.me, &share)?;
-
-                    // Store dealing
-                    selected.insert(idx, (commitment, share));
+                    *stored_commitment = commitment;
+                    *stored_share = share;
                 }
-                None => {
-                    // We must have received a reveal for this commitment.
+                Entry::Vacant(entry) => {
+                    // We must have received a reveal for this commitment
                     verify_commitment::<V>(
                         self.previous.as_ref(),
                         &commitment,
@@ -177,15 +178,13 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                     )?;
                     let share = reveals.get(&idx).ok_or(Error::MissingShare)?.clone();
 
-                    // Check that share is valid
+                    // Check that reveal is valid
                     verify_share::<V>(&commitment, self.me, &share)?;
-
-                    // Store dealing
-                    selected.insert(idx, (commitment, share));
+                    entry.insert((commitment, share));
                 }
             }
         }
-        if selected.len() != dealer_threshold {
+        if self.dealings.len() != dealer_threshold {
             return Err(Error::MissingShare);
         }
 
@@ -195,14 +194,26 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         match self.previous {
             None => {
                 // Add all valid commitments/dealings
-                for (commitment, private) in selected.values() {
+                for (commitment, private) in self.dealings.values() {
                     public.add(commitment);
                     secret.add(private.as_ref());
                 }
             }
             Some(previous) => {
+                // Construct commitments and shares
+                let mut indices = Vec::with_capacity(self.dealings.len());
+                let mut commitments = BTreeMap::new();
+                let mut dealings = Vec::with_capacity(self.dealings.len());
+                for (dealer, (commitment, share)) in self.dealings.into_iter() {
+                    indices.push(dealer);
+                    commitments.insert(dealer, commitment);
+                    dealings.push(Eval {
+                        index: dealer,
+                        value: share.private,
+                    });
+                }
+
                 // Compute weights
-                let indices = selected.keys().copied().collect::<Vec<_>>();
                 let weights = poly::compute_weights(indices)
                     .map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
@@ -211,26 +222,15 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                 // While it is tempting to remove this work (given we only need the secret
                 // to generate a threshold signature), this polynomial is required to verify
                 // dealings of future resharings.
-                let commitments: BTreeMap<u32, poly::Public<V>> = selected
-                    .iter()
-                    .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
-                    .collect();
                 public = recover_public_with_weights::<V>(
                     &previous,
-                    commitments,
+                    &commitments,
                     &weights,
                     self.player_threshold,
                     self.concurrency,
                 )?;
 
                 // Recover share via interpolation
-                let dealings = selected
-                    .into_iter()
-                    .map(|(dealer, (_, share))| Eval {
-                        index: dealer,
-                        value: share.private,
-                    })
-                    .collect::<Vec<_>>();
                 secret = match poly::Private::recover_with_weights(&weights, &dealings) {
                     Ok(share) => share,
                     Err(_) => return Err(Error::ShareInterpolationFailed),
