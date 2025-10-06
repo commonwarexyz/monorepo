@@ -4,18 +4,22 @@ use crate::{
     application::Block,
     dkg::{DealOutcome, Dkg, Payload, OUTCOME_NAMESPACE},
 };
-use commonware_codec::{Decode, Encode, EncodeSize, FixedSize, Write};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{player::Output, Arbiter, Dealer, Player},
-        primitives::{group::Share, poly::Public, variant::Variant},
+        dkg::{
+            player::Output,
+            types::{Ack, Share},
+            Arbiter, Dealer, Player,
+        },
+        primitives::{group, poly::Public, variant::Variant},
     },
-    Hasher, PrivateKey, PublicKey, Verifier,
+    Hasher, PrivateKey, Verifier,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use futures::FutureExt;
 use rand_core::CryptoRngCore;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::{debug, error, info, warn};
 
 /// The signature namespace for DKG acknowledgment messages.
@@ -43,7 +47,7 @@ where
     signer: &'ctx mut P,
 
     /// The index of the local signer in the contributors list.
-    signer_index: usize,
+    signer_index: u32,
 
     /// The previous group polynomial and share.
     previous: Output<V>,
@@ -64,7 +68,7 @@ where
     commitment: Public<V>,
 
     /// The dealer's shares for all players.
-    shares: Vec<Share>,
+    shares: Vec<group::Share>,
 
     /// The local player for this round.
     player: Player<P::PublicKey, V>,
@@ -73,7 +77,7 @@ where
     arbiter: Arbiter<P::PublicKey, V>,
 
     /// Signed acknowledgements from contributors.
-    acks: HashMap<u32, P::Signature>,
+    acks: BTreeMap<u32, Ack<P::Signature>>,
 
     /// The deal outcome constructed from this manager's state, if any.
     deal_outcome: Option<DealOutcome<P, V>>,
@@ -94,7 +98,7 @@ where
     pub fn new<E: CryptoRngCore>(
         context: &mut E,
         public: Public<V>,
-        share: Share,
+        share: group::Share,
         signer: &'ctx mut P,
         contributors: &'ctx [P::PublicKey],
         sender: &'ctx mut S,
@@ -103,7 +107,7 @@ where
         let signer_index = contributors
             .iter()
             .position(|pk| pk == &signer.public_key())
-            .expect("signer must be in contributors");
+            .expect("signer must be in contributors") as u32;
 
         let (dealer, commitment, shares) =
             Dealer::new(context, Some(share.clone()), contributors.to_vec());
@@ -133,7 +137,7 @@ where
             shares,
             player,
             arbiter,
-            acks: HashMap::new(),
+            acks: BTreeMap::new(),
             deal_outcome: None,
         }
     }
@@ -152,29 +156,27 @@ where
         for (idx, contributor) in needs_broadcast {
             let share = self.shares.get(idx).cloned().unwrap();
 
-            if idx == self.signer_index {
+            if idx == self.signer_index as usize {
                 self.player
                     .share(self.signer.public_key(), self.commitment.clone(), share)
                     .unwrap();
                 self.dealer.ack(self.signer.public_key()).unwrap();
 
-                let payload = ack_payload::<V, P::PublicKey>(
+                let ack = Ack::new::<_, V>(
+                    ACK_NAMESPACE,
+                    self.signer,
+                    self.signer_index,
                     round,
                     &self.signer.public_key(),
                     &self.commitment,
                 );
-                let signature = self.signer.sign(Some(ACK_NAMESPACE), &payload);
-                self.acks.insert(self.signer_index as u32, signature);
+                self.acks.insert(self.signer_index, ack);
                 continue;
             }
 
-            let payload: Dkg<V, P::Signature> = Dkg {
-                round,
-                payload: Payload::Share {
-                    commitment: self.commitment.clone(),
-                    share,
-                },
-            };
+            let payload =
+                Payload::<V, P::Signature>::Share(Share::new(self.commitment.clone(), share))
+                    .into_message(round);
             let success = self
                 .sender
                 .send(
@@ -200,9 +202,11 @@ where
         while let Some(msg) = self.receiver.recv().now_or_never() {
             let (peer, msg) = msg.expect("receiver closed");
 
-            let msg =
-                Dkg::<V, P::Signature>::decode_cfg(&mut msg.as_ref(), &self.contributors.len())
-                    .unwrap();
+            let msg = Dkg::<V, P::Signature>::decode_cfg(
+                &mut msg.as_ref(),
+                &(self.contributors.len() as u32),
+            )
+            .unwrap();
             if msg.round != round {
                 warn!(
                     round,
@@ -213,42 +217,40 @@ where
             }
 
             match msg.payload {
-                Payload::Ack {
-                    public_key,
-                    signature,
-                } => {
+                Payload::Ack(ack) => {
                     // Verify index matches
-                    let Some(player) = self.contributors.get(public_key as usize) else {
-                        warn!(round, index = public_key, "invalid ack index");
+                    let Some(player) = self.contributors.get(ack.player as usize) else {
+                        warn!(round, index = ack.player, "invalid ack index");
                         return;
                     };
 
                     if player != &peer {
-                        warn!(round, index = public_key, "mismatched ack index");
+                        warn!(round, index = ack.player, "mismatched ack index");
                         return;
                     }
 
                     // Verify signature on incoming ack
-                    let payload = ack_payload::<V, P::PublicKey>(
+                    if !ack.verify::<V, _>(
+                        ACK_NAMESPACE,
+                        &peer,
                         round,
                         &self.signer.public_key(),
                         &self.commitment,
-                    );
-                    if !peer.verify(Some(ACK_NAMESPACE), &payload, &signature) {
-                        warn!(round, index = public_key, "invalid ack signature");
+                    ) {
+                        warn!(round, index = ack.player, "invalid ack signature");
                         return;
                     }
 
                     // Store ack
                     if let Err(e) = self.dealer.ack(peer) {
-                        debug!(round, index = public_key, error = ?e, "failed to store ack");
+                        debug!(round, index = ack.player, error = ?e, "failed to store ack");
                         return;
                     }
-                    self.acks.insert(public_key, signature);
+                    info!(round, index = ack.player, "stored ack");
 
-                    info!(round, index = public_key, "stored ack");
+                    self.acks.insert(ack.player, ack);
                 }
-                Payload::Share { commitment, share } => {
+                Payload::Share(Share { commitment, share }) => {
                     // Store share
                     if let Err(e) = self.player.share(peer.clone(), commitment.clone(), share) {
                         debug!(round, error = ?e, "failed to store share");
@@ -256,18 +258,21 @@ where
                     }
 
                     // Send ack
-                    let payload = ack_payload::<V, P::PublicKey>(round, &peer, &commitment);
-                    let signature = self.signer.sign(Some(ACK_NAMESPACE), &payload);
-                    let ack: Dkg<V, P::Signature> = Dkg {
+                    let payload = Payload::<V, P::Signature>::Ack(Ack::new::<_, V>(
+                        ACK_NAMESPACE,
+                        self.signer,
+                        self.signer_index,
                         round,
-                        payload: Payload::Ack {
-                            public_key: self.signer_index as u32,
-                            signature,
-                        },
-                    };
-
+                        &peer,
+                        &commitment,
+                    ))
+                    .into_message(round);
                     self.sender
-                        .send(Recipients::One(peer.clone()), ack.encode().freeze(), true)
+                        .send(
+                            Recipients::One(peer.clone()),
+                            payload.encode().freeze(),
+                            true,
+                        )
                         .await
                         .expect("could not send ack");
 
@@ -305,11 +310,18 @@ where
         }
 
         // Verify all ack signatures
-        let payload = ack_payload::<V, P::PublicKey>(round, &outcome.dealer, &outcome.commitment);
-        if !outcome.acks.iter().all(|(i, sig)| {
+        if !outcome.acks.iter().all(|ack| {
             self.contributors
-                .get(*i as usize)
-                .map(|public_key| public_key.verify(Some(ACK_NAMESPACE), &payload, sig))
+                .get(ack.player as usize)
+                .map(|public_key| {
+                    ack.verify::<V, _>(
+                        ACK_NAMESPACE,
+                        public_key,
+                        round,
+                        &outcome.dealer,
+                        &outcome.commitment,
+                    )
+                })
                 .unwrap_or(false)
         }) {
             warn!(round, "invalid ack signatures; disqualifying dealer");
@@ -321,8 +333,7 @@ where
         let ack_indices = outcome
             .acks
             .iter()
-            .map(|(i, _)| i)
-            .copied()
+            .map(|ack| ack.player)
             .collect::<Vec<_>>();
         if let Err(e) = self.arbiter.commitment(
             outcome.dealer,
@@ -351,18 +362,18 @@ where
             }
         };
 
-        let commitments = result.commitments.into_iter().collect::<HashMap<_, _>>();
+        let commitments = result.commitments.into_iter().collect::<BTreeMap<_, _>>();
         let reveals = result
             .reveals
             .into_iter()
             .filter_map(|(dealer_idx, shares)| {
                 shares
                     .iter()
-                    .find(|s| s.index == self.signer_index as u32)
+                    .find(|s| s.index == self.signer_index)
                     .cloned()
                     .map(|share| (dealer_idx, share))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
 
         let n_commitments = commitments.len();
         let n_reveals = reveals.len();
@@ -400,7 +411,7 @@ where
             self.signer,
             round,
             self.commitment.clone(),
-            self.acks.clone().into_iter().collect::<Vec<_>>(),
+            self.acks.values().cloned().collect(),
             reveals,
         ));
     }
@@ -409,17 +420,4 @@ where
     pub fn take_deal_outcome(&mut self) -> Option<DealOutcome<P, V>> {
         self.deal_outcome.take()
     }
-}
-
-/// Create a payload for acking a secret.
-fn ack_payload<V: Variant, P: PublicKey>(
-    round: u64,
-    dealer: &P,
-    commitment: &Public<V>,
-) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(u64::SIZE + P::SIZE + commitment.encode_size());
-    round.write(&mut payload);
-    dealer.write(&mut payload);
-    commitment.write(&mut payload);
-    payload
 }
