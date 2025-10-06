@@ -605,6 +605,39 @@ mod tests {
     }
 
     #[test]
+    fn info_verifier_allows_past_timestamp() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let namespace = b"namespace".to_vec();
+            let synchrony_bound = Duration::from_secs(30);
+            let validator = Info::verifier(
+                validator_key.public_key(),
+                true,
+                4,
+                synchrony_bound,
+                namespace.clone(),
+            );
+
+            // Advance current time
+            context.sleep(synchrony_bound * 2).await;
+
+            // Create peer with timestamp below current - synchrony bound
+            let past_timestamp =
+                (context.current().epoch() - synchrony_bound - Duration::from_secs(1)).as_millis()
+                    as u64;
+            let peer = Info::sign(
+                &peer_key,
+                namespace.as_ref(),
+                SocketAddr::from(([198, 51, 100, 1], 8080)),
+                past_timestamp,
+            );
+            assert!(validator.validate(&context, &[peer]).is_ok());
+        });
+    }
+
+    #[test]
     fn info_verifier_rejects_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
