@@ -180,68 +180,6 @@ pub struct Info<C: PublicKey> {
     pub signature: C::Signature,
 }
 
-/// Validate peer gossip payloads against configurability and basic safety checks.
-#[derive(Clone)]
-pub struct InfoVerifier<C: PublicKey> {
-    /// The [PublicKey] of the verifier.
-    me: C,
-
-    /// Whether to allow private IPs.
-    allow_private_ips: bool,
-
-    /// The maximum number of [Info] allowable in a single message.
-    peer_gossip_max_count: usize,
-
-    /// The time bound for synchrony. Messages with timestamps greater than this far into the
-    /// future will be considered malformed.
-    synchrony_bound: Duration,
-
-    /// The namespace used to sign and verify [Info] messages.
-    ip_namespace: Vec<u8>,
-}
-
-impl<C: PublicKey> InfoVerifier<C> {
-    /// Handle an incoming list of peer information.
-    ///
-    /// Returns an error if the list itself or any entries can be considered malformed.
-    pub fn validate(&self, clock: &impl Clock, infos: &[Info<C>]) -> Result<(), Error> {
-        // Ensure there aren't too many peers sent
-        if infos.len() > self.peer_gossip_max_count {
-            return Err(Error::TooManyPeers(infos.len()));
-        }
-
-        // We allow peers to be sent in any order when responding to a bit vector (allows
-        // for selecting a random subset of peers when there are too many) and allow
-        // for duplicates (no need to create an additional set to check this)
-        for info in infos {
-            // Check if IP is allowed
-            #[allow(unstable_name_collisions)]
-            if !self.allow_private_ips && !info.socket.ip().is_global() {
-                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
-            }
-
-            // Check if peer is us
-            if info.public_key == self.me {
-                return Err(Error::ReceivedSelf);
-            }
-
-            // If any timestamp is too far into the future, disconnect from the peer
-            if Duration::from_millis(info.timestamp)
-                > clock.current().epoch() + self.synchrony_bound
-            {
-                return Err(Error::SynchronyBound);
-            }
-
-            // If any signature is invalid, disconnect from the peer
-            if !info.verify(self.ip_namespace.as_ref()) {
-                return Err(Error::InvalidSignature);
-            }
-        }
-
-        Ok(())
-    }
-}
-
 impl<C: PublicKey> Info<C> {
     /// Verify the signature of [Info].
     pub fn verify(&self, namespace: &[u8]) -> bool {
@@ -260,13 +198,13 @@ impl<C: PublicKey> Info<C> {
         synchrony_bound: Duration,
         ip_namespace: Vec<u8>,
     ) -> InfoVerifier<C> {
-        InfoVerifier {
+        InfoVerifier::new(
             me,
             allow_private_ips,
             peer_gossip_max_count,
             synchrony_bound,
             ip_namespace,
-        }
+        )
     }
 
     /// Sign the [Info] message.
@@ -318,6 +256,85 @@ impl<C: PublicKey> Read for Info<C> {
             public_key,
             signature,
         })
+    }
+}
+
+/// Validate peer gossip payloads against configurability and basic safety checks.
+#[derive(Clone)]
+pub struct InfoVerifier<C: PublicKey> {
+    /// The [PublicKey] of the verifier.
+    me: C,
+
+    /// Whether to allow private IPs.
+    allow_private_ips: bool,
+
+    /// The maximum number of [Info] allowable in a single message.
+    peer_gossip_max_count: usize,
+
+    /// The time bound for synchrony. Messages with timestamps greater than this far into the
+    /// future will be considered malformed.
+    synchrony_bound: Duration,
+
+    /// The namespace used to sign and verify [Info] messages.
+    ip_namespace: Vec<u8>,
+}
+
+impl<C: PublicKey> InfoVerifier<C> {
+    /// Create a new [InfoVerifier] with the provided configuration.
+    fn new(
+        me: C,
+        allow_private_ips: bool,
+        peer_gossip_max_count: usize,
+        synchrony_bound: Duration,
+        ip_namespace: Vec<u8>,
+    ) -> InfoVerifier<C> {
+        InfoVerifier {
+            me,
+            allow_private_ips,
+            peer_gossip_max_count,
+            synchrony_bound,
+            ip_namespace,
+        }
+    }
+
+    /// Handle an incoming list of peer information.
+    ///
+    /// Returns an error if the list itself or any entries can be considered malformed.
+    pub fn validate(&self, clock: &impl Clock, infos: &[Info<C>]) -> Result<(), Error> {
+        // Ensure there aren't too many peers sent
+        if infos.len() > self.peer_gossip_max_count {
+            return Err(Error::TooManyPeers(infos.len()));
+        }
+
+        // We allow peers to be sent in any order when responding to a bit vector (allows
+        // for selecting a random subset of peers when there are too many) and allow
+        // for duplicates (no need to create an additional set to check this)
+        for info in infos {
+            // Check if IP is allowed
+            #[allow(unstable_name_collisions)]
+            if !self.allow_private_ips && !info.socket.ip().is_global() {
+                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
+            }
+
+            // Check if peer is us
+            if info.public_key == self.me {
+                return Err(Error::ReceivedSelf);
+            }
+
+            // If any timestamp is too far into the future, disconnect from the peer
+            if Duration::from_millis(info.timestamp)
+                > clock.current().epoch() + self.synchrony_bound
+            {
+                return Err(Error::SynchronyBound);
+            }
+
+            // If any signature is invalid, disconnect from the peer
+            if !info.verify(self.ip_namespace.as_ref()) {
+                return Err(Error::InvalidSignature);
+            }
+        }
+
+        Ok(())
     }
 }
 
