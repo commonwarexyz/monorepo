@@ -349,7 +349,7 @@ impl<const N: usize> BitMap<N> {
     /// for one more bit.
     fn prepare_next_chunk(&mut self) {
         self.next_bit = 0;
-        self.chunks.push_back([0u8; N]);
+        self.chunks.push_back(Self::EMPTY_CHUNK);
     }
 
     /// Clear all bits in the last chunk that are >= self.next_bit to maintain the invariant.
