@@ -118,7 +118,7 @@ impl Topology {
             samples -= 1;
         }
         let data_rows = n * samples;
-        let data_cols = data_els.div_ceil(data_rows);
+        let data_cols = data_els.div_ceil(data_rows).max(1);
         let encoded_rows = (data_rows + k * samples).next_power_of_two();
         // We make sure we have enough column samples to get 126 bits of security.
         //
@@ -417,6 +417,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
         let shards = shuffled_indices
             .chunks_exact(topology.samples)
+            .take(topology.total_shards)
             .map(|indices| {
                 let rows = Matrix::init(
                     indices.len(),
