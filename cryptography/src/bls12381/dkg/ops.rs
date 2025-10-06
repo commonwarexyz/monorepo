@@ -94,17 +94,21 @@ pub fn verify_share<V: Variant>(
 }
 
 /// Construct a public polynomial by summing a vector of commitments.
-pub fn construct_public<V: Variant>(
-    commitments: &BTreeMap<u32, poly::Public<V>>,
+pub fn construct_public<'a, V: Variant>(
+    commitments: impl IntoIterator<Item = &'a poly::Public<V>>,
     required: u32,
 ) -> Result<poly::Public<V>, Error> {
-    if commitments.len() < required as usize {
-        return Err(Error::InsufficientDealings);
+    // Compute new public polynomial by summing all commitments
+    let mut count = 0;
+    let mut public = poly::Public::<V>::zero();
+    for commitment in commitments.into_iter() {
+        public.add(commitment);
+        count += 1;
     }
 
-    let mut public = poly::Public::<V>::zero();
-    for commitment in commitments.values() {
-        public.add(commitment);
+    // Ensure we have enough commitments
+    if count < required {
+        return Err(Error::InsufficientDealings);
     }
     Ok(public)
 }

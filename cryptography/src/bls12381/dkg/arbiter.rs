@@ -260,7 +260,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                     Err(e) => return (Err(e), self.disqualified),
                 }
             }
-            None => match construct_public::<V>(&commitments, self.player_threshold) {
+            None => match construct_public::<V>(commitments.values(), self.player_threshold) {
                 Ok(public) => public,
                 Err(e) => return (Err(e), self.disqualified),
             },
