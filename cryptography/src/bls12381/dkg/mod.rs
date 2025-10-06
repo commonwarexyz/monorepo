@@ -748,38 +748,31 @@ mod tests {
         }
         contributors.sort();
 
-        // Create dealer
-        let (_, _, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
-
-        // Create player
-        let mut player = Player::<_, MinSig>::new(
-            contributors[0].clone(),
-            None,
-            contributors.clone(),
-            contributors.clone(),
-            1,
-        );
-
-        // Create arbiter
-        let mut arb =
-            Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
-
         // Create invalid commitments
         let mut commitments = Vec::new();
-        let (public, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n * 2, 1);
-        commitments.push(public);
-        let (public, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n * 2, t - 1);
-        commitments.push(public);
-        let (public, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n * 2, t + 1);
-        commitments.push(public);
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, 1);
+        commitments.push((public, shares));
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t - 1);
+        commitments.push((public, shares));
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t + 1);
+        commitments.push((public, shares));
 
         // Check invalid commitments
-        for public in commitments {
+        for (public, shares) in commitments {
             // Send invalid commitment to player
+            let mut player = Player::<_, MinSig>::new(
+                contributors[0].clone(),
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                1,
+            );
             let result = player.share(contributors[0].clone(), public.clone(), shares[0].clone());
             assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
 
-            // Send invalid commitment to arbiter
+            // Create arbiter
+            let mut arb =
+                Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
             let result = arb.commitment(
                 contributors[0].clone(),
                 public,
