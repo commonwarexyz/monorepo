@@ -64,7 +64,7 @@ impl Label {
     }
 }
 
-/// Metric label that indicates the class of task spawned.
+/// Metric label that indicates the type of task spawned.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum Kind {
     /// The root task.
