@@ -270,14 +270,6 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.push(bit);
     }
 
-    /// Convert a bit into the position of the Merkle tree leaf it belongs to.
-    #[inline]
-    #[cfg(test)]
-    pub(crate) fn leaf_pos(bit: u64) -> Position {
-        let chunk_loc = BitMap::<N>::unpruned_chunk(bit);
-        Position::from(Location::new(chunk_loc as u64))
-    }
-
     /// Get the value of a bit.
     ///
     /// # Warning
@@ -600,6 +592,12 @@ mod tests {
         /// - Panics if self.next_bit is not chunk aligned.
         fn push_chunk(&mut self, chunk: &[u8; N]) {
             self.bitmap.push_chunk(chunk);
+        }
+
+        /// Convert a bit into the position of the Merkle tree leaf it belongs to.
+        pub(crate) fn leaf_pos(bit: u64) -> Position {
+            let chunk_loc = BitMap::<N>::unpruned_chunk(bit);
+            Position::from(Location::new(chunk_loc as u64))
         }
     }
 
