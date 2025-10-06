@@ -1,3 +1,4 @@
+use commonware_codec::{Encode, FixedSize, Read, Write};
 use commonware_cryptography::{Digestible, Hasher};
 use rand_core::CryptoRngCore;
 use std::ops::{Add, Mul, Neg, Sub};
@@ -10,6 +11,27 @@ const P: u64 = u64::wrapping_neg(1 << 32) + 1;
 /// An element of the [Goldilocks field](https://xn--2-umb.com/22/goldilocks/).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct F(u64);
+
+impl FixedSize for F {
+    const SIZE: usize = u64::SIZE;
+}
+
+impl Write for F {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.0.write(buf)
+    }
+}
+
+impl Read for F {
+    type Cfg = <u64 as Read>::Cfg;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        u64::read_cfg(buf, cfg).map(F)
+    }
+}
 
 impl std::fmt::Debug for F {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
