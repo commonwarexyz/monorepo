@@ -139,6 +139,13 @@ impl Topology {
             total_shards: n + k,
         }
     }
+
+    fn check_index(&self, i: u16) -> Result<(), ZodaError> {
+        if (0..self.total_shards).contains(&(i as usize)) {
+            return Ok(());
+        }
+        Err(ZodaError::InvalidIndex(i))
+    }
 }
 
 #[derive(Clone)]
@@ -289,12 +296,12 @@ impl<H: Hasher> CheckingData<H> {
         transcript.commit(root.encode());
         let expected_commitment = transcript.summarize();
         if *commitment != expected_commitment {
-            return Err(ZodaError::Something);
+            return Err(ZodaError::InvalidShard);
         }
         let transcript = Transcript::resume(expected_commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
-            return Err(ZodaError::Something);
+            return Err(ZodaError::InvalidShard);
         }
         let encoded_checksum = checksum
             .as_polynomials(topology.encoded_rows)
@@ -312,12 +319,12 @@ impl<H: Hasher> CheckingData<H> {
     }
 
     fn check(&self, index: u16, reshard: &ReShard<H>) -> Result<CheckedShard, ZodaError> {
+        self.topology.check_index(index)?;
         if reshard.shard.rows() != self.topology.samples
             || reshard.shard.cols() != self.topology.data_cols
             || reshard.inclusion_proofs.len() != reshard.shard.rows()
-            || !(0..=self.topology.total_shards).contains(&(index as usize))
         {
-            return Err(ZodaError::Something);
+            return Err(ZodaError::InvalidReShard);
         }
         let index = index as usize;
         let these_shuffled_indices = &self.shuffled_indices
@@ -335,13 +342,13 @@ impl<H: Hasher> CheckingData<H> {
                     i as u32,
                     &self.root,
                 )
-                .map_err(|_| ZodaError::Something)?;
+                .map_err(|_| ZodaError::InvalidReShard)?;
         }
         let shard_checksum = reshard.shard.mul(&self.checking_matrix);
         // Check that the shard checksum rows match the encoded checksums
         for (row, &i) in shard_checksum.iter().zip(these_shuffled_indices) {
             if row != &self.encoded_checksum[i] {
-                return Err(ZodaError::Something);
+                return Err(ZodaError::InvalidReShard);
             }
         }
         Ok(CheckedShard {
@@ -353,8 +360,14 @@ impl<H: Hasher> CheckingData<H> {
 
 #[derive(Debug, Error)]
 pub enum ZodaError {
-    #[error("something")]
-    Something,
+    #[error("invalid shard")]
+    InvalidShard,
+    #[error("invalid reshard")]
+    InvalidReShard,
+    #[error("invalid index {0}")]
+    InvalidIndex(u16),
+    #[error("insufficient shards {0} < {1}")]
+    InsufficientShards(usize, usize),
 }
 
 const NAMESPACE: &[u8] = b"commonware-zoda";
@@ -424,7 +437,10 @@ impl<H: Hasher> Scheme for Zoda<H> {
                 );
                 let inclusion_proofs = indices
                     .iter()
-                    .map(|&i| tree.proof(i as u32).expect("TODO"))
+                    .map(|&i| {
+                        tree.proof(i as u32)
+                            .expect("Impossible: ZODA should always have at least 1 row")
+                    })
                     .collect::<Vec<_>>();
                 Shard {
                     data_bytes,
@@ -484,7 +500,9 @@ impl<H: Hasher> Scheme for Zoda<H> {
             min_shards,
             ..
         } = checking_data.topology;
-        assert!(shards.len() >= min_shards, "TODO: not enough shards");
+        if shards.len() < min_shards {
+            return Err(ZodaError::InsufficientShards(shards.len(), min_shards));
+        }
         let mut evaluation = EvaluationVector::empty(encoded_rows.ilog2() as usize, data_cols);
         for shard in shards {
             let indices =
