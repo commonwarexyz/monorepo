@@ -14,7 +14,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     time::Duration,
 };
 use tracing::{debug, info, warn};
@@ -179,16 +179,16 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
         );
 
         // Broadcast commitments
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (dealer_idx, commitment) in output.commitments {
             commitments.insert(dealer_idx, commitment);
         }
-        let mut reveals = HashMap::new();
+        let mut reveals = BTreeMap::new();
         for (dealer_idx, shares) in output.reveals {
             for share in shares {
                 reveals
                     .entry(share.index)
-                    .or_insert_with(HashMap::new)
+                    .or_insert_with(BTreeMap::new)
                     .insert(dealer_idx, share);
             }
         }
