@@ -95,7 +95,7 @@ pub fn verify_share<V: Variant>(
 
 /// Construct a public polynomial by summing a vector of commitments.
 pub fn construct_public<V: Variant>(
-    commitments: Vec<poly::Public<V>>,
+    commitments: &BTreeMap<u32, poly::Public<V>>,
     required: u32,
 ) -> Result<poly::Public<V>, Error> {
     if commitments.len() < required as usize {
@@ -103,8 +103,8 @@ pub fn construct_public<V: Variant>(
     }
 
     let mut public = poly::Public::<V>::zero();
-    for commitment in commitments {
-        public.add(&commitment);
+    for commitment in commitments.values() {
+        public.add(commitment);
     }
     Ok(public)
 }
@@ -168,7 +168,7 @@ pub fn recover_public_with_weights<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, poly::Public<V>>,
+    commitments: &BTreeMap<u32, poly::Public<V>>,
     threshold: u32,
     concurrency: usize,
 ) -> Result<poly::Public<V>, Error> {
@@ -183,5 +183,5 @@ pub fn recover_public<V: Variant>(
     let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
     // Perform interpolation over each coefficient using the precomputed weights
-    recover_public_with_weights::<V>(previous, &commitments, &weights, threshold, concurrency)
+    recover_public_with_weights::<V>(previous, commitments, &weights, threshold, concurrency)
 }
