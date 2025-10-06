@@ -68,7 +68,7 @@ where
                     thread_pool: db_config.thread_pool.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
-                // The last node of an MMR with `range.end - 1` operations is at the position
+                // The last node of an MMR with `range.end` leaves is at the position
                 // right before where the next leaf (at location `range.end`) goes.
                 range: Position::from(range.start)..Position::from(range.end + 1),
                 pinned_nodes,
@@ -1484,7 +1484,7 @@ mod tests {
 
             // Test different pruning boundaries
             for lower_bound in [0, 50, 100, 150] {
-                let upper_bound = std::cmp::min(lower_bound + 49, *total_ops );
+                let upper_bound = std::cmp::min(lower_bound + 50, *total_ops );
 
                 // Create log with operations
                 let mut log = init_journal(
