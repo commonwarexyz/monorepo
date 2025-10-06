@@ -190,8 +190,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
     /// Create a new instance of `Spawner` configured to spawn new tasks on a dedicated thread.
     ///
-    /// If the runtime supports it, it should allocate a dedicated thread that drives the async
-    /// task.
+    /// If the runtime supports it, it should allocate a dedicated thread that drives the task.
     fn dedicated(&self) -> Self;
 
     /// Create a new instance of `Spawner` configured to spawn new tasks on the shared task
