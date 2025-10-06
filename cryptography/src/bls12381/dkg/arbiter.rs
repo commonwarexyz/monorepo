@@ -56,10 +56,10 @@ pub struct Output<V: Variant> {
     pub public: poly::Public<V>,
 
     /// `2f + 1` commitments used to derive group polynomial.
-    pub commitments: HashMap<u32, poly::Public<V>>,
+    pub commitments: BTreeMap<u32, poly::Public<V>>,
 
     /// Reveals published by dealers of selected commitments.
-    pub reveals: HashMap<u32, Vec<Share>>,
+    pub reveals: BTreeMap<u32, Vec<Share>>,
 }
 
 /// Gather commitments, acknowledgements, and reveals from all dealers.
@@ -272,8 +272,8 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         };
 
         // Generate output
-        let mut commitments = HashMap::new();
-        let mut reveals = HashMap::new();
+        let mut commitments = BTreeMap::new();
+        let mut reveals = BTreeMap::new();
         for (dealer_idx, (commitment, _, shares)) in selected {
             commitments.insert(dealer_idx, commitment.into());
             if shares.is_empty() {

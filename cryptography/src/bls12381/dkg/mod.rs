@@ -217,7 +217,7 @@ mod tests {
     use arbiter::Output;
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn run_dkg_and_reshare<V: Variant>(
         n_0: u32,
@@ -326,7 +326,7 @@ mod tests {
             let result = players
                 .remove(player)
                 .unwrap()
-                .finalize(output.commitments.clone(), HashMap::new())
+                .finalize(output.commitments.clone(), BTreeMap::new())
                 .unwrap();
             outputs.insert(player.clone(), result);
         }
@@ -444,7 +444,7 @@ mod tests {
             let result = reshare_player_objs
                 .remove(player)
                 .unwrap()
-                .finalize(output.commitments.clone(), HashMap::new())
+                .finalize(output.commitments.clone(), BTreeMap::new())
                 .unwrap();
             assert_eq!(result.public, output.public);
             outputs.push(result);
@@ -1368,7 +1368,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1383,7 +1383,7 @@ mod tests {
         let (_, commitment, shares) =
             Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
         commitments.insert(last, commitment);
-        let mut reveals = HashMap::new();
+        let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[0].clone());
         player.finalize(commitments, reveals).unwrap();
     }
@@ -1413,7 +1413,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1427,7 +1427,7 @@ mod tests {
         let last = (q - 1) as u32;
         let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
         commitments.insert(last, commitment);
-        let result = player.finalize(commitments, HashMap::new());
+        let result = player.finalize(commitments, BTreeMap::new());
         assert!(matches!(result, Err(Error::MissingShare)));
     }
 
@@ -1455,7 +1455,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(2) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1466,7 +1466,7 @@ mod tests {
         }
 
         // Finalize player with reveal
-        let result = player.finalize(commitments, HashMap::new());
+        let result = player.finalize(commitments, BTreeMap::new());
         assert!(matches!(result, Err(Error::InvalidCommitments)));
     }
 
@@ -1495,7 +1495,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1510,7 +1510,7 @@ mod tests {
         let (_, commitment, shares) =
             Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
         commitments.insert(last, commitment);
-        let mut reveals = HashMap::new();
+        let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[1].clone());
         let result = player.finalize(commitments, reveals);
         assert!(matches!(result, Err(Error::MisdirectedShare)));
@@ -1541,7 +1541,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1555,7 +1555,7 @@ mod tests {
         let last = (q - 1) as u32;
         let (commitment, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n as u32, 1);
         commitments.insert(last, commitment);
-        let mut reveals = HashMap::new();
+        let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[0].clone());
         let result = player.finalize(commitments, reveals);
         assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
@@ -1586,7 +1586,7 @@ mod tests {
         );
 
         // Send shares to player
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (i, con) in contributors.iter().enumerate().take(q - 1) {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -1601,7 +1601,7 @@ mod tests {
         let (_, commitment, shares) =
             Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
         commitments.insert(last, commitment);
-        let mut reveals = HashMap::new();
+        let mut reveals = BTreeMap::new();
         let mut share = shares[1].clone();
         share.index = 0;
         reveals.insert(last, share);
