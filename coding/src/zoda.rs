@@ -11,7 +11,7 @@ use commonware_cryptography::{
 };
 use commonware_storage::bmt::{Builder, Proof};
 use rand::seq::SliceRandom as _;
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
 /// Create an iterator over the data of a buffer, interpreted as little-endian u64s.
@@ -182,7 +182,7 @@ pub struct Shard<H: Hasher> {
     root: H::Digest,
     inclusion_proofs: Vec<Proof<H>>,
     rows: Matrix,
-    checksum: Matrix,
+    checksum: Arc<Matrix>,
 }
 
 impl<H: Hasher> PartialEq for Shard<H> {
@@ -287,7 +287,7 @@ impl<H: Hasher> CheckingData<H> {
         commitment: &Summary,
         data_bytes: usize,
         root: H::Digest,
-        checksum: Matrix,
+        checksum: &Matrix,
     ) -> Result<Self, ZodaError> {
         let topology = Topology::reckon(config, data_bytes);
         let mut transcript = Transcript::new(NAMESPACE);
@@ -412,7 +412,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let transcript = Transcript::resume(commitment);
 
         let checking_matrix = checking_matrix(&transcript, &topology);
-        let checksum = data.mul(&checking_matrix);
+        let checksum = Arc::new(data.mul(&checking_matrix));
 
         let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
         let shards = shuffled_indices
@@ -457,7 +457,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             commitment,
             shard.data_bytes,
             shard.root,
-            shard.checksum,
+            shard.checksum.as_ref(),
         )?;
         let checked_shard = checking_data.check(index, &reshard)?;
         Ok((checking_data, checked_shard, reshard))
