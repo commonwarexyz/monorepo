@@ -1,10 +1,13 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group,
-        poly::{self, Eval},
-        variant::{MinSig, Variant},
+    bls12381::{
+        dkg::types::Payload as StandardPayload,
+        primitives::{
+            group,
+            poly::{self, Eval},
+            variant::{MinSig, Variant},
+        },
     },
     Signature,
 };
@@ -59,28 +62,11 @@ pub enum Payload<S: Signature> {
         group: Option<poly::Public<MinSig>>,
     },
 
-    /// Message sent by a dealer node to a player node.
+    /// Standard DKG messages exchanged between dealer and player nodes.
     ///
-    /// Contains the dealer's public commitment to their polynomial and the specific
-    /// share calculated for the receiving player.
-    Share {
-        /// The dealer's public commitment (coefficients of the polynomial).
-        commitment: poly::Public<MinSig>,
-        /// The secret share evaluated for the recipient player.
-        share: group::Share,
-    },
-
-    /// Message sent by a player node back to the dealer node.
-    ///
-    /// Acknowledges the receipt and verification of a [Payload::Share] message.
-    /// Includes a signature to authenticate the acknowledgment.
-    Ack {
-        /// The public key identifier of the player sending the acknowledgment.
-        public_key: u32,
-        /// A signature covering the DKG round, dealer ID, and the dealer's commitment.
-        /// This confirms the player received and validated the correct share.
-        signature: S,
-    },
+    /// This variant wraps the existing [dkg::types::Payload] enum, which includes
+    /// acknowledgment messages from players and share distribution messages from dealers.
+    Standard { inner: StandardPayload<MinSig, S> },
 
     /// Message sent by a dealer node to the arbiter.
     ///
@@ -118,25 +104,16 @@ impl<S: Signature> Write for Payload<S> {
                 buf.put_u8(0);
                 group.write(buf);
             }
-            Payload::Share { commitment, share } => {
+            Payload::Standard { inner } => {
                 buf.put_u8(1);
-                commitment.write(buf);
-                share.write(buf);
-            }
-            Payload::Ack {
-                public_key,
-                signature,
-            } => {
-                buf.put_u8(2);
-                UInt(*public_key).write(buf);
-                signature.write(buf);
+                inner.write(buf);
             }
             Payload::Commitment {
                 commitment,
                 acks,
                 reveals,
             } => {
-                buf.put_u8(3);
+                buf.put_u8(2);
                 commitment.write(buf);
                 acks.write(buf);
                 reveals.write(buf);
@@ -145,12 +122,12 @@ impl<S: Signature> Write for Payload<S> {
                 commitments,
                 reveals,
             } => {
-                buf.put_u8(4);
+                buf.put_u8(3);
                 commitments.write(buf);
                 reveals.write(buf);
             }
             Payload::Abort => {
-                buf.put_u8(5);
+                buf.put_u8(4);
             }
         }
     }
@@ -166,15 +143,10 @@ impl<S: Signature> Read for Payload<S> {
             0 => Payload::Start {
                 group: Option::<poly::Public<MinSig>>::read_cfg(buf, &t)?,
             },
-            1 => Payload::Share {
-                commitment: poly::Public::<MinSig>::read_cfg(buf, &t)?,
-                share: group::Share::read(buf)?,
+            1 => Payload::Standard {
+                inner: StandardPayload::<MinSig, S>::read_cfg(buf, p)?,
             },
-            2 => Payload::Ack {
-                public_key: UInt::read(buf)?.into(),
-                signature: S::read(buf)?,
-            },
-            3 => {
+            2 => {
                 let commitment = poly::Public::<MinSig>::read_cfg(buf, &t)?;
                 let acks = HashMap::<u32, S>::read_range(buf, ..=*p)?;
                 let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
@@ -185,7 +157,7 @@ impl<S: Signature> Read for Payload<S> {
                     reveals,
                 }
             }
-            4 => {
+            3 => {
                 let commitments = HashMap::<u32, poly::Public<MinSig>>::read_cfg(
                     buf,
                     &((..=*p).into(), ((), t)),
@@ -196,7 +168,7 @@ impl<S: Signature> Read for Payload<S> {
                     reveals,
                 }
             }
-            5 => Payload::Abort,
+            4 => Payload::Abort,
             _ => return Err(Error::InvalidEnum(tag)),
         };
         Ok(result)
@@ -206,11 +178,7 @@ impl<S: Signature> EncodeSize for Payload<S> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Payload::Start { group } => group.encode_size(),
-            Payload::Share { commitment, share } => commitment.encode_size() + share.encode_size(),
-            Payload::Ack {
-                public_key,
-                signature,
-            } => UInt(*public_key).encode_size() + signature.encode_size(),
+            Payload::Standard { inner } => inner.encode_size(),
             Payload::Commitment {
                 commitment,
                 acks,
@@ -324,9 +292,11 @@ mod tests {
     fn test_dkg_share_codec() {
         let original: Dkg<Signature> = Dkg {
             round: 1,
-            payload: Payload::Share {
-                commitment: new_poly(),
-                share: new_share(42),
+            payload: Payload::Standard {
+                inner: StandardPayload::Share {
+                    commitment: new_poly(),
+                    share: new_share(42),
+                },
             },
         };
         let encoded = original.encode();
@@ -338,9 +308,11 @@ mod tests {
     fn test_dkg_ack_codec() {
         let original: Dkg<Signature> = Dkg {
             round: 1,
-            payload: Payload::Ack {
-                public_key: 1,
-                signature: new_signature(123),
+            payload: Payload::Standard {
+                inner: StandardPayload::Ack {
+                    public_key: 1,
+                    signature: new_signature(123),
+                },
             },
         };
         let encoded = original.encode();

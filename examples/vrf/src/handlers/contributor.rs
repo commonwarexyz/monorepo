@@ -5,7 +5,7 @@ use crate::handlers::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{player::Output, Dealer, Player},
+        dkg::{player::Output, types::Payload as StandardPayload, Dealer, Player},
         primitives::{group, variant::MinSig},
     },
     Signer, Verifier as _,
@@ -219,9 +219,11 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                         Recipients::One(player.clone()),
                         wire::Dkg::<C::Signature> {
                             round,
-                            payload: wire::Payload::Share {
-                                commitment: commitment.clone(),
-                                share,
+                            payload: wire::Payload::Standard {
+                                inner: StandardPayload::Share {
+                                    commitment: commitment.clone(),
+                                    share,
+                                },
                             },
                         }
                         .encode()
@@ -266,67 +268,71 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                     return (round, None);
                                 }
                                 match msg.payload {
-                                    wire::Payload::Ack{ public_key, signature } => {
-                                        // Skip if not dealing
-                                        let Some((dealer, commitment, _, acks)) = &mut dealer_obj else {
-                                            continue;
-                                        };
+                                    wire::Payload::Standard { inner } => match inner {
+                                        StandardPayload::Ack{ public_key, signature } => {
+                                            // Skip if not dealing
+                                            let Some((dealer, commitment, _, acks)) = &mut dealer_obj else {
+                                                continue;
+                                            };
 
-                                        // Skip if forger
-                                        if self.forger {
-                                            continue;
-                                        }
+                                            // Skip if forger
+                                            if self.forger {
+                                                continue;
+                                            }
 
-                                        // Verify index matches
-                                        let Some(player) = self.contributors.get(public_key as usize) else {
-                                            continue;
-                                        };
-                                        if player != &peer {
-                                            warn!(round, ?peer, "received ack with wrong index");
-                                            continue;
-                                        }
+                                            // Verify index matches
+                                            let Some(player) = self.contributors.get(public_key as usize) else {
+                                                continue;
+                                            };
+                                            if player != &peer {
+                                                warn!(round, ?peer, "received ack with wrong index");
+                                                continue;
+                                            }
 
-                                        // Verify signature on incoming ack
-                                        let payload = payload(round, &me, commitment);
-                                        if !peer.verify(Some(ACK_NAMESPACE), &payload, &signature) {
-                                            warn!(round, ?peer, "received invalid ack signature");
-                                            continue;
-                                        }
+                                            // Verify signature on incoming ack
+                                            let payload = payload(round, &me, commitment);
+                                            if !peer.verify(Some(ACK_NAMESPACE), &payload, &signature) {
+                                                warn!(round, ?peer, "received invalid ack signature");
+                                                continue;
+                                            }
 
-                                        // Store ack
-                                        if let Err(e) = dealer.ack(peer) {
-                                            warn!(round, error = ?e, "failed to record ack");
-                                            continue;
-                                        }
-                                        acks.insert(public_key, signature);
-                                    },
-                                    wire::Payload::Share{ commitment, share } => {
-                                        // Store share
-                                        if let Err(e) = player_obj.share(peer.clone(), commitment.clone(), share){
-                                            warn!(round, error = ?e, "failed to store share");
-                                            continue;
-                                        }
+                                            // Store ack
+                                            if let Err(e) = dealer.ack(peer) {
+                                                warn!(round, error = ?e, "failed to record ack");
+                                                continue;
+                                            }
+                                            acks.insert(public_key, signature);
+                                        },
+                                        StandardPayload::Share{ commitment, share } => {
+                                            // Store share
+                                            if let Err(e) = player_obj.share(peer.clone(), commitment.clone(), share){
+                                                warn!(round, error = ?e, "failed to store share");
+                                                continue;
+                                            }
 
-                                        // Send ack
-                                        let payload = payload(round, &peer, &commitment);
-                                        let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
-                                        sender
-                                            .send(
-                                                Recipients::One(peer),
-                                                wire::Dkg {
-                                                    round,
-                                                    payload: wire::Payload::Ack{
-                                                        public_key: me_idx,
-                                                        signature,
-                                                    },
-                                                }
-                                                .encode()
-                                                .into(),
-                                                true,
-                                            )
-                                            .await
-                                            .expect("could not send ack");
-                                    },
+                                            // Send ack
+                                            let payload = payload(round, &peer, &commitment);
+                                            let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
+                                            sender
+                                                .send(
+                                                    Recipients::One(peer),
+                                                    wire::Dkg {
+                                                        round,
+                                                        payload: wire::Payload::Standard {
+                                                            inner: StandardPayload::Ack{
+                                                                public_key: me_idx,
+                                                                signature,
+                                                            }
+                                                        },
+                                                    }
+                                                    .encode()
+                                                    .into(),
+                                                    true,
+                                                )
+                                                .await
+                                                .expect("could not send ack");
+                                        },
+                                    }
                                     _ => {
                                         // Useless message
                                         continue;
