@@ -94,17 +94,21 @@ pub fn verify_share<V: Variant>(
 }
 
 /// Construct a public polynomial by summing a vector of commitments.
-pub fn construct_public<V: Variant>(
-    commitments: Vec<poly::Public<V>>,
+pub fn construct_public<'a, V: Variant>(
+    commitments: impl IntoIterator<Item = &'a poly::Public<V>>,
     required: u32,
 ) -> Result<poly::Public<V>, Error> {
-    if commitments.len() < required as usize {
-        return Err(Error::InsufficientDealings);
+    // Compute new public polynomial by summing all commitments
+    let mut count = 0;
+    let mut public = poly::Public::<V>::zero();
+    for commitment in commitments.into_iter() {
+        public.add(commitment);
+        count += 1;
     }
 
-    let mut public = poly::Public::<V>::zero();
-    for commitment in commitments {
-        public.add(&commitment);
+    // Ensure we have enough commitments
+    if count < required {
+        return Err(Error::InsufficientDealings);
     }
     Ok(public)
 }
@@ -115,7 +119,7 @@ pub fn construct_public<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public_with_weights<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, poly::Public<V>>,
+    commitments: &BTreeMap<u32, poly::Public<V>>,
     weights: &BTreeMap<u32, poly::Weight>,
     threshold: u32,
     concurrency: usize,
@@ -168,7 +172,7 @@ pub fn recover_public_with_weights<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, poly::Public<V>>,
+    commitments: &BTreeMap<u32, poly::Public<V>>,
     threshold: u32,
     concurrency: usize,
 ) -> Result<poly::Public<V>, Error> {

@@ -1,7 +1,11 @@
 //! Peer
 
-use crate::authenticated::discovery::metrics;
+use crate::authenticated::discovery::{
+    metrics,
+    types::{self, InfoVerifier},
+};
 use commonware_codec::Error as CodecError;
+use commonware_cryptography::PublicKey;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
@@ -13,13 +17,14 @@ pub use actor::Actor;
 mod ingress;
 pub use ingress::Message;
 
-pub struct Config {
+pub struct Config<C: PublicKey> {
     pub mailbox_size: usize,
     pub gossip_bit_vec_frequency: Duration,
     pub allowed_bit_vec_rate: Quota,
     pub max_peer_set_size: u64,
     pub allowed_peers_rate: Quota,
     pub peer_gossip_max_count: usize,
+    pub info_verifier: InfoVerifier<C>,
 
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
@@ -42,4 +47,6 @@ pub enum Error {
     UnexpectedFailure(commonware_runtime::Error),
     #[error("invalid channel")]
     InvalidChannel,
+    #[error("types: {0}")]
+    Types(types::Error),
 }

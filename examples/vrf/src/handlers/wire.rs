@@ -12,7 +12,7 @@ use commonware_cryptography::{
     Signature,
 };
 use commonware_utils::quorum;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Represents a top-level message for the Distributed Key Generation (DKG) protocol,
 /// typically sent over a dedicated DKG communication channel.
@@ -93,10 +93,10 @@ pub enum Payload<S: Signature> {
     /// Contains the final aggregated commitments and revealed shares from all participating dealers.
     Success {
         /// A map of dealer public key identifiers to their final public commitments.
-        commitments: HashMap<u32, poly::Public<MinSig>>,
+        commitments: BTreeMap<u32, poly::Public<MinSig>>,
         /// A map of player public key identifiers to their corresponding revealed shares,
         /// aggregated from all dealers' [Payload::Commitment] messages.
-        reveals: HashMap<u32, group::Share>,
+        reveals: BTreeMap<u32, group::Share>,
     },
 
     /// Message broadcast by the arbiter to all player nodes if the DKG round fails or is aborted.
@@ -167,11 +167,11 @@ impl<S: Signature> Read for Payload<S> {
                 }
             }
             4 => {
-                let commitments = HashMap::<u32, poly::Public<MinSig>>::read_cfg(
+                let commitments = BTreeMap::<u32, poly::Public<MinSig>>::read_cfg(
                     buf,
                     &((..=*p).into(), ((), t)),
                 )?;
-                let reveals = HashMap::<u32, group::Share>::read_range(buf, ..=*p)?;
+                let reveals = BTreeMap::<u32, group::Share>::read_range(buf, ..=*p)?;
                 Payload::Success {
                     commitments,
                     reveals,
@@ -255,7 +255,6 @@ mod tests {
     };
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
-    use std::collections::HashMap;
 
     const N: usize = 11;
     const T: usize = 8;
@@ -359,9 +358,9 @@ mod tests {
 
     #[test]
     fn test_dkg_success_codec() {
-        let mut commitments = HashMap::<u32, poly::Public<MinSig>>::new();
+        let mut commitments = BTreeMap::<u32, poly::Public<MinSig>>::new();
         commitments.insert(1, new_poly());
-        let mut reveals = HashMap::<u32, group::Share>::new();
+        let mut reveals = BTreeMap::<u32, group::Share>::new();
         reveals.insert(1, new_share(123));
 
         let original: Dkg<Signature> = Dkg {
