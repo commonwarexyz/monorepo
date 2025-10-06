@@ -14,9 +14,9 @@ use std::{collections::HashMap, hint::black_box};
 const CONCURRENCY: usize = 1;
 
 // Configure contributors based on context
-#[cfg(test)]
+#[cfg(not(full_bench))]
 const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
-#[cfg(not(test))]
+#[cfg(full_bench)]
 const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50, 100, 250, 500];
 
 fn benchmark_dkg_recovery(c: &mut Criterion) {

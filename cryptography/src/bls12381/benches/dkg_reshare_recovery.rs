@@ -11,9 +11,9 @@ use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::HashMap, hint::black_box};
 
 // Configure contributors based on context
-#[cfg(test)]
+#[cfg(not(full_bench))]
 const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
-#[cfg(not(test))]
+#[cfg(full_bench)]
 const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50, 100, 250, 500];
 
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {

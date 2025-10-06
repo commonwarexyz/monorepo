@@ -61,6 +61,8 @@ jobs:
       - name: Compile benchmarks
         run: cargo bench ${{ matrix.cargo_flags }} --no-run
       - name: Run benchmarks
+        env:
+          RUSTFLAGS: "--cfg full_bench"
         run: |
           cargo bench ${{ matrix.cargo_flags }} \
             --benches -p ${{ matrix.package }} \

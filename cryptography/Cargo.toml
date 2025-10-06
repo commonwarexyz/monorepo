@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/cryptography"
 documentation = "https://docs.rs/commonware-cryptography"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
+
 [dependencies]
 commonware-codec = { workspace = true }
 commonware-utils = { workspace = true }
