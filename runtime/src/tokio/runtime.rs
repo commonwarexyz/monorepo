@@ -449,6 +449,9 @@ impl crate::Spawner for Context {
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
 
+        // Reset spawn config
+        self.spawn_config = SpawnConfig::default();
+
         let future = f(self);
         let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
 
@@ -497,6 +500,9 @@ impl crate::Spawner for Context {
         let executor = self.executor.clone();
         let dedicated = self.spawn_config.is_dedicated();
 
+        // Reset spawn config
+        self.spawn_config = SpawnConfig::default();
+
         move |f: F| {
             let (f, handle) =
                 Handle::init_future(f, metric, executor.panicker.clone(), children.clone());
@@ -520,7 +526,7 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    fn spawn_blocking<F, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
@@ -540,6 +546,10 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.spawn_config.is_dedicated();
+
+        // Reset spawn config
+        self.spawn_config = SpawnConfig::default();
+
         let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
 
         // Spawn the blocking task
@@ -572,6 +582,10 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.spawn_config.is_dedicated();
+
+        // Reset spawn config
+        self.spawn_config = SpawnConfig::default();
+
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, metric, executor.panicker.clone());
 
