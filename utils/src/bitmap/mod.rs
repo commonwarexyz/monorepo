@@ -150,45 +150,45 @@ impl<const N: usize> BitMap<N> {
     /// Panics if the bit doesn't exist.
     #[inline]
     pub fn get(&self, bit: u64) -> bool {
-        let chunk = self.get_chunk(bit);
+        let chunk = self.get_chunk_containing(bit);
         Self::get_from_chunk(chunk, bit)
     }
 
-    /// Returns the bitmap chunk containing the given index.
+    /// Returns the bitmap chunk containing the given bit.
     ///
     /// # Warning
     ///
     /// Panics if the bit doesn't exist.
     #[inline]
-    fn get_chunk(&self, bit: u64) -> &[u8; N] {
+    fn get_chunk_containing(&self, bit: u64) -> &[u8; N] {
         assert!(
             bit < self.len(),
-            "Bit offset {} out of bounds (len: {})",
+            "bit {} out of bounds (len: {})",
             bit,
             self.len()
         );
-        &self.chunks[Self::chunk_index(bit)]
+        &self.chunks[Self::chunk(bit)]
     }
 
     /// Get a reference to a chunk by its index in the current bitmap.
-    /// Note this is an index into the chunks, not a bit offset.
+    /// Note this is an index into the chunks, not a bit.
     #[inline]
-    pub(super) fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
+    pub(super) fn get_chunk(&self, chunk: usize) -> &[u8; N] {
         assert!(
-            index < self.chunks.len(),
-            "Chunk index {} out of bounds (chunks: {})",
-            index,
+            chunk < self.chunks.len(),
+            "chunk {} out of bounds (chunks: {})",
+            chunk,
             self.chunks.len()
         );
-        &self.chunks[index]
+        &self.chunks[chunk]
     }
 
     /// Get the value at the given `bit` from the `chunk`.
-    /// Note `bit` is an offset within the entire bitmap, not just the chunk.
+    /// `bit` is an index into the entire bitmap, not just the chunk.
     #[inline]
     fn get_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
-        let byte_offset = Self::chunk_byte_offset(bit);
-        let byte = chunk[byte_offset];
+        let byte = Self::chunk_byte_offset(bit);
+        let byte = chunk[byte];
         let mask = Self::chunk_byte_bitmask(bit);
         (byte & mask) != 0
     }
@@ -257,11 +257,11 @@ impl<const N: usize> BitMap<N> {
     /// Panics if `bit` is out of bounds.
     #[inline]
     pub fn flip(&mut self, bit: u64) {
-        self.assert_offset(bit);
-        let chunk_index = Self::chunk_index(bit);
-        let byte_offset = Self::chunk_byte_offset(bit);
+        self.assert_bit(bit);
+        let chunk = Self::chunk(bit);
+        let byte = Self::chunk_byte_offset(bit);
         let mask = Self::chunk_byte_bitmask(bit);
-        self.chunks[chunk_index][byte_offset] ^= mask;
+        self.chunks[chunk][byte] ^= mask;
     }
 
     /// Flips all bits (1s become 0s and vice versa).
@@ -283,21 +283,18 @@ impl<const N: usize> BitMap<N> {
     pub fn set(&mut self, bit: u64, value: bool) {
         assert!(
             bit < self.len(),
-            "Bit offset {} out of bounds (len: {})",
+            "bit {} out of bounds (len: {})",
             bit,
             self.len()
         );
 
-        let chunk_index = Self::chunk_index(bit);
-        let chunk = &mut self.chunks[chunk_index];
-
-        let byte_offset = Self::chunk_byte_offset(bit);
+        let chunk = &mut self.chunks[Self::chunk(bit)];
+        let byte = Self::chunk_byte_offset(bit);
         let mask = Self::chunk_byte_bitmask(bit);
-
         if value {
-            chunk[byte_offset] |= mask;
+            chunk[byte] |= mask;
         } else {
-            chunk[byte_offset] &= !mask;
+            chunk[byte] &= !mask;
         }
     }
 
@@ -314,7 +311,7 @@ impl<const N: usize> BitMap<N> {
         }
     }
 
-    // Efficiently add a byte's worth of bits to the bitmap.
+    // Add a byte's worth of bits to the bitmap.
     //
     // # Warning
     //
@@ -335,7 +332,7 @@ impl<const N: usize> BitMap<N> {
         }
     }
 
-    /// Efficiently add a chunk of bits to the bitmap.
+    /// Add a chunk of bits to the bitmap.
     ///
     /// # Warning
     ///
@@ -442,32 +439,32 @@ impl<const N: usize> BitMap<N> {
         NZUsize!(((size / Self::CHUNK_SIZE_BITS) + 1) as usize)
     }
 
-    /// Convert a bit offset into a bitmask for the byte containing that bit.
+    /// Convert a bit into a bitmask for the byte containing that bit.
     #[inline]
     pub(super) fn chunk_byte_bitmask(bit: u64) -> u8 {
         1 << (bit % 8)
     }
 
-    /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
+    /// Convert a bit into the index of the byte within a chunk containing the bit.
     #[inline]
     pub(super) fn chunk_byte_offset(bit: u64) -> usize {
         ((bit / 8) % N as u64) as usize
     }
 
-    /// Convert a bit offset into the index of the chunk it belongs to.
+    /// Convert a bit into the index of the chunk it belongs to.
     ///
     /// # Panics
     ///
     /// Panics if the chunk index overflows `usize`.
     #[inline]
-    pub(super) fn chunk_index(bit: u64) -> usize {
-        let chunk_index = bit / Self::CHUNK_SIZE_BITS;
+    pub(super) fn chunk(bit: u64) -> usize {
+        let chunk = bit / Self::CHUNK_SIZE_BITS;
         assert!(
-            chunk_index <= usize::MAX as u64,
-            "chunk index overflow: {} exceeds usize::MAX",
-            chunk_index
+            chunk <= usize::MAX as u64,
+            "chunk overflow: {} exceeds usize::MAX",
+            chunk
         );
-        chunk_index as usize
+        chunk as usize
     }
 
     /* Iterator */
@@ -524,12 +521,12 @@ impl<const N: usize> BitMap<N> {
 
     /* Assertions */
 
-    /// Asserts that the bit offset is within bounds.
+    /// Asserts that the bit is within bounds.
     #[inline(always)]
-    fn assert_offset(&self, bit: u64) {
+    fn assert_bit(&self, bit: u64) {
         assert!(
             bit < self.len(),
-            "Bit offset {} out of bounds (len: {})",
+            "bit {} out of bounds (len: {})",
             bit,
             self.len()
         );
@@ -578,8 +575,8 @@ impl<const N: usize> fmt::Debug for BitMap<N> {
         const HALF_DISPLAY: u64 = MAX_DISPLAY / 2;
 
         // Closure for writing a bit
-        let write_bit = |formatter: &mut Formatter<'_>, index: u64| -> core::fmt::Result {
-            formatter.write_char(if self.get(index) { '1' } else { '0' })
+        let write_bit = |formatter: &mut Formatter<'_>, bit: u64| -> core::fmt::Result {
+            formatter.write_char(if self.get(bit) { '1' } else { '0' })
         };
 
         f.write_str("BitMap[")?;
@@ -612,9 +609,9 @@ impl<const N: usize> Index<u64> for BitMap<N> {
     ///
     /// Panics if out of bounds.
     #[inline]
-    fn index(&self, index: u64) -> &Self::Output {
-        self.assert_offset(index);
-        let value = self.get(index);
+    fn index(&self, bit: u64) -> &Self::Output {
+        self.assert_bit(bit);
+        let value = self.get(bit);
         if value {
             &true
         } else {
@@ -975,9 +972,9 @@ mod tests {
         let chunk = bv.get_chunk(0);
         assert_eq!(chunk, &test_chunk);
 
-        // Test get_chunk_by_index
-        let chunk_by_index = bv.get_chunk_by_index(0);
-        assert_eq!(chunk_by_index, &test_chunk);
+        // Test get_chunk_containing
+        let chunk = bv.get_chunk_containing(0);
+        assert_eq!(chunk, &test_chunk);
 
         // Test last_chunk
         let (last_chunk, next_bit) = bv.last_chunk();
@@ -1291,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Bit offset 1 out of bounds (len: 1)")]
+    #[should_panic(expected = "bit 1 out of bounds (len: 1)")]
     fn test_flip_out_of_bounds() {
         let mut bv: BitMap<4> = BitMap::new();
         bv.push(true);
@@ -1886,18 +1883,18 @@ mod tests {
         bv.push_chunk(&[9, 10, 11, 12]);
 
         assert_eq!(bv.len(), 96);
-        assert_eq!(bv.get_chunk_by_index(0), &[1, 2, 3, 4]);
+        assert_eq!(bv.get_chunk(0), &[1, 2, 3, 4]);
 
         // Prune first chunk
         bv.prune_chunks(1);
         assert_eq!(bv.len(), 64);
-        assert_eq!(bv.get_chunk_by_index(0), &[5, 6, 7, 8]);
-        assert_eq!(bv.get_chunk_by_index(1), &[9, 10, 11, 12]);
+        assert_eq!(bv.get_chunk(0), &[5, 6, 7, 8]);
+        assert_eq!(bv.get_chunk(1), &[9, 10, 11, 12]);
 
         // Prune another chunk
         bv.prune_chunks(1);
         assert_eq!(bv.len(), 32);
-        assert_eq!(bv.get_chunk_by_index(0), &[9, 10, 11, 12]);
+        assert_eq!(bv.get_chunk(0), &[9, 10, 11, 12]);
     }
 
     #[test]
@@ -1925,7 +1922,7 @@ mod tests {
         // Can prune first chunk
         bv.prune_chunks(1);
         assert_eq!(bv.len(), 34);
-        assert_eq!(bv.get_chunk_by_index(0), &[5, 6, 7, 8]);
+        assert_eq!(bv.get_chunk(0), &[5, 6, 7, 8]);
 
         // Last partial chunk still has the appended bits
         assert!(bv.get(32));

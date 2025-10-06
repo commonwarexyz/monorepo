@@ -283,7 +283,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.bitmap.push_back([0u8; N]);
     }
 
-    /// Efficiently add a chunk of bits to the bitmap.
+    /// Add a chunk of bits to the bitmap.
     ///
     /// # Warning
     ///
@@ -300,7 +300,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.prepare_next_chunk();
     }
 
-    /// Efficiently add a byte's worth of bits to the bitmap.
+    /// Add a byte's worth of bits to the bitmap.
     ///
     /// # Warning
     ///
