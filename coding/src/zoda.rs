@@ -314,6 +314,8 @@ impl<H: Hasher> CheckingData<H> {
     fn check(&self, index: u16, reshard: &ReShard<H>) -> Result<CheckedShard, ZodaError> {
         if reshard.shard.rows() != self.topology.samples
             || reshard.shard.cols() != self.topology.data_cols
+            || reshard.inclusion_proofs.len() != reshard.shard.rows()
+            || !(0..=self.topology.total_shards).contains(&(index as usize))
         {
             return Err(ZodaError::Something);
         }
