@@ -38,7 +38,10 @@
 
 use crate::{
     bls12381::{
-        dkg::{ops, Error},
+        dkg::{
+            ops::{construct_public, recover_public, verify_commitment, verify_share},
+            Error,
+        },
         primitives::{group::Share, poly, variant::Variant},
     },
     PublicKey,
@@ -135,10 +138,10 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Verify the commitment is valid
-        if let Err(e) = ops::verify_commitment::<V>(
+        if let Err(e) = verify_commitment::<V>(
             self.previous.as_ref(),
-            idx,
             &commitment,
+            idx,
             self.player_threshold,
         ) {
             self.disqualified.insert(dealer);
@@ -185,14 +188,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             }
 
             // Verify share
-            ops::verify_share::<V>(
-                self.previous.as_ref(),
-                idx,
-                &commitment,
-                self.player_threshold,
-                share.index,
-                share,
-            )?;
+            verify_share::<V>(&commitment, share.index, share)?;
         }
 
         // Active must be equal to number of players
@@ -250,7 +246,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                 for (dealer_idx, (commitment, _, _)) in &selected {
                     commitments.insert(*dealer_idx, commitment.clone());
                 }
-                match ops::recover_public::<V>(
+                match recover_public::<V>(
                     &previous,
                     commitments,
                     self.player_threshold,
@@ -265,7 +261,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                 for (_, (commitment, _, _)) in &selected {
                     commitments.push(commitment.clone());
                 }
-                match ops::construct_public::<V>(commitments, self.player_threshold) {
+                match construct_public::<V>(commitments, self.player_threshold) {
                     Ok(public) => public,
                     Err(e) => return (Err(e), self.disqualified),
                 }
@@ -276,11 +272,11 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         let mut commitments = HashMap::new();
         let mut reveals = HashMap::new();
         for (dealer_idx, (commitment, _, shares)) in selected {
-            commitments.insert(dealer_idx, commitment.clone());
+            commitments.insert(dealer_idx, commitment);
             if shares.is_empty() {
                 continue;
             }
-            reveals.insert(dealer_idx, shares.clone());
+            reveals.insert(dealer_idx, shares);
         }
         let output = Output {
             public,

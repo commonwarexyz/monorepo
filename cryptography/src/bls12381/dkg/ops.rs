@@ -55,8 +55,8 @@ pub fn evaluate_all<V: Variant>(polynomial: &poly::Public<V>, n: u32) -> Vec<V::
 /// polynomial is provided, verify that the commitment is on that polynomial.
 pub fn verify_commitment<V: Variant>(
     previous: Option<&poly::Public<V>>,
-    dealer: u32,
     commitment: &poly::Public<V>,
+    dealer: u32,
     t: u32,
 ) -> Result<(), Error> {
     if let Some(previous) = previous {
@@ -72,17 +72,15 @@ pub fn verify_commitment<V: Variant>(
 }
 
 /// Verify that a given share is valid for a specified recipient.
+///
+/// # Warning
+///
+/// This function assumes the provided commitment has already been verified.
 pub fn verify_share<V: Variant>(
-    previous: Option<&poly::Public<V>>,
-    dealer: u32,
     commitment: &poly::Public<V>,
-    t: u32,
     recipient: u32,
     share: &Share,
 ) -> Result<(), Error> {
-    // Verify that commitment is on previous public polynomial (if provided)
-    verify_commitment::<V>(previous, dealer, commitment, t)?;
-
     // Check if share is valid
     if share.index != recipient {
         return Err(Error::MisdirectedShare);
@@ -95,7 +93,7 @@ pub fn verify_share<V: Variant>(
     Ok(())
 }
 
-/// Construct a new public polynomial by summing all commitments.
+/// Construct a public polynomial by summing a vector of commitments.
 pub fn construct_public<V: Variant>(
     commitments: Vec<poly::Public<V>>,
     required: u32,
@@ -103,6 +101,7 @@ pub fn construct_public<V: Variant>(
     if commitments.len() < required as usize {
         return Err(Error::InsufficientDealings);
     }
+
     let mut public = poly::Public::<V>::zero();
     for commitment in commitments {
         public.add(&commitment);
