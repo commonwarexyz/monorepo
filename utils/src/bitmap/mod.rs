@@ -760,11 +760,7 @@ impl<const N: usize> core::iter::Iterator for Iterator<'_, N> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.bitmap.len().saturating_sub(self.pos);
-        let capped = if remaining > usize::MAX as u64 {
-            usize::MAX
-        } else {
-            remaining as usize
-        };
+        let capped = remaining.min(usize::MAX as u64) as usize;
         (capped, Some(capped))
     }
 }

@@ -7,7 +7,6 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     codec::{Read, Write},
-    config::RangeCfg,
     error::Error as CodecError,
     EncodeSize, FixedSize,
 };
@@ -91,17 +90,27 @@ impl Write for BloomFilter {
 }
 
 impl Read for BloomFilter {
-    type Cfg = (RangeCfg, u64);
+    // The number of hashers and the number of bits that the bitmap must have.
+    type Cfg = (u8, u64);
 
     fn read_cfg(
         buf: &mut impl Buf,
         (hashers_cfg, bits_cfg): &Self::Cfg,
     ) -> Result<Self, CodecError> {
         let hashers = u8::read_cfg(buf, &())?;
-        if !hashers_cfg.contains(&(hashers as usize)) {
-            return Err(CodecError::Invalid("BloomFilter", "invalid hashers"));
+        if hashers != *hashers_cfg {
+            return Err(CodecError::Invalid(
+                "BloomFilter",
+                "hashers doesn't match config",
+            ));
         }
         let bits = BitMap::read_cfg(buf, bits_cfg)?;
+        if bits.len() != *bits_cfg {
+            return Err(CodecError::Invalid(
+                "BloomFilter",
+                "bitmap length doesn't match config",
+            ));
+        }
         Ok(Self { hashers, bits })
     }
 }
@@ -171,7 +180,7 @@ mod tests {
         bf.insert(b"test1");
         bf.insert(b"test2");
 
-        let cfg = ((1..=100).into(), 100);
+        let cfg = (5, 100);
 
         let encoded = bf.encode();
         let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
@@ -182,7 +191,7 @@ mod tests {
     #[test]
     fn test_codec_empty() {
         let bf = BloomFilter::new(NZU8!(4), NZUsize!(128));
-        let cfg = ((1..=100).into(), 128);
+        let cfg = (4, 128);
         let encoded = bf.encode();
         let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(bf, decoded);
@@ -194,20 +203,26 @@ mod tests {
         bf.insert(b"test1");
         let encoded = bf.encode();
 
-        // Too small
-        let cfg = ((10..=10).into(), 100);
+        // Too large
+        let cfg = (10, 100);
         let decoded = BloomFilter::decode_cfg(encoded.clone(), &cfg);
         assert!(matches!(
             decoded,
-            Err(CodecError::Invalid("BloomFilter", "invalid hashers"))
+            Err(CodecError::Invalid(
+                "BloomFilter",
+                "hashers doesn't match config"
+            ))
         ));
 
-        // Too large
-        let cfg = ((0..5).into(), 100);
+        // Too small
+        let cfg = (4, 100);
         let decoded = BloomFilter::decode_cfg(encoded, &cfg);
         assert!(matches!(
             decoded,
-            Err(CodecError::Invalid("BloomFilter", "invalid hashers"))
+            Err(CodecError::Invalid(
+                "BloomFilter",
+                "hashers doesn't match config"
+            ))
         ));
     }
 
@@ -217,9 +232,19 @@ mod tests {
         bf.insert(b"test1");
         let encoded = bf.encode();
 
-        // Too large
-        let cfg_large = ((5..=5).into(), 99);
-        let result_large = BloomFilter::decode_cfg(encoded.clone(), &cfg_large);
-        assert!(matches!(result_large, Err(CodecError::InvalidLength(100))));
+        // Wrong bit count
+        let cfg = (5, 99);
+        let result = BloomFilter::decode_cfg(encoded.clone(), &cfg);
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
+
+        let cfg = (5, 101);
+        let result = BloomFilter::decode_cfg(encoded, &cfg);
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "BloomFilter",
+                "bitmap length doesn't match config"
+            ))
+        ));
     }
 }
