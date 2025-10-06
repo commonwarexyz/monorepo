@@ -321,14 +321,14 @@ impl<C: PublicKey> InfoVerifier<C> {
                 return Err(Error::ReceivedSelf);
             }
 
-            // If any timestamp is too far into the future, disconnect from the peer
+            // Check if timestamp is too far into the future
             if Duration::from_millis(info.timestamp)
                 > clock.current().epoch().saturating_add(self.synchrony_bound)
             {
                 return Err(Error::SynchronyBound);
             }
 
-            // If any signature is invalid, disconnect from the peer
+            // Check if signature is valid
             if !info.verify(self.ip_namespace.as_ref()) {
                 return Err(Error::InvalidSignature);
             }
