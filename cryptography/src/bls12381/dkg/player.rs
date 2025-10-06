@@ -163,7 +163,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                     )?;
                     let share = reveals.remove(&idx).ok_or(Error::MissingShare)?;
 
-                    // Check that reveal is valid
+                    // Check that reveal is valid (updating stored commitment and share, if so)
                     verify_share::<V>(&commitment, self.me, &share)?;
                     *stored_commitment = commitment;
                     *stored_share = share;
