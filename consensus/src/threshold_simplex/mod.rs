@@ -747,27 +747,28 @@ mod tests {
     fn unclean_shutdown<V: Variant>() {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-
-        // Derive threshold
-        let mut rng = StdRng::seed_from_u64(0);
-        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, threshold);
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
         let supervised = Arc::new(Mutex::new(Vec::new()));
         let mut prev_checkpoint = None;
 
+        // Create validator keys
+        let mut rng = StdRng::seed_from_u64(0);
+        let (schemes, validators, signing_schemes) =
+            mocks::fixtures::bls_threshold_fixture::<V, _>(&mut rng, n);
+
         loop {
+            let schemes = schemes.clone();
+            let validators = validators.clone();
+            let signing_schemes = signing_schemes.clone();
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
-            let polynomial = polynomial.clone();
-            let shares = shares.clone();
 
             let f = |mut context: deterministic::Context| async move {
                 // Create simulated network
@@ -783,8 +784,6 @@ mod tests {
                 network.start();
 
                 // Register participants
-                let (schemes, validators, signing_schemes) =
-                    mocks::fixtures::bls_threshold_fixture::<V, _>(&mut context, n);
                 let mut registrations = register_validators(&mut oracle, &validators).await;
 
                 // Link all validators
@@ -805,15 +804,6 @@ mod tests {
 
                     // Configure engine
                     let validator = scheme.public_key();
-                    let mut participants = BTreeMap::new();
-                    participants.insert(
-                        0,
-                        (
-                            polynomial.clone(),
-                            validators.clone(),
-                            Some(shares[idx].clone()),
-                        ),
-                    );
                     let supervisor_config = mocks::supervisor::Config {
                         namespace: namespace.clone(),
                         participants: validators.clone(),
