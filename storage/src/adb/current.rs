@@ -443,7 +443,7 @@ impl<
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
             let bit_offset = i * chunk_bits;
-            let chunk = *self.status.get_chunk(bit_offset);
+            let chunk = *self.status.get_chunk_containing(bit_offset);
             chunks.push(chunk);
         }
 
@@ -547,7 +547,7 @@ impl<
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk(*loc);
+        let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
         if next_bit != 0 {
@@ -670,7 +670,7 @@ impl<
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk(*loc);
+        let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
         if next_bit != 0 {

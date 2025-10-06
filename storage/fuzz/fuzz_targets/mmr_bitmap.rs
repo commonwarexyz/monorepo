@@ -93,7 +93,7 @@ fn fuzz(input: FuzzInput) {
                             / Bitmap::<Sha256, CHUNK_SIZE>::CHUNK_SIZE_BITS)
                             * Bitmap::<Sha256, CHUNK_SIZE>::CHUNK_SIZE_BITS;
                         if chunk_aligned >= pruned_bits && chunk_aligned < bit_count {
-                            let _ = bitmap.get_chunk(chunk_aligned);
+                            let _ = bitmap.get_chunk_containing(chunk_aligned);
                         }
                     }
                 }
