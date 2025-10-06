@@ -38,7 +38,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     synchrony_bound: Duration,
 
     /// The maximum number of peers in a set.
-    max_peer_set_size: usize,
+    max_peer_set_size: u64,
 
     /// The maximum number of [types::PeerInfo] allowable in a single message.
     peer_gossip_max_count: usize,
@@ -172,7 +172,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 // Panic since there is no way to recover from this.
                 let len = peers.len();
                 let max = self.max_peer_set_size;
-                assert!(len <= max, "peer set too large: {len} > {max}");
+                assert!(len as u64 <= max, "peer set too large: {len} > {max}");
 
                 self.directory.add_set(index, peers);
             }
@@ -426,7 +426,7 @@ mod tests {
                 mut mailbox,
                 ..
             } = setup_actor(context.clone(), cfg_initial);
-            let too_many_peers: Vec<PublicKey> = (1..=(cfg.max_peer_set_size + 1) as u64)
+            let too_many_peers: Vec<PublicKey> = (1..=cfg.max_peer_set_size + 1)
                 .map(|i| new_signer_and_pk(i).1)
                 .collect();
             oracle.register(0, too_many_peers).await;
