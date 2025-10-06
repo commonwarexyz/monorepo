@@ -152,9 +152,16 @@ impl<P: PublicKey> Oracle<P> {
 
         // Convert Duration to milliseconds as f64 for the Normal distribution
         let latency_ms = config.latency.as_secs_f64() * 1000.0;
-        let jitter_ms = config.jitter.as_secs_f64() * 1000.0;
+        let base_jitter_ms = config.jitter.as_secs_f64() * 1000.0;
 
-        // Create distribution
+        // Create distribution (Normal requires std dev > 0). If configured jitter is zero,
+        // substitute the smallest positive f64 to emulate deterministic latency without panicking.
+        let jitter_ms = if base_jitter_ms == 0.0 {
+            f64::MIN_POSITIVE
+        } else {
+            base_jitter_ms
+        };
+
         let sampler = Normal::new(latency_ms, jitter_ms).unwrap();
 
         // Wait for update to complete
