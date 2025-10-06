@@ -37,8 +37,7 @@ impl Reporter for Forwarder {
         };
 
         // Best-effort: try to get the block locally from marshal; skip if unavailable
-        let rx = self.marshal.get(finalization.proposal.payload).await;
-        let Ok(Some(block)) = rx.await else {
+        let Some(block) = self.marshal.get_block(&finalization.proposal.payload).await else {
             error!(
                 "forwarder: failed to get block: {}",
                 finalization.proposal.payload

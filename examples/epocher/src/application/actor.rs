@@ -73,7 +73,7 @@ impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
 
                     // Case: Non-genesis.
                     let height = epoch::get_last_height(epoch - 1);
-                    let Ok(Some(block)) = self.marshal.get_by_height(height).await.await else {
+                    let Some(block) = self.marshal.get_block(height).await else {
                         // No block exists, put the response in the responders map for later.
                         self.responders.entry(height).or_default().push(response);
                         continue;

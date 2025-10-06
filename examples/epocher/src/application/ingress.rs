@@ -1,7 +1,6 @@
 use crate::types::block::Block;
 use commonware_consensus::{
-    threshold_simplex::types::Context, types::Epoch, Automaton as Au, Epochable, Relay as Re,
-    Reporter,
+    threshold_simplex::types::Context, types::Epoch, Automaton as Au, Epochable, Relay, Reporter,
 };
 use commonware_cryptography::Digest;
 use futures::{
@@ -82,7 +81,7 @@ impl<D: Digest> Au for Mailbox<D> {
     }
 }
 
-impl<D: Digest> Re for Mailbox<D> {
+impl<D: Digest> Relay for Mailbox<D> {
     type Digest = D;
 
     async fn broadcast(&mut self, _: Self::Digest) {}
