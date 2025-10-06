@@ -392,11 +392,14 @@ impl<const N: usize> BitMap<N> {
 
     /* Pruning */
 
-    // Remove the first `n` chunks from the bitmap.
-    //
-    // # Warning
-    //
-    // Panics if trying to prune more chunks than exist.
+    /// Remove the first `chunks` chunks from the bitmap.
+    ///
+    /// If all chunks are pruned, a new empty chunk is added to maintain the invariant that the
+    /// bitmap always has at least one chunk.
+    ///
+    /// # Warning
+    ///
+    /// Panics if trying to prune more chunks than exist.
     fn prune_chunks(&mut self, chunks: usize) {
         assert!(
             chunks <= self.chunks.len(),
