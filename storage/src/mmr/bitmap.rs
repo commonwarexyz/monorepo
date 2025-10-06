@@ -157,7 +157,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
         Ok(Self {
             bitmap: BitMap::new_with_pruned_chunks(pruned_chunks)
-                .expect("bitmap length overflows u64"),
+                .map_err(|_| PrunedChunksOverflow)?,
             authenticated_len: 0,
             mmr,
             dirty_chunks: HashSet::new(),
