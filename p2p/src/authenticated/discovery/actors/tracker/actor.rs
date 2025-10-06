@@ -6,7 +6,7 @@ use super::{
 use crate::authenticated::{
     discovery::{
         actors::tracker::ingress::Releaser,
-        types::{self, InfoVerifier},
+        types::{self, Info, InfoVerifier},
     },
     mailbox::UnboundedMailbox,
 };
@@ -88,7 +88,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         );
 
         // Create peer validator
-        let peer_info_verifier = InfoVerifier::new(
+        let info_verifier = Info::verifier(
             cfg.crypto.public_key(),
             cfg.allow_private_ips,
             cfg.peer_gossip_max_count,
@@ -107,7 +107,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             },
             mailbox,
             oracle,
-            peer_info_verifier,
+            info_verifier,
         )
     }
 

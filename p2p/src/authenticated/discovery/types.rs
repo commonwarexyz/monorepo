@@ -180,6 +180,25 @@ pub struct Info<C: PublicKey> {
     pub signature: C::Signature,
 }
 
+impl<C: PublicKey> Info<C> {
+    /// Create a new [InfoVerifier] with the provided configuration.
+    pub fn verifier(
+        me: C,
+        allow_private_ips: bool,
+        peer_gossip_max_count: usize,
+        synchrony_bound: Duration,
+        ip_namespace: Vec<u8>,
+    ) -> InfoVerifier<C> {
+        InfoVerifier {
+            me,
+            allow_private_ips,
+            peer_gossip_max_count,
+            synchrony_bound,
+            ip_namespace,
+        }
+    }
+}
+
 /// Validate peer gossip payloads against configurability and basic safety checks.
 #[derive(Clone)]
 pub struct InfoVerifier<C: PublicKey> {
@@ -201,23 +220,6 @@ pub struct InfoVerifier<C: PublicKey> {
 }
 
 impl<C: PublicKey> InfoVerifier<C> {
-    /// Create a new `InfoVerifier` with the provided configuration.
-    pub fn new(
-        me: C,
-        allow_private_ips: bool,
-        peer_gossip_max_count: usize,
-        synchrony_bound: Duration,
-        ip_namespace: Vec<u8>,
-    ) -> Self {
-        Self {
-            me,
-            allow_private_ips,
-            peer_gossip_max_count,
-            synchrony_bound,
-            ip_namespace,
-        }
-    }
-
     /// Handle an incoming list of peer information.
     ///
     /// Returns an error if the list itself or any entries can be considered malformed.
@@ -445,13 +447,13 @@ mod tests {
     }
 
     #[test]
-    fn peer_info_verifier_accepts_valid_peer() {
+    fn info_verifier_accepts_valid_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
-            let validator = InfoVerifier::new(
+            let validator = Info::verifier(
                 validator_key.public_key(),
                 false,
                 4,
@@ -470,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_info_verifier_rejects_too_many_peers() {
+    fn info_verifier_rejects_too_many_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
@@ -494,7 +496,7 @@ mod tests {
                 );
                 vec![peer_a, peer_b]
             };
-            let validator = InfoVerifier::new(
+            let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
                 1,
@@ -507,13 +509,13 @@ mod tests {
     }
 
     #[test]
-    fn peer_info_verifier_rejects_private_ips_when_disallowed() {
+    fn info_verifier_rejects_private_ips_when_disallowed() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
-            let validator = InfoVerifier::new(
+            let validator = Info::verifier(
                 validator_key.public_key(),
                 false,
                 4,
@@ -533,12 +535,12 @@ mod tests {
     }
 
     #[test]
-    fn peer_info_verifier_rejects_self() {
+    fn info_verifier_rejects_self() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
-            let validator = InfoVerifier::new(
+            let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
                 4,
@@ -558,14 +560,14 @@ mod tests {
     }
 
     #[test]
-    fn peer_info_verifier_rejects_future_timestamp() {
+    fn info_verifier_rejects_future_timestamp() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
             let synchrony_bound = Duration::from_secs(30);
-            let validator = InfoVerifier::new(
+            let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
                 4,
@@ -587,13 +589,13 @@ mod tests {
     }
 
     #[test]
-    fn peer_info_verifier_rejects_invalid_signature() {
+    fn info_verifier_rejects_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
             let namespace = b"namespace".to_vec();
-            let validator = InfoVerifier::new(
+            let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
                 4,
