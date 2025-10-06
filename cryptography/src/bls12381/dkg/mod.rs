@@ -147,9 +147,9 @@ pub use dealer::Dealer;
 pub mod ops;
 pub mod player;
 pub use player::Player;
-use thiserror::Error;
+pub mod types;
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("unexpected polynomial")]
     UnexpectedPolynomial,
