@@ -272,7 +272,7 @@ impl<const N: usize> BitMap<N> {
             }
         }
         // Clear trailing bits to maintain invariant
-        let _ = self.clear_trailing_bits();
+        self.clear_trailing_bits();
     }
 
     /// Set the value of the referenced bit.
