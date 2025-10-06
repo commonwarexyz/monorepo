@@ -1,6 +1,17 @@
 //! A prunable wrapper around BitMap that tracks pruned chunks.
 
 use super::BitMap;
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use thiserror::Error;
+
+/// Errors that can occur when working with a prunable bitmap.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// The provided pruned_chunks value would overflow.
+    #[error("pruned_chunks * CHUNK_SIZE_BITS overflows u64")]
+    PrunedChunksOverflow,
+}
 
 /// A prunable bitmap that stores data in chunks of N bytes.
 ///
@@ -14,6 +25,10 @@ pub struct Prunable<const N: usize> {
     bitmap: BitMap<N>,
 
     /// The number of bitmap chunks that have been pruned.
+    ///
+    /// # Invariant
+    ///
+    /// Must satisfy: `pruned_chunks as u64 * CHUNK_SIZE_BITS + bitmap.len() <= u64::MAX`
     pruned_chunks: usize,
 }
 
@@ -32,11 +47,22 @@ impl<const N: usize> Prunable<N> {
     }
 
     /// Create a new empty prunable bitmap with the given number of pruned chunks.
-    pub fn new_with_pruned_chunks(pruned_chunks: usize) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `pruned_chunks` violates the invariant that
+    /// `pruned_chunks as u64 * CHUNK_SIZE_BITS` must not overflow u64.
+    pub fn new_with_pruned_chunks(pruned_chunks: usize) -> Result<Self, Error> {
+        // Validate the invariant: pruned_chunks * CHUNK_SIZE_BITS must fit in u64
+        let pruned_chunks_u64 = pruned_chunks as u64;
+        pruned_chunks_u64
+            .checked_mul(Self::CHUNK_SIZE_BITS)
+            .ok_or(Error::PrunedChunksOverflow)?;
+
+        Ok(Self {
             bitmap: BitMap::new(),
             pruned_chunks,
-        }
+        })
     }
 
     /* Length */
@@ -44,7 +70,13 @@ impl<const N: usize> Prunable<N> {
     /// Return the number of bits in the bitmap, irrespective of any pruning.
     #[inline]
     pub fn len(&self) -> u64 {
-        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS + self.bitmap.len()
+        let pruned_bits = (self.pruned_chunks as u64)
+            .checked_mul(Self::CHUNK_SIZE_BITS)
+            .expect("invariant violated: pruned_chunks * CHUNK_SIZE_BITS overflows u64");
+
+        pruned_bits
+            .checked_add(self.bitmap.len())
+            .expect("invariant violated: pruned_bits + bitmap.len() overflows u64")
     }
 
     /// Return true if the bitmap is empty.
@@ -68,7 +100,9 @@ impl<const N: usize> Prunable<N> {
     /// Return the number of pruned bits.
     #[inline]
     pub fn pruned_bits(&self) -> u64 {
-        self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS
+        (self.pruned_chunks as u64)
+            .checked_mul(Self::CHUNK_SIZE_BITS)
+            .expect("invariant violated: pruned_chunks * CHUNK_SIZE_BITS overflows u64")
     }
 
     /* Getters */
@@ -236,9 +270,60 @@ impl<const N: usize> Default for Prunable<N> {
     }
 }
 
+impl<const N: usize> Write for Prunable<N> {
+    fn write(&self, buf: &mut impl BufMut) {
+        (self.pruned_chunks as u64).write(buf);
+        self.bitmap.write(buf);
+    }
+}
+
+impl<const N: usize> Read for Prunable<N> {
+    // Max length for the unpruned portion of the bitmap.
+    type Cfg = u64;
+
+    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
+        let pruned_chunks_u64 = u64::read(buf)?;
+
+        // Validate that pruned_chunks * CHUNK_SIZE_BITS doesn't overflow u64
+        let pruned_bits =
+            pruned_chunks_u64
+                .checked_mul(Self::CHUNK_SIZE_BITS)
+                .ok_or(CodecError::Invalid(
+                    "Prunable",
+                    "pruned_chunks would overflow when computing pruned_bits",
+                ))?;
+
+        let pruned_chunks = usize::try_from(pruned_chunks_u64)
+            .map_err(|_| CodecError::Invalid("Prunable", "pruned_chunks doesn't fit in usize"))?;
+
+        let bitmap = BitMap::<N>::read_cfg(buf, max_len)?;
+
+        // Validate that total length (pruned_bits + bitmap.len()) doesn't overflow u64
+        pruned_bits
+            .checked_add(bitmap.len())
+            .ok_or(CodecError::Invalid(
+                "Prunable",
+                "total bitmap length (pruned + unpruned) would overflow u64",
+            ))?;
+
+        Ok(Self {
+            bitmap,
+            pruned_chunks,
+        })
+    }
+}
+
+impl<const N: usize> EncodeSize for Prunable<N> {
+    fn encode_size(&self) -> usize {
+        (self.pruned_chunks as u64).encode_size() + self.bitmap.encode_size()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
+    use commonware_codec::Encode;
 
     #[test]
     fn test_new() {
@@ -252,11 +337,20 @@ mod tests {
 
     #[test]
     fn test_new_with_pruned_chunks() {
-        let prunable: Prunable<2> = Prunable::new_with_pruned_chunks(1);
+        let prunable: Prunable<2> = Prunable::new_with_pruned_chunks(1).unwrap();
         assert_eq!(prunable.len(), 16);
         assert_eq!(prunable.pruned_bits(), 16);
         assert_eq!(prunable.pruned_chunks(), 1);
         assert_eq!(prunable.chunks_len(), 1); // Always has at least one chunk
+    }
+
+    #[test]
+    fn test_new_with_pruned_chunks_overflow() {
+        // Try to create a Prunable with pruned_chunks that would overflow
+        let overflowing_pruned_chunks = (u64::MAX / Prunable::<4>::CHUNK_SIZE_BITS) as usize + 1;
+        let result = Prunable::<4>::new_with_pruned_chunks(overflowing_pruned_chunks);
+
+        assert!(matches!(result, Err(Error::PrunedChunksOverflow)));
     }
 
     #[test]
@@ -654,5 +748,238 @@ mod tests {
         }
 
         assert!(prunable.is_empty());
+    }
+
+    #[test]
+    fn test_write_read_empty() {
+        let original: Prunable<4> = Prunable::new();
+        let encoded = original.encode();
+
+        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX).unwrap();
+        assert_eq!(decoded.len(), original.len());
+        assert_eq!(decoded.pruned_chunks(), original.pruned_chunks());
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_write_read_non_empty() {
+        let mut original: Prunable<4> = Prunable::new();
+        original.push_chunk(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        original.push_chunk(&[0x11, 0x22, 0x33, 0x44]);
+        original.push(true);
+        original.push(false);
+        original.push(true);
+
+        let encoded = original.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX).unwrap();
+
+        assert_eq!(decoded.len(), original.len());
+        assert_eq!(decoded.pruned_chunks(), original.pruned_chunks());
+        assert_eq!(decoded.len(), 67);
+
+        // Verify all bits match
+        for i in 0..original.len() {
+            assert_eq!(decoded.get_bit(i), original.get_bit(i));
+        }
+    }
+
+    #[test]
+    fn test_write_read_with_pruning() {
+        let mut original: Prunable<4> = Prunable::new();
+        original.push_chunk(&[0x01, 0x02, 0x03, 0x04]);
+        original.push_chunk(&[0x05, 0x06, 0x07, 0x08]);
+        original.push_chunk(&[0x09, 0x0A, 0x0B, 0x0C]);
+
+        // Prune first chunk
+        original.prune_to_bit(32);
+        assert_eq!(original.pruned_chunks(), 1);
+        assert_eq!(original.len(), 96);
+
+        let encoded = original.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX).unwrap();
+
+        assert_eq!(decoded.len(), original.len());
+        assert_eq!(decoded.pruned_chunks(), original.pruned_chunks());
+        assert_eq!(decoded.pruned_chunks(), 1);
+        assert_eq!(decoded.len(), 96);
+
+        // Verify remaining chunks match
+        assert_eq!(decoded.get_chunk(32), &[0x05, 0x06, 0x07, 0x08]);
+        assert_eq!(decoded.get_chunk(64), &[0x09, 0x0A, 0x0B, 0x0C]);
+    }
+
+    #[test]
+    fn test_write_read_with_pruning_2() {
+        let mut original: Prunable<4> = Prunable::new();
+
+        // Add several chunks
+        for i in 0..5 {
+            let chunk = [
+                (i * 4) as u8,
+                (i * 4 + 1) as u8,
+                (i * 4 + 2) as u8,
+                (i * 4 + 3) as u8,
+            ];
+            original.push_chunk(&chunk);
+        }
+
+        // Keep only last two chunks
+        original.prune_to_bit(96); // Prune first 3 chunks
+        assert_eq!(original.pruned_chunks(), 3);
+        assert_eq!(original.len(), 160);
+
+        let encoded = original.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX).unwrap();
+
+        assert_eq!(decoded.len(), original.len());
+        assert_eq!(decoded.pruned_chunks(), 3);
+
+        // Verify remaining accessible bits match
+        for i in 96..original.len() {
+            assert_eq!(decoded.get_bit(i), original.get_bit(i));
+        }
+    }
+
+    #[test]
+    fn test_encode_size_matches() {
+        let mut prunable: Prunable<4> = Prunable::new();
+        prunable.push_chunk(&[1, 2, 3, 4]);
+        prunable.push_chunk(&[5, 6, 7, 8]);
+        prunable.push(true);
+
+        let size = prunable.encode_size();
+        let encoded = prunable.encode();
+
+        assert_eq!(size, encoded.len());
+    }
+
+    #[test]
+    fn test_encode_size_with_pruning() {
+        let mut prunable: Prunable<4> = Prunable::new();
+        prunable.push_chunk(&[1, 2, 3, 4]);
+        prunable.push_chunk(&[5, 6, 7, 8]);
+        prunable.push_chunk(&[9, 10, 11, 12]);
+
+        prunable.prune_to_bit(32);
+
+        let size = prunable.encode_size();
+        let encoded = prunable.encode();
+
+        assert_eq!(size, encoded.len());
+    }
+
+    #[test]
+    fn test_read_max_len_validation() {
+        let mut original: Prunable<4> = Prunable::new();
+        for _ in 0..10 {
+            original.push(true);
+        }
+
+        let encoded = original.encode();
+
+        // Should succeed with sufficient max_len
+        assert!(Prunable::<4>::read_cfg(&mut encoded.as_ref(), &100).is_ok());
+
+        // Should fail with insufficient max_len
+        let result = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_codec_roundtrip_different_chunk_sizes() {
+        // Test with different chunk sizes
+        let mut p8: Prunable<8> = Prunable::new();
+        let mut p16: Prunable<16> = Prunable::new();
+        let mut p32: Prunable<32> = Prunable::new();
+
+        for i in 0..100 {
+            let bit = i % 3 == 0;
+            p8.push(bit);
+            p16.push(bit);
+            p32.push(bit);
+        }
+
+        // Roundtrip each
+        let encoded8 = p8.encode();
+        let decoded8 = Prunable::<8>::read_cfg(&mut encoded8.as_ref(), &u64::MAX).unwrap();
+        assert_eq!(decoded8.len(), p8.len());
+
+        let encoded16 = p16.encode();
+        let decoded16 = Prunable::<16>::read_cfg(&mut encoded16.as_ref(), &u64::MAX).unwrap();
+        assert_eq!(decoded16.len(), p16.len());
+
+        let encoded32 = p32.encode();
+        let decoded32 = Prunable::<32>::read_cfg(&mut encoded32.as_ref(), &u64::MAX).unwrap();
+        assert_eq!(decoded32.len(), p32.len());
+    }
+
+    #[test]
+    fn test_read_pruned_chunks_overflow() {
+        let mut buf = BytesMut::new();
+
+        // Write a pruned_chunks value that would overflow when multiplied by CHUNK_SIZE_BITS
+        let overflowing_pruned_chunks = (u64::MAX / Prunable::<4>::CHUNK_SIZE_BITS) + 1;
+        overflowing_pruned_chunks.write(&mut buf);
+
+        // Write a valid bitmap (empty)
+        0u64.write(&mut buf); // len = 0
+
+        // Try to read - should fail with overflow error
+        let result = Prunable::<4>::read_cfg(&mut buf.as_ref(), &u64::MAX);
+        match result {
+            Err(CodecError::Invalid(type_name, msg)) => {
+                assert_eq!(type_name, "Prunable");
+                assert_eq!(
+                    msg,
+                    "pruned_chunks would overflow when computing pruned_bits"
+                );
+            }
+            Ok(_) => panic!("Expected error but got Ok"),
+            Err(e) => panic!(
+                "Expected Invalid error for pruned_bits overflow, got: {:?}",
+                e
+            ),
+        }
+    }
+
+    #[test]
+    fn test_read_total_length_overflow() {
+        let mut buf = BytesMut::new();
+
+        // Make pruned_bits as large as possible without overflowing
+        let max_safe_pruned_chunks = u64::MAX / Prunable::<4>::CHUNK_SIZE_BITS;
+        let pruned_bits = max_safe_pruned_chunks * Prunable::<4>::CHUNK_SIZE_BITS;
+
+        // Make bitmap_len large enough that adding it overflows
+        let remaining_space = u64::MAX - pruned_bits;
+        let bitmap_len = remaining_space + 1; // Go over by 1 to trigger overflow
+
+        // Write the serialized data
+        max_safe_pruned_chunks.write(&mut buf);
+        bitmap_len.write(&mut buf);
+
+        // Write bitmap chunk data
+        let num_chunks =
+            (bitmap_len + Prunable::<4>::CHUNK_SIZE_BITS - 1) / Prunable::<4>::CHUNK_SIZE_BITS;
+        for _ in 0..(num_chunks * 4) {
+            0u8.write(&mut buf);
+        }
+
+        // Try to read - should fail because pruned_bits + bitmap_len overflows u64
+        let result = Prunable::<4>::read_cfg(&mut buf.as_ref(), &u64::MAX);
+        match result {
+            Err(CodecError::Invalid(type_name, msg)) => {
+                assert_eq!(type_name, "Prunable");
+                assert_eq!(
+                    msg,
+                    "total bitmap length (pruned + unpruned) would overflow u64"
+                );
+            }
+            Ok(_) => panic!("Expected error but got Ok"),
+            Err(e) => panic!(
+                "Expected Invalid error for total length overflow, got: {:?}",
+                e
+            ),
+        }
     }
 }
