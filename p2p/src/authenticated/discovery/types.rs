@@ -180,25 +180,6 @@ pub struct Info<C: PublicKey> {
     pub signature: C::Signature,
 }
 
-impl<C: PublicKey> Info<C> {
-    /// Create a new [InfoVerifier] with the provided configuration.
-    pub fn verifier(
-        me: C,
-        allow_private_ips: bool,
-        peer_gossip_max_count: usize,
-        synchrony_bound: Duration,
-        ip_namespace: Vec<u8>,
-    ) -> InfoVerifier<C> {
-        InfoVerifier {
-            me,
-            allow_private_ips,
-            peer_gossip_max_count,
-            synchrony_bound,
-            ip_namespace,
-        }
-    }
-}
-
 /// Validate peer gossip payloads against configurability and basic safety checks.
 #[derive(Clone)]
 pub struct InfoVerifier<C: PublicKey> {
@@ -262,7 +243,7 @@ impl<C: PublicKey> InfoVerifier<C> {
 }
 
 impl<C: PublicKey> Info<C> {
-    /// Verify the signature of the peer info.
+    /// Verify the signature of [Info].
     pub fn verify(&self, namespace: &[u8]) -> bool {
         self.public_key.verify(
             Some(namespace),
@@ -271,6 +252,24 @@ impl<C: PublicKey> Info<C> {
         )
     }
 
+    /// Create a new [InfoVerifier] with the provided configuration.
+    pub fn verifier(
+        me: C,
+        allow_private_ips: bool,
+        peer_gossip_max_count: usize,
+        synchrony_bound: Duration,
+        ip_namespace: Vec<u8>,
+    ) -> InfoVerifier<C> {
+        InfoVerifier {
+            me,
+            allow_private_ips,
+            peer_gossip_max_count,
+            synchrony_bound,
+            ip_namespace,
+        }
+    }
+
+    /// Sign the [Info] message.
     pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
         signer: &Sk,
         namespace: &[u8],
