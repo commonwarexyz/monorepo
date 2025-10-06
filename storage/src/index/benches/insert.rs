@@ -9,9 +9,9 @@ use prometheus_client::registry::Metric;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
+#[cfg(not(full_bench))]
 const N_ITEMS: [usize; 2] = [10_000, 50_000];
-#[cfg(not(test))]
+#[cfg(full_bench)]
 const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
 
 #[derive(Clone)]

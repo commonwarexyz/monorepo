@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
 documentation = "https://docs.rs/commonware-storage"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
+
 [dependencies]
 commonware-codec = {workspace = true, default-features = false }
 commonware-cryptography = {workspace = true, default-features = false }
