@@ -51,76 +51,51 @@ pub fn evaluate_all<V: Variant>(polynomial: &poly::Public<V>, n: u32) -> Vec<V::
     evals
 }
 
-/// A verified commitment.
-#[derive(Clone)]
-pub struct Commitment<V: Variant> {
-    commitment: poly::Public<V>,
+/// Verify that a given commitment is valid for a dealer. If a previous
+/// polynomial is provided, verify that the commitment is on that polynomial.
+pub fn verify_commitment<V: Variant>(
+    previous: Option<&poly::Public<V>>,
+    commitment: &poly::Public<V>,
+    dealer: u32,
+    t: u32,
+) -> Result<(), Error> {
+    if let Some(previous) = previous {
+        let expected = previous.evaluate(dealer).value;
+        if expected != *commitment.constant() {
+            return Err(Error::UnexpectedPolynomial);
+        }
+    }
+    if commitment.degree() != t - 1 {
+        return Err(Error::CommitmentWrongDegree);
+    }
+    Ok(())
 }
 
-#[allow(clippy::from_over_into)]
-impl<V: Variant> Into<poly::Public<V>> for Commitment<V> {
-    fn into(self) -> poly::Public<V> {
-        self.commitment
+// Verify that a given share is valid for a specified recipient.
+//
+// # Warning
+//
+// This function assumes the provided commitment has already been verified.
+pub fn verify_share<V: Variant>(
+    commitment: &poly::Public<V>,
+    recipient: u32,
+    share: &Share,
+) -> Result<(), Error> {
+    // Check if share is valid
+    if share.index != recipient {
+        return Err(Error::MisdirectedShare);
     }
-}
-
-impl<V: Variant> AsRef<poly::Public<V>> for Commitment<V> {
-    fn as_ref(&self) -> &poly::Public<V> {
-        &self.commitment
+    let expected = share.public::<V>();
+    let given = commitment.evaluate(share.index);
+    if given.value != expected {
+        return Err(Error::ShareWrongCommitment);
     }
-}
-
-impl<V: Variant> Commitment<V> {
-    /// Create a new verified commitment.
-    ///
-    /// Verify that a given commitment is valid for a dealer. If a previous
-    /// polynomial is provided, verify that the commitment is on that polynomial.
-    pub fn new(
-        previous: Option<&poly::Public<V>>,
-        commitment: poly::Public<V>,
-        dealer: u32,
-        t: u32,
-    ) -> Result<Self, Error> {
-        if let Some(previous) = previous {
-            let expected = previous.evaluate(dealer).value;
-            if expected != *commitment.constant() {
-                return Err(Error::UnexpectedPolynomial);
-            }
-        }
-        if commitment.degree() != t - 1 {
-            return Err(Error::CommitmentWrongDegree);
-        }
-        Ok(Commitment { commitment })
-    }
-
-    /// Evaluate the commitment at a given index.
-    pub fn evaluate(&self, index: u32) -> poly::Eval<V::Public> {
-        self.commitment.evaluate(index)
-    }
-
-    /// Get the commitment.
-    pub fn get(&self, index: u32) -> V::Public {
-        self.commitment.get(index)
-    }
-
-    // Verify that a given share is valid for a specified recipient.
-    pub fn verify_share(&self, recipient: u32, share: &Share) -> Result<(), Error> {
-        // Check if share is valid
-        if share.index != recipient {
-            return Err(Error::MisdirectedShare);
-        }
-        let expected = share.public::<V>();
-        let given = self.evaluate(share.index);
-        if given.value != expected {
-            return Err(Error::ShareWrongCommitment);
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Construct a public polynomial by summing a vector of commitments.
 pub fn construct_public<V: Variant>(
-    commitments: Vec<Commitment<V>>,
+    commitments: Vec<poly::Public<V>>,
     required: u32,
 ) -> Result<poly::Public<V>, Error> {
     if commitments.len() < required as usize {
@@ -129,7 +104,7 @@ pub fn construct_public<V: Variant>(
 
     let mut public = poly::Public::<V>::zero();
     for commitment in commitments {
-        public.add(&commitment.into());
+        public.add(&commitment);
     }
     Ok(public)
 }
@@ -140,7 +115,7 @@ pub fn construct_public<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public_with_weights<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, Commitment<V>>,
+    commitments: BTreeMap<u32, poly::Public<V>>,
     weights: &BTreeMap<u32, poly::Weight>,
     threshold: u32,
     concurrency: usize,
@@ -193,7 +168,7 @@ pub fn recover_public_with_weights<V: Variant>(
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public<V: Variant>(
     previous: &poly::Public<V>,
-    commitments: BTreeMap<u32, Commitment<V>>,
+    commitments: BTreeMap<u32, poly::Public<V>>,
     threshold: u32,
     concurrency: usize,
 ) -> Result<poly::Public<V>, Error> {
