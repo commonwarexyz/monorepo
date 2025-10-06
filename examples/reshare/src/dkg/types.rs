@@ -1,12 +1,14 @@
 //! Types for the DKG/reshare protocol.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
-    bls12381::primitives::{group::Share, poly::Public, variant::Variant},
+    bls12381::{
+        dkg::types::{Ack, Share},
+        primitives::{group, poly::Public, variant::Variant},
+    },
     PrivateKey, Signature,
 };
-use commonware_utils::quorum;
 
 /// The namespace used when signing [DealOutcome]s.
 pub const OUTCOME_NAMESPACE: &[u8] = b"RESHARE_OUTCOME";
@@ -29,10 +31,10 @@ pub struct DealOutcome<P: PrivateKey, V: Variant> {
     pub commitment: Public<V>,
 
     /// All signed acknowledgements from participants.
-    pub acks: Vec<(u32, P::Signature)>,
+    pub acks: Vec<Ack<P::Signature>>,
 
     /// Any revealed secret shares.
-    pub reveals: Vec<Share>,
+    pub reveals: Vec<group::Share>,
 }
 
 impl<P: PrivateKey, V: Variant> DealOutcome<P, V> {
@@ -43,8 +45,8 @@ impl<P: PrivateKey, V: Variant> DealOutcome<P, V> {
         dealer_signer: &P,
         round: u64,
         commitment: Public<V>,
-        acks: Vec<(u32, P::Signature)>,
-        reveals: Vec<Share>,
+        acks: Vec<Ack<P::Signature>>,
+        reveals: Vec<group::Share>,
     ) -> Self {
         // Sign the resharing outcome
         let payload = Self::signature_payload_from_parts(round, &commitment, &acks, &reveals);
@@ -69,8 +71,8 @@ impl<P: PrivateKey, V: Variant> DealOutcome<P, V> {
     fn signature_payload_from_parts(
         round: u64,
         commitment: &Public<V>,
-        acks: &[(u32, P::Signature)],
-        reveals: &Vec<Share>,
+        acks: &[Ack<P::Signature>],
+        reveals: &Vec<group::Share>,
     ) -> Vec<u8> {
         let mut buf = Vec::with_capacity(
             UInt(round).encode_size()
@@ -120,11 +122,8 @@ impl<P: PrivateKey, V: Variant> Read for DealOutcome<P, V> {
             dealer_signature: P::Signature::read(buf)?,
             round: UInt::read(buf)?.into(),
             commitment: Public::<V>::read_cfg(buf, cfg)?,
-            acks: Vec::<(u32, P::Signature)>::read_cfg(
-                buf,
-                &(RangeCfg::from(0..=usize::MAX), ((), ())),
-            )?,
-            reveals: Vec::<Share>::read_cfg(buf, &(RangeCfg::from(0..=usize::MAX), ()))?,
+            acks: Vec::<Ack<P::Signature>>::read_cfg(buf, &(RangeCfg::from(0..=usize::MAX), ()))?,
+            reveals: Vec::<group::Share>::read_cfg(buf, &(RangeCfg::from(0..=usize::MAX), ()))?,
         })
     }
 }
@@ -148,9 +147,9 @@ impl<V: Variant, S: Signature> Write for Dkg<V, S> {
 }
 
 impl<V: Variant, S: Signature> Read for Dkg<V, S> {
-    type Cfg = usize;
+    type Cfg = u32;
 
-    fn read_cfg(buf: &mut impl Buf, num_players: &usize) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, num_players: &u32) -> Result<Self, commonware_codec::Error> {
         let round = UInt::read(buf)?.into();
         let payload = Payload::read_cfg(buf, num_players)?;
         Ok(Self { round, payload })
@@ -173,61 +172,48 @@ pub enum Payload<V: Variant, S: Signature> {
     ///
     /// Contains the dealer's public commitment to their polynomial and the specific
     /// share calculated for the receiving player.
-    Share {
-        /// The dealer's public commitment (coefficients of the polynomial).
-        commitment: Public<V>,
-        /// The secret share evaluated for the recipient player.
-        share: Share,
-    },
+    Share(Share<V>),
 
     /// Message sent by a player node back to the dealer node.
     ///
     /// Acknowledges the receipt and verification of a [Payload::Share] message.
     /// Includes a signature to authenticate the acknowledgment.
-    Ack {
-        /// The public key identifier of the player sending the acknowledgment.
-        public_key: u32,
-        /// A signature covering the DKG round, dealer ID, and the dealer's commitment.
-        /// This confirms the player received and validated the correct share.
-        signature: S,
-    },
+    Ack(Ack<S>),
+}
+
+impl<V: Variant, S: Signature> Payload<V, S> {
+    /// Lifts the [Payload] into a [Dkg] message for a specific round.
+    pub fn into_message(self, round: u64) -> Dkg<V, S> {
+        Dkg {
+            round,
+            payload: self,
+        }
+    }
 }
 
 impl<V: Variant, S: Signature> Write for Payload<V, S> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Payload::Share { commitment, share } => {
+            Payload::Share(inner) => {
                 buf.put_u8(0);
-                commitment.write(buf);
-                share.write(buf);
+                inner.write(buf);
             }
-            Payload::Ack {
-                public_key,
-                signature,
-            } => {
+            Payload::Ack(inner) => {
                 buf.put_u8(1);
-                UInt(*public_key).write(buf);
-                signature.write(buf);
+                inner.write(buf);
             }
         }
     }
 }
 
 impl<V: Variant, S: Signature> Read for Payload<V, S> {
-    type Cfg = usize;
+    type Cfg = u32;
 
-    fn read_cfg(buf: &mut impl Buf, p: &usize) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, p: &u32) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
-        let t = quorum(u32::try_from(*p).unwrap()) as usize;
         let result = match tag {
-            0 => Payload::Share {
-                commitment: Public::<V>::read_cfg(buf, &t)?,
-                share: Share::read(buf)?,
-            },
-            1 => Payload::Ack {
-                public_key: UInt::read(buf)?.into(),
-                signature: S::read(buf)?,
-            },
+            0 => Payload::Share(Share::read_cfg(buf, p)?),
+            1 => Payload::Ack(Ack::read(buf)?),
             _ => return Err(commonware_codec::Error::InvalidEnum(tag)),
         };
         Ok(result)
@@ -236,12 +222,10 @@ impl<V: Variant, S: Signature> Read for Payload<V, S> {
 
 impl<V: Variant, S: Signature> EncodeSize for Payload<V, S> {
     fn encode_size(&self) -> usize {
-        1 + match self {
-            Payload::Share { commitment, share } => commitment.encode_size() + share.encode_size(),
-            Payload::Ack {
-                public_key,
-                signature,
-            } => UInt(*public_key).encode_size() + signature.encode_size(),
-        }
+        u8::SIZE
+            + match self {
+                Payload::Share(inner) => inner.encode_size(),
+                Payload::Ack(inner) => inner.encode_size(),
+            }
     }
 }
