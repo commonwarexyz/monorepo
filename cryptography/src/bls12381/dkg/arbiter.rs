@@ -238,10 +238,13 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         for (dealer_idx, (commitment, _, shares)) in
             self.commitments.into_iter().take(dealer_threshold)
         {
-            if !shares.is_empty() {
-                reveals.insert(dealer_idx, shares);
-            }
             commitments.insert(dealer_idx, commitment);
+
+            // If there are no reveals for dealer, skip
+            if shares.is_empty() {
+                continue;
+            }
+            reveals.insert(dealer_idx, shares);
         }
 
         // Recover group
