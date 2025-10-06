@@ -121,10 +121,20 @@ pub trait Runner {
 }
 
 /// Configuration flags that influence how a task is spawned.
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug)]
 struct SpawnConfig {
     supervised: bool,
     dedicated: bool,
+}
+
+impl Default for SpawnConfig {
+    fn default() -> Self {
+        Self {
+            // Default to supervised tasks like UNIX (and unlike tokio)
+            supervised: true,
+            dedicated: false,
+        }
+    }
 }
 
 impl SpawnConfig {
