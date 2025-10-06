@@ -39,6 +39,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bitmap"
+path = "fuzz_targets/bitmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "priority_set"
 path = "fuzz_targets/priority_set.rs"
 test = false
