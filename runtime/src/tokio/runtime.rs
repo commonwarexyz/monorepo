@@ -620,11 +620,11 @@ impl crate::Metrics for Context {
         Self {
             name,
             spawned: false,
+            spawn_config: SpawnConfig::default(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
             children: self.children.clone(),
-            spawn_config: self.spawn_config,
         }
     }
 
