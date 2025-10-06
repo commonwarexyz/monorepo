@@ -392,7 +392,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             spawned: false,
-            spawn_config: SpawnConfig::default(),
+            spawn_config: self.spawn_config,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -496,10 +496,8 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.spawn_config.is_dedicated();
-        self.spawn_config = SpawnConfig::default();
-
-        // Spawn the task
         move |f: F| {
+            // Spawn the task
             let (f, handle) =
                 Handle::init_future(f, metric, executor.panicker.clone(), children.clone());
             if dedicated {
@@ -561,7 +559,6 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.spawn_config.is_dedicated();
-        self.spawn_config = SpawnConfig::default();
 
         // Spawn the blocking task
         move |f: F| {
@@ -620,7 +617,7 @@ impl crate::Metrics for Context {
         Self {
             name,
             spawned: false,
-            spawn_config: SpawnConfig::default(),
+            spawn_config: self.spawn_config,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),

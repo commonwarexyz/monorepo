@@ -835,7 +835,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             spawned: false,
-            spawn_config: SpawnConfig::default(),
+            spawn_config: self.spawn_config,
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -930,10 +930,8 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor();
-        self.spawn_config = SpawnConfig::default();
-
-        // Spawn the task
         move |f: F| {
+            // Spawn the task
             let (f, handle) = Handle::init_future(f, metric, executor.panicker.clone(), children);
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
@@ -957,12 +955,11 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self, blocking);
 
-        // Initialize the blocking task
-        let executor = self.executor();
-
         // Reset spawn config
         self.spawn_config = SpawnConfig::default();
 
+        // Initialize the blocking task
+        let executor = self.executor();
         let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
 
         // Spawn the task
@@ -985,10 +982,6 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor();
-
-        // Reset spawn config
-        self.spawn_config = SpawnConfig::default();
-
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, metric, executor.panicker.clone());
 
@@ -1050,7 +1043,7 @@ impl crate::Metrics for Context {
         Self {
             name,
             spawned: false,
-            spawn_config: SpawnConfig::default(),
+            spawn_config: self.spawn_config,
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
