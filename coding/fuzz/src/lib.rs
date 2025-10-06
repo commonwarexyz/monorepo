@@ -40,19 +40,8 @@ pub struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        // We need to generate parameters which satisfy the conditions of valid RS coding,
-        // which are such that if min <= 2^16 - 2^n, then recovery <= 2^n.
-        let n: u64 = u.int_in_range(0..=15)?;
-        let mut min = u.int_in_range(1..=u16::try_from((1 << 16) - (1 << n)).unwrap())?;
-        let mut recovery = u.int_in_range(1..=u16::try_from(1 << n).unwrap())?;
-        // Correction to make sure that we can fit min + recovery in a u16.
-        if min.checked_add(recovery).is_none() {
-            if recovery > 1 {
-                recovery -= 1;
-            } else {
-                min -= 1;
-            }
-        }
+        let min = u.int_in_range(1..=((1 << 10) - 1))?;
+        let recovery = u.int_in_range(min..=((1 << 10) - 1))?;
         let to_use = u.int_in_range(min..=min + recovery)?;
         let data = u.arbitrary::<Vec<u8>>()?;
         let shuffle = Shuffle::arbitrary(u, (min + recovery) as usize)?;
