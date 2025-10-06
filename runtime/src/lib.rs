@@ -1421,7 +1421,7 @@ mod tests {
         }
     }
 
-    fn test_spawn_child<R: Runner>(runner: R, use_spawn_ref: bool)
+    fn test_spawn_supervised<R: Runner>(runner: R, use_spawn_ref: bool)
     where
         R::Context: Spawner + Clock,
     {
@@ -1460,7 +1460,7 @@ mod tests {
         });
     }
 
-    fn test_spawn_child_abort_on_parent_abort<R: Runner>(runner: R, use_spawn_ref: bool)
+    fn test_spawn_supervised_abort_on_parent_abort<R: Runner>(runner: R, use_spawn_ref: bool)
     where
         R::Context: Spawner + Clock,
     {
@@ -1496,7 +1496,7 @@ mod tests {
         });
     }
 
-    fn test_spawn_child_abort_on_parent_completion<R: Runner>(runner: R, use_spawn_ref: bool)
+    fn test_spawn_supervised_abort_on_parent_completion<R: Runner>(runner: R, use_spawn_ref: bool)
     where
         R::Context: Spawner + Clock,
     {
@@ -1529,7 +1529,7 @@ mod tests {
         });
     }
 
-    fn test_spawn_child_cascading_abort<R: Runner>(runner: R, use_spawn_ref: bool)
+    fn test_spawn_supervised_cascading_abort<R: Runner>(runner: R, use_spawn_ref: bool)
     where
         R::Context: Spawner + Clock,
     {
@@ -2170,34 +2170,34 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_spawn_child() {
+    fn test_deterministic_spawn_supervised() {
         for use_spawn_ref in [false, true] {
             let runner = deterministic::Runner::default();
-            test_spawn_child(runner, use_spawn_ref);
+            test_spawn_supervised(runner, use_spawn_ref);
         }
     }
 
     #[test]
-    fn test_deterministic_spawn_child_abort_on_parent_abort() {
+    fn test_deterministic_spawn_supervised_abort_on_parent_abort() {
         for use_spawn_ref in [false, true] {
             let runner = deterministic::Runner::default();
-            test_spawn_child_abort_on_parent_abort(runner, use_spawn_ref);
+            test_spawn_supervised_abort_on_parent_abort(runner, use_spawn_ref);
         }
     }
 
     #[test]
-    fn test_deterministic_spawn_child_abort_on_parent_completion() {
+    fn test_deterministic_spawn_supervised_abort_on_parent_completion() {
         for use_spawn_ref in [false, true] {
             let runner = deterministic::Runner::default();
-            test_spawn_child_abort_on_parent_completion(runner, use_spawn_ref);
+            test_spawn_supervised_abort_on_parent_completion(runner, use_spawn_ref);
         }
     }
 
     #[test]
-    fn test_deterministic_spawn_child_cascading_abort() {
+    fn test_deterministic_spawn_supervised_cascading_abort() {
         for use_spawn_ref in [false, true] {
             let runner = deterministic::Runner::default();
-            test_spawn_child_cascading_abort(runner, use_spawn_ref);
+            test_spawn_supervised_cascading_abort(runner, use_spawn_ref);
         }
     }
 
@@ -2470,34 +2470,34 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_spawn_child() {
+    fn test_tokio_spawn_supervised() {
         for use_spawn_ref in [false, true] {
             let runner = tokio::Runner::default();
-            test_spawn_child(runner, use_spawn_ref);
+            test_spawn_supervised(runner, use_spawn_ref);
         }
     }
 
     #[test]
-    fn test_tokio_spawn_child_abort_on_parent_abort() {
+    fn test_tokio_spawn_supervised_abort_on_parent_abort() {
         for use_spawn_ref in [false, true] {
             let runner = tokio::Runner::default();
-            test_spawn_child_abort_on_parent_abort(runner, use_spawn_ref);
+            test_spawn_supervised_abort_on_parent_abort(runner, use_spawn_ref);
         }
     }
 
     #[test]
-    fn test_tokio_spawn_child_abort_on_parent_completion() {
+    fn test_tokio_spawn_supervised_abort_on_parent_completion() {
         for use_spawn_ref in [false, true] {
             let runner = tokio::Runner::default();
-            test_spawn_child_abort_on_parent_completion(runner, use_spawn_ref);
+            test_spawn_supervised_abort_on_parent_completion(runner, use_spawn_ref);
         }
     }
 
     #[test]
-    fn test_tokio_spawn_child_cascading_abort() {
+    fn test_tokio_spawn_supervised_cascading_abort() {
         for use_spawn_ref in [false, true] {
             let runner = tokio::Runner::default();
-            test_spawn_child_cascading_abort(runner, use_spawn_ref);
+            test_spawn_supervised_cascading_abort(runner, use_spawn_ref);
         }
     }
 
