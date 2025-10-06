@@ -30,7 +30,6 @@ pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     pub allow_private_ips: bool,
-    pub mailbox_size: usize,
     pub synchrony_bound: Duration,
     pub tracked_peer_sets: usize,
     pub max_peer_set_size: usize,

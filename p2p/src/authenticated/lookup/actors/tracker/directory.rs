@@ -26,9 +26,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
-    context: E,
-
+pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: usize,
@@ -49,7 +47,7 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
-    releaser: Releaser<E, C>,
+    releaser: Releaser<C>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
@@ -58,12 +56,7 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
-    pub fn init(
-        context: E,
-        myself: (C, SocketAddr),
-        cfg: Config,
-        releaser: Releaser<E, C>,
-    ) -> Self {
+    pub fn init(context: E, myself: (C, SocketAddr), cfg: Config, releaser: Releaser<C>) -> Self {
         // Create the list of peers and add myself.
         let mut peers = HashMap::new();
         peers.insert(myself.0, Record::myself(myself.1));
@@ -74,7 +67,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
 
         Self {
-            context,
             max_sets: cfg.max_sets,
             allow_private_ips: cfg.allow_private_ips,
             peers,
@@ -159,7 +151,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn dial(&mut self, peer: &C) -> Option<Reservation<E, C>> {
+    pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
         let socket = self.peers.get(peer)?.socket()?;
         self.reserve(Metadata::Dialer(peer.clone(), socket))
     }
@@ -167,7 +159,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C) -> Option<Reservation<E, C>> {
+    pub fn listen(&mut self, peer: &C) -> Option<Reservation<C>> {
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
@@ -223,7 +215,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Attempt to reserve a peer.
     ///
     /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
-    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<E, C>> {
+    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
 
         // Not reservable
@@ -249,11 +241,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Reserve
         if record.reserve() {
             self.metrics.reserved.inc();
-            return Some(Reservation::new(
-                self.context.clone(),
-                metadata,
-                self.releaser.clone(),
-            ));
+            return Some(Reservation::new(metadata, self.releaser.clone()));
         }
         None
     }
@@ -279,11 +267,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::lookup::actors::tracker::directory::Directory;
+    use crate::authenticated::{
+        lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox,
+    };
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::NZU32;
-    use futures::channel::mpsc;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
@@ -291,7 +280,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
-        let (tx, _rx) = mpsc::channel(1);
+        let (tx, _rx) = UnboundedMailbox::new();
         let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
