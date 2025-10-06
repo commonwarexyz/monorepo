@@ -195,7 +195,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         match self.previous {
             None => {
                 // Add all valid commitments/dealings
-                for (commitment, private) in self.dealings.values() {
+                for (commitment, private) in selected.values() {
                     public.add(commitment);
                     secret.add(private.as_ref());
                 }
@@ -211,8 +211,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                 // While it is tempting to remove this work (given we only need the secret
                 // to generate a threshold signature), this polynomial is required to verify
                 // dealings of future resharings.
-                let commitments: BTreeMap<u32, poly::Public<V>> = self
-                    .dealings
+                let commitments: BTreeMap<u32, poly::Public<V>> = selected
                     .iter()
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
@@ -225,8 +224,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                 )?;
 
                 // Recover share via interpolation
-                let dealings = self
-                    .dealings
+                let dealings = selected
                     .into_iter()
                     .map(|(dealer, (_, share))| Eval {
                         index: dealer,
