@@ -232,7 +232,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // If there exist more than `2f + 1` commitments, take the first `2f + 1`
-        // sorted by dealer index and build output structures in-place.
+        // sorted by dealer index.
         let mut commitments = BTreeMap::new();
         let mut reveals = BTreeMap::new();
         for (dealer_idx, (commitment, _, shares)) in
