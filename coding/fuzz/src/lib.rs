@@ -1,7 +1,6 @@
-use std::iter;
-
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::{Config, Scheme};
+use std::iter;
 
 #[derive(Debug)]
 struct Shuffle {
