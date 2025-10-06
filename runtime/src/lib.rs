@@ -169,20 +169,35 @@ impl SpawnConfig {
 
 /// Interface that any task scheduler must implement to spawn tasks.
 pub trait Spawner: Clone + Send + Sync + 'static {
-    /// Create a new instance of `Spawner` configured to spawn new tasks
-    /// supervised by the current context.
+    /// Create a new instance of `Spawner` configured to spawn new tasks supervised by the current
+    /// context.
+    ///
+    /// Any async task spawned from this context will be aborted automatically if the current task
+    /// completes or is cancelled.
+    ///
+    /// # Note
+    ///
+    /// Only async tasks can be spawned as supervised, since blocking tasks cannot be aborted and
+    /// therefore can't support parent-child relationships.
     fn supervised(&self) -> Self;
 
-    /// Create a new instance of `Spawner` configured to spawn new tasks
-    /// detached from the current context.
+    /// Create a new instance of `Spawner` configured to spawn new tasks detached from the current
+    /// context.
+    ///
+    /// This is the default behavior, tasks spawned from detached contexts continue running
+    /// independently when their parent finishes (either through completion or abortion).
     fn detached(&self) -> Self;
 
-    /// Create a new instance of `Spawner` configured to spawn new tasks on a
-    /// dedicated thread.
+    /// Create a new instance of `Spawner` configured to spawn new tasks on a dedicated thread.
+    ///
+    /// If the runtime supports it, it should allocate a dedicated thread that drives the async
+    /// task.
     fn dedicated(&self) -> Self;
 
-    /// Create a new instance of `Spawner` configured to spawn new tasks on the
-    /// shared task executor.
+    /// Create a new instance of `Spawner` configured to spawn new tasks on the shared task
+    /// executor.
+    ///
+    /// This is the default behavior.
     fn shared(&self) -> Self;
 
     /// Enqueue a task to be executed.
@@ -218,7 +233,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// let executor = deterministic::Runner::default();
     /// executor.start(|mut context| async move {
     ///     context.spawn_ref()(async move {
-    ///         context.clone().spawn_child(|_| async move { /* ... */ });
+    ///         context.clone().supervised().spawn(|_| async move { /* ... */ });
     ///     });
     /// });
     /// ```
@@ -229,9 +244,10 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
     /// Enqueue a blocking task to be executed.
     ///
-    /// This method is designed for synchronous, potentially long-running operations. Tasks can either
-    /// be executed in a shared thread (tasks that are expected to finish on their own) or a dedicated
-    /// thread (tasks that are expected to run indefinitely).
+    /// This method is designed for synchronous, potentially long-running operations. Combine it
+    /// with [`Spawner::dedicated`] when you need a dedicated thread (tasks that are expected to run
+    /// indefinitely), otherwise the task executes in a shared thread (tasks that are expected to
+    /// finish on their own).
     ///
     /// The task starts executing immediately, and the returned handle can be awaited to retrieve the
     /// result.
@@ -244,7 +260,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// # Warning
     ///
-    /// Blocking tasks cannot be aborted.
+    /// Blocking tasks cannot be aborted or supervised. Calling this method on a context created with
+    /// [`Spawner::supervised`] will panic to prevent accidental misuse.
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
