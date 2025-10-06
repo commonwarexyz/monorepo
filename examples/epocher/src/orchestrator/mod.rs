@@ -12,7 +12,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::authenticated::discovery::Oracle;
 use commonware_runtime::{Metrics, Spawner};
-pub use ingress::{EpochCert, Mailbox, Message};
+pub use ingress::{EpochCert, EpochTransition, Mailbox, Message};
 
 type D = Sha256Digest;
 

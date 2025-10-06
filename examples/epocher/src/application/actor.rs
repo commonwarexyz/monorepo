@@ -1,16 +1,13 @@
 use super::ingress::{Mailbox, Message};
 use crate::{
-    orchestrator::EpochCert,
+    orchestrator::EpochTransition,
     types::{
         block::{Block, GENESIS_BLOCK, GENESIS_ROUND},
         epoch,
     },
 };
 use commonware_consensus::{
-    marshal,
-    threshold_simplex::types::{Context, Finalization},
-    types::Round,
-    Block as _, Reporter,
+    marshal, threshold_simplex::types::Context, types::Round, Block as _, Reporter,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, sha256::Digest as Sha256Digest, Committable,
@@ -24,7 +21,7 @@ use futures::{
 };
 use rand::Rng;
 use std::collections::BTreeMap;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Application actor for a single-network epocher.
 ///
@@ -57,11 +54,11 @@ impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
         )
     }
 
-    pub fn start<O: Reporter<Activity = EpochCert>>(mut self, orchestrator: O) -> Handle<()> {
+    pub fn start<O: Reporter<Activity = EpochTransition>>(mut self, orchestrator: O) -> Handle<()> {
         self.context.spawn_ref()(self.run(orchestrator))
     }
 
-    async fn run<O: Reporter<Activity = EpochCert>>(mut self, mut orchestrator: O) {
+    async fn run<O: Reporter<Activity = EpochTransition>>(mut self, mut orchestrator: O) {
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { epoch, response } => {
@@ -126,44 +123,31 @@ impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
                     }
 
                     // Get the finalization for this block.
-                    let cert = match epoch {
-                        0 => {
-                            let Some(f0) = self.get_finalization(height).await else {
-                                continue;
-                            };
-                            EpochCert::Single(f0)
-                        }
+                    let epoch_info = match epoch {
+                        0 => EpochTransition {
+                            epoch,
+                            seed: GENESIS_BLOCK.commitment(),
+                        },
                         _ => {
-                            let Some(f2) = self.get_finalization(height).await else {
-                                continue;
-                            };
                             let previous_height = epoch::get_last_height(epoch - 1);
-                            let Some(f1) = self.get_finalization(previous_height).await else {
+                            let Some(previous_block) =
+                                self.marshal.get_block(previous_height).await
+                            else {
                                 continue;
                             };
-                            EpochCert::Double(f1, f2)
+                            EpochTransition {
+                                epoch,
+                                seed: previous_block.commitment(),
+                            }
                         }
                     };
 
-                    orchestrator.report(cert).await;
+                    orchestrator.report(epoch_info).await;
 
                     let _ = response.send(());
                 }
             }
         }
-    }
-
-    /// Gets the finalization for a given height from marshal.
-    async fn get_finalization(
-        &mut self,
-        height: u64,
-    ) -> Option<Finalization<MinSig, Sha256Digest>> {
-        let Ok(Some((finalization, _block))) = self.marshal.get_finalization(height).await.await
-        else {
-            warn!("finalization not found for height {}", height);
-            return None;
-        };
-        Some(finalization)
     }
 
     /// Proposes a new block.

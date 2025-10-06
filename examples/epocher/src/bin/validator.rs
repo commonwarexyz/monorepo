@@ -89,7 +89,7 @@ fn main() {
     executor.start(|context| async move {
         // Setup P2P.
         // Tracks at least 3 peer sets since the epoch+2 set is established at end-of-epoch.
-        let mut p2p_cfg = discovery::Config::aggressive(
+        let mut p2p_cfg = discovery::Config::local(
             signer.clone(),
             b"EPOCHER",
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -184,7 +184,7 @@ fn main() {
             oracle,
             signer: signer.clone(),
             application: application.clone(),
-            marshal,
+            marshal: marshal.clone(),
             polynomial,
             shares,
             namespace,
@@ -202,6 +202,7 @@ fn main() {
             identity,
             indexers: indexers.clone(),
             orchestrator: orchestrator.clone(),
+            marshal,
             poll_interval: Duration::from_secs(5),
         };
         let poller_actor = poller::Poller::new(context.with_label("poller"), poller_cfg);

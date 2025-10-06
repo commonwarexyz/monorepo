@@ -1,6 +1,14 @@
-use crate::{orchestrator::EpochCert, NAMESPACE};
+use crate::{
+    orchestrator::{EpochCert, EpochTransition},
+    types::block::Block,
+    NAMESPACE,
+};
 use commonware_codec::extensions::DecodeRangeExt;
-use commonware_consensus::{threshold_simplex::types::Finalization, Reporter};
+use commonware_consensus::{
+    marshal,
+    threshold_simplex::types::{Activity, Finalization},
+    Reporter,
+};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     sha256::Digest as Sha256Digest,
@@ -10,11 +18,12 @@ use rand::{seq::SliceRandom, Rng};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-pub struct Config<O: Reporter<Activity = EpochCert>> {
+pub struct Config<O: Reporter<Activity = EpochTransition>> {
     pub identity: <MinSig as Variant>::Public,
     pub indexers: Vec<String>,
     pub poll_interval: Duration,
     pub orchestrator: O,
+    pub marshal: marshal::Mailbox<MinSig, Block>,
 }
 
 /// Poller actor: periodically polls configured indexers for the latest
@@ -23,20 +32,21 @@ pub struct Config<O: Reporter<Activity = EpochCert>> {
 pub struct Poller<E, O>
 where
     E: Clock + Spawner + Metrics + Rng,
-    O: Reporter<Activity = EpochCert>,
+    O: Reporter<Activity = EpochTransition>,
 {
     context: E,
     identity: <MinSig as Variant>::Public,
     indexers: Vec<String>,
     client: reqwest::Client,
     orchestrator: O,
+    marshal: marshal::Mailbox<MinSig, Block>,
     poll_interval: Duration,
 }
 
 impl<E, O> Poller<E, O>
 where
     E: Clock + Spawner + Metrics + Rng,
-    O: Reporter<Activity = EpochCert> + Clone,
+    O: Reporter<Activity = EpochTransition> + Clone,
 {
     pub fn new(context: E, cfg: Config<O>) -> Self {
         Self {
@@ -48,6 +58,7 @@ where
                 .build()
                 .unwrap(),
             orchestrator: cfg.orchestrator,
+            marshal: cfg.marshal,
             poll_interval: cfg.poll_interval,
         }
     }
@@ -56,7 +67,7 @@ where
         self.context.spawn_ref()(self.run())
     }
 
-    async fn run(self) {
+    async fn run(mut self) {
         // Track which next-epochs we've already reported to the orchestrator.
         let mut highest_reported_epoch: u64 = 0;
         let mut rng = self.context.clone();
@@ -114,6 +125,14 @@ where
                 continue;
             }
 
+            // Give to marshal to ensure that it has this finalization.
+            for finalization in finals {
+                let _ = self
+                    .marshal
+                    .report(Activity::Finalization(finalization.clone()))
+                    .await;
+            }
+
             // The last finalization must be the highest-epoch finalization.
             let epoch = cert.epoch();
             if epoch <= highest_reported_epoch {
@@ -122,9 +141,10 @@ where
             }
 
             // Report the epoch transition to the orchestrator.
-            info!(epoch, "poller: reporting epoch transition");
+            let seed = cert.seed();
+            info!(epoch, ?seed, "poller: reporting epoch transition");
             let mut orchestrator = self.orchestrator.clone();
-            orchestrator.report(cert).await;
+            orchestrator.report(EpochTransition { epoch, seed }).await;
             highest_reported_epoch = epoch;
         }
     }

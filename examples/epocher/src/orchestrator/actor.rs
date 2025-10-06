@@ -1,18 +1,14 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     forwarder::Forwarder,
-    orchestrator::EpochCert,
     types::block::{Block, GENESIS_BLOCK},
 };
 use commonware_codec::EncodeFixed;
 use commonware_consensus::{
     marshal,
-    threshold_simplex::{
-        self,
-        types::{Activity, Context},
-    },
+    threshold_simplex::{self, types::Context},
     types::Epoch,
-    Automaton, Relay, Reporter, Reporters,
+    Automaton, Relay, Reporters,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::MinSig},
@@ -191,25 +187,16 @@ impl<
         // Keep waiting for epoch updates.
         while let Some(message) = self.mailbox.next().await {
             match message {
-                Message::EpochTransition(cert) => {
+                Message::EpochTransition(epoch_info) => {
                     // Skip if already entered this epoch.
-                    if cert.epoch() <= self.epoch {
+                    if epoch_info.epoch <= self.epoch {
                         continue;
                     }
 
-                    // Send the finalization to marshal which can help it catch up if behind.
-                    let finalization = match &cert {
-                        EpochCert::Single(f0) => f0.clone(),
-                        EpochCert::Double(_f1, f2) => f2.clone(),
-                    };
-                    self.marshal
-                        .report(Activity::Finalization(finalization))
-                        .await;
-
                     // Enter the epoch.
                     self.enter_epoch(
-                        cert.epoch(),
-                        cert.seed(),
+                        epoch_info.epoch,
+                        epoch_info.seed,
                         &mut p_mux,
                         &mut rc_mux,
                         &mut rs_mux,

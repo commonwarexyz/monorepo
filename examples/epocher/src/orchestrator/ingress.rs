@@ -54,8 +54,13 @@ impl EpochCert {
     }
 }
 
+pub struct EpochTransition {
+    pub epoch: Epoch,
+    pub seed: Sha256Digest,
+}
+
 pub enum Message {
-    EpochTransition(EpochCert),
+    EpochTransition(EpochTransition),
 }
 
 /// Mailbox for the orchestrator.
@@ -71,7 +76,7 @@ impl Mailbox {
 }
 
 impl Reporter for Mailbox {
-    type Activity = EpochCert;
+    type Activity = EpochTransition;
 
     async fn report(&mut self, activity: Self::Activity) {
         self.sender
