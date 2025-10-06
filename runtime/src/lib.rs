@@ -1755,6 +1755,16 @@ mod tests {
         assert!(matches!(result, Err(Error::Exited)));
     }
 
+    fn test_spawn_blocking_supervised_panics<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let handle = context.supervised().spawn_blocking(|_| {});
+            handle.await
+        });
+    }
+
     fn test_spawn_blocking_ref<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -1790,6 +1800,16 @@ mod tests {
 
             // Ensure context is consumed
             context.spawn_blocking(|_| 42);
+        });
+    }
+
+    fn test_spawn_blocking_ref_supervised_panics<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        let _ = runner.start(|context| async move {
+            let spawn = context.supervised().spawn_blocking_ref();
+            spawn(|| ()).await;
         });
     }
 
@@ -2258,6 +2278,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "blocking tasks cannot be supervised")]
+    fn test_deterministic_spawn_blocking_supervised_panics() {
+        let executor = deterministic::Runner::default();
+        test_spawn_blocking_supervised_panics(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_blocking_abort() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
@@ -2280,6 +2307,13 @@ mod tests {
             let executor = deterministic::Runner::default();
             test_spawn_blocking_ref_duplicate(executor, dedicated);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "blocking tasks cannot be supervised")]
+    fn test_deterministic_spawn_blocking_ref_supervised_panics() {
+        let executor = deterministic::Runner::default();
+        test_spawn_blocking_ref_supervised_panics(executor);
     }
 
     #[test]
@@ -2564,6 +2598,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "blocking tasks cannot be supervised")]
+    fn test_tokio_spawn_blocking_supervised_panics() {
+        let executor = tokio::Runner::default();
+        test_spawn_blocking_supervised_panics(executor);
+    }
+
+    #[test]
     fn test_tokio_spawn_blocking_abort() {
         for dedicated in [false, true] {
             let executor = tokio::Runner::default();
@@ -2586,6 +2627,13 @@ mod tests {
             let executor = tokio::Runner::default();
             test_spawn_blocking_ref_duplicate(executor, dedicated);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "blocking tasks cannot be supervised")]
+    fn test_tokio_spawn_blocking_ref_supervised_panics() {
+        let executor = tokio::Runner::default();
+        test_spawn_blocking_ref_supervised_panics(executor);
     }
 
     #[test]
