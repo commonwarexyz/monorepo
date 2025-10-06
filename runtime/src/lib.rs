@@ -121,19 +121,10 @@ pub trait Runner {
 }
 
 /// Configuration flags that influence how a task is spawned.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 struct SpawnConfig {
     supervised: bool,
     dedicated: bool,
-}
-
-impl Default for SpawnConfig {
-    fn default() -> Self {
-        Self {
-            supervised: false,
-            dedicated: false,
-        }
-    }
 }
 
 impl SpawnConfig {
@@ -1761,7 +1752,7 @@ mod tests {
     {
         runner.start(|context| async move {
             let handle = context.supervised().spawn_blocking(|_| {});
-            handle.await
+            let _ = handle.await;
         });
     }
 
@@ -1807,9 +1798,9 @@ mod tests {
     where
         R::Context: Spawner,
     {
-        let _ = runner.start(|context| async move {
+        runner.start(|context| async move {
             let spawn = context.supervised().spawn_blocking_ref();
-            spawn(|| ()).await;
+            let _ = spawn(|| ()).await;
         });
     }
 
