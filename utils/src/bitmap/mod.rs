@@ -26,8 +26,8 @@ pub const DEFAULT_CHUNK_SIZE: usize = 8;
 ///
 /// # Panics
 ///
-/// Operations panic if `bit_offset / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
-/// with N=32, this occurs at bit_offset >= 1,099,511,627,776.
+/// Operations panic if `bit / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
+/// with N=32, this occurs at bit >= 1,099,511,627,776.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
@@ -143,31 +143,31 @@ impl<const N: usize> BitMap<N> {
 
     /* Getters */
 
-    /// Get the value of a bit.
+    /// Get the value of the bit at the given index.
     ///
     /// # Warning
     ///
     /// Panics if the bit doesn't exist.
     #[inline]
-    pub fn get(&self, bit_offset: u64) -> bool {
-        let chunk = self.get_chunk(bit_offset);
-        Self::get_from_chunk(chunk, bit_offset)
+    pub fn get(&self, bit: u64) -> bool {
+        let chunk = self.get_chunk(bit);
+        Self::get_from_chunk(chunk, bit)
     }
 
-    /// Returns the bitmap chunk containing the specified bit.
+    /// Returns the bitmap chunk containing the given index.
     ///
     /// # Warning
     ///
     /// Panics if the bit doesn't exist.
     #[inline]
-    fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
+    fn get_chunk(&self, bit: u64) -> &[u8; N] {
         assert!(
-            bit_offset < self.len(),
+            bit < self.len(),
             "Bit offset {} out of bounds (len: {})",
-            bit_offset,
+            bit,
             self.len()
         );
-        &self.chunks[Self::chunk_index(bit_offset)]
+        &self.chunks[Self::chunk_index(bit)]
     }
 
     /// Get a reference to a chunk by its index in the current bitmap.
@@ -183,13 +183,13 @@ impl<const N: usize> BitMap<N> {
         &self.chunks[index]
     }
 
-    /// Get the value at the given global `bit_offset` from the `chunk`.
-    /// Note `bit_offset` is an offset within the entire bitmap, not just the chunk.
+    /// Get the value at the given `bit` from the `chunk`.
+    /// Note `bit` is an offset within the entire bitmap, not just the chunk.
     #[inline]
-    fn get_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
-        let byte_offset = Self::chunk_byte_offset(bit_offset);
+    fn get_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
+        let byte_offset = Self::chunk_byte_offset(bit);
         let byte = chunk[byte_offset];
-        let mask = Self::chunk_byte_bitmask(bit_offset);
+        let mask = Self::chunk_byte_bitmask(bit);
         (byte & mask) != 0
     }
 
@@ -250,17 +250,17 @@ impl<const N: usize> BitMap<N> {
         bit
     }
 
-    /// Flips the bit at `bit_offset`.
+    /// Flips the given bit.
     ///
     /// # Panics
     ///
-    /// Panics if `bit_offset` is out of bounds.
+    /// Panics if `bit` is out of bounds.
     #[inline]
-    pub fn flip(&mut self, bit_offset: u64) {
-        self.assert_offset(bit_offset);
-        let chunk_index = Self::chunk_index(bit_offset);
-        let byte_offset = Self::chunk_byte_offset(bit_offset);
-        let mask = Self::chunk_byte_bitmask(bit_offset);
+    pub fn flip(&mut self, bit: u64) {
+        self.assert_offset(bit);
+        let chunk_index = Self::chunk_index(bit);
+        let byte_offset = Self::chunk_byte_offset(bit);
+        let mask = Self::chunk_byte_bitmask(bit);
         self.chunks[chunk_index][byte_offset] ^= mask;
     }
 
@@ -280,21 +280,21 @@ impl<const N: usize> BitMap<N> {
     /// # Warning
     ///
     /// Panics if the bit doesn't exist.
-    pub fn set(&mut self, bit_offset: u64, bit: bool) {
+    pub fn set(&mut self, bit: u64, value: bool) {
         assert!(
-            bit_offset < self.len(),
+            bit < self.len(),
             "Bit offset {} out of bounds (len: {})",
-            bit_offset,
+            bit,
             self.len()
         );
 
-        let chunk_index = Self::chunk_index(bit_offset);
+        let chunk_index = Self::chunk_index(bit);
         let chunk = &mut self.chunks[chunk_index];
 
-        let byte_offset = Self::chunk_byte_offset(bit_offset);
-        let mask = Self::chunk_byte_bitmask(bit_offset);
+        let byte_offset = Self::chunk_byte_offset(bit);
+        let mask = Self::chunk_byte_bitmask(bit);
 
-        if bit {
+        if value {
             chunk[byte_offset] |= mask;
         } else {
             chunk[byte_offset] &= !mask;
@@ -444,14 +444,14 @@ impl<const N: usize> BitMap<N> {
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
     #[inline]
-    pub(super) fn chunk_byte_bitmask(bit_offset: u64) -> u8 {
-        1 << (bit_offset % 8)
+    pub(super) fn chunk_byte_bitmask(bit: u64) -> u8 {
+        1 << (bit % 8)
     }
 
     /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
     #[inline]
-    pub(super) fn chunk_byte_offset(bit_offset: u64) -> usize {
-        ((bit_offset / 8) % N as u64) as usize
+    pub(super) fn chunk_byte_offset(bit: u64) -> usize {
+        ((bit / 8) % N as u64) as usize
     }
 
     /// Convert a bit offset into the index of the chunk it belongs to.
@@ -460,8 +460,8 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if the chunk index overflows `usize`.
     #[inline]
-    pub(super) fn chunk_index(bit_offset: u64) -> usize {
-        let chunk_index = bit_offset / Self::CHUNK_SIZE_BITS;
+    pub(super) fn chunk_index(bit: u64) -> usize {
+        let chunk_index = bit / Self::CHUNK_SIZE_BITS;
         assert!(
             chunk_index <= usize::MAX as u64,
             "chunk index overflow: {} exceeds usize::MAX",
@@ -526,11 +526,11 @@ impl<const N: usize> BitMap<N> {
 
     /// Asserts that the bit offset is within bounds.
     #[inline(always)]
-    fn assert_offset(&self, bit_offset: u64) {
+    fn assert_offset(&self, bit: u64) {
         assert!(
-            bit_offset < self.len(),
+            bit < self.len(),
             "Bit offset {} out of bounds (len: {})",
-            bit_offset,
+            bit,
             self.len()
         );
     }
