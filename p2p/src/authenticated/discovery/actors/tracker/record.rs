@@ -1,4 +1,4 @@
-use crate::authenticated::discovery::types::PeerInfo;
+use crate::authenticated::discovery::types::Info;
 use commonware_cryptography::PublicKey;
 use std::net::SocketAddr;
 use tracing::trace;
@@ -11,7 +11,7 @@ pub enum Address<C: PublicKey> {
     Unknown,
 
     /// Peer is the local node.
-    Myself(PeerInfo<C>),
+    Myself(Info<C>),
 
     /// Address is provided during initialization.
     /// Can be upgraded to `Discovered`.
@@ -20,7 +20,7 @@ pub enum Address<C: PublicKey> {
     /// Discovered this peer's address from other peers.
     ///
     /// The `usize` indicates the number of times dialing this record has failed.
-    Discovered(PeerInfo<C>, usize),
+    Discovered(Info<C>, usize),
 
     /// Peer is blocked.
     /// We don't care to track its information.
@@ -73,7 +73,7 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Create a new record with the local node's information.
-    pub fn myself(info: PeerInfo<C>) -> Self {
+    pub fn myself(info: Info<C>) -> Self {
         Record {
             address: Address::Myself(info),
             status: Status::Inert,
@@ -94,10 +94,10 @@ impl<C: PublicKey> Record<C> {
 
     // ---------- Setters ----------
 
-    /// Attempt to update the [PeerInfo] of a discovered peer.
+    /// Attempt to update the [Info] of a discovered peer.
     ///
     /// Returns true if the update was successful.
-    pub fn update(&mut self, info: PeerInfo<C>) -> bool {
+    pub fn update(&mut self, info: Info<C>) -> bool {
         match &self.address {
             Address::Myself(_) => false,
             Address::Blocked => false,
@@ -244,7 +244,7 @@ impl<C: PublicKey> Record<C> {
 
     /// Get the peer information if it is sharable. The information is considered sharable if it is
     /// known and we are connected to the peer.
-    pub fn sharable(&self) -> Option<PeerInfo<C>> {
+    pub fn sharable(&self) -> Option<Info<C>> {
         match &self.address {
             Address::Unknown => None,
             Address::Myself(info) => Some(info),
@@ -308,13 +308,13 @@ mod tests {
         signer_seed: u64,
         socket: SocketAddr,
         timestamp: u64,
-    ) -> PeerInfo<S::PublicKey>
+    ) -> Info<S::PublicKey>
     where
         S: PrivateKeyExt,
     {
         let signer = S::from_seed(signer_seed);
         let signature = signer.sign(None, &(socket, timestamp).encode());
-        PeerInfo {
+        Info {
             socket,
             timestamp,
             public_key: signer.public_key(),
@@ -330,21 +330,18 @@ mod tests {
         SocketAddr::from(([127, 0, 0, 1], 8081))
     }
 
-    // Helper function to compare the contents of two PeerInfo instances
-    fn peer_info_contents_are_equal<S: PublicKey>(
-        actual: &PeerInfo<S>,
-        expected: &PeerInfo<S>,
-    ) -> bool {
+    // Helper function to compare the contents of two Info instances
+    fn peer_info_contents_are_equal<S: PublicKey>(actual: &Info<S>, expected: &Info<S>) -> bool {
         actual.socket == expected.socket
             && actual.timestamp == expected.timestamp
             && actual.public_key == expected.public_key
             && actual.signature == expected.signature
     }
 
-    // Helper function to compare an Option<&PeerInfo<S>> with a &PeerInfo<S>
+    // Helper function to compare an Option<&Info<S>> with a &Info<S>
     fn compare_optional_peer_info<S: PublicKey>(
-        actual_opt: Option<&PeerInfo<S>>,
-        expected: &PeerInfo<S>,
+        actual_opt: Option<&Info<S>>,
+        expected: &Info<S>,
     ) -> bool {
         actual_opt.is_some_and(|actual| peer_info_contents_are_equal(actual, expected))
     }
@@ -501,7 +498,7 @@ mod tests {
 
     #[test]
     fn test_update_with_different_public_key() {
-        // While unlikely in normal operation (update uses PeerInfo tied to a specific record),
+        // While unlikely in normal operation (update uses Info tied to a specific record),
         // the `update` method itself doesn't check the public key matches.
         let socket = test_socket();
         let mut record = Record::<secp256r1::PublicKey>::unknown();
@@ -714,7 +711,7 @@ mod tests {
             &peer_info_data
         ));
 
-        // Bootstrapper (no PeerInfo yet): Not sharable
+        // Bootstrapper (no Info yet): Not sharable
         let record_boot = Record::<secp256r1::PublicKey>::bootstrapper(socket);
         assert!(record_boot.sharable().is_none());
 

@@ -7,7 +7,7 @@ use super::{
     types,
 };
 use crate::{
-    authenticated::{mailbox::UnboundedMailbox, Mailbox},
+    authenticated::{discovery::types::InfoVerifier, mailbox::UnboundedMailbox, Mailbox},
     Channel,
 };
 use commonware_cryptography::Signer;
@@ -38,6 +38,7 @@ pub struct Network<
     tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    info_verifier: InfoVerifier<C::PublicKey>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -54,7 +55,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
+        let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
@@ -88,6 +89,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracker_mailbox,
                 router,
                 router_mailbox,
+                info_verifier,
             },
             oracle,
         )
@@ -142,6 +144,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 max_peer_set_size: self.cfg.max_peer_set_size,
                 allowed_peers_rate: self.cfg.allowed_peers_rate,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
+                info_verifier: self.info_verifier,
             },
         );
         let mut spawner_task =
