@@ -62,20 +62,17 @@ pub struct Config {
 /// Configuration for initializing a journaled MMR for synchronization.
 ///
 /// Determines how to handle existing persistent data based on sync boundaries:
-/// - **Fresh Start**: Existing data < lower_bound → discard and start fresh
-/// - **Prune and Reuse**: lower_bound ≤ existing data ≤ upper_bound → prune and reuse
-/// - **Prune and Rewind**: existing data > upper_bound → prune and rewind to upper_bound
+/// - **Fresh Start**: Existing data < range start → discard and start fresh
+/// - **Prune and Reuse**: range contains existing data → prune and reuse
+/// - **Prune and Rewind**: existing data > range end → prune and rewind to range end
 pub struct SyncConfig<D: Digest> {
     /// Base MMR configuration (journal, metadata, etc.)
     pub config: Config,
 
-    /// Pruning boundary - nodes below this position are considered pruned.
-    pub lower_bound_pos: Position,
+    /// Sync range - nodes outside this range are pruned/rewound.
+    pub range: std::ops::Range<Position>,
 
-    /// Sync boundary - nodes above this position are rewound if present.
-    pub upper_bound_pos: Position,
-
-    /// The pinned nodes the MMR needs at the pruning boundary given by `lower_bound`, in the order
+    /// The pinned nodes the MMR needs at the pruning boundary (range start), in the order
     /// specified by `nodes_to_pin`. If `None`, the pinned nodes are expected to already be in the
     /// MMR's metadata/journal.
     pub pinned_nodes: Option<Vec<D>>,
@@ -324,18 +321,18 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
     ///
-    /// 1. **Fresh Start**: existing_size < lower_bound
+    /// 1. **Fresh Start**: existing_size < range.start
     ///    - Deletes existing data (if any)
-    ///    - Creates new [Journal] with pruning boundary and size `lower_bound`
+    ///    - Creates new [Journal] with pruning boundary and size `range.start`
     ///
-    /// 2. **Prune and Reuse**: lower_bound ≤ existing_size ≤ upper_bound
+    /// 2. **Prune and Reuse**: range.start ≤ existing_size ≤ range.end
     ///    - Sets in-memory MMR size to `existing_size`
-    ///    - Prunes the journal to `lower_bound`
+    ///    - Prunes the journal to `range.start`
     ///
-    /// 3. **Prune and Rewind**: existing_size > upper_bound
-    ///    - Rewinds the journal to size `upper_bound+1`
-    ///    - Sets in-memory MMR size to `upper_bound+1`
-    ///    - Prunes the journal to `lower_bound`
+    /// 3. **Prune and Rewind**: existing_size > range.end
+    ///    - Rewinds the journal to size `range.end`
+    ///    - Sets in-memory MMR size to `range.end`
+    ///    - Prunes the journal to `range.start`
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<H::Digest>,
@@ -348,12 +345,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 write_buffer: cfg.config.write_buffer,
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
-            *cfg.lower_bound_pos,
-            *cfg.upper_bound_pos,
+            *cfg.range.start..*cfg.range.end,
         )
         .await?;
         let journal_size = Position::new(journal.size().await?);
-        assert!(journal_size <= cfg.upper_bound_pos + 1);
+        assert!(journal_size <= *cfg.range.end);
 
         // Open the metadata.
         let metadata_cfg = MConfig {
@@ -366,12 +362,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
-            (*cfg.lower_bound_pos).to_be_bytes().into(),
+            (*cfg.range.start).to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
-            let nodes_to_pin_persisted = nodes_to_pin(cfg.lower_bound_pos);
+            let nodes_to_pin_persisted = nodes_to_pin(cfg.range.start);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
@@ -393,8 +389,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         });
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
-        if cfg.lower_bound_pos < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound_pos)
+        if cfg.range.start < journal_size {
+            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.range.start)
                 .await?;
         }
         metadata.sync().await?;
@@ -404,7 +400,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             journal,
             journal_size,
             metadata,
-            pruned_to_pos: cfg.lower_bound_pos,
+            pruned_to_pos: cfg.range.start,
         })
     }
 
@@ -1739,8 +1735,7 @@ mod tests {
             // Test fresh start scenario with completely new MMR (no existing data)
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(),
-                lower_bound_pos: Position::new(0),
-                upper_bound_pos: Position::new(100),
+                range: Position::new(0)..Position::new(100),
                 pinned_nodes: None,
             };
 
@@ -1784,11 +1779,11 @@ mod tests {
             let original_leaves = mmr.leaves();
             let original_root = mmr.root(&mut hasher);
 
-            // Sync with lower_bound ≤ existing_size ≤ upper_bound should reuse data
+            // Sync with range.start ≤ existing_size ≤ range.end should reuse data
             let lower_bound_pos = mmr.pruned_to_pos();
-            let upper_bound_pos = mmr.size() - 1;
+            let upper_bound_pos = mmr.size();
             let mut expected_nodes = BTreeMap::new();
-            for i in *lower_bound_pos..=*upper_bound_pos {
+            for i in *lower_bound_pos..*upper_bound_pos {
                 expected_nodes.insert(
                     Position::new(i),
                     mmr.get_node(Position::new(i)).await.unwrap().unwrap(),
@@ -1796,8 +1791,7 @@ mod tests {
             }
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(),
-                lower_bound_pos,
-                upper_bound_pos,
+                range: lower_bound_pos..upper_bound_pos,
                 pinned_nodes: None,
             };
 
@@ -1813,7 +1807,7 @@ mod tests {
             assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
             assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
             assert_eq!(sync_mmr.root(&mut hasher), original_root);
-            for pos in *lower_bound_pos..=*upper_bound_pos {
+            for pos in *lower_bound_pos..*upper_bound_pos {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
@@ -1850,7 +1844,7 @@ mod tests {
 
             // Sync with boundaries that extend beyond existing data (partial overlap).
             let lower_bound_pos = original_pruned_to;
-            let upper_bound_pos = original_size + 10; // Extend beyond existing data
+            let upper_bound_pos = original_size + 11; // Extend beyond existing data
 
             let mut expected_nodes = BTreeMap::new();
             for pos in *lower_bound_pos..*original_size {
@@ -1860,8 +1854,7 @@ mod tests {
 
             let sync_cfg = SyncConfig::<Digest> {
                 config: test_config(),
-                lower_bound_pos,
-                upper_bound_pos,
+                range: lower_bound_pos..upper_bound_pos,
                 pinned_nodes: None,
             };
 

@@ -737,6 +737,7 @@ mod tests {
     fn test_invalid_commitment_degree() {
         // Initialize test
         let n = 5;
+        let t = quorum(n);
         let mut rng = StdRng::seed_from_u64(0);
 
         // Create contributors (must be in sorted order)
@@ -747,37 +748,39 @@ mod tests {
         }
         contributors.sort();
 
-        // Create dealer
-        let (_, _, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        // Create invalid commitments
+        let mut commitments = Vec::new();
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, 1);
+        commitments.push((public, shares));
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t - 1);
+        commitments.push((public, shares));
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t + 1);
+        commitments.push((public, shares));
 
-        // Create invalid commitment
-        let (public, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n * 2, 1);
+        // Check invalid commitments
+        for (public, shares) in commitments {
+            // Send invalid commitment to player
+            let mut player = Player::<_, MinSig>::new(
+                contributors[0].clone(),
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                1,
+            );
+            let result = player.share(contributors[0].clone(), public.clone(), shares[0].clone());
+            assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
 
-        // Create player
-        let mut player = Player::<_, MinSig>::new(
-            contributors[0].clone(),
-            None,
-            contributors.clone(),
-            contributors.clone(),
-            1,
-        );
-
-        // Send invalid commitment to player
-        let result = player.share(contributors[0].clone(), public.clone(), shares[0].clone());
-        assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
-
-        // Create arbiter
-        let mut arb =
-            Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
-
-        // Send invalid commitment to arbiter
-        let result = arb.commitment(
-            contributors[0].clone(),
-            public,
-            vec![0, 1, 2, 3, 4],
-            Vec::new(),
-        );
-        assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
+            // Create arbiter
+            let mut arb =
+                Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
+            let result = arb.commitment(
+                contributors[0].clone(),
+                public,
+                vec![0, 1, 2, 3, 4],
+                Vec::new(),
+            );
+            assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
+        }
     }
 
     #[test]
