@@ -1,11 +1,11 @@
-use crate::handlers::{
-    utils::{payload, ACK_NAMESPACE},
-    wire,
-};
+use crate::handlers::wire;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
-        dkg,
+        dkg::{
+            self,
+            types::{Ack, ACK_NAMESPACE},
+        },
         primitives::{poly, variant::MinSig},
     },
     PublicKey,
@@ -110,7 +110,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                             };
 
                             // Validate the signature of each ack
-                            let payload = payload(round, &peer, &commitment);
+                            let payload = Ack::<C::Signature>::signature_payload::<MinSig, _>(round, &peer, &commitment);
                             if !acks.iter().all(|(i, sig)| {
                                 self.contributors.get(*i as usize).map(|signer| {
                                     signer.verify(Some(ACK_NAMESPACE), &payload,  sig)

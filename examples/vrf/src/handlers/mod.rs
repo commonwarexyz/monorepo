@@ -1,6 +1,5 @@
 mod arbiter;
 mod contributor;
-mod utils;
 mod vrf;
 
 pub use arbiter::Arbiter;

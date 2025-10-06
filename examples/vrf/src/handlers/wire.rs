@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
     bls12381::{
-        dkg::types::Payload as StandardPayload,
+        dkg::types::{Ack, Share},
         primitives::{
             group,
             poly::{self, Eval},
@@ -62,15 +62,21 @@ pub enum Payload<S: Signature> {
         group: Option<poly::Public<MinSig>>,
     },
 
-    /// Standard DKG messages exchanged between dealer and player nodes.
+    /// Message sent by a dealer node to a player node.
     ///
-    /// This variant wraps the existing [StandardPayload] enum, which includes
-    /// acknowledgment messages from players and share distribution messages from dealers.
-    Standard { inner: StandardPayload<MinSig, S> },
+    /// Contains the dealer's public commitment to their polynomial and the specific
+    /// share calculated for the receiving player.
+    Share(Share<MinSig>),
+
+    /// Message sent by a player node back to the dealer node.
+    ///
+    /// Acknowledges the receipt and verification of a [Payload::Share] message.
+    /// Includes a signature to authenticate the acknowledgment.
+    Ack(Ack<S>),
 
     /// Message sent by a dealer node to the arbiter.
     ///
-    /// Sent after the dealer has collected a sufficient number of [StandardPayload::Ack] messages
+    /// Sent after the dealer has collected a sufficient number of [Payload::Ack] messages
     /// from players. Contains the dealer's commitment, the collected acknowledgments,
     /// and potentially revealed shares (e.g., for handling unresponsive players).
     Commitment {
@@ -104,16 +110,20 @@ impl<S: Signature> Write for Payload<S> {
                 buf.put_u8(0);
                 group.write(buf);
             }
-            Payload::Standard { inner } => {
+            Payload::Share(share) => {
                 buf.put_u8(1);
-                inner.write(buf);
+                share.write(buf);
+            }
+            Payload::Ack(ack) => {
+                buf.put_u8(2);
+                ack.write(buf);
             }
             Payload::Commitment {
                 commitment,
                 acks,
                 reveals,
             } => {
-                buf.put_u8(2);
+                buf.put_u8(3);
                 commitment.write(buf);
                 acks.write(buf);
                 reveals.write(buf);
@@ -122,12 +132,12 @@ impl<S: Signature> Write for Payload<S> {
                 commitments,
                 reveals,
             } => {
-                buf.put_u8(3);
+                buf.put_u8(4);
                 commitments.write(buf);
                 reveals.write(buf);
             }
             Payload::Abort => {
-                buf.put_u8(4);
+                buf.put_u8(5);
             }
         }
     }
@@ -143,10 +153,9 @@ impl<S: Signature> Read for Payload<S> {
             0 => Payload::Start {
                 group: Option::<poly::Public<MinSig>>::read_cfg(buf, &t)?,
             },
-            1 => Payload::Standard {
-                inner: StandardPayload::<MinSig, S>::read_cfg(buf, p)?,
-            },
-            2 => {
+            1 => Payload::Share(Share::read_cfg(buf, &(*p as u32))?),
+            2 => Payload::Ack(Ack::read(buf)?),
+            3 => {
                 let commitment = poly::Public::<MinSig>::read_cfg(buf, &t)?;
                 let acks = HashMap::<u32, S>::read_range(buf, ..=*p)?;
                 let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
@@ -157,7 +166,7 @@ impl<S: Signature> Read for Payload<S> {
                     reveals,
                 }
             }
-            3 => {
+            4 => {
                 let commitments = HashMap::<u32, poly::Public<MinSig>>::read_cfg(
                     buf,
                     &((..=*p).into(), ((), t)),
@@ -168,7 +177,7 @@ impl<S: Signature> Read for Payload<S> {
                     reveals,
                 }
             }
-            4 => Payload::Abort,
+            5 => Payload::Abort,
             _ => return Err(Error::InvalidEnum(tag)),
         };
         Ok(result)
@@ -178,7 +187,8 @@ impl<S: Signature> EncodeSize for Payload<S> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Payload::Start { group } => group.encode_size(),
-            Payload::Standard { inner } => inner.encode_size(),
+            Payload::Share(share) => share.encode_size(),
+            Payload::Ack(ack) => ack.encode_size(),
             Payload::Commitment {
                 commitment,
                 acks,
@@ -239,9 +249,11 @@ mod tests {
             poly,
             variant::Variant,
         },
-        ed25519::Signature,
+        ed25519::{PrivateKey, Signature},
+        PrivateKeyExt, Signer,
     };
-    use rand::thread_rng;
+    use rand::{thread_rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
 
     const N: usize = 11;
@@ -292,12 +304,7 @@ mod tests {
     fn test_dkg_share_codec() {
         let original: Dkg<Signature> = Dkg {
             round: 1,
-            payload: Payload::Standard {
-                inner: StandardPayload::Share {
-                    commitment: new_poly(),
-                    share: new_share(42),
-                },
-            },
+            payload: Payload::Share(Share::new(new_poly(), new_share(42))),
         };
         let encoded = original.encode();
         let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
@@ -306,14 +313,19 @@ mod tests {
 
     #[test]
     fn test_dkg_ack_codec() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xdead);
+        let poly = new_poly();
+        let signer = PrivateKey::from_rng(&mut rng);
+
         let original: Dkg<Signature> = Dkg {
             round: 1,
-            payload: Payload::Standard {
-                inner: StandardPayload::Ack {
-                    public_key: 1,
-                    signature: new_signature(123),
-                },
-            },
+            payload: Payload::Ack(Ack::new::<_, MinSig>(
+                &signer,
+                1337,
+                42,
+                &signer.public_key(),
+                &poly,
+            )),
         };
         let encoded = original.encode();
         let decoded = Dkg::<Signature>::decode_cfg(encoded, &N).unwrap();
