@@ -64,13 +64,13 @@ pub enum Payload<S: Signature> {
 
     /// Standard DKG messages exchanged between dealer and player nodes.
     ///
-    /// This variant wraps the existing [dkg::types::Payload] enum, which includes
+    /// This variant wraps the existing [StandardPayload] enum, which includes
     /// acknowledgment messages from players and share distribution messages from dealers.
     Standard { inner: StandardPayload<MinSig, S> },
 
     /// Message sent by a dealer node to the arbiter.
     ///
-    /// Sent after the dealer has collected a sufficient number of [Payload::Ack] messages
+    /// Sent after the dealer has collected a sufficient number of [StandardPayload::Ack] messages
     /// from players. Contains the dealer's commitment, the collected acknowledgments,
     /// and potentially revealed shares (e.g., for handling unresponsive players).
     Commitment {
