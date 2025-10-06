@@ -23,9 +23,9 @@ enum Strategy {
 /// returns start diminishing.
 const THREADS: usize = 8;
 
-#[cfg(test)]
+#[cfg(not(full_bench))]
 const N_LEAVES: [usize; 1] = [100_000];
-#[cfg(not(test))]
+#[cfg(full_bench)]
 const N_LEAVES: [usize; 4] = [100_000, 1_000_000, 5_000_000, 10_000_000];
 
 /// Benchmark the performance of randomly updating leaves in an MMR.
