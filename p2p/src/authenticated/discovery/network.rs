@@ -6,7 +6,10 @@ use super::{
     config::Config,
     types,
 };
-use crate::{authenticated::Mailbox, Channel};
+use crate::{
+    authenticated::{mailbox::UnboundedMailbox, Mailbox},
+    Channel,
+};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
@@ -32,7 +35,7 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
+    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
 }
@@ -50,7 +53,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
@@ -59,7 +62,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
-                mailbox_size: cfg.mailbox_size,
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
