@@ -877,9 +877,6 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self, future);
 
-        // Set up the task
-        let executor = self.executor();
-
         // Track parent-child relationship when supervision is requested
         let parent_children = if self.spawn_config.is_supervised() {
             Some(self.children.clone())
@@ -887,17 +884,17 @@ impl crate::Spawner for Context {
             None
         };
 
+        // Set up the task
+        let executor = self.executor();
+        self.spawn_config = SpawnConfig::default();
+
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
 
-        // Reset spawn config
-        self.spawn_config = SpawnConfig::default();
-
+        // Spawn the task
         let future = f(self);
         let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
-
-        // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
         // Register this child with the parent
@@ -933,14 +930,11 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor();
-
-        // Reset spawn config
         self.spawn_config = SpawnConfig::default();
 
+        // Spawn the task
         move |f: F| {
             let (f, handle) = Handle::init_future(f, metric, executor.panicker.clone(), children);
-
-            // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
             // Register this child with the parent

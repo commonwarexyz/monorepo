@@ -434,10 +434,6 @@ impl crate::Spawner for Context {
         // Get metrics
         let (_, metric) = spawn_metrics!(self, future);
 
-        // Set up the task
-        let executor = self.executor.clone();
-        let dedicated = self.spawn_config.is_dedicated();
-
         // Track parent-child relationship when supervision is requested
         let parent_children = if self.spawn_config.is_supervised() {
             Some(self.children.clone())
@@ -445,14 +441,18 @@ impl crate::Spawner for Context {
             None
         };
 
+        // Set up the task
+        let executor = self.executor.clone();
+        let dedicated = self.spawn_config.is_dedicated();
+        self.spawn_config = SpawnConfig::default();
+
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
 
+        // Spawn the task
         let future = f(self);
         let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
-
-        // Spawn the task
         if dedicated {
             let runtime_handle = executor.runtime.handle().clone();
             thread::spawn(move || {
@@ -496,15 +496,12 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.spawn_config.is_dedicated();
-
-        // Reset spawn config
         self.spawn_config = SpawnConfig::default();
 
+        // Spawn the task
         move |f: F| {
             let (f, handle) =
                 Handle::init_future(f, metric, executor.panicker.clone(), children.clone());
-
-            // Spawn the task
             if dedicated {
                 let runtime = executor.runtime.handle().clone();
                 thread::spawn(move || {
@@ -537,13 +534,10 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.spawn_config.is_dedicated();
-
-        // Reset spawn config
         self.spawn_config = SpawnConfig::default();
 
-        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
-
         // Spawn the blocking task
+        let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
         if dedicated {
             thread::spawn(f);
         } else {
@@ -567,14 +561,12 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         let dedicated = self.spawn_config.is_dedicated();
-
-        // Reset spawn config
         self.spawn_config = SpawnConfig::default();
 
+        // Spawn the blocking task
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, metric, executor.panicker.clone());
 
-            // Spawn the blocking task
             if dedicated {
                 thread::spawn(f);
             } else {
