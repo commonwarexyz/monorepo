@@ -7,7 +7,7 @@ use crate::NZUsize;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{util::at_least, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use core::{
     fmt::{self, Formatter, Write as _},
     num::NonZeroUsize,
@@ -681,7 +681,7 @@ impl<const N: usize> Read for BitMap<N> {
 
     fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
         // Parse length in bits
-        let len = u64::read_cfg(buf, &())?;
+        let len = u64::read(buf)?;
         if len > *max_len {
             return Err(CodecError::InvalidLength(len as usize));
         }
@@ -699,10 +699,9 @@ impl<const N: usize> Read for BitMap<N> {
         // Parse chunks
         let mut chunks = VecDeque::with_capacity(num_chunks_needed);
         for _ in 0..num_chunks_to_read {
+            at_least(buf, N)?;
             let mut chunk = [0u8; N];
-            for byte in &mut chunk {
-                *byte = u8::read(buf)?;
-            }
+            buf.copy_to_slice(&mut chunk);
             chunks.push_back(chunk);
         }
 
