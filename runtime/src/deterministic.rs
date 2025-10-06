@@ -958,6 +958,12 @@ impl crate::Spawner for Context {
         // Ensure a context only spawns one task
         assert!(!self.spawned, "already spawned");
 
+        // Ensure the task is not supervised
+        assert!(
+            !self.spawn_config.is_supervised(),
+            "blocking tasks cannot be supervised"
+        );
+
         // Get metrics
         let (label, metric) = spawn_metrics!(self, blocking);
 
@@ -979,6 +985,12 @@ impl crate::Spawner for Context {
         // Ensure a context only spawns one task
         assert!(!self.spawned, "already spawned");
         self.spawned = true;
+
+        // Ensure the task is not supervised
+        assert!(
+            !self.spawn_config.is_supervised(),
+            "blocking tasks cannot be supervised"
+        );
 
         // Get metrics
         let (label, metric) = spawn_metrics!(self, blocking);

@@ -532,6 +532,12 @@ impl crate::Spawner for Context {
         // Ensure a context only spawns one task
         assert!(!self.spawned, "already spawned");
 
+        // Ensure the task is not supervised
+        assert!(
+            !self.spawn_config.is_supervised(),
+            "blocking tasks cannot be supervised"
+        );
+
         // Get metrics
         let (_, metric) = spawn_metrics!(self, blocking);
 
@@ -558,13 +564,18 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
         self.spawned = true;
 
-        let dedicated = self.spawn_config.is_dedicated();
+        // Ensure the task is not supervised
+        assert!(
+            !self.spawn_config.is_supervised(),
+            "blocking tasks cannot be supervised"
+        );
 
         // Get metrics
         let (_, metric) = spawn_metrics!(self, blocking);
 
         // Set up the task
         let executor = self.executor.clone();
+        let dedicated = self.spawn_config.is_dedicated();
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, metric, executor.panicker.clone());
 
