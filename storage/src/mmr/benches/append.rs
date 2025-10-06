@@ -4,9 +4,9 @@ use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, SeedableRng};
 
-#[cfg(test)]
+#[cfg(not(full_bench))]
 const N_LEAVES: [usize; 2] = [10_000, 100_000];
-#[cfg(not(test))]
+#[cfg(full_bench)]
 const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
 
 fn bench_append(c: &mut Criterion) {

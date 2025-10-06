@@ -234,6 +234,8 @@ fn encode<H: Hasher>(
 
 /// Decode data from a set of [Chunk]s.
 ///
+/// It is assumed that all [Chunk]s have already been verified against the given root using [Chunk::verify].
+///
 /// # Parameters
 ///
 /// - `total`: The total number of chunks to generate.
@@ -275,11 +277,6 @@ fn decode<H: Hasher>(
             return Err(Error::DuplicateIndex(index));
         }
         seen.insert(index);
-
-        // Verify Merkle proof
-        if !chunk.verify(chunk.index, root) {
-            return Err(Error::InvalidProof);
-        }
 
         // Add to provided shards
         if index < min {
@@ -656,7 +653,7 @@ mod tests {
 
         // Attempt to decode with malicious root
         let result = decode::<Sha256>(total, min, &malicious_root, &minimal);
-        assert!(matches!(result, Err(Error::InvalidProof)));
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
     #[test]
@@ -675,7 +672,7 @@ mod tests {
 
         // Try to decode with the tampered chunk
         let result = decode::<Sha256>(total, min, &root, &chunks);
-        assert!(matches!(result, Err(Error::InvalidProof)));
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
     #[test]

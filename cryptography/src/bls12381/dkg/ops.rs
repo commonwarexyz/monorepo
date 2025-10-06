@@ -71,11 +71,11 @@ pub fn verify_commitment<V: Variant>(
     Ok(())
 }
 
-// Verify that a given share is valid for a specified recipient.
-//
-// # Warning
-//
-// This function assumes the provided commitment has already been verified.
+/// Verify that a given share is valid for a specified recipient.
+///
+/// # Warning
+///
+/// This function assumes the provided commitment has already been verified.
 pub fn verify_share<V: Variant>(
     commitment: &poly::Public<V>,
     recipient: u32,
