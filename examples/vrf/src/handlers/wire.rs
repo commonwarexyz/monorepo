@@ -12,7 +12,7 @@ use commonware_cryptography::{
     Signature,
 };
 use commonware_utils::quorum;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// Represents a top-level message for the Distributed Key Generation (DKG) protocol,
 /// typically sent over a dedicated DKG communication channel.
@@ -255,7 +255,6 @@ mod tests {
     };
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
-    use std::collections::HashMap;
 
     const N: usize = 11;
     const T: usize = 8;
