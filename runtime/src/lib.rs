@@ -1405,6 +1405,16 @@ mod tests {
         });
     }
 
+    fn test_spawn_dedicated<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let handle = context.dedicated().spawn(|_| async move { 42 });
+            assert!(matches!(handle.await, Ok(42)));
+        });
+    }
+
     fn spawn_with<C, F, Fut, T>(context: &mut C, use_spawn_ref: bool, task: F) -> Handle<T>
     where
         C: Spawner,
@@ -2170,6 +2180,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_dedicated() {
+        let executor = deterministic::Runner::default();
+        test_spawn_dedicated(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_supervised() {
         for use_spawn_ref in [false, true] {
             let runner = deterministic::Runner::default();
@@ -2467,6 +2483,12 @@ mod tests {
     fn test_tokio_spawn_duplicate() {
         let executor = tokio::Runner::default();
         test_spawn_duplicate(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_dedicated() {
+        let executor = tokio::Runner::default();
+        test_spawn_dedicated(executor);
     }
 
     #[test]
