@@ -27,7 +27,7 @@ use futures::{
     pin_mut, try_join, StreamExt,
 };
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 pub mod sync;
 
@@ -403,8 +403,8 @@ impl<
         let loc = self.op_count();
         let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
         if r.is_some() {
-            self.steps += 1;
             self.apply_op(Operation::Delete(key)).await?;
+            self.steps += 1;
         };
 
         Ok(r)
@@ -518,12 +518,13 @@ impl<
     /// recover the database on restart.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by taking `self.steps` steps.
-        let steps_to_take = if self.snapshot.keys() == 0 {
-            self.steps
-        } else {
-            self.steps + 1 // account for the previous commit becoming inactive.
-        };
+        let steps_to_take = self.steps + 1; // account for the previous commit becoming inactive.
         for _ in 0..steps_to_take {
+            if self.snapshot.keys() == 0 {
+                self.inactivity_floor_loc = self.op_count();
+                info!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+                break;
+            }
             self.raise_floor().await?;
         }
         self.steps = 0;
@@ -595,6 +596,7 @@ impl<
     ///
     /// # Panics if there is not at least one active operation above the inactivity floor.
     async fn raise_floor(&mut self) -> Result<(), Error> {
+        // Search for the first active operation above the inactivity floor and move it to tip.
         let mut op = self.log.read(*self.inactivity_floor_loc).await?;
         while self
             .move_op_if_active(op, self.inactivity_floor_loc)
@@ -604,6 +606,8 @@ impl<
             self.inactivity_floor_loc += 1;
             op = self.log.read(*self.inactivity_floor_loc).await?;
         }
+
+        // Increment the floor to the next operation since we know the current one is inactive.
         self.inactivity_floor_loc += 1;
 
         Ok(())
@@ -800,7 +804,7 @@ pub(super) mod test {
         }
     }
 
-    #[test_traced("WARN")]
+    #[test_traced("INFO")]
     fn test_any_fixed_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -831,7 +835,7 @@ pub(super) mod test {
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit().await.unwrap();
-            assert_eq!(db.op_count(), 1); // floor op added
+            assert_eq!(db.op_count(), 1); // commit op added
             let root = db.root(&mut hasher);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
@@ -854,11 +858,15 @@ pub(super) mod test {
             db.update(d1, d2).await.unwrap();
             for _ in 1..100 {
                 db.commit().await.unwrap();
-                //assert_eq!(db.op_count() - 1, db.inactivity_floor_loc); //TODO: The db does fall further and further behind!
+                // Distance should equal 3 after the second commit, with inactivity_floor
+                // referencing the previous commit operation.
+                assert!(db.op_count() - db.inactivity_floor_loc <= 3);
             }
-            // Confirm the inactivity floor is raised to tip when the db is empty.
+
+            // Confirm the inactivity floor is raised to tip when the db becomes empty.
             db.delete(d1).await.unwrap();
             db.commit().await.unwrap();
+            assert_eq!(db.snapshot.keys(), 0);
             assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
 
             db.destroy().await.unwrap();
@@ -888,14 +896,14 @@ pub(super) mod test {
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            db.delete(d1).await.unwrap();
+            db.delete(d1).await.unwrap(); // inactivates op 0
             assert!(db.get(&d1).await.unwrap().is_none());
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
             db.update(d1, d1).await.unwrap();
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d1);
 
-            db.update(d2, d2).await.unwrap();
+            db.update(d2, d2).await.unwrap(); // inactivates op  1
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d2);
 
             assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
@@ -903,9 +911,10 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, Location::new(0));
             db.sync().await.unwrap();
 
-            // Advance over 3 inactive operations.
-            db.raise_inactivity_floor(3).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc, Location::new(3));
+            // take one floor raising step, which should move the first active op (at location 3) to
+            // tip, leaving the floor at the next location (4).
+            db.raise_floor().await.unwrap();
+            assert_eq!(db.inactivity_floor_loc, Location::new(4));
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();
 
@@ -915,35 +924,32 @@ pub(super) mod test {
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
-            assert_eq!(db.inactivity_floor_loc, Location::new(3));
 
-            db.sync().await.unwrap();
+            db.commit().await.unwrap();
+            // Since this db no longer has any active keys, the inactivity floor should have been
+            // set to tip.
+            assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
             let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
             db.delete(d1).await.unwrap();
-            assert_eq!(db.log.size().await.unwrap(), 8);
+            assert_eq!(db.log.size().await.unwrap(), 9); // one more commit op added.
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
             let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
             assert!(db.delete(d3).await.unwrap().is_none());
-            assert_eq!(db.log.size().await.unwrap(), 8);
+            assert_eq!(db.log.size().await.unwrap(), 9);
             db.sync().await.unwrap();
             assert_eq!(db.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
-            db.commit().await.unwrap();
             assert_eq!(db.log.size().await.unwrap(), 9);
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.log.size().await.unwrap(), 9);
             assert_eq!(db.root(&mut hasher), root);
-
-            // Since this db no longer has any active keys, the inactivity floor should have been
-            // set to tip.
-            assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
 
             // Re-activate the keys by updating them.
             db.update(d1, d1).await.unwrap();
@@ -1025,8 +1031,8 @@ pub(super) mod test {
             db.commit().await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.op_count(), 2336);
-            assert_eq!(db.inactivity_floor_loc, Location::new(1478));
+            assert_eq!(db.op_count(), 1956);
+            assert_eq!(db.inactivity_floor_loc, Location::new(837));
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1034,17 +1040,8 @@ pub(super) mod test {
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
-            assert_eq!(db.op_count(), 2336);
-            assert_eq!(db.inactivity_floor_loc, Location::new(1478));
-            assert_eq!(db.snapshot.items(), 857);
-
-            // Raise the inactivity floor to the point where all inactive operations can be pruned.
-            db.raise_inactivity_floor(3000).await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc, Location::new(4478));
-            // Inactivity floor should be 858 operations from tip since 858 operations are active
-            // (counting the floor op itself).
-            assert_eq!(db.op_count(), 4478 + 858);
+            assert_eq!(db.op_count(), 1956);
+            assert_eq!(db.inactivity_floor_loc, Location::new(837));
             assert_eq!(db.snapshot.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
@@ -1066,9 +1063,9 @@ pub(super) mod test {
             let end_loc = db.op_count();
             let start_pos = db.mmr.pruned_to_pos();
             let start_loc = Location::try_from(start_pos).unwrap();
-            // Raise the inactivity floor and make sure historical inactive operations are still provable.
-            db.raise_inactivity_floor(100).await.unwrap();
-            db.sync().await.unwrap();
+            // Raise the inactivity floor via commit and make sure historical inactive operations
+            // are still provable.
+            db.commit().await.unwrap();
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
