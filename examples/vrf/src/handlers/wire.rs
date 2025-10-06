@@ -82,8 +82,8 @@ pub enum Payload<S: Signature> {
     Commitment {
         /// The dealer's public commitment.
         commitment: poly::Public<MinSig>,
-        /// A map of player public key identifiers to their corresponding acknowledgment signatures.
-        acks: HashMap<u32, S>,
+        /// A list of received [Ack]s.
+        acks: Vec<Ack<S>>,
         /// A vector of shares revealed by the dealer, potentially for players who did not acknowledge.
         reveals: Vec<group::Share>,
     },
@@ -157,7 +157,7 @@ impl<S: Signature> Read for Payload<S> {
             2 => Payload::Ack(Ack::read(buf)?),
             3 => {
                 let commitment = poly::Public::<MinSig>::read_cfg(buf, &t)?;
-                let acks = HashMap::<u32, S>::read_range(buf, ..=*p)?;
+                let acks = Vec::<Ack<S>>::read_range(buf, ..=*p)?;
                 let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
                 let reveals = Vec::<group::Share>::read_range(buf, r..=r)?;
                 Payload::Commitment {
@@ -242,6 +242,7 @@ impl EncodeSize for Vrf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::ACK_NAMESPACE;
     use commonware_codec::{Decode, DecodeExt, Encode, FixedSize};
     use commonware_cryptography::{
         bls12381::primitives::{
@@ -320,6 +321,7 @@ mod tests {
         let original: Dkg<Signature> = Dkg {
             round: 1,
             payload: Payload::Ack(Ack::new::<_, MinSig>(
+                ACK_NAMESPACE,
                 &signer,
                 1337,
                 42,
@@ -335,8 +337,10 @@ mod tests {
     #[test]
     fn test_dkg_commitment_codec() {
         let commitment = new_poly();
-        let mut acks = HashMap::<u32, Signature>::new();
-        acks.insert(1, new_signature(123));
+        let acks = vec![Ack {
+            player: 1,
+            signature: new_signature(1),
+        }];
         let num_reveals = N - acks.len();
         let reveals_vec = vec![new_share(4321); num_reveals];
 

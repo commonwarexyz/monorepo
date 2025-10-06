@@ -1,11 +1,8 @@
-use crate::handlers::wire;
+use crate::handlers::{wire, ACK_NAMESPACE};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{
-            self,
-            types::{Ack, ACK_NAMESPACE},
-        },
+        dkg::{self},
         primitives::{poly, variant::MinSig},
     },
     PublicKey,
@@ -104,16 +101,15 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                             if msg.round != round {
                                 continue;
                             }
-                            let wire::Payload::Commitment{commitment, acks, reveals} = msg.payload else {
+                            let wire::Payload::Commitment { commitment, acks, reveals } = msg.payload else {
                                 // Useless message from previous step
                                 continue;
                             };
 
                             // Validate the signature of each ack
-                            let payload = Ack::<C::Signature>::signature_payload::<MinSig, _>(round, &peer, &commitment);
-                            if !acks.iter().all(|(i, sig)| {
-                                self.contributors.get(*i as usize).map(|signer| {
-                                    signer.verify(Some(ACK_NAMESPACE), &payload,  sig)
+                            if !acks.iter().all(|ack| {
+                                self.contributors.get(ack.player as usize).map(|signer| {
+                                    ack.verify::<MinSig, _>(ACK_NAMESPACE, signer, round, &peer, &commitment)
                                 }).unwrap_or(false)
                             }) {
                                 arbiter.disqualify(peer);
@@ -123,7 +119,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                             // Check dealer commitment
                             //
                             // Any faults here will be considered as a disqualification.
-                            let ack_indices: Vec<u32> = acks.keys().copied().collect();
+                            let ack_indices: Vec<u32> = acks.iter().map(|a| a.player).collect();
                             if let Err(e) = arbiter.commitment(peer.clone(), commitment, ack_indices, reveals) {
                                 warn!(round, error = ?e, ?peer, "failed to process commitment");
                                 break;

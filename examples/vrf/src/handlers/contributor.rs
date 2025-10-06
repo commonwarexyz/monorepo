@@ -1,15 +1,15 @@
-use crate::handlers::wire;
+use crate::handlers::{wire, ACK_NAMESPACE};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
         dkg::{
             player::Output,
-            types::{Ack, Share, ACK_NAMESPACE},
+            types::{Ack, Share},
             Dealer, Player,
         },
         primitives::{group, variant::MinSig},
     },
-    Signer, Verifier as _,
+    Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -161,7 +161,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
             let previous = previous.map(|previous| previous.share.clone());
             let (dealer, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut self.context, previous, self.contributors.clone());
-            Some((dealer, commitment, shares, HashMap::new()))
+            Some((dealer, commitment, shares, Vec::new()))
         } else {
             None
         };
@@ -186,10 +186,14 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                         .share(me.clone(), commitment.clone(), share)
                         .unwrap();
                     dealer.ack(me.clone()).unwrap();
-                    let payload =
-                        Ack::<C::Signature>::signature_payload::<MinSig, _>(round, &me, commitment);
-                    let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
-                    acks.insert(me_idx, signature);
+                    acks.push(Ack::new::<_, MinSig>(
+                        ACK_NAMESPACE,
+                        &self.crypto,
+                        me_idx,
+                        round,
+                        &me,
+                        commitment,
+                    ));
                     continue;
                 }
 
@@ -198,7 +202,10 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                     // If we are a forger, don't send any shares and instead create fake signatures.
                     let _ = dealer.ack(player.clone());
                     let signature = self.crypto.sign(None, b"fake");
-                    acks.insert(idx as u32, signature);
+                    acks.push(Ack {
+                        player: idx as u32,
+                        signature,
+                    });
                     warn!(round, ?player, "not sending share because forger");
                     continue;
                 }
@@ -265,7 +272,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                     return (round, None);
                                 }
                                 match msg.payload {
-                                    wire::Payload::Ack(Ack { public_key, signature }) => {
+                                    wire::Payload::Ack(ack) => {
                                         // Skip if not dealing
                                         let Some((dealer, commitment, _, acks)) = &mut dealer_obj else {
                                             continue;
@@ -277,7 +284,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                         }
 
                                         // Verify index matches
-                                        let Some(player) = self.contributors.get(public_key as usize) else {
+                                        let Some(player) = self.contributors.get(ack.player as usize) else {
                                             continue;
                                         };
                                         if player != &peer {
@@ -286,8 +293,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                         }
 
                                         // Verify signature on incoming ack
-                                        let payload = Ack::<C::Signature>::signature_payload::<MinSig, _>(round, &me, commitment);
-                                        if !peer.verify(Some(ACK_NAMESPACE), &payload, &signature) {
+                                        if !ack.verify::<MinSig, _>(ACK_NAMESPACE, &peer, round, &me, commitment) {
                                             warn!(round, ?peer, "received invalid ack signature");
                                             continue;
                                         }
@@ -297,7 +303,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                                             warn!(round, error = ?e, "failed to record ack");
                                             continue;
                                         }
-                                        acks.insert(public_key, signature);
+                                        acks.push(ack);
                                     },
                                     wire::Payload::Share(Share {  commitment, share }) => {
                                         // Store share
@@ -308,6 +314,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
 
                                         // Send ack
                                         let ack = Ack::new::<C, MinSig>(
+                                            ACK_NAMESPACE,
                                             &self.crypto,
                                             me_idx,
                                             round,
@@ -347,7 +354,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         if let Some((_, commitment, shares, acks)) = dealer_obj {
             let mut reveals = Vec::new();
             for idx in 0..self.contributors.len() as u32 {
-                if !acks.contains_key(&idx) {
+                if !acks.iter().any(|a| a.player == idx) {
                     reveals.push(shares[idx as usize].clone());
                 }
             }

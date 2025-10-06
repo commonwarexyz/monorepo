@@ -11,9 +11,6 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_utils::quorum;
 
-/// The signature namespace for DKG share acknowledgements.
-pub const ACK_NAMESPACE: &[u8] = b"DKG_ACK";
-
 /// A [Share] sent by a [Dealer] node to a [Player] node.
 ///
 /// Contains the [Dealer]'s public commitment to their polynomial and the specific
@@ -78,7 +75,7 @@ pub struct Ack<S: Signature> {
     /// The public key identifier of the [Player] sending the acknowledgment.
     ///
     /// [Player]: crate::bls12381::dkg::Player
-    pub public_key: u32,
+    pub player: u32,
     /// A signature covering the DKG round, dealer ID, and the [Dealer]'s commitment.
     /// This confirms the player received and validated the correct share.
     ///
@@ -89,8 +86,9 @@ pub struct Ack<S: Signature> {
 impl<S: Signature> Ack<S> {
     /// Create a new [Ack] message, constructing and signing the payload with the provided [Signer].
     pub fn new<C, V>(
+        namespace: &[u8],
         signer: &C,
-        public_key: u32,
+        player: u32,
         round: u64,
         dealer: &C::PublicKey,
         commitment: &Public<V>,
@@ -100,11 +98,21 @@ impl<S: Signature> Ack<S> {
         V: Variant,
     {
         let payload = Self::signature_payload::<V, C::PublicKey>(round, dealer, commitment);
-        let signature = signer.sign(Some(ACK_NAMESPACE), &payload);
-        Self {
-            public_key,
-            signature,
-        }
+        let signature = signer.sign(Some(namespace), &payload);
+        Self { player, signature }
+    }
+
+    /// Verifies the signature in the [Ack] message.
+    pub fn verify<V: Variant, P: PublicKey<Signature = S>>(
+        &self,
+        namespace: &[u8],
+        public_key: &P,
+        round: u64,
+        dealer: &P,
+        commitment: &Public<V>,
+    ) -> bool {
+        let payload = Self::signature_payload::<V, P>(round, dealer, commitment);
+        public_key.verify(Some(namespace), &payload, &self.signature)
     }
 
     /// Create a signature payload for acking a secret.
@@ -113,7 +121,7 @@ impl<S: Signature> Ack<S> {
     /// and the signature over this payload is included in the [Ack] message.
     ///
     /// [Dealer]: crate::bls12381::dkg::Dealer
-    pub fn signature_payload<V: Variant, P: PublicKey>(
+    fn signature_payload<V: Variant, P: PublicKey>(
         round: u64,
         dealer: &P,
         commitment: &Public<V>,
@@ -128,14 +136,14 @@ impl<S: Signature> Ack<S> {
 
 impl<S: Signature> Write for Ack<S> {
     fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.public_key).write(buf);
+        UInt(self.player).write(buf);
         self.signature.write(buf);
     }
 }
 
 impl<S: Signature> EncodeSize for Ack<S> {
     fn encode_size(&self) -> usize {
-        UInt(self.public_key).encode_size() + self.signature.encode_size()
+        UInt(self.player).encode_size() + self.signature.encode_size()
     }
 }
 
@@ -144,7 +152,7 @@ impl<S: Signature> Read for Ack<S> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            public_key: UInt::read(buf)?.into(),
+            player: UInt::read(buf)?.into(),
             signature: S::read(buf)?,
         })
     }
@@ -164,7 +172,8 @@ mod test {
     use commonware_utils::quorum;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
-    use rand_core::OsRng;
+
+    const ACK_NAMESPACE: &[u8] = b"DKG_ACK";
 
     fn generate_identities(num_peers: u32) -> (Public<MinSig>, Vec<(PrivateKey, group::Share)>) {
         let mut rng = ChaCha8Rng::seed_from_u64(num_peers as u64);
@@ -176,7 +185,7 @@ mod test {
 
         // Generate p2p private keys
         let mut peer_signers = (0..num_peers)
-            .map(|_| PrivateKey::from_rng(&mut OsRng))
+            .map(|_| PrivateKey::from_rng(&mut rng))
             .collect::<Vec<_>>();
         peer_signers.sort_by_key(|signer| signer.public_key());
 
@@ -192,13 +201,13 @@ mod test {
         let (commitment, identities) = generate_identities(NUM_PARTICIPANTS);
         let (_, share) = &identities[0];
 
-        let xshare = Share::<MinSig>::new(commitment.clone(), share.clone());
+        let share = Share::<MinSig>::new(commitment.clone(), share.clone());
 
-        let mut buf = Vec::with_capacity(xshare.encode_size());
-        xshare.write(&mut buf);
+        let mut buf = Vec::with_capacity(share.encode_size());
+        share.write(&mut buf);
 
         let decoded = Share::<MinSig>::read_cfg(&mut buf.as_slice(), &NUM_PARTICIPANTS).unwrap();
-        assert_eq!(decoded.commitment, commitment);
+        assert_eq!(decoded, share);
     }
 
     #[test]
@@ -208,14 +217,20 @@ mod test {
         let (commitment, identities) = generate_identities(NUM_PARTICIPANTS);
         let (signer, _) = &identities[0];
 
-        let ack =
-            Ack::new::<PrivateKey, MinSig>(signer, 1337, 42, &signer.public_key(), &commitment);
+        let ack = Ack::new::<PrivateKey, MinSig>(
+            ACK_NAMESPACE,
+            signer,
+            1337,
+            42,
+            &signer.public_key(),
+            &commitment,
+        );
 
         let mut buf = Vec::with_capacity(ack.encode_size());
         ack.write(&mut buf);
 
         let decoded =
             Ack::<<PrivateKey as Signer>::Signature>::read_cfg(&mut buf.as_slice(), &()).unwrap();
-        assert_eq!(decoded.public_key, ack.public_key);
+        assert_eq!(decoded, ack);
     }
 }
