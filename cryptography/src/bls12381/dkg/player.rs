@@ -137,31 +137,56 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
             return Err(Error::InvalidCommitments);
         }
 
-        // Store reveals
-        for (idx, share) in reveals {
-            // Verify that commitment is valid
-            let commitment = commitments.get(&idx).ok_or(Error::MissingCommitment)?;
-            let commitment = Commitment::<V>::new(
-                self.previous.as_ref(),
-                commitment.clone(),
-                idx,
-                self.player_threshold,
-            )?;
+        // Iterate over commitments
+        let mut selected = BTreeMap::new();
+        for (idx, commitment) in commitments {
+            match self.dealings.remove(&idx) {
+                Some((existing, share)) => {
+                    // If our stored commitment matches the one we are receiving,
+                    // we do nothing (as our share is valid).
+                    if existing.as_ref() == &commitment {
+                        selected.insert(idx, (existing, share));
+                        continue;
+                    }
 
-            // Check that share is valid
-            commitment.verify_share(self.me, &share)?;
+                    // If our stored commitment does not match the one we are receiving,
+                    // we must have received a reveal for this commitment (this is dealer
+                    // equivocation).
+                    let commitment = Commitment::<V>::new(
+                        self.previous.as_ref(),
+                        commitment.clone(),
+                        idx,
+                        self.player_threshold,
+                    )?;
+                    let share = reveals.get(&idx).ok_or(Error::MissingShare)?.clone();
 
-            // Store dealing
-            self.dealings.insert(idx, (commitment, share));
+                    // Check that share is valid
+                    commitment.verify_share(self.me, &share)?;
+
+                    // Store dealing
+                    selected.insert(idx, (commitment, share));
+                }
+                None => {
+                    // We must have received a reveal for this commitment.
+                    let commitment = Commitment::<V>::new(
+                        self.previous.as_ref(),
+                        commitment.clone(),
+                        idx,
+                        self.player_threshold,
+                    )?;
+                    let share = reveals.get(&idx).ok_or(Error::MissingShare)?.clone();
+
+                    // Check that share is valid
+                    commitment.verify_share(self.me, &share)?;
+
+                    // Store dealing
+                    selected.insert(idx, (commitment, share));
+                }
+            }
         }
-
-        // Remove all dealings not in commitments
-        self.dealings
-            .retain(|dealer, _| commitments.contains_key(dealer));
-        if self.dealings.len() != dealer_threshold {
+        if selected.len() != dealer_threshold {
             return Err(Error::MissingShare);
         }
-        assert_eq!(self.dealings.len(), commitments.len());
 
         // Construct secret
         let mut public = poly::Public::<V>::zero();
@@ -169,14 +194,14 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         match self.previous {
             None => {
                 // Add all valid commitments/dealings
-                for (commitment, private) in self.dealings.values() {
+                for (commitment, private) in selected.values() {
                     public.add(commitment.as_ref());
                     secret.add(private.as_ref());
                 }
             }
             Some(previous) => {
                 // Compute weights
-                let indices = commitments.keys().copied().collect::<Vec<_>>();
+                let indices = selected.keys().copied().collect::<Vec<_>>();
                 let weights = poly::compute_weights(indices)
                     .map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
