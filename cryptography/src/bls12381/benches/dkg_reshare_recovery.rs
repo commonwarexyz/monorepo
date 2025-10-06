@@ -8,7 +8,7 @@ use commonware_cryptography::{
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
-use std::{collections::HashMap, hint::black_box};
+use std::{collections::BTreeMap, hint::black_box};
 
 // Configure contributors based on context
 #[cfg(not(full_bench))]
@@ -45,7 +45,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
 
         // Create commitments and send shares to players
         let t = quorum(n as u32);
-        let mut commitments = HashMap::new();
+        let mut commitments = BTreeMap::new();
         for (dealer_idx, dealer) in contributors.iter().take(t as usize).enumerate() {
             let (_, commitment, shares) =
                 Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
@@ -66,7 +66,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
         for player in players {
             outputs.push(
                 player
-                    .finalize(commitments.clone(), HashMap::new())
+                    .finalize(commitments.clone(), BTreeMap::new())
                     .unwrap(),
             );
         }
@@ -88,7 +88,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                             );
 
                             // Create commitments and send shares to player
-                            let mut commitments = HashMap::new();
+                            let mut commitments = BTreeMap::new();
                             for (idx, dealer) in contributors.iter().take(t as usize).enumerate() {
                                 let (_, commitment, shares) = Dealer::<_, MinSig>::new(
                                     &mut rng,
@@ -103,7 +103,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                             (player, commitments)
                         },
                         |(player, commitments)| {
-                            black_box(player.finalize(commitments, HashMap::new()).unwrap());
+                            black_box(player.finalize(commitments, BTreeMap::new()).unwrap());
                         },
                         BatchSize::SmallInput,
                     );
