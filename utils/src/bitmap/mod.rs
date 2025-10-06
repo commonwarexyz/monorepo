@@ -200,8 +200,7 @@ impl<const N: usize> BitMap<N> {
         (self.chunks.back().unwrap(), self.next_bit)
     }
 
-    // Return the last chunk of the bitmap and its size in bits.
-    // The size can be 0 (meaning the last chunk is empty).
+    // Return the last chunk of the bitmap.
     #[inline]
     fn last_chunk_mut(&mut self) -> &mut [u8; N] {
         self.chunks.back_mut().unwrap()
