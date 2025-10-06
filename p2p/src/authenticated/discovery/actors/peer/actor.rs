@@ -5,7 +5,7 @@ use crate::authenticated::{
         actors::tracker,
         channels::Channels,
         metrics,
-        types::{self, PeerInfoVerifier},
+        types::{self, InfoVerifier},
     },
     mailbox::UnboundedMailbox,
     relay::Relay,
@@ -29,7 +29,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
-    peer_info_verifier: PeerInfoVerifier<C>,
+    peer_info_verifier: InfoVerifier<C>,
 
     codec_config: types::Config,
 

@@ -2,7 +2,7 @@
 
 use crate::authenticated::discovery::{
     metrics,
-    types::{self, PeerInfoVerifier},
+    types::{self, InfoVerifier},
 };
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
@@ -24,7 +24,7 @@ pub struct Config<C: PublicKey> {
     pub max_peer_set_size: usize,
     pub allowed_peers_rate: Quota,
     pub peer_gossip_max_count: usize,
-    pub peer_info_verifier: PeerInfoVerifier<C>,
+    pub peer_info_verifier: InfoVerifier<C>,
 
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,

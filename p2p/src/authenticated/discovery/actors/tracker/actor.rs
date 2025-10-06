@@ -6,7 +6,7 @@ use super::{
 use crate::authenticated::{
     discovery::{
         actors::tracker::ingress::Releaser,
-        types::{self, PeerInfoVerifier},
+        types::{self, InfoVerifier},
     },
     mailbox::UnboundedMailbox,
 };
@@ -32,7 +32,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// The maximum number of peers in a set.
     max_peer_set_size: usize,
 
-    /// The maximum number of [types::PeerInfo] allowable in a single message.
+    /// The maximum number of [types::Info] allowable in a single message.
     peer_gossip_max_count: usize,
 
     // ---------- Message-Passing ----------
@@ -58,13 +58,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         Self,
         UnboundedMailbox<Message<C::PublicKey>>,
         Oracle<C::PublicKey>,
-        PeerInfoVerifier<C::PublicKey>,
+        InfoVerifier<C::PublicKey>,
     ) {
         // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let myself = types::PeerInfo::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
+        let myself = types::Info::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
 
         // General initialization
         let directory_cfg = directory::Config {
@@ -88,7 +88,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         );
 
         // Create peer validator
-        let peer_info_verifier = PeerInfoVerifier::new(
+        let peer_info_verifier = InfoVerifier::new(
             cfg.crypto.public_key(),
             cfg.allow_private_ips,
             cfg.peer_gossip_max_count,
@@ -255,7 +255,7 @@ mod tests {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
     };
-    use types::PeerInfo;
+    use types::Info;
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(
@@ -284,7 +284,7 @@ mod tests {
         (signer, pk)
     }
 
-    // Helper to create PeerInfo
+    // Helper to create Info
     fn new_peer_info(
         signer: &mut PrivateKey,
         ip_namespace: &[u8],
@@ -292,7 +292,7 @@ mod tests {
         timestamp: u64,
         target_pk_override: Option<PublicKey>,
         make_sig_invalid: bool,
-    ) -> PeerInfo<PublicKey> {
+    ) -> Info<PublicKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
         let mut signature = signer.sign(Some(ip_namespace), &(socket, timestamp).encode());
 
@@ -302,7 +302,7 @@ mod tests {
             signature = Signature::decode(sig_bytes).unwrap();
         }
 
-        PeerInfo {
+        Info {
             socket,
             timestamp,
             public_key: peer_info_pk,
@@ -669,7 +669,7 @@ mod tests {
                     assert_eq!(received_pk2_info.socket, pk2_addr);
                     assert_eq!(received_pk2_info.timestamp, pk2_timestamp);
                 }
-                _ => panic!("pk1 did not receive expected PeerInfo for pk2",),
+                _ => panic!("pk1 did not receive expected Info for pk2",),
             }
         });
     }
@@ -754,7 +754,7 @@ mod tests {
                     assert_eq!(received_pk2_info.public_key, pk2);
                     assert_eq!(received_pk2_info.timestamp, ts_new);
                 }
-                _ => panic!("pk1 did not receive PeerInfo as expected"),
+                _ => panic!("pk1 did not receive Info as expected"),
             }
         });
     }
@@ -983,7 +983,7 @@ mod tests {
             );
 
             // --- Peer1 sends BitVec for set 0, indicating it only knows tracker ---
-            // Tracker should respond with PeerInfo for peer1_pk (as it just learned it)
+            // Tracker should respond with Info for peer1_pk (as it just learned it)
             let mut peer1_knowledge_s0 = UtilsBitVec::zeroes(set0_peers.len());
             peer1_knowledge_s0.set(tracker_idx_s0); // Peer1 knows tracker
             mailbox.bit_vec(
@@ -996,7 +996,7 @@ mod tests {
 
             match peer_receiver1.next().await {
                 Some(peer::Message::Peers(infos)) => {
-                    assert_eq!(infos.len(), 1, "Expected 1 PeerInfo (for peer1)");
+                    assert_eq!(infos.len(), 1, "Expected 1 Info (for peer1)");
                     assert_eq!(infos[0].public_key, peer1_pk);
                     assert_eq!(infos[0].socket, peer1_addr);
                 }

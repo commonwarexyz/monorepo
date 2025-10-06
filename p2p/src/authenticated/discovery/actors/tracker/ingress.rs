@@ -64,7 +64,7 @@ pub enum Message<C: PublicKey> {
     /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
     Peers {
         /// The list of peers received.
-        peers: Vec<types::PeerInfo<C>>,
+        peers: Vec<types::Info<C>>,
     },
 
     // ---------- Used by dialer ----------
@@ -140,7 +140,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send a `Peers` message to the tracker.
-    pub fn peers(&mut self, peers: Vec<types::PeerInfo<C>>) {
+    pub fn peers(&mut self, peers: Vec<types::Info<C>>) {
         self.send(Message::Peers { peers }).unwrap();
     }
 
