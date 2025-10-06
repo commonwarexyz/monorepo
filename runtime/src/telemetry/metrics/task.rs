@@ -7,7 +7,7 @@ use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 pub struct Label {
     /// The name of the task.
     name: String,
-    /// The class of task (root, async, or blocking).
+    /// The type of task (root, async, or blocking).
     kind: Kind,
     /// Whether the task is supervised by a parent.
     supervision: Supervision,
