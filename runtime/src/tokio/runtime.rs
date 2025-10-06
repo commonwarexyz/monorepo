@@ -402,28 +402,24 @@ impl Clone for Context {
 }
 
 impl crate::Spawner for Context {
-    fn supervised(&self) -> Self {
-        let mut context = self.clone();
-        context.spawn_config = self.spawn_config.supervised();
-        context
+    fn supervised(mut self) -> Self {
+        self.spawn_config = self.spawn_config.supervised();
+        self
     }
 
-    fn detached(&self) -> Self {
-        let mut context = self.clone();
-        context.spawn_config = self.spawn_config.detached();
-        context
+    fn detached(mut self) -> Self {
+        self.spawn_config = self.spawn_config.detached();
+        self
     }
 
-    fn dedicated(&self) -> Self {
-        let mut context = self.clone();
-        context.spawn_config = self.spawn_config.dedicated();
-        context
+    fn dedicated(mut self) -> Self {
+        self.spawn_config = self.spawn_config.dedicated();
+        self
     }
 
-    fn shared(&self) -> Self {
-        let mut context = self.clone();
-        context.spawn_config = self.spawn_config.shared();
-        context
+    fn shared(mut self) -> Self {
+        self.spawn_config = self.spawn_config.shared();
+        self
     }
 
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>

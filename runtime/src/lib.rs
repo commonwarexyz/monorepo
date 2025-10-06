@@ -189,25 +189,25 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// Only async tasks can be spawned as supervised, since blocking tasks cannot be aborted and
     /// therefore can't support parent-child relationships.
-    fn supervised(&self) -> Self;
+    fn supervised(self) -> Self;
 
     /// Create a new instance of `Spawner` configured to spawn new tasks detached from the current
     /// context.
     ///
     /// This is the default behavior, tasks spawned from detached contexts continue running
     /// independently when their parent finishes (either through completion or abortion).
-    fn detached(&self) -> Self;
+    fn detached(self) -> Self;
 
     /// Create a new instance of `Spawner` configured to spawn new tasks on a dedicated thread.
     ///
     /// If the runtime supports it, it should allocate a dedicated thread that drives the task.
-    fn dedicated(&self) -> Self;
+    fn dedicated(self) -> Self;
 
     /// Create a new instance of `Spawner` configured to spawn new tasks on the shared task
     /// executor.
     ///
     /// This is the default behavior.
-    fn shared(&self) -> Self;
+    fn shared(self) -> Self;
 
     /// Enqueue a task to be executed.
     ///
@@ -1579,16 +1579,21 @@ mod tests {
                     for _ in 0..3 {
                         let handles2 = handles.clone();
                         let mut initialized_tx2 = initialized_tx.clone();
-                        let handle = context.supervised().spawn(move |context| async move {
-                            for _ in 0..2 {
-                                let handle = context.supervised().spawn(|_| async {
+                        let handle =
+                            context
+                                .clone()
+                                .supervised()
+                                .spawn(move |context| async move {
+                                    for _ in 0..2 {
+                                        let handle =
+                                            context.clone().supervised().spawn(|_| async {
+                                                pending::<()>().await;
+                                            });
+                                        handles2.lock().unwrap().push(handle);
+                                        initialized_tx2.send(()).await.unwrap();
+                                    }
                                     pending::<()>().await;
                                 });
-                                handles2.lock().unwrap().push(handle);
-                                initialized_tx2.send(()).await.unwrap();
-                            }
-                            pending::<()>().await;
-                        });
 
                         handles.lock().unwrap().push(handle);
                         initialized_tx.send(()).await.unwrap();
@@ -1631,7 +1636,7 @@ mod tests {
 
             let parent = context.spawn(move |mut context| async move {
                 // Spawn a child task
-                context.supervised().spawn(|_| async move {
+                context.clone().supervised().spawn(|_| async move {
                     child_started_tx.send(()).unwrap();
                     // Wait for signal to complete
                     child_complete_rx.await.unwrap();
