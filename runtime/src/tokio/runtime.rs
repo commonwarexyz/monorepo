@@ -16,7 +16,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, Aborter, Panicker},
-    Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
+    Clock, Error, Handle, SinkOf, SpawnConfig, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -32,6 +32,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
+    thread,
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
@@ -341,6 +342,7 @@ impl crate::Runner for Runner {
             executor: executor.clone(),
             network,
             children: Arc::new(Mutex::new(Vec::new())),
+            spawn_config: SpawnConfig::default(),
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -375,6 +377,7 @@ pub struct Context {
     storage: Storage,
     network: Network,
     children: Arc<Mutex<Vec<Aborter>>>,
+    spawn_config: SpawnConfig,
 }
 
 impl Context {
@@ -393,11 +396,36 @@ impl Clone for Context {
             storage: self.storage.clone(),
             network: self.network.clone(),
             children: self.children.clone(),
+            spawn_config: self.spawn_config,
         }
     }
 }
 
 impl crate::Spawner for Context {
+    fn supervised(&self) -> Self {
+        let mut context = self.clone();
+        context.spawn_config = self.spawn_config.supervised();
+        context
+    }
+
+    fn detached(&self) -> Self {
+        let mut context = self.clone();
+        context.spawn_config = self.spawn_config.detached();
+        context
+    }
+
+    fn dedicated(&self) -> Self {
+        let mut context = self.clone();
+        context.spawn_config = self.spawn_config.dedicated();
+        context
+    }
+
+    fn shared(&self) -> Self {
+        let mut context = self.clone();
+        context.spawn_config = self.spawn_config.shared();
+        context
+    }
+
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -412,6 +440,14 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
+        let dedicated = self.spawn_config.is_dedicated();
+
+        // Track parent-child relationship when supervision is requested
+        let parent_children = if self.spawn_config.is_supervised() {
+            Some(self.children.clone())
+        } else {
+            None
+        };
 
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
@@ -421,7 +457,22 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
 
         // Spawn the task
-        executor.runtime.spawn(f);
+        if dedicated {
+            let runtime_handle = executor.runtime.handle().clone();
+            thread::spawn(move || {
+                runtime_handle.block_on(f);
+            });
+        } else {
+            executor.runtime.spawn(f);
+        }
+
+        // Register this child with the parent
+        if let Some(parent_children) = parent_children {
+            if let Some(aborter) = handle.aborter() {
+                parent_children.lock().unwrap().push(aborter);
+            }
+        }
+
         handle
     }
 
@@ -437,19 +488,40 @@ impl crate::Spawner for Context {
         // Get metrics
         let (_, metric) = spawn_metrics!(self, future);
 
+        // Track parent-child relationship when supervision is requested
+        let parent_children = if self.spawn_config.is_supervised() {
+            Some(self.children.clone())
+        } else {
+            None
+        };
+
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
 
         // Set up the task
         let executor = self.executor.clone();
+        let dedicated = self.spawn_config.is_dedicated();
 
         move |f: F| {
             let (f, handle) =
                 Handle::init_future(f, metric, executor.panicker.clone(), children.clone());
 
             // Spawn the task
-            executor.runtime.spawn(f);
+            if dedicated {
+                let runtime = executor.runtime.handle().clone();
+                thread::spawn(move || {
+                    runtime.block_on(f);
+                });
+            } else {
+                executor.runtime.spawn(f);
+            }
+
+            // Register this child with the parent
+            if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
+                parent_children.lock().unwrap().push(aborter);
+            }
+
             handle
         }
     }
@@ -460,21 +532,12 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Store parent's children list
-        let parent_children = self.children.clone();
-
-        // Spawn the child
-        let child_handle = self.spawn(f);
-
-        // Register this child with the parent
-        if let Some(aborter) = child_handle.aborter() {
-            parent_children.lock().unwrap().push(aborter);
-        }
-
-        child_handle
+        let mut context = self;
+        context.spawn_config = context.spawn_config.supervised();
+        context.spawn(f)
     }
 
-    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
@@ -487,18 +550,19 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
+        let dedicated = self.spawn_config.is_dedicated();
         let (f, handle) = Handle::init_blocking(|| f(self), metric, executor.panicker.clone());
 
         // Spawn the blocking task
         if dedicated {
-            std::thread::spawn(f);
+            thread::spawn(f);
         } else {
             executor.runtime.spawn_blocking(f);
         }
         handle
     }
 
-    fn spawn_blocking_ref<F, T>(&mut self, dedicated: bool) -> impl FnOnce(F) -> Handle<T> + 'static
+    fn spawn_blocking_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -506,6 +570,8 @@ impl crate::Spawner for Context {
         // Ensure a context only spawns one task
         assert!(!self.spawned, "already spawned");
         self.spawned = true;
+
+        let dedicated = self.spawn_config.is_dedicated();
 
         // Get metrics
         let (_, metric) = spawn_metrics!(self, blocking, dedicated);
@@ -517,7 +583,7 @@ impl crate::Spawner for Context {
 
             // Spawn the blocking task
             if dedicated {
-                std::thread::spawn(f);
+                thread::spawn(f);
             } else {
                 executor.runtime.spawn_blocking(f);
             }
@@ -573,6 +639,7 @@ impl crate::Metrics for Context {
             storage: self.storage.clone(),
             network: self.network.clone(),
             children: self.children.clone(),
+            spawn_config: self.spawn_config,
         }
     }
 

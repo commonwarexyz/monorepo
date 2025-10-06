@@ -36,7 +36,7 @@ use crate::{
         signal::{Signal, Stopper},
         Aborter, Panicker,
     },
-    Clock, Error, Handle, ListenerOf, Panicked, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Panicked, SpawnConfig, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -703,6 +703,7 @@ pub struct Context {
     network: Arc<Network>,
     storage: Arc<Storage>,
     children: Arc<Mutex<Vec<Aborter>>>,
+    spawn_config: SpawnConfig,
 }
 
 impl Context {
@@ -750,6 +751,7 @@ impl Context {
                 network: Arc::new(network),
                 storage: Arc::new(storage),
                 children: Arc::new(Mutex::new(Vec::new())),
+                spawn_config: SpawnConfig::default(),
             },
             executor,
             panicked,
@@ -805,6 +807,7 @@ impl Context {
                 network: Arc::new(network),
                 storage: checkpoint.storage,
                 children: Arc::new(Mutex::new(Vec::new())),
+                spawn_config: SpawnConfig::default(),
             },
             executor,
             panicked,
@@ -836,11 +839,36 @@ impl Clone for Context {
             network: self.network.clone(),
             storage: self.storage.clone(),
             children: self.children.clone(),
+            spawn_config: self.spawn_config,
         }
     }
 }
 
 impl crate::Spawner for Context {
+    fn supervised(&self) -> Self {
+        let mut context = self.clone();
+        context.spawn_config = self.spawn_config.supervised();
+        context
+    }
+
+    fn detached(&self) -> Self {
+        let mut context = self.clone();
+        context.spawn_config = self.spawn_config.detached();
+        context
+    }
+
+    fn dedicated(&self) -> Self {
+        let mut context = self.clone();
+        context.spawn_config = self.spawn_config.dedicated();
+        context
+    }
+
+    fn shared(&self) -> Self {
+        let mut context = self.clone();
+        context.spawn_config = self.spawn_config.shared();
+        context
+    }
+
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -856,6 +884,13 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor();
 
+        // Track parent-child relationship when supervision is requested
+        let parent_children = if self.spawn_config.is_supervised() {
+            Some(self.children.clone())
+        } else {
+            None
+        };
+
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
@@ -865,6 +900,14 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
+
+        // Register this child with the parent
+        if let Some(parent_children) = parent_children {
+            if let Some(aborter) = handle.aborter() {
+                parent_children.lock().unwrap().push(aborter);
+            }
+        }
+
         handle
     }
 
@@ -880,6 +923,13 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self, future);
 
+        // Track parent-child relationship when supervision is requested
+        let parent_children = if self.spawn_config.is_supervised() {
+            Some(self.children.clone())
+        } else {
+            None
+        };
+
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
@@ -892,6 +942,12 @@ impl crate::Spawner for Context {
 
             // Spawn the task
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
+
+            // Register this child with the parent
+            if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
+                parent_children.lock().unwrap().push(aborter);
+            }
+
             handle
         }
     }
@@ -902,21 +958,12 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Store parent's children list
-        let parent_children = self.children.clone();
-
-        // Spawn the child
-        let child_handle = self.spawn(f);
-
-        // Register this child with the parent
-        if let Some(aborter) = child_handle.aborter() {
-            parent_children.lock().unwrap().push(aborter);
-        }
-
-        child_handle
+        let mut context = self;
+        context.spawn_config = context.spawn_config.supervised();
+        context.spawn(f)
     }
 
-    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
@@ -925,7 +972,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, metric) = spawn_metrics!(self, blocking, dedicated);
+        let (label, metric) = spawn_metrics!(self, blocking, self.spawn_config.is_dedicated());
 
         // Initialize the blocking task
         let executor = self.executor();
@@ -937,7 +984,7 @@ impl crate::Spawner for Context {
         handle
     }
 
-    fn spawn_blocking_ref<F, T>(&mut self, dedicated: bool) -> impl FnOnce(F) -> Handle<T> + 'static
+    fn spawn_blocking_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -947,7 +994,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, metric) = spawn_metrics!(self, blocking, dedicated);
+        let (label, metric) = spawn_metrics!(self, blocking, self.spawn_config.is_dedicated());
 
         // Set up the task
         let executor = self.executor();
@@ -1016,6 +1063,7 @@ impl crate::Metrics for Context {
             network: self.network.clone(),
             storage: self.storage.clone(),
             children: self.children.clone(),
+            spawn_config: self.spawn_config,
         }
     }
 

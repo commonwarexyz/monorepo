@@ -76,7 +76,8 @@ pub fn create_pool<S: Spawner + Metrics>(
             // task and thus should be provisioned as a dedicated thread.
             context
                 .with_label("rayon-thread")
-                .spawn_blocking(true, move |_| thread.run());
+                .dedicated()
+                .spawn_blocking(move |_| thread.run());
             Ok(())
         })
         .build()?;

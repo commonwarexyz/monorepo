@@ -120,8 +120,80 @@ pub trait Runner {
         Fut: Future;
 }
 
+/// Configuration flags that influence how a task is spawned.
+#[derive(Copy, Clone, Debug)]
+struct SpawnConfig {
+    supervised: bool,
+    dedicated: bool,
+}
+
+impl Default for SpawnConfig {
+    fn default() -> Self {
+        Self {
+            supervised: false,
+            dedicated: false,
+        }
+    }
+}
+
+impl SpawnConfig {
+    /// Return a new configuration with supervision enabled.
+    fn supervised(&self) -> Self {
+        let mut cfg = *self;
+        cfg.supervised = true;
+        cfg
+    }
+
+    /// Return a new configuration with supervision disabled.
+    fn detached(&self) -> Self {
+        let mut cfg = *self;
+        cfg.supervised = false;
+        cfg
+    }
+
+    /// Return a new configuration that requests a dedicated thread.
+    fn dedicated(&self) -> Self {
+        let mut cfg = *self;
+        cfg.dedicated = true;
+        cfg
+    }
+
+    /// Return a new configuration that requests shared runtime scheduling.
+    fn shared(&self) -> Self {
+        let mut cfg = *self;
+        cfg.dedicated = false;
+        cfg
+    }
+
+    /// Returns `true` when the task should be supervised by its parent.
+    fn is_supervised(&self) -> bool {
+        self.supervised
+    }
+
+    /// Returns `true` when the task should run on a dedicated thread.
+    fn is_dedicated(&self) -> bool {
+        self.dedicated
+    }
+}
+
 /// Interface that any task scheduler must implement to spawn tasks.
 pub trait Spawner: Clone + Send + Sync + 'static {
+    /// Create a new instance of `Spawner` configured to spawn new tasks
+    /// supervised by the current context.
+    fn supervised(&self) -> Self;
+
+    /// Create a new instance of `Spawner` configured to spawn new tasks
+    /// detached from the current context.
+    fn detached(&self) -> Self;
+
+    /// Create a new instance of `Spawner` configured to spawn new tasks on a
+    /// dedicated thread.
+    fn dedicated(&self) -> Self;
+
+    /// Create a new instance of `Spawner` configured to spawn new tasks on the
+    /// shared task executor.
+    fn shared(&self) -> Self;
+
     /// Enqueue a task to be executed.
     ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
@@ -207,7 +279,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// # Warning
     ///
     /// Blocking tasks cannot be aborted.
-    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
+    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static;
@@ -220,10 +292,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// If this function is used to spawn multiple tasks from the same context,
     /// the runtime will panic to prevent accidental misuse.
-    fn spawn_blocking_ref<F, T>(
-        &mut self,
-        dedicated: bool,
-    ) -> impl FnOnce(F) -> Handle<T> + 'static
+    fn spawn_blocking_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static;
@@ -1648,7 +1717,13 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let handle = context.spawn_blocking(dedicated, |_| 42);
+            let context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared()
+            };
+
+            let handle = context.spawn_blocking(|_| 42);
             let result = handle.await;
             assert!(matches!(result, Ok(42)));
         });
@@ -1659,7 +1734,13 @@ mod tests {
         R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            context.clone().spawn_blocking(dedicated, |_| {
+            let context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared()
+            };
+
+            context.clone().spawn_blocking(|_| {
                 panic!("blocking task panicked");
             });
 
@@ -1675,7 +1756,13 @@ mod tests {
         R::Context: Spawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
-            let handle = context.clone().spawn_blocking(dedicated, |_| {
+            let context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared()
+            };
+
+            let handle = context.clone().spawn_blocking(|_| {
                 panic!("blocking task panicked");
             });
             handle.await
@@ -1687,8 +1774,14 @@ mod tests {
     where
         R::Context: Spawner,
     {
-        runner.start(|mut context| async move {
-            let spawn = context.spawn_blocking_ref(dedicated);
+        runner.start(|context| async move {
+            let mut context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared()
+            };
+
+            let spawn = context.spawn_blocking_ref();
             let handle = spawn(|| 42);
             let result = handle.await;
             assert!(matches!(result, Ok(42)));
@@ -1699,13 +1792,19 @@ mod tests {
     where
         R::Context: Spawner,
     {
-        runner.start(|mut context| async move {
-            let spawn = context.spawn_blocking_ref(dedicated);
+        runner.start(|context| async move {
+            let mut context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared()
+            };
+
+            let spawn = context.spawn_blocking_ref();
             let result = spawn(|| 42).await;
             assert!(matches!(result, Ok(42)));
 
             // Ensure context is consumed
-            context.spawn_blocking(dedicated, |_| 42);
+            context.spawn_blocking(|_| 42);
         });
     }
 
@@ -1716,7 +1815,14 @@ mod tests {
         runner.start(|context| async move {
             // Create task
             let (sender, mut receiver) = oneshot::channel();
-            let handle = context.spawn_blocking(dedicated, move |_| {
+
+            let context = if dedicated {
+                context.dedicated()
+            } else {
+                context.shared()
+            };
+
+            let handle = context.spawn_blocking(move |_| {
                 // Wait for abort to be called
                 loop {
                     if receiver.try_recv().is_ok() {
