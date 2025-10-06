@@ -323,7 +323,7 @@ impl<C: PublicKey> InfoVerifier<C> {
 
             // If any timestamp is too far into the future, disconnect from the peer
             if Duration::from_millis(info.timestamp)
-                > clock.current().epoch() + self.synchrony_bound
+                > clock.current().epoch().saturating_add(self.synchrony_bound)
             {
                 return Err(Error::SynchronyBound);
             }
