@@ -129,7 +129,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
     pub fn finalize(
         mut self,
         commitments: BTreeMap<u32, poly::Public<V>>,
-        reveals: BTreeMap<u32, Share>,
+        mut reveals: BTreeMap<u32, Share>,
     ) -> Result<Output<V>, Error> {
         // Ensure commitments equals required commitment count
         let dealer_threshold = self.dealer_threshold as usize;
@@ -161,7 +161,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                         idx,
                         self.player_threshold,
                     )?;
-                    let share = reveals.get(&idx).ok_or(Error::MissingShare)?.clone();
+                    let share = reveals.remove(&idx).ok_or(Error::MissingShare)?;
 
                     // Check that reveal is valid
                     verify_share::<V>(&commitment, self.me, &share)?;
@@ -176,7 +176,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
                         idx,
                         self.player_threshold,
                     )?;
-                    let share = reveals.get(&idx).ok_or(Error::MissingShare)?.clone();
+                    let share = reveals.remove(&idx).ok_or(Error::MissingShare)?;
 
                     // Check that reveal is valid
                     verify_share::<V>(&commitment, self.me, &share)?;
