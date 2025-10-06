@@ -1,87 +1,75 @@
-//! Mock `ThresholdSupervisor` and `Monitor` for tests: tracks participants/leaders,
-//! verifies activities, records votes/faults, and exposes a simple subscription.
-
+//! Mock `Monitor` for tests: tracks participants/leaders, verifies activities,
+//! records votes/faults, and exposes a simple subscription.
 use crate::{
-    threshold_simplex::types::{
-        Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
-        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, Seedable,
-    },
-    types::View,
-    Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu, Viewable,
-};
-use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::{
-        dkg::ops::evaluate_all,
-        primitives::{
-            group,
-            poly::{self, public},
-            variant::Variant,
+    threshold_simplex::{
+        new_types::{
+            self, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            SigningScheme, Vote, VoteContext,
+        },
+        select_leader,
+        types::{
+            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, NullifyFinalize,
+            Proposal,
         },
     },
-    Digest, PublicKey,
+    types::View,
+    Monitor, Reporter, Viewable,
 };
-use commonware_utils::modulo;
+use bytes::{Buf, BufMut};
+use commonware_codec::{DecodeExt, Encode};
+use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::mpsc::{Receiver, Sender};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
+    hash::Hash,
     sync::{Arc, Mutex},
 };
 
-// Fields: Polynomial, ShareIndexMap, Validators, MyShare
-type ViewInfo<P, V> = (Vec<V>, HashMap<P, u32>, Vec<P>, Option<group::Share>);
+// Records which validators have participated in a given view/payload pair.
+type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
+type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 
-pub struct Config<P: PublicKey, V: Variant> {
+/// Supervisor configuration used in tests.
+#[derive(Clone, Debug)]
+pub struct Config<P: PublicKey, S: SigningScheme> {
     pub namespace: Vec<u8>,
-    #[allow(clippy::type_complexity)]
-    pub participants: BTreeMap<View, (poly::Public<V>, Vec<P>, Option<group::Share>)>,
+    pub participants: Vec<P>,
+    pub signing: S,
 }
 
-type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
-type Faults<P, V, D> = HashMap<P, HashMap<View, HashSet<Activity<V, D>>>>;
-
 #[derive(Clone)]
-pub struct Supervisor<P: PublicKey, V: Variant, D: Digest> {
-    identity: V::Public,
-    participants: BTreeMap<View, ViewInfo<P, V::Public>>,
+pub struct Supervisor<P: PublicKey, S: SigningScheme, D: Digest> {
+    participants: Vec<P>,
+    signing: S,
 
     namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, P>>>,
-    pub seeds: Arc<Mutex<HashMap<View, Seed<V>>>>,
+    pub seeds: Arc<Mutex<HashMap<View, Option<S::Randomness>>>>,
     pub notarizes: Arc<Mutex<Participation<P, D>>>,
-    pub notarizations: Arc<Mutex<HashMap<View, Notarization<V, D>>>>,
+    pub notarizations: Arc<Mutex<HashMap<View, new_types::Notarization<S, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
-    pub nullifications: Arc<Mutex<HashMap<View, Nullification<V>>>>,
+    pub nullifications: Arc<Mutex<HashMap<View, new_types::Nullification<S>>>>,
     pub finalizes: Arc<Mutex<Participation<P, D>>>,
-    pub finalizations: Arc<Mutex<HashMap<View, Finalization<V, D>>>>,
-    pub faults: Arc<Mutex<Faults<P, V, D>>>,
+    pub finalizations: Arc<Mutex<HashMap<View, new_types::Finalization<S, D>>>>,
+    pub faults: Arc<Mutex<Faults<P, S, D>>>,
     pub invalid: Arc<Mutex<usize>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Supervisor<P, V, D> {
-    pub fn new(cfg: Config<P, V>) -> Self {
-        let mut identity = None;
-        let mut parsed_participants = BTreeMap::new();
-        for (view, (polynomial, mut validators, my_share)) in cfg.participants.into_iter() {
-            let evaluations = evaluate_all::<V>(&polynomial, validators.len() as u32);
-            let mut map = HashMap::new();
-            for (index, validator) in validators.iter().enumerate() {
-                map.insert(validator.clone(), index as u32);
-            }
-            validators.sort();
-            let view_identity = public::<V>(&polynomial);
-            let identity_ref = identity.get_or_insert(*view_identity);
-            assert_eq!(identity_ref, view_identity, "public keys do not match");
-            parsed_participants.insert(view, (evaluations, map, validators, my_share));
-        }
+impl<P, S, D> Supervisor<P, S, D>
+where
+    P: PublicKey + Eq + Hash + Clone,
+    S: SigningScheme,
+    D: Digest + Eq + Hash + Clone,
+{
+    pub fn new(cfg: Config<P, S>) -> Self {
         Self {
-            identity: identity.unwrap(),
-            participants: parsed_participants,
             namespace: cfg.namespace,
+            participants: cfg.participants,
+            signing: cfg.signing,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             seeds: Arc::new(Mutex::new(HashMap::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
@@ -96,115 +84,45 @@ impl<P: PublicKey, V: Variant, D: Digest> Supervisor<P, V, D> {
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
-}
 
-impl<P: PublicKey, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
-    type Index = View;
-    type PublicKey = P;
-
-    fn leader(&self, _: Self::Index) -> Option<Self::PublicKey> {
-        unimplemented!("only defined in supertrait")
-    }
-
-    fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {
-        let closest = match self.participants.range(..=index).next_back() {
-            Some((_, (_, _, p, _))) => p,
-            None => {
-                panic!("no participants in required range");
-            }
-        };
-        Some(closest)
-    }
-
-    fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
-        let closest = match self.participants.range(..=index).next_back() {
-            Some((_, (_, p, _, _))) => p,
-            None => {
-                panic!("no participants in required range");
-            }
-        };
-        closest.get(candidate).cloned()
+    fn record_leader(&self, view: View, randomness: Option<S::Randomness>) {
+        let mut leaders = self.leaders.lock().unwrap();
+        leaders.entry(view).or_insert_with(|| {
+            select_leader::<S, _>(&self.participants, view, randomness)
+                .0
+                .clone()
+        });
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
-    type Seed = V::Signature;
-    type Identity = V::Public;
-    type Polynomial = Vec<V::Public>;
-    type Share = group::Share;
-
-    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
-        let closest = match self.participants.range(..=index).next_back() {
-            Some((_, (_, _, p, _))) => p,
-            None => {
-                panic!("no participants in required range");
-            }
-        };
-        let seed = seed.encode();
-        let leader_index = modulo(&seed, closest.len() as u64);
-        let leader = closest[leader_index as usize].clone();
-        self.leaders
-            .lock()
-            .unwrap()
-            .entry(index)
-            .or_insert(leader.clone());
-        Some(leader)
-    }
-
-    fn identity(&self) -> &Self::Identity {
-        &self.identity
-    }
-
-    fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial> {
-        let closest = match self.participants.range(..=index).next_back() {
-            Some((_, (p, _, _, _))) => p,
-            None => {
-                panic!("no participants in required range");
-            }
-        };
-        Some(closest)
-    }
-
-    fn share(&self, index: Self::Index) -> Option<&Self::Share> {
-        let closest = match self.participants.range(..=index).next_back() {
-            Some((_, (_, _, _, s))) => s,
-            None => {
-                panic!("no participants in required range");
-            }
-        };
-        closest.as_ref()
-    }
-}
-
-impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
-    type Activity = Activity<V, D>;
+impl<P, S, D> Reporter for Supervisor<P, S, D>
+where
+    P: PublicKey + Eq + Hash + Clone,
+    S: SigningScheme,
+    S::Randomness: Clone,
+    D: Digest + Eq + Hash + Clone,
+{
+    type Activity = Activity<S, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         // We check signatures for all messages to ensure that the prover is working correctly
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).
         let verified = activity.verified();
-        match activity {
+        match &activity {
             Activity::Notarize(notarize) => {
-                let view = notarize.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                if !notarize.verify(&self.namespace, polynomial) {
+                if !notarize.verify(&self.signing, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = notarize.encode();
-                Notarize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[notarize.signer() as usize].clone();
+                Notarize::<S, D>::decode(encoded).unwrap();
+                let public_key = self.participants[notarize.signer() as usize].clone();
                 self.notarizes
                     .lock()
                     .unwrap()
-                    .entry(view)
+                    .entry(notarize.proposal.view())
                     .or_default()
                     .entry(notarize.proposal.payload)
                     .or_default()
@@ -212,153 +130,148 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::Notarization(notarization) => {
                 // Verify notarization
-                let view = notarization.view();
-                let seed = notarization.seed();
-                if !notarization.verify(&self.namespace, &self.identity) {
+                let view = notarization.proposal.view();
+                if self
+                    .signing
+                    .verify_certificate::<D>(
+                        new_types::VoteContext::Notarize {
+                            namespace: &self.namespace,
+                            proposal: &notarization.proposal,
+                        },
+                        &notarization.certificate,
+                    )
+                    .is_err()
+                {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = notarization.encode();
-                Notarization::<V, D>::decode(encoded).unwrap();
+                Notarization::<S, D>::decode(encoded).unwrap();
                 self.notarizations
                     .lock()
                     .unwrap()
-                    .insert(view, notarization);
-
-                // Verify seed
-                if !seed.verify(&self.namespace, &self.identity) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
-                }
-                let encoded = seed.encode();
-                Seed::<V>::decode(encoded).unwrap();
-                self.seeds.lock().unwrap().insert(view, seed);
+                    .insert(view, notarization.clone());
+                self.seeds
+                    .lock()
+                    .unwrap()
+                    .insert(view, self.signing.randomness(&notarization.certificate));
+                self.record_leader(view + 1, self.signing.randomness(&notarization.certificate));
             }
             Activity::Nullify(nullify) => {
-                let view = nullify.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                if !nullify.verify(&self.namespace, polynomial) {
+                if !nullify.verify::<D>(&self.signing, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = nullify.encode();
-                Nullify::<V>::decode(encoded).unwrap();
-                let public_key = validators[nullify.signer() as usize].clone();
+                Nullify::<S>::decode(encoded).unwrap();
+                let public_key = self.participants[nullify.signer() as usize].clone();
                 self.nullifies
                     .lock()
                     .unwrap()
-                    .entry(view)
+                    .entry(nullify.round.view())
                     .or_default()
                     .insert(public_key);
             }
             Activity::Nullification(nullification) => {
                 // Verify nullification
-                let view = nullification.view();
-                let seed = nullification.seed();
-                if !nullification.verify(&self.namespace, &self.identity) {
+                let view = nullification.round.view();
+                if self
+                    .signing
+                    .verify_certificate::<D>(
+                        new_types::VoteContext::Nullify {
+                            namespace: &self.namespace,
+                            round: nullification.round,
+                        },
+                        &nullification.certificate,
+                    )
+                    .is_err()
+                {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = nullification.encode();
-                Nullification::<V>::decode(encoded).unwrap();
+                Nullification::<S>::decode(encoded).unwrap();
                 self.nullifications
                     .lock()
                     .unwrap()
-                    .insert(view, nullification);
-
-                // Verify seed
-                if !seed.verify(&self.namespace, &self.identity) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
-                }
-                let encoded = seed.encode();
-                Seed::<V>::decode(encoded).unwrap();
-                self.seeds.lock().unwrap().insert(view, seed);
+                    .insert(view, nullification.clone());
+                self.seeds
+                    .lock()
+                    .unwrap()
+                    .insert(view, self.signing.randomness(&nullification.certificate));
+                self.record_leader(
+                    view + 1,
+                    self.signing.randomness(&nullification.certificate),
+                );
             }
             Activity::Finalize(finalize) => {
-                let view = finalize.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                if !finalize.verify(&self.namespace, polynomial) {
+                if !finalize.verify(&self.signing, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = finalize.encode();
-                Finalize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[finalize.signer() as usize].clone();
+                Finalize::<S, D>::decode(encoded).unwrap();
+                let public_key = self.participants[finalize.signer() as usize].clone();
                 self.finalizes
                     .lock()
                     .unwrap()
-                    .entry(view)
+                    .entry(finalize.proposal.view())
                     .or_default()
                     .entry(finalize.proposal.payload)
                     .or_default()
                     .insert(public_key);
             }
-            Activity::Finalization(ref finalization) => {
+            Activity::Finalization(finalization) => {
                 // Verify finalization
-                let view = finalization.view();
-                let seed = finalization.seed();
-                if !finalization.verify(&self.namespace, &self.identity) {
+                let view = finalization.proposal.view();
+                if self
+                    .signing
+                    .verify_certificate::<D>(
+                        new_types::VoteContext::Finalize {
+                            namespace: &self.namespace,
+                            proposal: &finalization.proposal,
+                        },
+                        &finalization.certificate,
+                    )
+                    .is_err()
+                {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = finalization.encode();
-                Finalization::<V, D>::decode(encoded).unwrap();
+                Finalization::<S, D>::decode(encoded).unwrap();
                 self.finalizations
                     .lock()
                     .unwrap()
                     .insert(view, finalization.clone());
-
-                // Verify seed
-                if !seed.verify(&self.namespace, &self.identity) {
-                    assert!(!verified);
-                    *self.invalid.lock().unwrap() += 1;
-                    return;
-                }
-                let encoded = seed.encode();
-                Seed::<V>::decode(encoded).unwrap();
-                self.seeds.lock().unwrap().insert(view, seed);
+                self.seeds
+                    .lock()
+                    .unwrap()
+                    .insert(view, self.signing.randomness(&finalization.certificate));
+                self.record_leader(view + 1, self.signing.randomness(&finalization.certificate));
 
                 // Send message to subscribers
-                *self.latest.lock().unwrap() = finalization.view();
+                *self.latest.lock().unwrap() = finalization.proposal.view();
                 let mut subscribers = self.subscribers.lock().unwrap();
                 for subscriber in subscribers.iter_mut() {
-                    let _ = subscriber.try_send(finalization.view());
+                    let _ = subscriber.try_send(finalization.proposal.view());
                 }
             }
-            Activity::ConflictingNotarize(ref conflicting) => {
+            Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                if !conflicting.verify(&self.namespace, polynomial) {
+                if !conflicting.verify(&self.signing, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
-                ConflictingNotarize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[conflicting.signer() as usize].clone();
+                ConflictingNotarize::<S, D>::decode(encoded).unwrap();
+                let public_key = self.participants[conflicting.signer() as usize].clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -368,22 +281,16 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .or_default()
                     .insert(activity);
             }
-            Activity::ConflictingFinalize(ref conflicting) => {
+            Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                if !conflicting.verify(&self.namespace, polynomial) {
+                if !conflicting.verify(&self.signing, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
-                ConflictingFinalize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[conflicting.signer() as usize].clone();
+                ConflictingFinalize::<S, D>::decode(encoded).unwrap();
+                let public_key = self.participants[conflicting.signer() as usize].clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -393,22 +300,16 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .or_default()
                     .insert(activity);
             }
-            Activity::NullifyFinalize(ref nullify_finalize) => {
-                let view = nullify_finalize.view();
-                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                if !nullify_finalize.verify(&self.namespace, polynomial) {
+            Activity::NullifyFinalize(conflicting) => {
+                let view = conflicting.view();
+                if !conflicting.verify(&self.signing, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
-                let encoded = nullify_finalize.encode();
-                NullifyFinalize::<V, D>::decode(encoded).unwrap();
-                let public_key = validators[nullify_finalize.signer() as usize].clone();
+                let encoded = conflicting.encode();
+                NullifyFinalize::<S, D>::decode(encoded).unwrap();
+                let public_key = self.participants[conflicting.signer() as usize].clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -422,8 +323,15 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Monitor for Supervisor<P, V, D> {
+impl<P, S, D> Monitor for Supervisor<P, S, D>
+where
+    P: PublicKey + Eq + Hash + Clone,
+    S: SigningScheme,
+    S::Randomness: Clone + Encode,
+    D: Digest + Eq + Hash + Clone,
+{
     type Index = View;
+
     async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
         let (tx, rx) = futures::channel::mpsc::channel(128);
         self.subscribers.lock().unwrap().push(tx);

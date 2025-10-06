@@ -43,9 +43,6 @@ pub struct Config<
     /// Reporter for the consensus engine.
     pub reporter: F,
 
-    /// Supervisor for the consensus engine.
-    pub supervisor: S,
-
     /// Partition for the consensus engine.
     pub partition: String,
 

@@ -35,7 +35,7 @@ pub enum Error {
     SignerMismatch { expected: u32, actual: u32 },
     /// Not enough votes to assemble a certificate.
     #[error("insufficient votes: required {required}, got {actual}")]
-    InsufficientVotes { required: usize, actual: usize },
+    InsufficientVotes { required: u32, actual: u32 },
     /// Threshold recovery failure.
     #[error("threshold error: {0}")]
     Threshold(#[from] ThresholdError),
@@ -58,7 +58,7 @@ pub enum VoteContext<'a, D: Digest> {
 }
 
 /// Signed vote emitted by a participant.
-#[derive(Clone, Debug, Eq, Hash)]
+#[derive(Clone, Debug, Eq)]
 pub struct Vote<S: SigningScheme> {
     pub signer: u32,
     pub signature: S::Signature,
@@ -67,6 +67,13 @@ pub struct Vote<S: SigningScheme> {
 impl<S: SigningScheme> PartialEq for Vote<S> {
     fn eq(&self, other: &Self) -> bool {
         self.signer == other.signer && self.signature == other.signature
+    }
+}
+
+impl<S: SigningScheme> Hash for Vote<S> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.signer.hash(state);
+        self.signature.hash(state);
     }
 }
 
@@ -110,10 +117,23 @@ impl<S: SigningScheme> Read for Vote<S> {
 }
 
 /// Partial notarize vote carrying the proposal and signatures.
-#[derive(Clone, Debug, Eq, Hash)]
+#[derive(Clone, Debug, Eq)]
 pub struct Notarize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
+}
+
+impl<S: SigningScheme, D: Digest> PartialEq for Notarize<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.proposal == other.proposal && self.vote == other.vote
+    }
+}
+
+impl<S: SigningScheme, D: Digest> Hash for Notarize<S, D> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.proposal.hash(state);
+        self.vote.hash(state);
+    }
 }
 
 impl<S: SigningScheme, D: Digest> Notarize<S, D> {
@@ -135,12 +155,6 @@ impl<S: SigningScheme, D: Digest> Notarize<S, D> {
         // FIXME: avoid cloning
         let verification = scheme.verify_votes(context, std::iter::once(self.vote.clone()));
         !verification.verified.is_empty()
-    }
-}
-
-impl<S: SigningScheme, D: Digest> PartialEq for Notarize<S, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.vote == other.vote
     }
 }
 
@@ -169,10 +183,23 @@ impl<S: SigningScheme, D: Digest> Read for Notarize<S, D> {
 }
 
 /// Partial nullify vote for a given round.
-#[derive(Clone, Debug, Eq, Hash)]
+#[derive(Clone, Debug, Eq)]
 pub struct Nullify<S: SigningScheme> {
     pub round: Round,
     pub vote: Vote<S>,
+}
+
+impl<S: SigningScheme> PartialEq for Nullify<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.round == other.round && self.vote == other.vote
+    }
+}
+
+impl<S: SigningScheme> Hash for Nullify<S> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.round.hash(state);
+        self.vote.hash(state);
+    }
 }
 
 impl<S: SigningScheme> Nullify<S> {
@@ -202,12 +229,6 @@ impl<S: SigningScheme> Write for Nullify<S> {
     }
 }
 
-impl<S: SigningScheme> PartialEq for Nullify<S> {
-    fn eq(&self, other: &Self) -> bool {
-        self.round == other.round && self.vote == other.vote
-    }
-}
-
 impl<S: SigningScheme> EncodeSize for Nullify<S> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.vote.encode_size()
@@ -226,10 +247,23 @@ impl<S: SigningScheme> Read for Nullify<S> {
 }
 
 /// Partial finalize vote carrying the proposal and signatures.
-#[derive(Clone, Debug, Eq, Hash)]
+#[derive(Clone, Debug, Eq)]
 pub struct Finalize<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub vote: Vote<S>,
+}
+
+impl<S: SigningScheme, D: Digest> PartialEq for Finalize<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.proposal == other.proposal && self.vote == other.vote
+    }
+}
+
+impl<S: SigningScheme, D: Digest> Hash for Finalize<S, D> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.proposal.hash(state);
+        self.vote.hash(state);
+    }
 }
 
 impl<S: SigningScheme, D: Digest> Finalize<S, D> {
@@ -251,12 +285,6 @@ impl<S: SigningScheme, D: Digest> Finalize<S, D> {
         // FIXME: avoid cloning
         let verification = scheme.verify_votes(context, std::iter::once(self.vote.clone()));
         !verification.verified.is_empty()
-    }
-}
-
-impl<S: SigningScheme, D: Digest> PartialEq for Finalize<S, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.vote == other.vote
     }
 }
 
@@ -285,10 +313,23 @@ impl<S: SigningScheme, D: Digest> Read for Finalize<S, D> {
 }
 
 /// Aggregated notarization certificate with randomness seed.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq)]
 pub struct Notarization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
+}
+
+impl<S: SigningScheme, D: Digest> PartialEq for Notarization<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.proposal == other.proposal && self.certificate == other.certificate
+    }
+}
+
+impl<S: SigningScheme, D: Digest> Hash for Notarization<S, D> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.proposal.hash(state);
+        self.certificate.hash(state);
+    }
 }
 
 impl<S: SigningScheme, D: Digest> Notarization<S, D> {
@@ -331,10 +372,23 @@ impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
 }
 
 /// Aggregated nullification certificate for a round.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq)]
 pub struct Nullification<S: SigningScheme> {
     pub round: Round,
     pub certificate: S::Certificate,
+}
+
+impl<S: SigningScheme> PartialEq for Nullification<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.round == other.round && self.certificate == other.certificate
+    }
+}
+
+impl<S: SigningScheme> Hash for Nullification<S> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.round.hash(state);
+        self.certificate.hash(state);
+    }
 }
 
 impl<S: SigningScheme> Write for Nullification<S> {
@@ -374,10 +428,23 @@ impl<S: SigningScheme> Read for Nullification<S> {
 }
 
 /// Aggregated finalization certificate.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq)]
 pub struct Finalization<S: SigningScheme, D: Digest> {
     pub proposal: Proposal<D>,
     pub certificate: S::Certificate,
+}
+
+impl<S: SigningScheme, D: Digest> PartialEq for Finalization<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.proposal == other.proposal && self.certificate == other.certificate
+    }
+}
+
+impl<S: SigningScheme, D: Digest> Hash for Finalization<S, D> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.proposal.hash(state);
+        self.certificate.hash(state);
+    }
 }
 
 impl<S: SigningScheme, D: Digest> Finalization<S, D> {
@@ -489,7 +556,7 @@ pub struct BlsThresholdScheme<V: Variant> {
     polynomial: Vec<V::Public>,
     identity: V::Public,
     share: Share,
-    threshold: usize,
+    threshold: u32,
 }
 
 impl<V: Variant> BlsThresholdScheme<V> {
@@ -498,7 +565,7 @@ impl<V: Variant> BlsThresholdScheme<V> {
         polynomial: Vec<V::Public>,
         identity: V::Public,
         share: Share,
-        threshold: usize,
+        threshold: u32,
     ) -> Self {
         Self {
             signer,
@@ -507,6 +574,10 @@ impl<V: Variant> BlsThresholdScheme<V> {
             share,
             threshold,
         }
+    }
+
+    pub fn identity(&self) -> V::Public {
+        self.identity
     }
 }
 
@@ -601,10 +672,10 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         _context: VoteContext<'_, D>,
         votes: &[Vote<Self>],
     ) -> Result<Self::Certificate, Error> {
-        if votes.len() < self.threshold {
+        if votes.len() < self.threshold as usize {
             return Err(Error::InsufficientVotes {
                 required: self.threshold,
-                actual: votes.len(),
+                actual: votes.len() as u32,
             });
         }
 
@@ -625,7 +696,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             .collect();
 
         let (proposal_sig, seed_sig) = threshold_signature_recover_pair::<V, _>(
-            self.threshold as u32,
+            self.threshold,
             proposal_partials.iter(),
             seed_partials.iter(),
         )?;
@@ -899,7 +970,7 @@ mod tests {
     #[test]
     fn bls_scheme_stores_configuration() {
         let mut rng = StdRng::seed_from_u64(7);
-        let threshold = 3usize;
+        let threshold = 3;
         let (public_poly, shares) =
             generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
         let polynomial = evaluate_all::<MinSig>(&public_poly, 4);

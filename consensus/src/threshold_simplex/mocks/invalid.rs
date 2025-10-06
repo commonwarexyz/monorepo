@@ -58,11 +58,19 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Invalid<
             match msg {
                 Voter::Notarize(notarize) => {
                     // Notarize received digest
-                    let mut n =
-                        Notarize::<S, _>::sign(&self.signing, &self.namespace, notarize.proposal);
+                    let mut n = Notarize::<S, _>::sign(
+                        &self.signing,
+                        &self.namespace,
+                        notarize.proposal.clone(),
+                    );
 
                     // Manipulate signature
-                    n.vote.signature = corrupt_signature::<S>(&n.vote.signature);
+                    let mut invalid_signature =
+                        Notarize::<S, _>::sign(&self.signing, &[], notarize.proposal)
+                            .vote
+                            .signature;
+
+                    n.vote.signature = invalid_signature;
 
                     // Send invalid message
                     let msg = Voter::Notarize(n).encode().into();
@@ -70,11 +78,19 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Invalid<
                 }
                 Voter::Finalize(finalize) => {
                     // Finalize provided digest
-                    let mut f =
-                        Finalize::<S, _>::sign(&self.signing, &self.namespace, finalize.proposal);
+                    let mut f = Finalize::<S, _>::sign(
+                        &self.signing,
+                        &self.namespace,
+                        finalize.proposal.clone(),
+                    );
 
                     // Manipulate signature
-                    f.vote.signature = corrupt_signature::<S>(&f.vote.signature);
+                    let mut invalid_signature =
+                        Finalize::<S, _>::sign(&self.signing, &[], finalize.proposal)
+                            .vote
+                            .signature;
+
+                    f.vote.signature = invalid_signature;
 
                     // Send invalid message
                     let msg = Voter::Finalize(f).encode().into();
@@ -84,12 +100,4 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Invalid<
             }
         }
     }
-}
-
-fn corrupt_signature<S: SigningScheme>(original: &S::Signature) -> S::Signature {
-    let mut buf = original.encode();
-    let last = buf.len() - 1;
-    buf[last] ^= 0x01;
-    S::Signature::read_cfg(&mut buf, &S::signature_read_cfg())
-        .expect("failed to decode tampered signature")
 }
