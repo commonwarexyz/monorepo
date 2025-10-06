@@ -835,11 +835,11 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             spawned: false,
+            spawn_config: SpawnConfig::default(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
             children: self.children.clone(),
-            spawn_config: self.spawn_config,
         }
     }
 }

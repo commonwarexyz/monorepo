@@ -392,11 +392,11 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             spawned: false,
+            spawn_config: SpawnConfig::default(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
             children: self.children.clone(),
-            spawn_config: self.spawn_config,
         }
     }
 }
@@ -448,9 +448,6 @@ impl crate::Spawner for Context {
         // Give spawned task its own empty children list
         let children = Arc::new(Mutex::new(Vec::new()));
         self.children = children.clone();
-
-        // Reset spawn config
-        self.spawn_config = SpawnConfig::default();
 
         let future = f(self);
         let (f, handle) = Handle::init_future(future, metric, executor.panicker.clone(), children);
