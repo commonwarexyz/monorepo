@@ -33,7 +33,7 @@ pub struct Config {
     pub max_peers: usize,
 
     /// The maximum number of bits that can be sent in a `BitVec` message.
-    pub max_bit_vec: usize,
+    pub max_bit_vec: u64,
 }
 
 /// Payload is the only allowed message format that can be sent between peers.
@@ -134,11 +134,11 @@ impl Write for BitVec {
 }
 
 impl Read for BitVec {
-    type Cfg = usize;
+    type Cfg = u64;
 
-    fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, max_bits: &u64) -> Result<Self, Error> {
         let index = UInt::read(buf)?.into();
-        let bits = BitMap::read_cfg(buf, &(*max_bits as u64))?;
+        let bits = BitMap::read_cfg(buf, max_bits)?;
         Ok(Self { index, bits })
     }
 }
