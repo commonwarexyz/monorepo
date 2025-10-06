@@ -467,10 +467,8 @@ impl crate::Spawner for Context {
         }
 
         // Register this child with the parent
-        if let Some(parent_children) = parent_children {
-            if let Some(aborter) = handle.aborter() {
-                parent_children.lock().unwrap().push(aborter);
-            }
+        if let (Some(parent_children), Some(aborter)) = (parent_children, handle.aborter()) {
+            parent_children.lock().unwrap().push(aborter);
         }
 
         handle
