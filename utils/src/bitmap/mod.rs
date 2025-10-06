@@ -16,6 +16,9 @@ use core::{
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
 
+mod prunable;
+pub use prunable::Prunable;
+
 /// The default [BitMap] chunk size in bytes.
 pub const DEFAULT_CHUNK_SIZE: usize = 8;
 
@@ -134,7 +137,6 @@ impl<const N: usize> BitMap<N> {
     }
 
     // Get the number of chunks currently in the bitmap.
-    #[allow(dead_code)]
     fn chunks_len(&self) -> usize {
         self.chunks.len()
     }
@@ -171,7 +173,6 @@ impl<const N: usize> BitMap<N> {
     /// Get a reference to a chunk by its index in the current bitmap.
     /// Note this is an index into the chunks, not a bit offset.
     #[inline]
-    #[allow(dead_code)]
     pub(super) fn get_chunk_by_index(&self, index: usize) -> &[u8; N] {
         assert!(
             index < self.chunks.len(),
@@ -319,7 +320,6 @@ impl<const N: usize> BitMap<N> {
     // # Warning
     //
     // Panics if self.next_bit is not byte aligned.
-    #[allow(dead_code)]
     fn push_byte(&mut self, byte: u8) {
         assert!(
             self.next_bit.is_multiple_of(8),
@@ -341,7 +341,6 @@ impl<const N: usize> BitMap<N> {
     /// # Warning
     ///
     /// Panics if self.next_bit is not chunk aligned.
-    #[allow(dead_code)]
     pub(super) fn push_chunk(&mut self, chunk: &[u8; N]) {
         assert_eq!(self.next_bit, 0, "cannot add chunk when not chunk aligned");
         self.last_chunk_mut().copy_from_slice(chunk.as_ref());
@@ -402,7 +401,6 @@ impl<const N: usize> BitMap<N> {
     // # Warning
     //
     // Panics if trying to prune more chunks than exist.
-    #[allow(dead_code)]
     fn prune_chunks(&mut self, chunks: usize) {
         assert!(
             chunks <= self.chunks.len(),
