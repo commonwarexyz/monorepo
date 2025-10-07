@@ -371,9 +371,9 @@ mod tests {
         let stored_cfg = cfg_to_clone.clone(); // Clone for storing in harness
 
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
-        let (actor, mailbox, oracle, _) = Actor::new(runner_context.clone(), cfg_to_clone);
+        let (actor, mailbox, oracle, _) = Actor::new(runner_context, cfg_to_clone);
         let ip_namespace = union(&ip_namespace_base, super::NAMESPACE_SUFFIX_IP);
-        runner_context.spawn(|_| actor.run());
+        actor.start();
 
         TestHarness {
             mailbox,
