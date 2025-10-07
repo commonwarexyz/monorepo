@@ -273,19 +273,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         let mut timer = self.recover_latency.timer();
         let notarization_certificate = self
             .signing
-            .assemble_certificate(
-                // FIXME
-                &[],
-                VoteContext::Notarize {
-                    proposal: &proposal,
-                },
-                // FIXME
-                &self
-                    .notarizes
-                    .iter()
-                    .map(|n| n.vote.clone())
-                    .collect::<Vec<_>>(),
-            )
+            .assemble_certificate(self.notarizes.iter().map(|n| n.vote.clone()))
             .expect("failed to recover threshold signature");
         timer.observe();
 
@@ -320,17 +308,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         let mut timer = self.recover_latency.timer();
         let nullification_certificate = self
             .signing
-            .assemble_certificate(
-                // FIXME
-                &[],
-                VoteContext::Nullify::<D> { round: self.round },
-                // FIXME
-                &self
-                    .nullifies
-                    .iter()
-                    .map(|n| n.vote.clone())
-                    .collect::<Vec<_>>(),
-            )
+            .assemble_certificate(self.nullifies.iter().map(|n| n.vote.clone()))
             .expect("failed to recover threshold signature");
         timer.observe();
 
@@ -380,19 +358,7 @@ impl<E: Clock, P: PublicKey, S: SigningScheme, D: Digest> Round<E, P, S, D> {
         // FIXME: ideally we'd be able to reuse the seed signature from notarization if we have it
         let finalization_certificate = self
             .signing
-            .assemble_certificate(
-                // FIXME
-                &[],
-                VoteContext::Finalize {
-                    proposal: &proposal,
-                },
-                // FIXME
-                &self
-                    .finalizes
-                    .iter()
-                    .map(|f| f.vote.clone())
-                    .collect::<Vec<_>>(),
-            )
+            .assemble_certificate(self.finalizes.iter().map(|f| f.vote.clone()))
             .expect("failed to recover threshold signature");
         timer.observe();
 

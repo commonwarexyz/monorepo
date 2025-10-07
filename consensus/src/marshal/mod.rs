@@ -228,15 +228,7 @@ mod tests {
 
         // Generate certificate signatures
         let finalization_certificate = signing_schemes[0]
-            .assemble_certificate(
-                // FIXME
-                NAMESPACE,
-                VoteContext::Finalize {
-                    proposal: &proposal,
-                },
-                // FIXME
-                &finalizes.map(|n| n.vote.clone()).collect::<Vec<_>>(),
-            )
+            .assemble_certificate(finalizes.map(|n| n.vote.clone()))
             .unwrap();
 
         Finalization {
@@ -258,15 +250,7 @@ mod tests {
 
         // Generate certificate signatures
         let notarization_certificate = signing_schemes[0]
-            .assemble_certificate(
-                // FIXME
-                NAMESPACE,
-                VoteContext::Notarize {
-                    proposal: &proposal,
-                },
-                // FIXME
-                &notarizes.map(|n| n.vote.clone()).collect::<Vec<_>>(),
-            )
+            .assemble_certificate(notarizes.map(|n| n.vote.clone()))
             .unwrap();
 
         Notarization {

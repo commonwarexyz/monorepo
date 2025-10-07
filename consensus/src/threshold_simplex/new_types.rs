@@ -519,13 +519,9 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         I: IntoIterator<Item = Vote<Self>>,
         Self: Sized;
 
-    fn assemble_certificate<D: Digest>(
-        &self,
-        namespace: &[u8],
-        context: VoteContext<'_, D>,
-        votes: &[Vote<Self>],
-    ) -> Result<Self::Certificate, Error>
+    fn assemble_certificate<I>(&self, votes: I) -> Result<Self::Certificate, Error>
     where
+        I: IntoIterator<Item = Vote<Self>>,
         Self: Sized;
 
     // FIXME: just return bool
@@ -680,42 +676,40 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         }
     }
 
-    fn assemble_certificate<D: Digest>(
-        &self,
-        _namespace: &[u8],
-        _context: VoteContext<'_, D>,
-        votes: &[Vote<Self>],
-    ) -> Result<Self::Certificate, Error> {
-        if votes.len() < self.threshold as usize {
+    fn assemble_certificate<I>(&self, votes: I) -> Result<Self::Certificate, Error>
+    where
+        I: IntoIterator<Item = Vote<Self>>,
+    {
+        let (proposal_partials, seed_partials): (Vec<_>, Vec<_>) = votes
+            .into_iter()
+            .map(|vote| {
+                (
+                    PartialSignature::<V> {
+                        index: vote.signer,
+                        value: vote.signature.0,
+                    },
+                    PartialSignature::<V> {
+                        index: vote.signer,
+                        value: vote.signature.1,
+                    },
+                )
+            })
+            .unzip();
+
+        if proposal_partials.len() < self.threshold as usize {
             return Err(Error::InsufficientVotes {
                 required: self.threshold,
-                actual: votes.len() as u32,
+                actual: proposal_partials.len() as u32,
             });
         }
 
-        let proposal_partials: Vec<_> = votes
-            .iter()
-            .map(|vote| PartialSignature::<V> {
-                index: vote.signer,
-                value: vote.signature.0.clone(),
-            })
-            .collect();
-
-        let seed_partials: Vec<_> = votes
-            .iter()
-            .map(|vote| PartialSignature::<V> {
-                index: vote.signer,
-                value: vote.signature.1.clone(),
-            })
-            .collect();
-
-        let (proposal_sig, seed_sig) = threshold_signature_recover_pair::<V, _>(
+        let (proposal_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
             self.threshold,
             proposal_partials.iter(),
             seed_partials.iter(),
         )?;
 
-        Ok((proposal_sig, seed_sig))
+        Ok((proposal_signature, seed_signature))
     }
 
     fn verify_vote<D: Digest>(
@@ -809,7 +803,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         I: IntoIterator<Item = Vote<Self>>,
     {
         let mut invalid = BTreeSet::new();
-        let (message_partials, seed_partials): (Vec<_>, Vec<_>) = votes
+        let (proposal_partials, seed_partials): (Vec<_>, Vec<_>) = votes
             .into_iter()
             .map(|vote| {
                 (
@@ -834,7 +828,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                     &self.polynomial,
                     Some(notarize_namespace.as_ref()),
                     notarize_message.as_ref(),
-                    message_partials.iter(),
+                    proposal_partials.iter(),
                 ) {
                     for partial in errs {
                         invalid.insert(partial.index);
@@ -865,7 +859,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                     &self.polynomial,
                     Some(nullify_namespace.as_ref()),
                     nullify_message.as_ref(),
-                    message_partials.iter(),
+                    proposal_partials.iter(),
                 ) {
                     for partial in errs {
                         invalid.insert(partial.index);
@@ -896,7 +890,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                     &self.polynomial,
                     Some(finalize_namespace.as_ref()),
                     finalize_message.as_ref(),
-                    message_partials.iter(),
+                    proposal_partials.iter(),
                 ) {
                     for partial in errs {
                         invalid.insert(partial.index);
@@ -921,12 +915,12 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             }
         }
 
-        let verified = message_partials
+        let verified = proposal_partials
             .into_iter()
             .zip(seed_partials.into_iter())
             .map(|(message, seed)| Vote {
                 signer: message.index,
-                signature: (message.value.clone(), seed.value.clone()),
+                signature: (message.value, seed.value),
             })
             .filter(|vote| !invalid.contains(&vote.signer))
             .collect();
