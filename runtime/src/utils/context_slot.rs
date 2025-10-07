@@ -119,6 +119,9 @@ impl<E: RngCore> RngCore for ContextSlot<E> {
 impl<E: CryptoRng> CryptoRng for ContextSlot<E> {}
 
 #[macro_export]
+// `spawn_ref!(owner.field, |pattern| body)` temporarily removes the context slot,
+// spawns the actor via the stored handle, then restores the context before
+// evaluating `body` with the caller-provided binding (e.g. `actor` or `mut actor`).
 macro_rules! spawn_ref {
     ($owner:ident . $field:ident, | $binding:pat_param | $body:expr) => {{
         let (__context_handle, __context_lease) = $owner.$field.take();
