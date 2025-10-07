@@ -5,6 +5,7 @@ use crate::{
     dkg::{DealOutcome, Dkg, Payload, OUTCOME_NAMESPACE},
 };
 use commonware_codec::{Decode, Encode};
+use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     bls12381::{
         dkg::{
@@ -16,7 +17,10 @@ use commonware_cryptography::{
     },
     Hasher, PrivateKey, Verifier,
 };
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::mux::{MuxHandle, SubReceiver, SubSender},
+    Receiver, Recipients, Sender,
+};
 use futures::FutureExt;
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
@@ -56,10 +60,10 @@ where
     contributors: &'ctx [P::PublicKey],
 
     /// The outbound communication channel for peers.
-    sender: &'ctx mut S,
+    sender: SubSender<S>,
 
     /// The inbound communication channel for peers.
-    receiver: &'ctx mut R,
+    receiver: SubReceiver<R>,
 
     /// The local dealer for this round.
     dealer: Dealer<P::PublicKey, V>,
@@ -94,15 +98,16 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the signer is not in the list of contributors.
-    pub fn new<E: CryptoRngCore>(
+    /// Panics if the signer is not in the list of contributors or if the sub-channel for the current
+    /// epoch could not be registered.
+    pub async fn init<E: CryptoRngCore>(
         context: &mut E,
+        epoch: Epoch,
         public: Public<V>,
         share: group::Share,
         signer: &'ctx mut P,
         contributors: &'ctx [P::PublicKey],
-        sender: &'ctx mut S,
-        receiver: &'ctx mut R,
+        mux: &'ctx mut MuxHandle<S, R>,
     ) -> Self {
         let signer_index = contributors
             .iter()
@@ -125,13 +130,15 @@ where
             CONCURRENCY,
         );
 
+        let (s, r) = mux.register(epoch as u32).await.unwrap();
+
         Self {
             signer,
             signer_index,
             previous: Output { public, share },
             contributors,
-            sender,
-            receiver,
+            sender: s,
+            receiver: r,
             dealer,
             commitment,
             shares,

@@ -1,18 +1,19 @@
 //! Validator node service entrypoint.
 
 use crate::{
-    application::{self, Supervisor, B},
-    dkg,
+    application::{self, Block, Supervisor},
+    dkg, orchestrator,
     setup::{ParticipantConfig, PeerConfig},
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal::{self, resolver::p2p as p2p_resolver},
-    threshold_simplex, Reporters,
+    Reporters,
 };
 use commonware_cryptography::{
     bls12381::primitives::{poly::public, variant::MinSig},
-    Signer,
+    ed25519::PrivateKey,
+    Sha256, Signer,
 };
 use commonware_p2p::{authenticated::discovery, utils::requester};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics};
@@ -38,15 +39,8 @@ const DKG_CHANNEL: u32 = 5;
 const MAILBOX_SIZE: usize = 10;
 const DEQUE_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
-const LEADER_TIMEOUT: Duration = Duration::from_secs(1);
-const NOTARIZATION_TIMEOUT: Duration = Duration::from_secs(2);
-const NULLIFY_RETRY: Duration = Duration::from_secs(10);
 const ACTIVITY_TIMEOUT: u64 = 256;
-const SKIP_TIMEOUT: u64 = 32;
-const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
-const FETCH_CONCURRENT: usize = 4;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
-const MAX_FETCH_COUNT: usize = 16;
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
 const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
 const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
@@ -60,6 +54,10 @@ const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
 const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: u64 = 20;
 const FINALIZED_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
+
+type H = Sha256;
+type C = PrivateKey;
+type V = MinSig;
 
 /// Run the validator node service.
 pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
@@ -98,6 +96,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
 
     let (mut network, mut oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
+    // Register all possible peers
     oracle.register(0, peer_config.peers.clone()).await;
 
     let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
@@ -118,18 +117,13 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
     let dkg_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
     let dkg_channel = network.register(DKG_CHANNEL, dkg_limit, MESSAGE_BACKLOG);
 
-    let identity = *public::<MinSig>(&polynomial);
-    let supervisor = Supervisor::new(
-        polynomial.clone(),
-        peer_config.peers.clone(),
-        config.share.clone(),
-    );
+    let identity = *public::<V>(&polynomial);
     let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
 
     let (dkg, dkg_mailbox) = dkg::Actor::new(
         context.with_label("dkg"),
         config.p2p_key.clone(),
-        peer_config.peers,
+        peer_config.peers.clone(),
         MAILBOX_SIZE,
     );
 
@@ -147,59 +141,53 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
         },
     );
 
-    let (marshal, marshal_mailbox): (_, marshal::Mailbox<MinSig, B>) = marshal::Actor::init(
-        context.with_label("marshal"),
-        marshal::Config {
-            identity,
-            partition_prefix: "engine".to_string(),
-            mailbox_size: MAILBOX_SIZE,
-            view_retention_timeout: ACTIVITY_TIMEOUT
-                .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
-            namespace: NAMESPACE.to_vec(),
-            prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
-            immutable_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-            freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
-            freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
-            freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-            freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-            freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
-            freezer_journal_buffer_pool: buffer_pool.clone(),
-            replay_buffer: REPLAY_BUFFER,
-            write_buffer: WRITE_BUFFER,
-            codec_config: threshold as usize,
-            max_repair: MAX_REPAIR,
-        },
-    )
-    .await;
+    let (marshal, marshal_mailbox): (_, marshal::Mailbox<V, Block<H, C, V>>) =
+        marshal::Actor::init(
+            context.with_label("marshal"),
+            marshal::Config {
+                identity,
+                partition_prefix: "engine".to_string(),
+                mailbox_size: MAILBOX_SIZE,
+                view_retention_timeout: ACTIVITY_TIMEOUT
+                    .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
+                namespace: NAMESPACE.to_vec(),
+                prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
+                immutable_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
+                freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
+                freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
+                freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
+                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
+                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
+                freezer_journal_buffer_pool: buffer_pool.clone(),
+                replay_buffer: REPLAY_BUFFER,
+                write_buffer: WRITE_BUFFER,
+                codec_config: threshold as usize,
+                max_repair: MAX_REPAIR,
+            },
+        )
+        .await;
 
-    let consensus = threshold_simplex::Engine::new(
-        context.with_label("consensus"),
-        threshold_simplex::Config {
-            epoch: 0,
+    let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
+        context.with_label("orchestrator"),
+        orchestrator::Config {
+            oracle,
+            signer: config.p2p_key.clone(),
+            application: application_mailbox.clone(),
+            marshal: marshal_mailbox.clone(),
             namespace: NAMESPACE.to_vec(),
-            crypto: config.p2p_key.clone(),
-            automaton: application_mailbox.clone(),
-            relay: application_mailbox.clone(),
-            reporter: marshal_mailbox.clone(),
-            supervisor: supervisor.clone(),
-            partition: "engine-consensus".to_string(),
+            validators: peer_config.peers.clone(),
+            muxer_size: MAILBOX_SIZE,
             mailbox_size: MAILBOX_SIZE,
-            leader_timeout: LEADER_TIMEOUT,
-            notarization_timeout: NOTARIZATION_TIMEOUT,
-            nullify_retry: NULLIFY_RETRY,
-            fetch_timeout: FETCH_TIMEOUT,
-            activity_timeout: ACTIVITY_TIMEOUT,
-            skip_timeout: SKIP_TIMEOUT,
-            max_fetch_count: MAX_FETCH_COUNT,
-            fetch_concurrent: FETCH_CONCURRENT,
-            fetch_rate_per_peer: resolver_limit,
-            replay_buffer: REPLAY_BUFFER,
-            write_buffer: WRITE_BUFFER,
-            blocker: oracle,
-            buffer_pool,
+            partition_prefix: "consensus".to_string(),
         },
     );
 
+    // Create a static resolver for backfill
+    let supervisor = Supervisor::<V, _>::new(
+        polynomial.clone(),
+        peer_config.peers.clone(),
+        config.share.clone(),
+    );
     let resolver_cfg = p2p_resolver::Config {
         public_key: config.p2p_key.public_key(),
         coordinator: supervisor.clone(),
@@ -219,11 +207,17 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
     let finalized_reporter = Reporters::from((application_mailbox, dkg_mailbox.clone()));
 
     let p2p_handle = network.start();
-    let dkg_handle = dkg.start(polynomial, config.share, dkg_channel);
+    let dkg_handle = dkg.start(
+        polynomial.clone(),
+        config.share.clone(),
+        orchestrator_mailbox,
+        dkg_channel,
+    );
     let application_handle = application.start(marshal_mailbox, dkg_mailbox);
     let buffer_handle = buffer.start(broadcaster);
     let marshal_handle = marshal.start(finalized_reporter, buffered_mailbox, p2p_resolver);
-    let consensus_handle = consensus.start(pending, recovered, resolver);
+    let orchestrator_handle =
+        orchestrator.start(pending, recovered, resolver, polynomial, config.share);
 
     if let Err(e) = try_join_all(vec![
         p2p_handle,
@@ -231,7 +225,7 @@ pub async fn run(context: tokio::Context, args: super::ValidatorArgs) {
         application_handle,
         buffer_handle,
         marshal_handle,
-        consensus_handle,
+        orchestrator_handle,
     ])
     .await
     {
