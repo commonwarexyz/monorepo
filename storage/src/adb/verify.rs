@@ -80,7 +80,13 @@ pub fn digests_required_for_proof<D: Digest>(
 /// Create a [Proof] from a op_count and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
+///
+/// # Panics
+///
+/// Panics if:
+/// - op_count exceeds MAX_LOCATION
 pub fn create_proof<D: Digest>(op_count: Location, digests: Vec<D>) -> Proof<D> {
+    assert!(op_count.is_valid(), "op_count exceeds MAX_LOCATION");
     Proof::<D> {
         size: Position::from(op_count),
         digests,
