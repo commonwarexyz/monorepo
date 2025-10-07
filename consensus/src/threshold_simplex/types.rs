@@ -92,7 +92,7 @@ impl<S: SigningScheme> Read for Vote<S> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let signer = u32::read(reader)?;
-        let signature = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;
+        let signature = S::Signature::read(reader)?;
 
         Ok(Self { signer, signature })
     }
@@ -124,7 +124,7 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         + Sync
         + EncodeSize
         + Write
-        + Read<Cfg = Self::SignatureReadCfg>;
+        + Read<Cfg = ()>;
 
     type Certificate: Clone
         + Debug
@@ -139,7 +139,6 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
 
     type Randomness: EncodeSize + Write + Send;
 
-    type SignatureReadCfg;
     type CertificateReadCfg;
 
     fn can_sign(&self) -> bool;
@@ -191,7 +190,6 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
 
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
 
-    fn signature_read_cfg() -> Self::SignatureReadCfg;
     fn certificate_read_cfg() -> Self::CertificateReadCfg;
 }
 
@@ -1912,10 +1910,10 @@ impl<S: SigningScheme, D: Digest> Read for ConflictingNotarize<S, D> {
         let signer = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
         let payload_1 = D::read(reader)?;
-        let signature_1 = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;
+        let signature_1 = S::Signature::read(reader)?;
         let parent_2 = UInt::read(reader)?.into();
         let payload_2 = D::read(reader)?;
-        let signature_2 = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;
+        let signature_2 = S::Signature::read(reader)?;
         // FIXME: need to store Notarize directly
         // if signature_1.index != signature_2.index {
         //     return Err(Error::Invalid(
@@ -2088,10 +2086,10 @@ impl<S: SigningScheme, D: Digest> Read for ConflictingFinalize<S, D> {
         let signer = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
         let payload_1 = D::read(reader)?;
-        let signature_1 = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;
+        let signature_1 = S::Signature::read(reader)?;
         let parent_2 = UInt::read(reader)?.into();
         let payload_2 = D::read(reader)?;
-        let signature_2 = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;
+        let signature_2 = S::Signature::read(reader)?;
         // FIXME: need to store Finalize directly
         // if signature_1.index != signature_2.index {
         //     return Err(Error::Invalid(
@@ -2230,8 +2228,8 @@ impl<S: SigningScheme, D: Digest> Read for NullifyFinalize<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let signer = UInt::read(reader)?.into();
-        let view_signature = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;
-        let finalize_signature = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;
+        let view_signature = S::Signature::read(reader)?;
+        let finalize_signature = S::Signature::read(reader)?;
         // FIXME: need to store Nullify/Finalize directly
         // if view_signature.index != finalize_signature.index {
         //     return Err(Error::Invalid(

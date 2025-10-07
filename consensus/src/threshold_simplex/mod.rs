@@ -3374,7 +3374,7 @@ mod tests {
                 };
 
                 // Decrypt the message using the seed signature
-                let seed_signature = notarization.certificate.1;
+                let seed_signature = notarization.certificate.seed_signature;
                 let decrypted = decrypt::<V>(&seed_signature, &ciphertext)
                     .expect("Decryption should succeed with valid seed signature");
                 assert_eq!(

@@ -9,7 +9,8 @@ use crate::{
     },
     Viewable,
 };
-use commonware_codec::Encode;
+use bytes::{Buf, BufMut};
+use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
@@ -64,13 +65,45 @@ impl<V: Variant> Scheme<V> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Signature<V: Variant> {
+    pub message_signature: V::Signature,
+    pub seed_signature: V::Signature,
+}
+
+impl<V: Variant> Write for Signature<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.message_signature.write(writer);
+        self.seed_signature.write(writer);
+    }
+}
+
+impl<V: Variant> Read for Signature<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let message_signature = V::Signature::read(reader)?;
+        let seed_signature = V::Signature::read(reader)?;
+
+        Ok(Self {
+            message_signature,
+            seed_signature,
+        })
+    }
+}
+
+impl<V: Variant> EncodeSize for Signature<V> {
+    fn encode_size(&self) -> usize {
+        self.message_signature.encode_size() + self.seed_signature.encode_size()
+    }
+}
+
 impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
-    type Signature = (V::Signature, V::Signature);
-    type Certificate = (V::Signature, V::Signature);
+    type Signature = Signature<V>;
+    type Certificate = Signature<V>;
     type Randomness = V::Signature;
 
-    type SignatureReadCfg = ((), ());
-    type CertificateReadCfg = ((), ());
+    type CertificateReadCfg = ();
 
     fn can_sign(&self) -> bool {
         self.share.is_some()
@@ -102,7 +135,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 )
                 .value;
 
-                (proposal_signature, seed_signature)
+                Signature {
+                    message_signature: proposal_signature,
+                    seed_signature,
+                }
             }
             VoteContext::Nullify { round } => {
                 let nullify_namespace = nullify_namespace(namespace);
@@ -122,7 +158,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 )
                 .value;
 
-                (round_signature, seed_signature)
+                Signature {
+                    message_signature: round_signature,
+                    seed_signature,
+                }
             }
             VoteContext::Finalize { proposal } => {
                 let finalize_namespace = finalize_namespace(namespace);
@@ -143,7 +182,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 )
                 .value;
 
-                (proposal_signature, seed_signature)
+                Signature {
+                    message_signature: proposal_signature,
+                    seed_signature,
+                }
             }
         };
 
@@ -163,11 +205,11 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 (
                     PartialSignature::<V> {
                         index: vote.signer,
-                        value: vote.signature.0,
+                        value: vote.signature.message_signature,
                     },
                     PartialSignature::<V> {
                         index: vote.signer,
-                        value: vote.signature.1,
+                        value: vote.signature.seed_signature,
                     },
                 )
             })
@@ -184,7 +226,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
         )
         .ok()?;
 
-        Some((message_signature, seed_signature))
+        Some(Signature {
+            message_signature,
+            seed_signature,
+        })
     }
 
     fn verify_vote<D: Digest>(
@@ -208,7 +253,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let seed_message = proposal.round.encode();
                 let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
 
-                let signature = aggregate_signatures::<V, _>(&[vote.signature.0, vote.signature.1]);
+                let signature = aggregate_signatures::<V, _>(&[
+                    vote.signature.message_signature,
+                    vote.signature.seed_signature,
+                ]);
 
                 aggregate_verify_multiple_messages::<V, _>(
                     evaluated,
@@ -230,7 +278,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let seed_namespace = seed_namespace(namespace);
                 let seed_message = (Some(seed_namespace.as_ref()), nullify_encoded.as_ref());
 
-                let signature = aggregate_signatures::<V, _>(&[vote.signature.0, vote.signature.1]);
+                let signature = aggregate_signatures::<V, _>(&[
+                    vote.signature.message_signature,
+                    vote.signature.seed_signature,
+                ]);
 
                 aggregate_verify_multiple_messages::<V, _>(
                     evaluated,
@@ -254,7 +305,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let seed_message = proposal.round.encode();
                 let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
 
-                let signature = aggregate_signatures::<V, _>(&[vote.signature.0, vote.signature.1]);
+                let signature = aggregate_signatures::<V, _>(&[
+                    vote.signature.message_signature,
+                    vote.signature.seed_signature,
+                ]);
 
                 aggregate_verify_multiple_messages::<V, _>(
                     evaluated,
@@ -283,11 +337,11 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 (
                     PartialSignature::<V> {
                         index: vote.signer,
-                        value: vote.signature.0,
+                        value: vote.signature.message_signature,
                     },
                     PartialSignature::<V> {
                         index: vote.signer,
-                        value: vote.signature.1,
+                        value: vote.signature.seed_signature,
                     },
                 )
             })
@@ -393,7 +447,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
             .zip(seed_partials)
             .map(|(message, seed)| Vote {
                 signer: message.index,
-                signature: (message.value, seed.value),
+                signature: Signature {
+                    message_signature: message.value,
+                    seed_signature: seed.value,
+                },
             })
             .filter(|vote| !invalid.contains(&vote.signer))
             .collect();
@@ -420,7 +477,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let seed_message = proposal.round.encode();
                 let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
 
-                let signature = aggregate_signatures::<V, _>(&[certificate.0, certificate.1]);
+                let signature = aggregate_signatures::<V, _>(&[
+                    certificate.message_signature,
+                    certificate.seed_signature,
+                ]);
 
                 aggregate_verify_multiple_messages::<V, _>(
                     &self.identity,
@@ -438,7 +498,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let seed_namespace = seed_namespace(namespace);
                 let seed_message = (Some(seed_namespace.as_ref()), nullify_encoded.as_ref());
 
-                let signature = aggregate_signatures::<V, _>(&[certificate.0, certificate.1]);
+                let signature = aggregate_signatures::<V, _>(&[
+                    certificate.message_signature,
+                    certificate.seed_signature,
+                ]);
 
                 aggregate_verify_multiple_messages::<V, _>(
                     &self.identity,
@@ -458,7 +521,10 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let seed_message = proposal.round.encode();
                 let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
 
-                let signature = aggregate_signatures::<V, _>(&[certificate.0, certificate.1]);
+                let signature = aggregate_signatures::<V, _>(&[
+                    certificate.message_signature,
+                    certificate.seed_signature,
+                ]);
 
                 aggregate_verify_multiple_messages::<V, _>(
                     &self.identity,
@@ -491,19 +557,19 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                     let notarize_message = proposal.encode();
                     let notarize_message = (Some(notarize_namespace.as_slice()), notarize_message);
                     messages.push(notarize_message);
-                    signatures.push(&certificate.0);
+                    signatures.push(&certificate.message_signature);
 
                     // Add seed message (if not already present)
                     if let Some(previous) = seeds.get(&proposal.view()) {
-                        if *previous != &certificate.1 {
+                        if *previous != &certificate.seed_signature {
                             return false;
                         }
                     } else {
                         let seed_message = proposal.round.encode();
                         let seed_message = (Some(seed_namespace.as_slice()), seed_message);
                         messages.push(seed_message);
-                        signatures.push(&certificate.1);
-                        seeds.insert(proposal.view(), &certificate.1);
+                        signatures.push(&certificate.seed_signature);
+                        seeds.insert(proposal.view(), &certificate.seed_signature);
                     }
                 }
                 VoteContext::Nullify { round } => {
@@ -512,18 +578,18 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                     let nullify_message =
                         (Some(nullify_namespace.as_slice()), nullify_encoded.clone());
                     messages.push(nullify_message);
-                    signatures.push(&certificate.0);
+                    signatures.push(&certificate.message_signature);
 
                     // Add seed message (if not already present)
                     if let Some(previous) = seeds.get(&round.view()) {
-                        if *previous != &certificate.1 {
+                        if *previous != &certificate.seed_signature {
                             return false;
                         }
                     } else {
                         let seed_message = (Some(seed_namespace.as_slice()), nullify_encoded);
                         messages.push(seed_message);
-                        signatures.push(&certificate.1);
-                        seeds.insert(round.view(), &certificate.1);
+                        signatures.push(&certificate.seed_signature);
+                        seeds.insert(round.view(), &certificate.seed_signature);
                     }
                 }
                 VoteContext::Finalize { proposal } => {
@@ -531,19 +597,19 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                     let finalize_message = proposal.encode();
                     let finalize_message = (Some(finalize_namespace.as_slice()), finalize_message);
                     messages.push(finalize_message);
-                    signatures.push(&certificate.0);
+                    signatures.push(&certificate.message_signature);
 
                     // Add seed message (if not already present)
                     if let Some(previous) = seeds.get(&proposal.view()) {
-                        if *previous != &certificate.1 {
+                        if *previous != &certificate.seed_signature {
                             return false;
                         }
                     } else {
                         let seed_message = proposal.round.encode();
                         let seed_message = (Some(seed_namespace.as_slice()), seed_message);
                         messages.push(seed_message);
-                        signatures.push(&certificate.1);
-                        seeds.insert(proposal.view(), &certificate.1);
+                        signatures.push(&certificate.seed_signature);
+                        seeds.insert(proposal.view(), &certificate.seed_signature);
                     }
                 }
             }
@@ -564,15 +630,11 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     }
 
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness> {
-        Some(certificate.1)
-    }
-
-    fn signature_read_cfg() -> Self::SignatureReadCfg {
-        ((), ())
+        Some(certificate.seed_signature)
     }
 
     fn certificate_read_cfg() -> Self::CertificateReadCfg {
-        ((), ())
+        ()
     }
 }
 

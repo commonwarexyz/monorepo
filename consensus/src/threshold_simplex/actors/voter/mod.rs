@@ -50,7 +50,7 @@ mod tests {
         threshold_simplex::{
             actors::{batcher, resolver},
             mocks,
-            signing_scheme::bls12381_threshold,
+            signing_scheme::{bls12381_threshold, bls12381_threshold::Signature},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
@@ -237,11 +237,11 @@ mod tests {
                     (
                         PartialSignature::<MinSig> {
                             index: finalize.vote.signer,
-                            value: finalize.vote.signature.0,
+                            value: finalize.vote.signature.message_signature,
                         },
                         PartialSignature::<MinSig> {
                             index: notarize.vote.signer,
-                            value: notarize.vote.signature.1,
+                            value: notarize.vote.signature.seed_signature,
                         },
                     )
                 })
@@ -256,7 +256,10 @@ mod tests {
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
             let finalization = Finalization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal,
-                certificate: (proposal_signature, seed_signature),
+                certificate: Signature {
+                    message_signature: proposal_signature,
+                    seed_signature,
+                },
             };
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
@@ -309,11 +312,11 @@ mod tests {
                     (
                         PartialSignature::<MinSig> {
                             index: finalize.vote.signer,
-                            value: finalize.vote.signature.0,
+                            value: finalize.vote.signature.message_signature,
                         },
                         PartialSignature::<MinSig> {
                             index: notarize.vote.signer,
-                            value: notarize.vote.signature.1,
+                            value: notarize.vote.signature.seed_signature,
                         },
                     )
                 })
@@ -328,7 +331,10 @@ mod tests {
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
             let notarization = Notarization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal,
-                certificate: (proposal_signature, seed_signature),
+                certificate: Signature {
+                    message_signature: proposal_signature,
+                    seed_signature,
+                },
             };
             mailbox
                 .verified(vec![Voter::Notarization(notarization)])
@@ -345,11 +351,11 @@ mod tests {
                     (
                         PartialSignature::<MinSig> {
                             index: finalize.vote.signer,
-                            value: finalize.vote.signature.0,
+                            value: finalize.vote.signature.message_signature,
                         },
                         PartialSignature::<MinSig> {
                             index: notarize.vote.signer,
-                            value: notarize.vote.signature.1,
+                            value: notarize.vote.signature.seed_signature,
                         },
                     )
                 })
@@ -364,7 +370,10 @@ mod tests {
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
             let finalization = Finalization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal,
-                certificate: (proposal_signature, seed_signature),
+                certificate: Signature {
+                    message_signature: proposal_signature,
+                    seed_signature,
+                },
             };
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
@@ -581,11 +590,11 @@ mod tests {
                     (
                         PartialSignature::<MinSig> {
                             index: finalize.vote.signer,
-                            value: finalize.vote.signature.0,
+                            value: finalize.vote.signature.message_signature,
                         },
                         PartialSignature::<MinSig> {
                             index: notarize.vote.signer,
-                            value: notarize.vote.signature.1,
+                            value: notarize.vote.signature.seed_signature,
                         },
                     )
                 })
@@ -602,7 +611,10 @@ mod tests {
             .unwrap();
             let finalization = Finalization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal: proposal_lf,
-                certificate: (final_prop_sig, final_seed_sig),
+                certificate: Signature {
+                    message_signature: final_prop_sig,
+                    seed_signature: final_seed_sig,
+                },
             };
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
@@ -657,11 +669,11 @@ mod tests {
                     (
                         PartialSignature::<MinSig> {
                             index: notarize.vote.signer,
-                            value: notarize.vote.signature.0,
+                            value: notarize.vote.signature.message_signature,
                         },
                         PartialSignature::<MinSig> {
                             index: notarize.vote.signer,
-                            value: notarize.vote.signature.1,
+                            value: notarize.vote.signature.seed_signature,
                         },
                     )
                 })
@@ -678,7 +690,10 @@ mod tests {
             .unwrap();
             let notarization_for_floor = Notarization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal: proposal_jft,
-                certificate: (not_prop_sig, not_seed_sig),
+                certificate: Signature {
+                    message_signature: not_prop_sig,
+                    seed_signature: not_seed_sig,
+                },
             };
             let msg = Voter::Notarization(notarization_for_floor).encode().into();
             peer_recovered_sender
@@ -716,11 +731,11 @@ mod tests {
                     (
                         PartialSignature::<MinSig> {
                             index: notarize.vote.signer,
-                            value: notarize.vote.signature.0,
+                            value: notarize.vote.signature.message_signature,
                         },
                         PartialSignature::<MinSig> {
                             index: notarize.vote.signer,
-                            value: notarize.vote.signature.1,
+                            value: notarize.vote.signature.seed_signature,
                         },
                     )
                 })
@@ -737,7 +752,10 @@ mod tests {
             .unwrap();
             let notarization_for_bft = Notarization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal: proposal_bft,
-                certificate: (not_prop_sig, not_seed_sig),
+                certificate: Signature {
+                    message_signature: not_prop_sig,
+                    seed_signature: not_seed_sig,
+                },
             };
             let msg = Voter::Notarization(notarization_for_bft).encode().into();
             peer_recovered_sender
@@ -769,11 +787,11 @@ mod tests {
                     (
                         PartialSignature::<MinSig> {
                             index: finalize.vote.signer,
-                            value: finalize.vote.signature.0,
+                            value: finalize.vote.signature.message_signature,
                         },
                         PartialSignature::<MinSig> {
                             index: notarize.vote.signer,
-                            value: notarize.vote.signature.1,
+                            value: notarize.vote.signature.seed_signature,
                         },
                     )
                 })
@@ -790,7 +808,10 @@ mod tests {
             .unwrap();
             let finalization = Finalization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal: proposal_lf,
-                certificate: (final_prop_sig, final_seed_sig),
+                certificate: Signature {
+                    message_signature: final_prop_sig,
+                    seed_signature: final_seed_sig,
+                },
             };
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
@@ -950,11 +971,11 @@ mod tests {
                         finalize.clone(),
                         PartialSignature::<MinSig> {
                             index: finalize.vote.signer,
-                            value: finalize.vote.signature.0,
+                            value: finalize.vote.signature.message_signature,
                         },
                         PartialSignature::<MinSig> {
                             index: finalize.vote.signer,
-                            value: finalize.vote.signature.1,
+                            value: finalize.vote.signature.seed_signature,
                         },
                     )
                 })
@@ -992,8 +1013,11 @@ mod tests {
             let recorded = finalizations
                 .get(&view)
                 .expect("missing recorded finalization");
-            assert_eq!(recorded.certificate.0, expected_proposal_signature);
-            assert_eq!(recorded.certificate.1, expected_seed_signature);
+            assert_eq!(
+                recorded.certificate.message_signature,
+                expected_proposal_signature
+            );
+            assert_eq!(recorded.certificate.seed_signature, expected_seed_signature);
         });
     }
 }
