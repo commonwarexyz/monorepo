@@ -9,7 +9,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_runtime::{
-    spawn_with_context, Clock, ContextSlot, Handle, Metrics as RuntimeMetrics, Spawner,
+    spawn_ref, Clock, ContextSlot, Handle, Metrics as RuntimeMetrics, Spawner,
 };
 use commonware_utils::{union, IpAddrExt, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
@@ -153,7 +153,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        spawn_with_context!(self.context, |mut actor| actor.run())
+        spawn_ref!(self.context, |mut actor| actor.run())
     }
 
     async fn run(mut self) {

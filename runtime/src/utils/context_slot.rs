@@ -119,7 +119,7 @@ impl<E: RngCore> RngCore for ContextSlot<E> {
 impl<E: CryptoRng> CryptoRng for ContextSlot<E> {}
 
 #[macro_export]
-macro_rules! spawn_with_context {
+macro_rules! spawn_ref {
     ($owner:ident . $field:ident, |mut $actor:ident| $body:expr) => {{
         let (__context_handle, __context_lease) = $owner.$field.take();
         __context_handle.spawn(move |__runtime_context| {
