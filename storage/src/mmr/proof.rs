@@ -194,7 +194,7 @@ impl<D: Digest> Proof<D> {
         for (_, loc) in elements {
             if !loc.is_valid() {
                 #[cfg(feature = "std")]
-                debug!(loc = ?loc, "location too large");
+                debug!(?loc, "location too large");
                 return false;
             }
         }
