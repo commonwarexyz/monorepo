@@ -1,6 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use commonware_codec::RangeCfg;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::sequence::U64;
@@ -37,7 +38,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let cfg = Config {
             partition: "metadata_operations_fuzz_test".to_string(),
-            codec_config: ((0..).into(), ()),
+            codec_config: (RangeCfg::new(0..), ()),
         };
         let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
             .await

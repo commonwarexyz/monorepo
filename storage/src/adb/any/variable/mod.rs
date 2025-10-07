@@ -864,6 +864,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 pub(super) mod test {
     use super::*;
     use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr, translator::TwoCap};
+    use commonware_codec::RangeCfg;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
@@ -873,7 +874,7 @@ pub(super) mod test {
     const PAGE_SIZE: usize = 77;
     const PAGE_CACHE_SIZE: usize = 9;
 
-    fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
+    fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -883,7 +884,7 @@ pub(super) mod test {
             log_items_per_section: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
+            log_codec_config: (RangeCfg::new(0..=10000), ()),
             locations_journal_partition: format!("locations_journal_{suffix}"),
             locations_items_per_blob: NZU64!(7),
             translator: TwoCap,

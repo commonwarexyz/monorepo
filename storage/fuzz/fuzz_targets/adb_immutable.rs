@@ -97,7 +97,7 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     (0..actual_size).map(|_| rng.gen()).collect()
 }
 
-fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg, ())> {
+fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("journal_{suffix}"),
         mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -106,7 +106,7 @@ fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg, ())> {
         log_journal_partition: format!("log_journal_{suffix}"),
         log_items_per_section: NZU64!(ITEMS_PER_SECTION),
         log_compression: None,
-        log_codec_config: ((0..=10000).into(), ()),
+        log_codec_config: (RangeCfg::new(0..=10000), ()),
         log_write_buffer: NZUsize!(1024),
         locations_journal_partition: format!("locations_journal_{suffix}"),
         locations_items_per_blob: NZU64!(7),

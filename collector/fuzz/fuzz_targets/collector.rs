@@ -49,7 +49,7 @@ impl Write for FuzzRequest {
 }
 
 impl Read for FuzzRequest {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let data = Vec::read_range(buf, *cfg)?;
@@ -91,7 +91,7 @@ impl Write for FuzzResponse {
 }
 
 impl Read for FuzzResponse {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let result = Vec::read_range(buf, *cfg)?;
@@ -405,9 +405,9 @@ fn fuzz(input: FuzzInput) {
                         handler,
                         mailbox_size: (mailbox_size as usize),
                         priority_request,
-                        request_codec: RangeCfg::from(..=MAX_LEN),
+                        request_codec: RangeCfg::new(..=MAX_LEN),
                         priority_response,
-                        response_codec: RangeCfg::from(..=MAX_LEN),
+                        response_codec: RangeCfg::new(..=MAX_LEN),
                     };
 
                     let (engine, mailbox) = Engine::new(context.clone(), config);

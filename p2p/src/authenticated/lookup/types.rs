@@ -53,7 +53,7 @@ impl Write for Message {
 }
 
 impl Read for Message {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let message_type = <u8>::read(buf)?;

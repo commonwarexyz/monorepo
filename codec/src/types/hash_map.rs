@@ -92,7 +92,7 @@ impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V
 
 // Read implementation for HashMap
 impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> {
-    type Cfg = (RangeCfg, (K::Cfg, V::Cfg));
+    type Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg));
 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
@@ -123,14 +123,14 @@ mod tests {
     // Manual round trip test function for HashMap with non-default configs
     fn round_trip_hash<K, V, KCfg, VCfg>(
         map: &HashMap<K, V>,
-        range_cfg: RangeCfg,
+        range_cfg: RangeCfg<usize>,
         k_cfg: KCfg,
         v_cfg: VCfg,
     ) where
         K: Write + EncodeSize + Read<Cfg = KCfg> + Clone + Ord + Hash + Eq + PartialEq + Debug,
         V: Write + EncodeSize + Read<Cfg = VCfg> + Clone + PartialEq + Debug,
-        HashMap<K, V>: Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
-            + Decode<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
+        HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
+            + Decode<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
             + PartialEq
             + Write
             + EncodeSize,
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn test_empty_hashmap() {
         let map = HashMap::<u32, u64>::new();
-        round_trip_hash(&map, (..).into(), (), ());
+        round_trip_hash(&map, RangeCfg::new(..), (), ());
         assert_eq!(map.encode_size(), 1);
         let encoded = map.encode();
         assert_eq!(encoded, 0usize.encode());
@@ -160,7 +160,7 @@ mod tests {
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
         map.insert(2u32, 200u64);
-        round_trip_hash(&map, (..).into(), (), ());
+        round_trip_hash(&map, RangeCfg::new(..), (), ());
         assert_eq!(map.encode_size(), 1 + 3 * (u32::SIZE + u64::SIZE));
     }
 
@@ -171,7 +171,7 @@ mod tests {
         for i in 0..1000 {
             map.insert(i as u16, i as u64 * 2);
         }
-        round_trip_hash(&map, (0..=1000).into(), (), ());
+        round_trip_hash(&map, RangeCfg::new(0..=1000), (), ());
 
         // Variable-size items
         let mut map = HashMap::new();
@@ -180,9 +180,9 @@ mod tests {
         }
         round_trip_hash(
             &map,
-            (0..=1000).into(),
-            (..=1000).into(),
-            (1000..=2000).into(),
+            RangeCfg::new(0..=1000),
+            RangeCfg::new(..=1000),
+            RangeCfg::new(1000..=2000),
         );
     }
 
@@ -193,9 +193,9 @@ mod tests {
         map.insert(Bytes::from_static(b"banana"), vec![3, 4, 5]);
         map.insert(Bytes::from_static(b"cherry"), vec![]);
 
-        let map_range = RangeCfg::from(0..=10);
-        let key_range = RangeCfg::from(..=10);
-        let val_range = RangeCfg::from(0..=100);
+        let map_range = RangeCfg::new(0..=10);
+        let key_range = RangeCfg::new(..=10);
+        let val_range = RangeCfg::new(0..=100);
 
         round_trip_hash(&map, map_range, key_range, (val_range, ()));
     }
@@ -207,7 +207,7 @@ mod tests {
         map.insert(5u32, 500u64);
 
         let encoded = map.encode();
-        let config_tuple = ((0..=1).into(), ((), ()));
+        let config_tuple = (RangeCfg::new(0..=1), ((), ()));
 
         let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::InvalidLength(2))));
@@ -218,9 +218,9 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(Bytes::from_static(b"key1"), vec![1u8, 2u8, 3u8, 4u8, 5u8]);
 
-        let key_range = RangeCfg::from(..=10);
-        let map_range = RangeCfg::from(0..=10);
-        let restrictive_val_range = RangeCfg::from(0..=3);
+        let key_range = RangeCfg::new(..=10);
+        let map_range = RangeCfg::new(0..=10);
+        let restrictive_val_range = RangeCfg::new(0..=3);
 
         let encoded = map.encode();
         let config_tuple = (map_range, (key_range, (restrictive_val_range, ())));
@@ -238,7 +238,7 @@ mod tests {
         2u32.write(&mut encoded); // Key 2 (out of order)
         200u64.write(&mut encoded); // Value 200
 
-        let range = (..).into();
+        let range = RangeCfg::new(..);
         let config_tuple = (range, ((), ()));
 
         let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
@@ -257,7 +257,7 @@ mod tests {
         1u32.write(&mut encoded); // Duplicate Key 1
         200u64.write(&mut encoded); // Value 200
 
-        let range = (..).into();
+        let range = RangeCfg::new(..);
         let config_tuple = (range, ((), ()));
 
         let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
@@ -276,7 +276,7 @@ mod tests {
         let mut encoded = map.encode();
         encoded.truncate(map.encode_size() - 10); // Truncate during last key/value pair
 
-        let range = (..).into();
+        let range = RangeCfg::new(..);
         let config_tuple = (range, ((), ()));
         let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::EndOfBuffer)));
@@ -291,7 +291,7 @@ mod tests {
         let mut encoded = map.encode();
         encoded.truncate(map.encode_size() - 4); // Truncate during last value
 
-        let range = RangeCfg::from(..);
+        let range = RangeCfg::new(..);
         let config_tuple = (range, ((), ()));
         let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::EndOfBuffer)));
@@ -306,7 +306,7 @@ mod tests {
         encoded.put_u8(0xFF); // Add extra byte
 
         // Use decode_cfg which enforces buffer is fully consumed
-        let config_tuple = ((..).into(), ((), ()));
+        let config_tuple = (RangeCfg::new(..), ((), ()));
         let result = HashMap::<u32, u64>::decode_cfg(encoded.clone(), &config_tuple);
         assert!(matches!(result, Err(Error::ExtraData(1))));
 

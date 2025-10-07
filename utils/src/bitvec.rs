@@ -543,7 +543,7 @@ impl Write for BitVec {
 }
 
 impl Read for BitVec {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
         // Parse length
@@ -967,7 +967,7 @@ mod tests {
     fn test_codec_roundtrip() {
         let original = BitVec::from_bools(&[true, false, true, false, true]);
         let mut buf = original.encode();
-        let decoded = BitVec::decode_cfg(&mut buf, &(..).into()).unwrap();
+        let decoded = BitVec::decode_cfg(&mut buf, &RangeCfg::new(..)).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -978,13 +978,13 @@ mod tests {
 
         let mut buf_clone1 = buf.clone();
         assert!(matches!(
-            BitVec::decode_cfg(&mut buf_clone1, &(..=4usize).into()),
+            BitVec::decode_cfg(&mut buf_clone1, &RangeCfg::new(..=4usize)),
             Err(CodecError::InvalidLength(_))
         ));
 
         let mut buf_clone2 = buf.clone();
         assert!(matches!(
-            BitVec::decode_cfg(&mut buf_clone2, &(6usize..).into()),
+            BitVec::decode_cfg(&mut buf_clone2, &RangeCfg::new(6usize..)),
             Err(CodecError::InvalidLength(_))
         ));
     }
@@ -995,7 +995,7 @@ mod tests {
         1usize.write(&mut buf); // write the bit length as 1
         (2 as Block).write(&mut buf); // set two bits
         assert!(matches!(
-            BitVec::decode_cfg(&mut buf, &(..).into()),
+            BitVec::decode_cfg(&mut buf, &RangeCfg::new(..)),
             Err(CodecError::Invalid("BitVec", "trailing bits"))
         ));
     }

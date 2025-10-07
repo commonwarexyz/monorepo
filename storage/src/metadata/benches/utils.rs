@@ -1,3 +1,4 @@
+use commonware_codec::RangeCfg;
 use commonware_runtime::tokio::Context;
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::sequence::U64;
@@ -17,7 +18,7 @@ pub type Val = Vec<u8>;
 pub async fn init(ctx: Context) -> MetadataType {
     let cfg = Config {
         partition: PARTITION.into(),
-        codec_config: ((0..).into(), ()),
+        codec_config: (RangeCfg::new(0..), ()),
     };
     Metadata::init(ctx, cfg).await.unwrap()
 }

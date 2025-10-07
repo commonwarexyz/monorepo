@@ -81,7 +81,7 @@ impl<K: Ord + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
 }
 
 impl<K: Read + Clone + Ord + Eq> Read for BTreeSet<K> {
-    type Cfg = (RangeCfg, K::Cfg);
+    type Cfg = (RangeCfg<usize>, K::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
@@ -106,11 +106,11 @@ mod tests {
     use core::fmt::Debug;
 
     // Generic round trip test function for BTreeSet
-    fn round_trip_btree<K>(set: &BTreeSet<K>, range_cfg: RangeCfg, item_cfg: K::Cfg)
+    fn round_trip_btree<K>(set: &BTreeSet<K>, range_cfg: RangeCfg<usize>, item_cfg: K::Cfg)
     where
         K: Write + EncodeSize + Read + Clone + Ord + Eq + Debug + PartialEq,
-        BTreeSet<K>: Read<Cfg = (RangeCfg, K::Cfg)>
-            + Decode<Cfg = (RangeCfg, K::Cfg)>
+        BTreeSet<K>: Read<Cfg = (RangeCfg<usize>, K::Cfg)>
+            + Decode<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Debug
             + PartialEq
             + Write
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn test_empty_btreeset() {
         let set = BTreeSet::<u32>::new();
-        round_trip_btree(&set, (..).into(), ());
+        round_trip_btree(&set, RangeCfg::new(..), ());
         assert_eq!(set.encode_size(), 1); // varint 0
         let encoded = set.encode();
         assert_eq!(encoded, Bytes::from_static(&[0]));
@@ -138,7 +138,7 @@ mod tests {
         set.insert(1u32);
         set.insert(5u32);
         set.insert(2u32);
-        round_trip_btree(&set, (..).into(), ());
+        round_trip_btree(&set, RangeCfg::new(..), ());
         assert_eq!(set.encode_size(), 1 + 3 * u32::SIZE);
     }
 
@@ -146,11 +146,11 @@ mod tests {
     fn test_large_btreeset() {
         // Fixed-size items
         let set: BTreeSet<_> = (0..1000u16).collect();
-        round_trip_btree(&set, (1000..=1000).into(), ());
+        round_trip_btree(&set, RangeCfg::new(1000..=1000), ());
 
         // Variable-size items
         let set: BTreeSet<_> = (0..1000usize).collect();
-        round_trip_btree(&set, (1000..=1000).into(), (..=1000).into());
+        round_trip_btree(&set, RangeCfg::new(1000..=1000), RangeCfg::new(..=1000));
     }
 
     #[test]
@@ -160,7 +160,7 @@ mod tests {
         set.insert(5u32);
         let encoded = set.encode();
 
-        let config_tuple = ((0..=1).into(), ());
+        let config_tuple = (RangeCfg::new(0..=1), ());
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::InvalidLength(2))));
     }
@@ -172,7 +172,7 @@ mod tests {
         5u32.write(&mut encoded); // Item 5
         2u32.write(&mut encoded); // Item 2 (out of order)
 
-        let config_tuple = ((..).into(), ());
+        let config_tuple = (RangeCfg::new(..), ());
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
             result,
@@ -187,7 +187,7 @@ mod tests {
         1u32.write(&mut encoded); // Item 1
         1u32.write(&mut encoded); // Duplicate Item 1
 
-        let config_tuple = ((..).into(), ());
+        let config_tuple = (RangeCfg::new(..), ());
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
             result,

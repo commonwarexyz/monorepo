@@ -5,7 +5,7 @@ use crate::{
     ordinal::{self, Ordinal},
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Codec, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{sequence::prefixed_u64::U64, Array, BitVec};
 use futures::join;
@@ -66,7 +66,7 @@ impl Read for Record {
             0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),
             1 => Ok(Self::Ordinal(Option::<BitVec>::read_cfg(
                 buf,
-                &(0..=usize::MAX).into(),
+                &RangeCfg::new(0..=usize::MAX),
             )?)),
             _ => Err(commonware_codec::Error::InvalidEnum(tag)),
         }

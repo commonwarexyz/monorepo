@@ -122,7 +122,7 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                codec_config: RangeCfg::from(..),
+                codec_config: RangeCfg::new(..),
             };
             let (engine, engine_mailbox) =
                 Engine::<_, PublicKey, TestMessage>::new(context.clone(), config);

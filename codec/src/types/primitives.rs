@@ -71,7 +71,7 @@ impl Write for usize {
 }
 
 impl Read for usize {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
@@ -270,7 +270,7 @@ mod tests {
         for value in values.iter() {
             let encoded = value.encode();
             assert_eq!(value.encode_size(), UInt(*value as u32).encode_size());
-            let decoded = usize::decode_cfg(encoded, &(..).into()).unwrap();
+            let decoded = usize::decode_cfg(encoded, &RangeCfg::new(..)).unwrap();
             assert_eq!(*value, decoded);
         }
     }

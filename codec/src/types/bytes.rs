@@ -22,7 +22,7 @@ impl EncodeSize for Bytes {
 }
 
 impl Read for Bytes {
-    type Cfg = RangeCfg;
+    type Cfg = RangeCfg<usize>;
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
@@ -52,18 +52,18 @@ mod tests {
             let len = value.len();
 
             // Valid decoding
-            let decoded = Bytes::decode_cfg(encoded, &(len..=len).into()).unwrap();
+            let decoded = Bytes::decode_cfg(encoded, &RangeCfg::new(len..=len)).unwrap();
             assert_eq!(value, decoded);
 
             // Failure for too long
             assert!(matches!(
-                Bytes::decode_cfg(value.encode(), &(0..len).into()),
+                Bytes::decode_cfg(value.encode(), &RangeCfg::new(0..len)),
                 Err(Error::InvalidLength(_))
             ));
 
             // Failure for too short
             assert!(matches!(
-                Bytes::decode_cfg(value.encode(), &(len + 1..).into()),
+                Bytes::decode_cfg(value.encode(), &RangeCfg::new(len + 1..)),
                 Err(Error::InvalidLength(_))
             ));
         }

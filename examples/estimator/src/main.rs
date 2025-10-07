@@ -342,7 +342,7 @@ async fn setup_network_identities(
                 .register(identity.clone(), DEFAULT_CHANNEL)
                 .await
                 .unwrap();
-            let codec_config = (commonware_codec::RangeCfg::from(..), ());
+            let codec_config = (commonware_codec::RangeCfg::new(..), ());
             let (sender, receiver) = wrap::<_, _, Message>(codec_config, sender, receiver);
             identities.push((identity, region.clone(), sender, receiver));
             peer_idx += 1;

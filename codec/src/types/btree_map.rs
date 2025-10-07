@@ -91,7 +91,7 @@ impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
 }
 
 impl<K: Read + Clone + Ord + Eq, V: Read + Clone> Read for BTreeMap<K, V> {
-    type Cfg = (RangeCfg, (K::Cfg, V::Cfg));
+    type Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg));
 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
@@ -122,14 +122,14 @@ mod tests {
     // Manual round trip test function for BTreeMap with non-default configs
     fn round_trip_btree<K, V, KCfg, VCfg>(
         map: &BTreeMap<K, V>,
-        range_cfg: RangeCfg,
+        range_cfg: RangeCfg<usize>,
         k_cfg: KCfg,
         v_cfg: VCfg,
     ) where
         K: Write + EncodeSize + Read<Cfg = KCfg> + Clone + Ord + Eq + PartialEq + Debug,
         V: Write + EncodeSize + Read<Cfg = VCfg> + Clone + PartialEq + Debug,
-        BTreeMap<K, V>: Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
-            + Decode<Cfg = (RangeCfg, (K::Cfg, V::Cfg))>
+        BTreeMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
+            + Decode<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
             + PartialEq
             + Write
             + EncodeSize,
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn test_empty_btreemap() {
         let map = BTreeMap::<u32, u64>::new();
-        round_trip_btree(&map, (..).into(), (), ());
+        round_trip_btree(&map, RangeCfg::new(..), (), ());
         assert_eq!(map.encode_size(), 1); // varint 0
         let encoded = map.encode();
         assert_eq!(encoded, Bytes::from_static(&[0]));
@@ -157,7 +157,7 @@ mod tests {
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
         map.insert(2u32, 200u64);
-        round_trip_btree(&map, (..).into(), (), ());
+        round_trip_btree(&map, RangeCfg::new(..), (), ());
         assert_eq!(map.encode_size(), 1 + 3 * (u32::SIZE + u64::SIZE));
         // Check encoding order (BTreeMap guarantees sorted keys: 1, 2, 5)
         let mut expected = BytesMut::new();
@@ -178,7 +178,7 @@ mod tests {
         for i in 0..1000 {
             map.insert(i as u16, i as u64 * 2);
         }
-        round_trip_btree(&map, (0..=1000).into(), (), ());
+        round_trip_btree(&map, RangeCfg::new(0..=1000), (), ());
 
         // Variable-size items
         let mut map = BTreeMap::new();
@@ -187,9 +187,9 @@ mod tests {
         }
         round_trip_btree(
             &map,
-            (0..=1000).into(),
-            (..=1000).into(),
-            (1000..=2000).into(),
+            RangeCfg::new(0..=1000),
+            RangeCfg::new(..=1000),
+            RangeCfg::new(1000..=2000),
         );
     }
 
@@ -200,7 +200,7 @@ mod tests {
         map.insert(5u32, 500u64);
 
         let encoded = map.encode();
-        let config_tuple = ((0..=1).into(), ((), ()));
+        let config_tuple = (RangeCfg::new(0..=1), ((), ()));
 
         let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::InvalidLength(2))));
@@ -215,7 +215,7 @@ mod tests {
         2u32.write(&mut encoded); // Key 2 (out of order)
         200u64.write(&mut encoded); // Value 200
 
-        let range = (..).into();
+        let range = RangeCfg::new(..);
         let config_tuple = (range, ((), ()));
 
         let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
@@ -234,7 +234,7 @@ mod tests {
         1u32.write(&mut encoded); // Duplicate Key 1
         200u64.write(&mut encoded); // Value 200
 
-        let range = (..).into();
+        let range = RangeCfg::new(..);
         let config_tuple = (range, ((), ()));
 
         let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);

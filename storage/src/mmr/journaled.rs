@@ -23,7 +23,7 @@ use crate::{
         Proof,
     },
 };
-use commonware_codec::DecodeExt;
+use commonware_codec::{DecodeExt, RangeCfg};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::sequence::prefixed_u64::U64;
@@ -147,7 +147,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Initialize metadata
         let metadata_cfg = MConfig {
             partition: config.metadata_partition.clone(),
-            codec_config: ((0..).into(), ()),
+            codec_config: (RangeCfg::new(0..), ()),
         };
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
 
@@ -195,7 +195,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition,
-            codec_config: ((0..).into(), ()),
+            codec_config: (RangeCfg::new(0..), ()),
         };
         let metadata =
             Metadata::<_, U64, Vec<u8>>::init(context.with_label("mmr_metadata"), metadata_cfg)
@@ -354,7 +354,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Open the metadata.
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
-            codec_config: ((0..).into(), ()),
+            codec_config: (RangeCfg::new(0..), ()),
         };
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
 

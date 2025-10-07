@@ -2,37 +2,69 @@
 
 use core::ops::{Bound, RangeBounds};
 
-/// Configuration for limiting the range of a [usize] value.
+/// Configuration for limiting the range of a value.
 ///
 /// This is often used to configure length limits for variable-length types or collections.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// use commonware_codec::RangeCfg;
 ///
-/// // Limit lengths to 0..=1024
-/// let cfg = RangeCfg::from(0..=1024);
+/// // Limit lengths to 0..=1024 (type inferred as usize)
+/// let cfg = RangeCfg::new(0..=1024);
 /// assert!(cfg.contains(&500));
 /// assert!(!cfg.contains(&2000));
 ///
 /// // Allow any length >= 1
-/// let cfg_min = RangeCfg::from(1..);
+/// let cfg_min = RangeCfg::new(1..);
 /// assert!(cfg_min.contains(&1));
 /// assert!(!cfg_min.contains(&0));
+///
+/// // Works with other integer types
+/// let cfg_u8: RangeCfg<u8> = RangeCfg::new(0u8..=255u8);
+/// assert!(cfg_u8.contains(&128));
+///
+/// let cfg_u32 = RangeCfg::new(0u32..1024u32);
+/// assert!(cfg_u32.contains(&500));
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct RangeCfg {
+pub struct RangeCfg<T> {
     /// The lower bound of the range.
-    start: Bound<usize>,
+    start: Bound<T>,
 
     /// The upper bound of the range.
-    end: Bound<usize>,
+    end: Bound<T>,
 }
 
-impl RangeCfg {
+impl<T: Copy + PartialOrd> RangeCfg<T> {
+    /// Creates a new `RangeCfg` from any type implementing `RangeBounds<T>`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_codec::RangeCfg;
+    ///
+    /// let cfg = RangeCfg::new(0..=1024);
+    /// assert!(cfg.contains(&500));
+    /// ```
+    pub fn new(r: impl RangeBounds<T>) -> Self {
+        fn own<U: Copy>(b: Bound<&U>) -> Bound<U> {
+            match b {
+                Bound::Included(&v) => Bound::Included(v),
+                Bound::Excluded(&v) => Bound::Excluded(v),
+                Bound::Unbounded => Bound::Unbounded,
+            }
+        }
+
+        RangeCfg {
+            start: own(r.start_bound()),
+            end: own(r.end_bound()),
+        }
+    }
+
     /// Returns `true` if the given value is within the configured range.
-    pub fn contains(&self, value: &usize) -> bool {
+    pub fn contains(&self, value: &T) -> bool {
         // Exclude by start bound
         match &self.start {
             Bound::Included(s) if value < s => return false,
@@ -52,21 +84,13 @@ impl RangeCfg {
     }
 }
 
-// Allow conversion from any type that implements `RangeBounds<usize>` to `RangeCfg`.
-impl<R: RangeBounds<usize>> From<R> for RangeCfg {
-    fn from(r: R) -> Self {
-        fn own(b: Bound<&usize>) -> Bound<usize> {
-            match b {
-                Bound::Included(&v) => Bound::Included(v),
-                Bound::Excluded(&v) => Bound::Excluded(v),
-                Bound::Unbounded => Bound::Unbounded,
-            }
-        }
+impl<T> RangeBounds<T> for RangeCfg<T> {
+    fn start_bound(&self) -> Bound<&T> {
+        self.start.as_ref()
+    }
 
-        RangeCfg {
-            start: own(r.start_bound()),
-            end: own(r.end_bound()),
-        }
+    fn end_bound(&self) -> Bound<&T> {
+        self.end.as_ref()
     }
 }
 
@@ -76,9 +100,9 @@ mod tests {
     use core::ops::Bound::{Excluded, Included, Unbounded};
 
     #[test]
-    fn test_range_cfg_from() {
+    fn test_range_cfg_new() {
         // Full range
-        let cfg_full: RangeCfg = (..).into();
+        let cfg_full: RangeCfg<usize> = RangeCfg::new(..);
         assert_eq!(
             cfg_full,
             RangeCfg {
@@ -88,7 +112,7 @@ mod tests {
         );
 
         // Start bounded, end unbounded
-        let cfg_start_incl: RangeCfg = (5..).into();
+        let cfg_start_incl = RangeCfg::new(5..);
         assert_eq!(
             cfg_start_incl,
             RangeCfg {
@@ -98,7 +122,7 @@ mod tests {
         );
 
         // Start unbounded, end bounded (exclusive)
-        let cfg_end_excl: RangeCfg = (..10).into();
+        let cfg_end_excl = RangeCfg::new(..10);
         assert_eq!(
             cfg_end_excl,
             RangeCfg {
@@ -108,7 +132,7 @@ mod tests {
         );
 
         // Start unbounded, end bounded (inclusive)
-        let cfg_end_incl: RangeCfg = (..=10).into();
+        let cfg_end_incl = RangeCfg::new(..=10);
         assert_eq!(
             cfg_end_incl,
             RangeCfg {
@@ -118,7 +142,7 @@ mod tests {
         );
 
         // Fully bounded (inclusive start, exclusive end)
-        let cfg_incl_excl: RangeCfg = (5..10).into();
+        let cfg_incl_excl = RangeCfg::new(5..10);
         assert_eq!(
             cfg_incl_excl,
             RangeCfg {
@@ -128,7 +152,7 @@ mod tests {
         );
 
         // Fully bounded (inclusive)
-        let cfg_incl_incl: RangeCfg = (5..=10).into();
+        let cfg_incl_incl = RangeCfg::new(5..=10);
         assert_eq!(
             cfg_incl_incl,
             RangeCfg {
@@ -147,7 +171,7 @@ mod tests {
                 Included(&self.1)
             }
         }
-        let cfg_excl_incl: RangeCfg = ExclusiveStartRange(5, 10).into();
+        let cfg_excl_incl = RangeCfg::new(ExclusiveStartRange(5, 10));
         assert_eq!(
             cfg_excl_incl,
             RangeCfg {
@@ -160,34 +184,34 @@ mod tests {
     #[test]
     fn test_range_cfg_contains() {
         // Unbounded range (..)
-        let cfg_unbounded: RangeCfg = (..).into();
+        let cfg_unbounded = RangeCfg::new(..);
         assert!(cfg_unbounded.contains(&0));
         assert!(cfg_unbounded.contains(&100));
         assert!(cfg_unbounded.contains(&usize::MAX));
 
         // Inclusive start (5..)
-        let cfg_start_incl: RangeCfg = (5..).into();
+        let cfg_start_incl = RangeCfg::new(5..);
         assert!(!cfg_start_incl.contains(&4));
         assert!(cfg_start_incl.contains(&5));
         assert!(cfg_start_incl.contains(&6));
         assert!(cfg_start_incl.contains(&usize::MAX));
 
         // Exclusive end (..10)
-        let cfg_end_excl: RangeCfg = (..10).into();
+        let cfg_end_excl = RangeCfg::new(..10);
         assert!(cfg_end_excl.contains(&0));
         assert!(cfg_end_excl.contains(&9));
         assert!(!cfg_end_excl.contains(&10));
         assert!(!cfg_end_excl.contains(&11));
 
         // Inclusive end (..=10)
-        let cfg_end_incl: RangeCfg = (..=10).into();
+        let cfg_end_incl = RangeCfg::new(..=10);
         assert!(cfg_end_incl.contains(&0));
         assert!(cfg_end_incl.contains(&9));
         assert!(cfg_end_incl.contains(&10));
         assert!(!cfg_end_incl.contains(&11));
 
         // Inclusive start, exclusive end (5..10)
-        let cfg_incl_excl: RangeCfg = (5..10).into();
+        let cfg_incl_excl = RangeCfg::new(5..10);
         assert!(!cfg_incl_excl.contains(&4));
         assert!(cfg_incl_excl.contains(&5));
         assert!(cfg_incl_excl.contains(&9));
@@ -195,7 +219,7 @@ mod tests {
         assert!(!cfg_incl_excl.contains(&11));
 
         // Inclusive start, inclusive end (5..=10)
-        let cfg_incl_incl: RangeCfg = (5..=10).into();
+        let cfg_incl_incl = RangeCfg::new(5..=10);
         assert!(!cfg_incl_incl.contains(&4));
         assert!(cfg_incl_incl.contains(&5));
         assert!(cfg_incl_incl.contains(&9));
@@ -227,15 +251,71 @@ mod tests {
     #[test]
     fn test_contains_empty_range() {
         // Empty range (e.g., 5..5)
-        let cfg_empty_excl: RangeCfg = (5..5).into();
+        let cfg_empty_excl = RangeCfg::new(5..5);
         assert!(!cfg_empty_excl.contains(&4));
         assert!(!cfg_empty_excl.contains(&5));
         assert!(!cfg_empty_excl.contains(&6));
 
         // Slightly less obvious empty range (e.g., 6..=5)
         #[allow(clippy::reversed_empty_ranges)]
-        let cfg_empty_incl: RangeCfg = (6..=5).into();
+        let cfg_empty_incl = RangeCfg::new(6..=5);
         assert!(!cfg_empty_incl.contains(&5));
         assert!(!cfg_empty_incl.contains(&6));
+    }
+
+    #[test]
+    fn test_range_cfg_u8() {
+        // Test with u8 type
+        let cfg = RangeCfg::new(0u8..=255u8);
+        assert!(cfg.contains(&0));
+        assert!(cfg.contains(&128));
+        assert!(cfg.contains(&255));
+
+        let cfg_partial = RangeCfg::new(10u8..20u8);
+        assert!(!cfg_partial.contains(&9));
+        assert!(cfg_partial.contains(&10));
+        assert!(cfg_partial.contains(&19));
+        assert!(!cfg_partial.contains(&20));
+    }
+
+    #[test]
+    fn test_range_cfg_u16() {
+        // Test with u16 type
+        let cfg = RangeCfg::new(100u16..=1000u16);
+        assert!(!cfg.contains(&99));
+        assert!(cfg.contains(&100));
+        assert!(cfg.contains(&500));
+        assert!(cfg.contains(&1000));
+        assert!(!cfg.contains(&1001));
+    }
+
+    #[test]
+    fn test_range_cfg_u32() {
+        // Test with u32 type
+        let cfg = RangeCfg::new(0u32..1024u32);
+        assert!(cfg.contains(&0));
+        assert!(cfg.contains(&512));
+        assert!(!cfg.contains(&1024));
+        assert!(!cfg.contains(&2000));
+    }
+
+    #[test]
+    fn test_range_cfg_u64() {
+        // Test with u64 type
+        let cfg = RangeCfg::new(1000u64..);
+        assert!(!cfg.contains(&999));
+        assert!(cfg.contains(&1000));
+        assert!(cfg.contains(&u64::MAX));
+    }
+
+    #[test]
+    fn test_type_inference() {
+        // Type inference from range literal with explicit type suffixes
+        let cfg = RangeCfg::new(0u8..10u8);
+        assert!(cfg.contains(&5u8));
+
+        // Type inference when assigning to typed variable
+        let cfg: RangeCfg<u32> = RangeCfg::new(0..1000);
+        assert!(cfg.contains(&500));
     }
 }

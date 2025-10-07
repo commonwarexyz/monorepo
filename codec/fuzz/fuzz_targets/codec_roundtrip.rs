@@ -32,18 +32,18 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
 
     // Decode with too long length
     assert!(matches!(
-        Bytes::decode_cfg(encoded_bytes.clone(), &(0..input_len).into()),
+        Bytes::decode_cfg(encoded_bytes.clone(), &RangeCfg::new(0..input_len)),
         Err(Error::InvalidLength(_))
     ));
 
     // Decode with too short length
     assert!(matches!(
-        Bytes::decode_cfg(encoded_bytes.clone(), &(input_len + 1..).into()),
+        Bytes::decode_cfg(encoded_bytes.clone(), &RangeCfg::new(input_len + 1..)),
         Err(Error::InvalidLength(_))
     ));
 
     // Decode with full length
-    let decoded_bytes = Bytes::decode_cfg(encoded_bytes, &(input_len..=input_len).into())
+    let decoded_bytes = Bytes::decode_cfg(encoded_bytes, &RangeCfg::new(input_len..=input_len))
         .expect("Failed to decode bytes!");
 
     // Check matching
@@ -83,12 +83,19 @@ fn roundtrip_primitive_f64(v: f64) {
     assert_eq!(v, decoded);
 }
 
-fn roundtrip_map<K, V>(map: &HashMap<K, V>, range_cfg: RangeCfg, k_cfg: K::Cfg, v_cfg: V::Cfg)
-where
+fn roundtrip_map<K, V>(
+    map: &HashMap<K, V>,
+    range_cfg: RangeCfg<usize>,
+    k_cfg: K::Cfg,
+    v_cfg: V::Cfg,
+) where
     K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + std::fmt::Debug + PartialEq,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
-    HashMap<K, V>:
-        Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))> + std::fmt::Debug + PartialEq + Write + EncodeSize,
+    HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
+        + std::fmt::Debug
+        + PartialEq
+        + Write
+        + EncodeSize,
 {
     let encoded = map.encode();
     assert_eq!(encoded.len(), map.encode_size());
@@ -109,17 +116,17 @@ where
 
     // Decode with too long length
     assert!(matches!(
-        Vec::<T>::decode_cfg(encoded_vec.clone(), &((0..input_len).into(), ())),
+        Vec::<T>::decode_cfg(encoded_vec.clone(), &(RangeCfg::new(0..input_len), ())),
         Err(Error::InvalidLength(_))
     ));
 
     // Decode with too short length
     assert!(matches!(
-        Vec::<T>::decode_cfg(encoded_vec.clone(), &((input_len + 1..).into(), ())),
+        Vec::<T>::decode_cfg(encoded_vec.clone(), &(RangeCfg::new(input_len + 1..), ())),
         Err(Error::InvalidLength(_))
     ));
 
-    let decoded = Vec::<T>::decode_cfg(encoded_vec, &((input_len..=input_len).into(), ()))
+    let decoded = Vec::<T>::decode_cfg(encoded_vec, &(RangeCfg::new(input_len..=input_len), ()))
         .expect("Failed to decode Vec<T>!");
 
     assert_eq!(vec, decoded);
@@ -159,7 +166,7 @@ fn fuzz(input: FuzzInput) {
     match input {
         FuzzInput::Socket(it) => roundtrip_socket(it.0),
         FuzzInput::Bytes(it) => roundtrip_bytes(Bytes::from(it.to_vec())),
-        FuzzInput::Map(it) => roundtrip_map(&it, (..).into(), (), ()), // TODO this needs proper length specifiers for the type if doing dynamic lengths!
+        FuzzInput::Map(it) => roundtrip_map(&it, RangeCfg::new(..), (), ()), // TODO this needs proper length specifiers for the type if doing dynamic lengths!
         FuzzInput::Vec(it) => roundtrip_vec(it),
 
         // Primitive roundtrips

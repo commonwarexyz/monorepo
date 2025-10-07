@@ -764,6 +764,7 @@ where
 mod test {
     use super::*;
     use crate::translator::TwoCap;
+    use commonware_codec::RangeCfg;
     use commonware_cryptography::{
         blake3::{hash, Digest},
         Digest as _,
@@ -783,7 +784,7 @@ mod test {
             log_journal_partition: "journal".to_string(),
             log_write_buffer: NZUsize!(64 * 1024),
             log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
+            log_codec_config: (RangeCfg::new(0..=10000), ()),
             log_items_per_section: NZU64!(7),
             locations_journal_partition: "locations_journal".to_string(),
             locations_items_per_blob: NZU64!(11),
