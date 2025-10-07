@@ -31,7 +31,7 @@ pub struct Actor<
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
-    max_peer_set_size: usize,
+    max_peer_set_size: u64,
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,

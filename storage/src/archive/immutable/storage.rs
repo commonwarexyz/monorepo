@@ -7,7 +7,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{sequence::prefixed_u64::U64, Array, BitVec};
+use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::BTreeMap;
@@ -22,7 +22,7 @@ const ORDINAL_PREFIX: u8 = 1;
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
 enum Record {
     Freezer(Checkpoint),
-    Ordinal(Option<BitVec>),
+    Ordinal(Option<BitMap>),
 }
 
 impl Record {
@@ -34,8 +34,8 @@ impl Record {
         }
     }
 
-    /// Get the [Ordinal] [BitVec] from the [Record].
-    fn ordinal(&self) -> &Option<BitVec> {
+    /// Get the [Ordinal] [BitMap] from the [Record].
+    fn ordinal(&self) -> &Option<BitMap> {
         match self {
             Self::Ordinal(indices) => indices,
             _ => panic!("incorrect record"),
@@ -64,9 +64,9 @@ impl Read for Record {
         let tag = u8::read(buf)?;
         match tag {
             0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),
-            1 => Ok(Self::Ordinal(Option::<BitVec>::read_cfg(
+            1 => Ok(Self::Ordinal(Option::<BitMap>::read_cfg(
                 buf,
-                &(0..=usize::MAX).into(),
+                &(usize::MAX as u64),
             )?)),
             _ => Err(commonware_codec::Error::InvalidEnum(tag)),
         }
@@ -216,7 +216,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     /// Initialize the section.
     async fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
-        let bits = BitVec::zeroes(self.items_per_section as usize);
+        let bits = BitMap::zeroes(self.items_per_section);
 
         // Store record
         let key = U64::new(ORDINAL_PREFIX, section);
@@ -247,8 +247,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
 
         // Update active bits
         let done = if let Record::Ordinal(Some(bits)) = record {
-            bits.set((index % self.items_per_section) as usize);
-            bits.count_ones() == self.items_per_section as usize
+            bits.set(index % self.items_per_section, true);
+            bits.count_ones() == self.items_per_section
         } else {
             false
         };
