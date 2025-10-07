@@ -198,8 +198,8 @@ impl std::fmt::Debug for Matrix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for i in 0..self.rows {
             let row_i = &self[i];
-            for j in 0..self.cols {
-                write!(f, "{:?} ", row_i[j])?;
+            for &row_i_j in row_i {
+                write!(f, "{:?} ", row_i_j)?;
             }
             writeln!(f)?;
         }
@@ -419,9 +419,10 @@ impl Polynomial {
             let mut w_inv = F::root_of_unity(lg_rows as u8)
                 .expect("too many rows to create vanishing polynomial")
                 .exp((1 << lg_rows) - 1);
-            let mut out = vec![F::zero(); lg_rows as usize];
-            for i in 0..lg_rows as usize {
-                out[i] = w_inv;
+            let lg_rows = lg_rows as usize;
+            let mut out = Vec::with_capacity(lg_rows);
+            for _ in 0..lg_rows {
+                out.push(w_inv);
                 w_inv = w_inv * w_inv;
             }
             out.reverse();
@@ -618,11 +619,11 @@ impl PolynomialVector {
         let mut data = Matrix::zero(rows, cols);
         'outer: for i in 0..rows {
             let row_i = &mut data[reverse_bits(lg_rows, i as u64) as usize];
-            for j in 0..cols {
+            for row_i_j in row_i {
                 let Some(c) = coefficients.next() else {
                     break 'outer;
                 };
-                row_i[j] = c;
+                *row_i_j = c;
             }
         }
         Self { data }
@@ -638,11 +639,11 @@ impl PolynomialVector {
         }
     }
 
-    /// Like [Self::evaluation], but with a simpler algorithm that's much less efficient.
+    /// Like [Self::evaluate], but with a simpler algorithm that's much less efficient.
     ///
     /// Exists as a useful tool for testing
     #[cfg(test)]
-    fn evaluation_naive(self) -> EvaluationVector {
+    fn evaluate_naive(self) -> EvaluationVector {
         let rows = self.data.rows;
         let lg_rows = rows.ilog2();
         let w = F::root_of_unity(lg_rows as u8).expect("too much data to calculate NTT");
@@ -783,7 +784,7 @@ pub struct EvaluationVector {
 impl EvaluationVector {
     /// Figure out the polynomial which evaluates to this vector.
     ///
-    /// i.e. the inverse of [PolynomialVector::evaluation].
+    /// i.e. the inverse of [PolynomialVector::evaluate].
     ///
     /// (This makes all the rows count as filled).
     fn interpolate(mut self) -> PolynomialVector {
@@ -826,8 +827,7 @@ impl EvaluationVector {
                 data: &mut coefficients,
             },
         );
-        for i in 0..self.data.rows {
-            let c_i = coefficients[i];
+        for (i, &c_i) in coefficients.iter().enumerate() {
             for self_j in &mut self.data[i] {
                 *self_j = *self_j * c_i;
             }
@@ -935,7 +935,7 @@ mod test {
                                     cols,
                                     // idk why this is necessary, but who cares
                                     data: data.clone(),
-                                    present: present,
+                                    present,
                                 }
                             })
                         })
@@ -973,7 +973,7 @@ mod test {
         #[test]
         fn test_ntt_eq_naive(p in any_polynomial_vector(6, 4)) {
             let ntt = p.clone().evaluate();
-            let ntt_naive = p.evaluation_naive();
+            let ntt_naive = p.evaluate_naive();
             assert_eq!(ntt, ntt_naive);
         }
 

@@ -311,7 +311,7 @@ impl<H: Hasher> CheckingData<H> {
 
         Ok(Self {
             topology,
-            root: root,
+            root,
             checking_matrix,
             encoded_checksum,
             shuffled_indices,
