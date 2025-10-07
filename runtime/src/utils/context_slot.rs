@@ -1,81 +1,73 @@
-//! Utilities for storing runtime contexts that must be temporarily moved.
+//! Utilities for safely moving runtime contexts in and out of long-lived actors.
 //!
-//! `ContextSlot` wraps a runtime context so it can be "taken" for spawning tasks
-//! and later restored without forcing call sites to handle `Option` or `Result`
-//! manually. The type implements `Deref`/`DerefMut`, so existing code that expects
-//! direct access to the underlying context can continue to call methods on it
-//! transparently.
+//! `ContextSlot` owns a runtime context but allows temporarily leasing it (e.g.
+//! to spawn a task) without cloning. The lease is an RAII guard—dropping it
+//! without returning the context panics so mistakes are caught immediately.
 
 use std::ops::{Deref, DerefMut};
 
-/// Guard returned when leasing a context.
-///
-/// Dropping the lease without returning the context will panic, ensuring
-/// callers use the lease API correctly.
-#[must_use = "the lease must be used to return the context"]
-#[derive(Debug)]
-pub struct ContextLease<E> {
-    returned: bool,
-    _marker: std::marker::PhantomData<fn() -> E>,
-}
-
-/// Wrapper that allows temporarily removing a runtime context and later
-/// replacing it without cloning.
+/// Wrapper around a runtime context that supports leasing.
 #[derive(Debug)]
 pub struct ContextSlot<E> {
     context: Option<E>,
 }
 
+/// Lease that must be returned to the slot.
+#[must_use = "the leased context must be returned via `ContextSlot::put`"]
+#[derive(Debug)]
+pub struct ContextLease {
+    returned: bool,
+}
+
 impl<E> ContextSlot<E> {
-    /// Store a new context inside the slot.
+    /// Create a new slot containing `context`.
     pub fn new(context: E) -> Self {
         Self {
             context: Some(context),
         }
     }
 
-    /// Lease the context out of the slot.
-    ///
-    /// Returns the leased context and a guard that must be used to restore the
-    /// context. Dropping the guard without returning the context will panic.
+    /// Temporarily remove the context from the slot, returning it together with
+    /// an RAII guard that must put the context back.
     ///
     /// # Panics
-    /// Panics if the context has already been taken.
-    pub fn take(&mut self) -> (E, ContextLease<E>) {
+    ///
+    /// Panics if the slot is already empty (which indicates a logic bug).
+    pub fn take(&mut self) -> (E, ContextLease) {
         let context = self.context.take().expect("context slot already taken");
-        (
-            context,
-            ContextLease {
-                returned: false,
-                _marker: std::marker::PhantomData,
-            },
-        )
+        (context, ContextLease { returned: false })
     }
 
-    /// Put a context back into the slot.
+    /// Return the leased context to the slot.
     ///
     /// # Panics
-    /// Panics if a context is already present. This indicates a logic error where
-    /// more than one `put` was attempted without a matching `take`.
-    pub fn put(&mut self, context: E) {
-        assert!(
-            self.context.replace(context).is_none(),
-            "context slot already filled"
-        );
+    ///
+    /// Panics if the lease has already been consumed or the slot already holds a
+    /// context.
+    pub fn put(&mut self, context: E, mut lease: ContextLease) {
+        assert!(self.context.is_none(), "context slot already filled");
+        assert!(!lease.returned, "context lease already returned");
+        self.context = Some(context);
+        lease.returned = true;
+    }
+
+    /// Returns `true` if the slot currently holds a context.
+    pub fn is_present(&self) -> bool {
+        self.context.is_some()
+    }
+}
+
+impl Drop for ContextLease {
+    fn drop(&mut self) {
+        if !self.returned {
+            panic!("context lease dropped without returning context");
+        }
     }
 }
 
 impl<E> From<E> for ContextSlot<E> {
     fn from(context: E) -> Self {
         Self::new(context)
-    }
-}
-
-impl<E: Clone> Clone for ContextSlot<E> {
-    fn clone(&self) -> Self {
-        Self {
-            context: self.context.clone(),
-        }
     }
 }
 
@@ -93,26 +85,6 @@ impl<E> DerefMut for ContextSlot<E> {
     }
 }
 
-impl<E> ContextLease<E> {
-    /// Return the leased context to the provided slot.
-    ///
-    /// # Panics
-    /// Panics if the lease has already been returned.
-    pub fn put(&mut self, slot: &mut ContextSlot<E>, context: E) {
-        assert!(!self.returned, "context lease already returned");
-        slot.put(context);
-        self.returned = true;
-    }
-}
-
-impl<E> Drop for ContextLease<E> {
-    fn drop(&mut self) {
-        if !self.returned {
-            panic!("context lease dropped without returning context");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,10 +92,11 @@ mod tests {
     #[test]
     fn lease_put_restores_context() {
         let mut slot = ContextSlot::new(42);
-        let (ctx, mut lease) = slot.take();
+        let (ctx, lease) = slot.take();
         assert_eq!(ctx, 42);
-        lease.put(&mut slot, 7);
+        slot.put(7, lease);
         assert_eq!(*slot, 7);
+        assert!(slot.is_present());
     }
 
     #[test]
