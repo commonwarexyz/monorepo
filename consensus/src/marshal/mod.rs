@@ -79,10 +79,10 @@ mod tests {
         marshal::ingress::mailbox::Identifier,
         threshold_simplex::{
             self,
-            new_types::{BlsThresholdScheme, SigningScheme},
+            new_types::BlsThresholdScheme,
             types::{
                 finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
-                Finalize, Notarization, Notarize, Proposal, VoteContext,
+                Finalize, Notarization, Notarize, Proposal, SigningScheme, VoteContext,
             },
         },
         types::Round,

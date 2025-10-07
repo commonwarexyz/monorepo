@@ -2,8 +2,8 @@
 
 use crate::{
     threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Proposal, Vote,
-        VoteContext,
+        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Error, Proposal,
+        SigningScheme, Vote, VoteContext, VoteVerification,
     },
     types::Round,
 };
@@ -28,120 +28,6 @@ use std::{
     hash::Hash,
 };
 use thiserror::Error;
-
-/// Errors emitted by signing scheme implementations.
-#[derive(Debug, Error)]
-pub enum Error {
-    /// Placeholder until real logic is implemented in later phases.
-    #[error("not implemented")]
-    NotImplemented,
-    /// Signer index does not match the scheme's share.
-    #[error("signer mismatch (expected {expected}, got {actual})")]
-    SignerMismatch { expected: u32, actual: u32 },
-    /// Not enough votes to assemble a certificate.
-    #[error("insufficient votes: required {required}, got {actual}")]
-    InsufficientVotes { required: u32, actual: u32 },
-    /// Threshold recovery failure.
-    #[error("threshold error: {0}")]
-    Threshold(#[from] ThresholdError),
-}
-
-/// Result of verifying a batch of votes.
-pub struct VoteVerification<S: SigningScheme> {
-    pub verified: Vec<Vote<S>>,
-    pub invalid_signers: Vec<u32>,
-}
-
-impl<S: SigningScheme> VoteVerification<S> {
-    pub fn new(verified: Vec<Vote<S>>, invalid_signers: Vec<u32>) -> Self {
-        Self {
-            verified,
-            invalid_signers,
-        }
-    }
-}
-
-/// Trait that signing schemes must implement.
-pub trait SigningScheme: Clone + Send + Sync + 'static {
-    type Signature: Clone
-        + Debug
-        + PartialEq
-        + Eq
-        + Hash
-        + Send
-        + Sync
-        + EncodeSize
-        + Write
-        + Read<Cfg = Self::SignatureReadCfg>;
-
-    type Certificate: Clone
-        + Debug
-        + PartialEq
-        + Eq
-        + Hash
-        + Send
-        + Sync
-        + EncodeSize
-        + Write
-        + Read<Cfg = Self::CertificateReadCfg>;
-
-    type Randomness: EncodeSize + Write + Send;
-
-    type SignatureReadCfg;
-    type CertificateReadCfg;
-
-    fn can_sign(&self) -> bool;
-
-    fn sign_vote<D: Digest>(&self, namespace: &[u8], context: VoteContext<'_, D>) -> Vote<Self>;
-
-    fn verify_vote<D: Digest>(
-        &self,
-        namespace: &[u8],
-        context: VoteContext<'_, D>,
-        vote: &Vote<Self>,
-    ) -> bool {
-        let verification = self.verify_votes(namespace, context, std::iter::once(vote.clone()));
-        !verification.verified.is_empty()
-    }
-
-    fn verify_votes<D: Digest, I>(
-        &self,
-        namespace: &[u8],
-        context: VoteContext<'_, D>,
-        votes: I,
-    ) -> VoteVerification<Self>
-    where
-        I: IntoIterator<Item = Vote<Self>>;
-
-    fn assemble_certificate<I>(&self, votes: I) -> Result<Self::Certificate, Error>
-    where
-        I: IntoIterator<Item = Vote<Self>>;
-
-    fn verify_certificate<D: Digest>(
-        &self,
-        namespace: &[u8],
-        context: VoteContext<'_, D>,
-        certificate: &Self::Certificate,
-    ) -> bool;
-
-    fn verify_certificates<'a, D: Digest, I>(&self, namespace: &[u8], certificates: I) -> bool
-    where
-        I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
-    {
-        for (context, certificate) in certificates {
-            if !self.verify_certificate(namespace, context, certificate) {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
-
-    fn signature_read_cfg() -> Self::SignatureReadCfg;
-    fn certificate_read_cfg() -> Self::CertificateReadCfg;
-}
 
 /// Placeholder for the upcoming BLS threshold implementation.
 #[derive(Clone, Debug)]
@@ -300,7 +186,8 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             self.threshold,
             message_partials.iter(),
             seed_partials.iter(),
-        )?;
+        )
+        .map_err(|e| Error::Wrapped("BlsThresholdScheme", e.into()))?;
 
         Ok((message_signature, seed_signature))
     }

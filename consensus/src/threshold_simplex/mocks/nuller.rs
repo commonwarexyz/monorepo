@@ -1,9 +1,6 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
-use crate::threshold_simplex::{
-    new_types::SigningScheme,
-    types::{Finalize, Nullify, Voter},
-};
+use crate::threshold_simplex::types::{Finalize, Nullify, SigningScheme, Voter};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};

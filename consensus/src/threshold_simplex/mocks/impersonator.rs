@@ -1,9 +1,6 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
-use crate::threshold_simplex::{
-    new_types::SigningScheme,
-    types::{Finalize, Notarize, Voter},
-};
+use crate::threshold_simplex::types::{Finalize, Notarize, SigningScheme, Voter};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};

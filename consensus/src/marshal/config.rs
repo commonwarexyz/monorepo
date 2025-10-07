@@ -1,4 +1,4 @@
-use crate::{threshold_simplex::new_types::SigningScheme, Block};
+use crate::{threshold_simplex::types::SigningScheme, Block};
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 

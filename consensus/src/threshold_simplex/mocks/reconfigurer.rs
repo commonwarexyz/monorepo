@@ -3,10 +3,7 @@
 //! reject messages from an unexpected epoch.
 
 use crate::{
-    threshold_simplex::{
-        new_types::SigningScheme,
-        types::{Finalize, Notarize, Nullify, Voter},
-    },
+    threshold_simplex::types::{Finalize, Notarize, Nullify, SigningScheme, Voter},
     types::Epoch,
 };
 use commonware_codec::{DecodeExt, Encode};

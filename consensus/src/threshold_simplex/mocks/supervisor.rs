@@ -2,12 +2,11 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     threshold_simplex::{
-        new_types::{self, SigningScheme},
         select_leader,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal,
-            Vote, VoteContext,
+            SigningScheme, Vote, VoteContext,
         },
     },
     types::View,

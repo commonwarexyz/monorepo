@@ -2,10 +2,7 @@ mod actor;
 mod ingress;
 
 use crate::{
-    threshold_simplex::{
-        new_types::SigningScheme,
-        types::{Activity, Context},
-    },
+    threshold_simplex::types::{Activity, Context, SigningScheme},
     types::{Epoch, View},
     Automaton, Relay, Reporter,
 };

@@ -10,10 +10,7 @@ use super::{
 };
 use crate::{
     marshal::ingress::mailbox::Identifier as BlockID,
-    threshold_simplex::{
-        new_types::SigningScheme,
-        types::{Finalization, Notarization},
-    },
+    threshold_simplex::types::{Finalization, Notarization, SigningScheme},
     types::Round,
     Block, Reporter,
 };

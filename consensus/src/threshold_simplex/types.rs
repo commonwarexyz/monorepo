@@ -1,15 +1,17 @@
 //! Types used in [crate::threshold_simplex].
 
-use super::new_types::{self, SigningScheme};
 use crate::{
     types::{Epoch, Round, View},
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{
+    varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
+};
 use commonware_cryptography::Digest;
 use commonware_utils::union;
-use std::{collections::HashSet, hash::Hash};
+use std::{collections::HashSet, fmt::Debug, hash::Hash};
+use thiserror::Error;
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -133,12 +135,125 @@ impl<S: SigningScheme> EncodeSize for Vote<S> {
 impl<S: SigningScheme> Read for Vote<S> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let signer = u32::read(reader)?;
         let signature = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;
 
         Ok(Self { signer, signature })
     }
+}
+
+/// Result of verifying a batch of votes.
+pub struct VoteVerification<S: SigningScheme> {
+    pub verified: Vec<Vote<S>>,
+    pub invalid_signers: Vec<u32>,
+}
+
+impl<S: SigningScheme> VoteVerification<S> {
+    pub fn new(verified: Vec<Vote<S>>, invalid_signers: Vec<u32>) -> Self {
+        Self {
+            verified,
+            invalid_signers,
+        }
+    }
+}
+
+/// Errors emitted by signing scheme implementations.
+#[derive(Debug, Error)]
+pub enum Error {
+    /// Signer index does not match the scheme's share.
+    #[error("signer mismatch (expected {expected}, got {actual})")]
+    SignerMismatch { expected: u32, actual: u32 },
+    /// Not enough votes to assemble a certificate.
+    #[error("insufficient votes: required {required}, got {actual}")]
+    InsufficientVotes { required: u32, actual: u32 },
+    #[error("Wrapped Error: Context({0})")]
+    Wrapped(
+        &'static str,
+        #[source] Box<dyn core::error::Error + Send + Sync>,
+    ),
+}
+
+/// Trait that signing schemes must implement.
+pub trait SigningScheme: Clone + Send + Sync + 'static {
+    type Signature: Clone
+        + Debug
+        + PartialEq
+        + Eq
+        + Hash
+        + Send
+        + Sync
+        + EncodeSize
+        + Write
+        + Read<Cfg = Self::SignatureReadCfg>;
+
+    type Certificate: Clone
+        + Debug
+        + PartialEq
+        + Eq
+        + Hash
+        + Send
+        + Sync
+        + EncodeSize
+        + Write
+        + Read<Cfg = Self::CertificateReadCfg>;
+
+    type Randomness: EncodeSize + Write + Send;
+
+    type SignatureReadCfg;
+    type CertificateReadCfg;
+
+    fn can_sign(&self) -> bool;
+
+    fn sign_vote<D: Digest>(&self, namespace: &[u8], context: VoteContext<'_, D>) -> Vote<Self>;
+
+    fn verify_vote<D: Digest>(
+        &self,
+        namespace: &[u8],
+        context: VoteContext<'_, D>,
+        vote: &Vote<Self>,
+    ) -> bool {
+        let verification = self.verify_votes(namespace, context, std::iter::once(vote.clone()));
+        !verification.verified.is_empty()
+    }
+
+    fn verify_votes<D: Digest, I>(
+        &self,
+        namespace: &[u8],
+        context: VoteContext<'_, D>,
+        votes: I,
+    ) -> VoteVerification<Self>
+    where
+        I: IntoIterator<Item = Vote<Self>>;
+
+    fn assemble_certificate<I>(&self, votes: I) -> Result<Self::Certificate, Error>
+    where
+        I: IntoIterator<Item = Vote<Self>>;
+
+    fn verify_certificate<D: Digest>(
+        &self,
+        namespace: &[u8],
+        context: VoteContext<'_, D>,
+        certificate: &Self::Certificate,
+    ) -> bool;
+
+    fn verify_certificates<'a, D: Digest, I>(&self, namespace: &[u8], certificates: I) -> bool
+    where
+        I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
+    {
+        for (context, certificate) in certificates {
+            if !self.verify_certificate(namespace, context, certificate) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
+
+    fn signature_read_cfg() -> Self::SignatureReadCfg;
+    fn certificate_read_cfg() -> Self::CertificateReadCfg;
 }
 
 /// `BatchVerifier` is a utility for tracking and batch verifying consensus messages.
@@ -325,7 +440,7 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
         let notarizes = std::mem::take(&mut self.notarizes);
         let proposal = &notarizes[0].proposal.clone();
 
-        let new_types::VoteVerification {
+        let VoteVerification {
             verified,
             invalid_signers,
         } = self.signing.verify_votes::<D, _>(
@@ -415,7 +530,7 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
         let nullifies = std::mem::take(&mut self.nullifies);
         let round = nullifies[0].round;
 
-        let new_types::VoteVerification {
+        let VoteVerification {
             verified,
             invalid_signers,
         } = self.signing.verify_votes::<D, _>(
@@ -485,7 +600,7 @@ impl<S: SigningScheme, D: Digest> BatchVerifier<S, D> {
         let finalizes = std::mem::take(&mut self.finalizes);
         let proposal = &finalizes[0].proposal.clone();
 
-        let new_types::VoteVerification {
+        let VoteVerification {
             verified,
             invalid_signers,
         } = self.signing.verify_votes::<D, _>(
@@ -615,7 +730,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Voter<S, D> {
 impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -642,7 +757,7 @@ impl<S: SigningScheme, D: Digest> Read for Voter<S, D> {
                 let v = Finalization::read(reader)?;
                 Ok(Voter::Finalization(v))
             }
-            _ => Err(Error::Invalid(
+            _ => Err(CodecError::Invalid(
                 "consensus::threshold_simplex::Voter",
                 "Invalid type",
             )),
@@ -714,7 +829,7 @@ impl<D: Digest> Write for Proposal<D> {
 impl<D: Digest> Read for Proposal<D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let round = Round::read(reader)?;
         let parent = UInt::read(reader)?.into();
         let payload = D::read(reader)?;
@@ -807,7 +922,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Notarize<S, D> {
 impl<S: SigningScheme, D: Digest> Read for Notarize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let proposal = Proposal::read(reader)?;
         let vote = Vote::read(reader)?;
 
@@ -885,7 +1000,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Notarization<S, D> {
 impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let proposal = Proposal::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
 
@@ -970,7 +1085,7 @@ impl<S: SigningScheme> EncodeSize for Nullify<S> {
 impl<S: SigningScheme> Read for Nullify<S> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let round = Round::read(reader)?;
         let vote = Vote::read(reader)?;
 
@@ -1046,7 +1161,7 @@ impl<S: SigningScheme> EncodeSize for Nullification<S> {
 impl<S: SigningScheme> Read for Nullification<S> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let round = Round::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
 
@@ -1135,7 +1250,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Finalize<S, D> {
 impl<S: SigningScheme, D: Digest> Read for Finalize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let proposal = Proposal::read(reader)?;
         let vote = Vote::read(reader)?;
 
@@ -1213,7 +1328,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Finalization<S, D> {
 impl<S: SigningScheme, D: Digest> Read for Finalization<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let proposal = Proposal::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, &S::certificate_read_cfg())?;
 
@@ -1283,7 +1398,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Backfiller<S, D> {
 impl<S: SigningScheme, D: Digest> Read for Backfiller<S, D> {
     type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, CodecError> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -1294,7 +1409,7 @@ impl<S: SigningScheme, D: Digest> Read for Backfiller<S, D> {
                 let v = Response::<S, D>::read_cfg(reader, cfg)?;
                 Ok(Backfiller::Response(v))
             }
-            _ => Err(Error::Invalid(
+            _ => Err(CodecError::Invalid(
                 "consensus::threshold_simplex::Backfiller",
                 "Invalid type",
             )),
@@ -1344,13 +1459,13 @@ impl EncodeSize for Request {
 impl Read for Request {
     type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, CodecError> {
         let id = UInt::read(reader)?.into();
         let mut views = HashSet::new();
         let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
         for view in notarizations.iter() {
             if !views.insert(view) {
-                return Err(Error::Invalid(
+                return Err(CodecError::Invalid(
                     "consensus::threshold_simplex::Request",
                     "Duplicate notarization",
                 ));
@@ -1361,7 +1476,7 @@ impl Read for Request {
         let nullifications = Vec::<View>::read_range(reader, ..=remaining)?;
         for view in nullifications.iter() {
             if !views.insert(view) {
-                return Err(Error::Invalid(
+                return Err(CodecError::Invalid(
                     "consensus::threshold_simplex::Request",
                     "Duplicate nullification",
                 ));
@@ -1447,13 +1562,13 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Response<S, D> {
 impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
     type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, CodecError> {
         let id = UInt::read(reader)?.into();
         let mut views = HashSet::new();
         let notarizations = Vec::<Notarization<S, D>>::read_range(reader, ..=*max_len)?;
         for notarization in notarizations.iter() {
             if !views.insert(notarization.proposal.view()) {
-                return Err(Error::Invalid(
+                return Err(CodecError::Invalid(
                     "consensus::threshold_simplex::Response",
                     "Duplicate notarization",
                 ));
@@ -1464,7 +1579,7 @@ impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
         let nullifications = Vec::<Nullification<S>>::read_range(reader, ..=remaining)?;
         for nullification in nullifications.iter() {
             if !views.insert(nullification.round.view()) {
-                return Err(Error::Invalid(
+                return Err(CodecError::Invalid(
                     "consensus::threshold_simplex::Response",
                     "Duplicate nullification",
                 ));
@@ -1654,7 +1769,7 @@ impl<S: SigningScheme, D: Digest> EncodeSize for Activity<S, D> {
 impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -1693,7 +1808,7 @@ impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
                 let v = NullifyFinalize::<S, D>::read(reader)?;
                 Ok(Activity::NullifyFinalize(v))
             }
-            _ => Err(Error::Invalid(
+            _ => Err(CodecError::Invalid(
                 "consensus::threshold_simplex::Activity",
                 "Invalid type",
             )),
@@ -1933,7 +2048,7 @@ impl<S: SigningScheme, D: Digest> Write for ConflictingNotarize<S, D> {
 impl<S: SigningScheme, D: Digest> Read for ConflictingNotarize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let round = Round::read(reader)?;
         let signer = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
@@ -2109,7 +2224,7 @@ impl<S: SigningScheme, D: Digest> Write for ConflictingFinalize<S, D> {
 impl<S: SigningScheme, D: Digest> Read for ConflictingFinalize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let round = Round::read(reader)?;
         let signer = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
@@ -2253,7 +2368,7 @@ impl<S: SigningScheme, D: Digest> Write for NullifyFinalize<S, D> {
 impl<S: SigningScheme, D: Digest> Read for NullifyFinalize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let proposal = Proposal::read(reader)?;
         let signer = UInt::read(reader)?.into();
         let view_signature = S::Signature::read_cfg(reader, &S::signature_read_cfg())?;

@@ -1,10 +1,7 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
-    threshold_simplex::{
-        new_types::SigningScheme,
-        types::{Finalize, Notarize, Proposal, Voter},
-    },
+    threshold_simplex::types::{Finalize, Notarize, Proposal, SigningScheme, Voter},
     types::View,
     Viewable,
 };

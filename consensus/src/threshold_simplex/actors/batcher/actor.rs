@@ -4,10 +4,9 @@ use crate::{
         actors::voter,
         interesting,
         metrics::Inbound,
-        new_types::SigningScheme,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            Finalize, Notarize, Nullify, NullifyFinalize, Voter,
+            Finalize, Notarize, Nullify, NullifyFinalize, SigningScheme, Voter,
         },
     },
     types::{Epoch, View},
