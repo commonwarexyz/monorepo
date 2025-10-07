@@ -1,5 +1,5 @@
-use commonware_codec::{Encode, FixedSize, Read, Write};
-use commonware_cryptography::{Digestible, Hasher};
+use commonware_codec::{FixedSize, Read, Write};
+use commonware_cryptography::Hasher;
 use rand_core::CryptoRngCore;
 use std::ops::{Add, Mul, Neg, Sub};
 
@@ -173,6 +173,7 @@ impl F {
     /// Any non-zero element x = GENERATOR^k, for some k.
     ///
     /// This is chosen such that GENERATOR^((P - 1) / 64) = 8.
+    #[cfg(test)]
     pub const GENERATOR: Self = Self(0xd64f951101aff9bf);
 
     /// An element of order 2^32.
@@ -237,7 +238,7 @@ impl F {
                         break;
                     };
                     let x = u128::from(x);
-                    self.acc = self.acc | (x << self.acc_bits);
+                    self.acc |= x << self.acc_bits;
                     self.acc_bits += 64;
                 }
                 if self.acc_bits > 0 {
@@ -278,7 +279,7 @@ impl F {
                     };
                     // Ignore any upper bits of x
                     let x = u128::from(x & ((1 << 63) - 1));
-                    self.acc = self.acc | (x << self.acc_bits);
+                    self.acc |= x << self.acc_bits;
                     self.acc_bits += 63;
                 }
                 if self.acc_bits > 0 {
