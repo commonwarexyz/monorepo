@@ -131,17 +131,13 @@ where
             Activity::Notarization(notarization) => {
                 // Verify notarization
                 let view = notarization.proposal.view();
-                if self
-                    .signing
-                    .verify_certificate::<D>(
-                        &self.namespace,
-                        new_types::VoteContext::Notarize {
-                            proposal: &notarization.proposal,
-                        },
-                        &notarization.certificate,
-                    )
-                    .is_err()
-                {
+                if !self.signing.verify_certificate::<D>(
+                    &self.namespace,
+                    new_types::VoteContext::Notarize {
+                        proposal: &notarization.proposal,
+                    },
+                    &notarization.certificate,
+                ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -177,17 +173,13 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.round.view();
-                if self
-                    .signing
-                    .verify_certificate::<D>(
-                        &self.namespace,
-                        new_types::VoteContext::Nullify {
-                            round: nullification.round,
-                        },
-                        &nullification.certificate,
-                    )
-                    .is_err()
-                {
+                if !self.signing.verify_certificate::<D>(
+                    &self.namespace,
+                    new_types::VoteContext::Nullify {
+                        round: nullification.round,
+                    },
+                    &nullification.certificate,
+                ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -228,17 +220,13 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.proposal.view();
-                if self
-                    .signing
-                    .verify_certificate::<D>(
-                        &self.namespace,
-                        new_types::VoteContext::Finalize {
-                            proposal: &finalization.proposal,
-                        },
-                        &finalization.certificate,
-                    )
-                    .is_err()
-                {
+                if !self.signing.verify_certificate::<D>(
+                    &self.namespace,
+                    new_types::VoteContext::Finalize {
+                        proposal: &finalization.proposal,
+                    },
+                    &finalization.certificate,
+                ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
