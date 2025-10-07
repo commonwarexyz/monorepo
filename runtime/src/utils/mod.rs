@@ -15,11 +15,14 @@ use std::{
 };
 
 pub mod buffer;
+pub mod context_slot;
 pub mod signal;
 
 mod handle;
 pub use handle::Handle;
 pub(crate) use handle::{Aborter, MetricHandle, Panicked, Panicker};
+
+pub use context_slot::{ContextLease, ContextSlot};
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {

@@ -8,7 +8,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{Clock, ContextSlot, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, IpAddrExt, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
@@ -21,7 +21,7 @@ const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: E,
+    context: ContextSlot<E>,
 
     // ---------- Configuration ----------
     /// For signing and verifying messages.
@@ -93,7 +93,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context,
+                context: ContextSlot::new(context),
                 crypto: cfg.crypto,
                 ip_namespace,
                 allow_private_ips: cfg.allow_private_ips,
@@ -150,32 +150,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     /// Start the actor and run it in the background.
-    pub fn start(self) -> Handle<()> {
-        let Self {
-            context,
-            crypto,
-            ip_namespace,
-            allow_private_ips,
-            synchrony_bound,
-            max_peer_set_size,
-            peer_gossip_max_count,
-            receiver,
-            directory,
-        } = self;
-
+    pub fn start(mut self) -> Handle<()> {
+        let (context, mut lease) = self.context.take();
         context.spawn(move |task_context| {
-            Self {
-                context: task_context,
-                crypto,
-                ip_namespace,
-                allow_private_ips,
-                synchrony_bound,
-                max_peer_set_size,
-                peer_gossip_max_count,
-                receiver,
-                directory,
-            }
-            .run()
+            let mut actor = self;
+            lease.put(&mut actor.context, task_context);
+            actor.run()
         })
     }
 
