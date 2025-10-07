@@ -126,6 +126,8 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_storage::bmt::{Builder, Proof};
+use commonware_utils::rational::BigRationalExt;
+use num_rational::BigRational;
 use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
@@ -179,11 +181,19 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
     out
 }
 
+fn required_samples_impl(n: usize, k: usize, skew: usize) -> usize {
+    let n = BigRational::from_usize(n);
+    let k = BigRational::from_usize(k);
+    let skew = BigRational::from_usize(skew);
+    let fraction = (&k + &skew) / (BigRational::from_usize(2) * (&n + &k));
+    let log_term = (BigRational::from_usize(1) - fraction).log2_rational_ceil(7);
+    let required = BigRational::from_usize(128) / -log_term;
+    required.ceil_to_u128().unwrap_or(u128::MAX) as usize
+}
+
 fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
-    let n = min_rows as f64;
-    let k = (encoded_rows - min_rows) as f64;
-    let required = 128.0 / -(1.0 - (k + 1.0) / (2.0 * (n + k))).log2();
-    required.ceil() as usize
+    let k = encoded_rows - min_rows;
+    required_samples_impl(min_rows, k, 1)
 }
 
 /// Takes the limit of [required_samples] as the number of samples per row goes to infinity.
@@ -191,7 +201,7 @@ fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
 /// The actual number of required samples for a given n * samples and k * samples
 /// will be less.
 fn required_samples_upper_bound(n: usize, k: usize) -> usize {
-    (128.0 / -(1.0 - k as f64 / (2.0 * (n + k) as f64)).log2()).ceil() as usize
+    required_samples_impl(n, k, 0)
 }
 
 fn enough_samples(n: usize, k: usize, samples: usize) -> bool {
