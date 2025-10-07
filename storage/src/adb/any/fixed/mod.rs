@@ -235,7 +235,8 @@ impl<
     /// Builds the database's snapshot by replaying the log starting at the inactivity floor.
     /// Assumes the log and mmr have the same number of operations and are not pruned beyond the
     /// inactivity floor. The callback is invoked for each replayed operation, indicating activity
-    /// status updates.
+    /// status updates. The first argument of the callback is the activity status of the operation,
+    /// and the second argument is the location of the operation it inactivates (if any).
     pub(crate) async fn build_snapshot_from_log<F>(
         inactivity_floor_loc: Location,
         log: &Journal<E, Operation<K, V>>,
@@ -386,12 +387,12 @@ impl<
         let new_loc = self.op_count();
         let res =
             Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
-        if res.is_some() {
-            self.steps += 1;
-        }
 
         let op = Operation::Update(key, value);
         self.apply_op(op).await?;
+        if res.is_some() {
+            self.steps += 1;
+        }
 
         Ok(res)
     }
@@ -517,8 +518,9 @@ impl<
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        // Raise the inactivity floor by taking `self.steps` steps.
-        let steps_to_take = self.steps + 1; // account for the previous commit becoming inactive.
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        let steps_to_take = self.steps + 1;
         for _ in 0..steps_to_take {
             if self.snapshot.keys() == 0 {
                 self.inactivity_floor_loc = self.op_count();
@@ -594,7 +596,9 @@ impl<
     /// inactivity floor to the location following the moved operation. This method is therefore
     /// guaranteed to raise the floor by at least one.
     ///
-    /// # Panics if there is not at least one active operation above the inactivity floor.
+    /// # Panics
+    ///
+    /// Panics if there is not at least one active operation above the inactivity floor.
     async fn raise_floor(&mut self) -> Result<(), Error> {
         // Search for the first active operation above the inactivity floor and move it to tip.
         let mut op = self.log.read(*self.inactivity_floor_loc).await?;
@@ -616,7 +620,7 @@ impl<
     /// Prune historical operations prior to `target_prune_loc`. This does not affect the db's root
     /// or current snapshot.
     ///
-    /// # Panic
+    /// # Panics
     ///
     /// Panics if `target_prune_loc` is greater than the inactivity floor.
     pub async fn prune(&mut self, target_prune_loc: Location) -> Result<(), Error> {
