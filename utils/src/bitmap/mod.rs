@@ -19,6 +19,9 @@ use std::collections::VecDeque;
 mod prunable;
 pub use prunable::Prunable;
 
+mod historical;
+pub use historical::{BatchGuard, Error, Historical};
+
 /// The default [BitMap] chunk size in bytes.
 pub const DEFAULT_CHUNK_SIZE: usize = 8;
 
@@ -341,6 +344,29 @@ impl<const N: usize> BitMap<N> {
         assert_eq!(self.next_bit, 0, "cannot add chunk when not chunk aligned");
         self.last_chunk_mut().copy_from_slice(chunk.as_ref());
         self.prepare_next_chunk();
+    }
+
+    /// Prepend a chunk to the beginning of the bitmap.
+    pub(super) fn prepend_chunk(&mut self, chunk: &[u8; N]) {
+        self.chunks.push_front(*chunk);
+    }
+
+    /// Overwrite a chunk's data at the given index.
+    ///
+    /// Replaces the entire chunk data, including any bits beyond `len()` in the last chunk.
+    /// The caller is responsible for ensuring `chunk_data` has the correct bit pattern
+    /// (e.g., zeros beyond the valid length if this is a partial last chunk).
+    ///
+    /// # Panics
+    ///
+    /// Panics if chunk_index is out of bounds.
+    pub(super) fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
+        assert!(
+            chunk_index < self.chunks.len(),
+            "chunk index {chunk_index} out of bounds (chunks_len: {})",
+            self.chunks.len()
+        );
+        self.chunks[chunk_index].copy_from_slice(chunk_data);
     }
 
     /* Invariant Maintenance */
