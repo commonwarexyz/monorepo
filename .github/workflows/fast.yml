@@ -176,12 +176,6 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Add minimal no_std target
-      run: rustup target add thumbv7em-none-eabihf
-    - name: Install ARM bare-metal toolchain (required to compile C from x86 worker)
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-arm-none-eabi
     - name: Check no_std compatibility
       run: ./.github/scripts/check_no_std.sh
 
