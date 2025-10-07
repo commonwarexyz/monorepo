@@ -320,12 +320,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
 
     /// Whether there are any updates that are not yet reflected in this bitmap's root.
     pub fn is_dirty(&self) -> bool {
-        if !self.dirty_chunks.is_empty() {
-            return true;
-        }
-
-        // Check if there are complete chunks that haven't been authenticated yet
-        self.authenticated_len < self.complete_chunks()
+        !self.dirty_chunks.is_empty() || self.authenticated_len < self.complete_chunks()
     }
 
     /// The chunks that have been modified or added since the last `sync`.
