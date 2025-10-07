@@ -252,17 +252,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.prune_to_bit(bit);
 
         // Update authenticated length
-        let chunks_len = self.bitmap.chunks_len();
-        if chunks_len == 0 {
-            self.authenticated_len = 0;
-        } else {
-            let (_, next_bit) = self.bitmap.last_chunk();
-            self.authenticated_len = if next_bit == Self::CHUNK_SIZE_BITS {
-                chunks_len // Include complete last chunk
-            } else {
-                chunks_len - 1 // Exclude partial last chunk
-            };
-        }
+        self.authenticated_len = self.complete_chunks();
 
         // Update MMR
         let mmr_pos = Position::from(Location::new(chunk as u64));
