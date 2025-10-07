@@ -145,10 +145,7 @@ impl<S: SigningScheme, D: Digest> Notarize<S, D> {
         let context = VoteContext::Notarize {
             proposal: &self.proposal,
         };
-        // FIXME: avoid cloning
-        let verification =
-            scheme.verify_votes(namespace, context, std::iter::once(self.vote.clone()));
-        !verification.verified.is_empty()
+        scheme.verify_vote(namespace, context, &self.vote)
     }
 }
 
@@ -207,10 +204,7 @@ impl<S: SigningScheme> Nullify<S> {
     // FIXME: this D sucks
     pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
         let context: VoteContext<D> = VoteContext::Nullify { round: self.round };
-        // FIXME: avoid cloning
-        let verification =
-            scheme.verify_votes(namespace, context, std::iter::once(self.vote.clone()));
-        !verification.verified.is_empty()
+        scheme.verify_vote(namespace, context, &self.vote)
     }
 }
 
@@ -272,10 +266,7 @@ impl<S: SigningScheme, D: Digest> Finalize<S, D> {
         let context = VoteContext::Finalize {
             proposal: &self.proposal,
         };
-        // FIXME: avoid cloning
-        let verification =
-            scheme.verify_votes(namespace, context, std::iter::once(self.vote.clone()));
-        !verification.verified.is_empty()
+        scheme.verify_vote(namespace, context, &self.vote)
     }
 }
 
@@ -508,6 +499,16 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
     where
         Self: Sized;
 
+    fn verify_vote<D: Digest>(
+        &self,
+        namespace: &[u8],
+        context: VoteContext<'_, D>,
+        vote: &Vote<Self>,
+    ) -> bool {
+        let verification = self.verify_votes(namespace, context, std::iter::once(vote.clone()));
+        !verification.verified.is_empty()
+    }
+
     // FIXME: avoid cloning votes, maybe just Iterator<&Vote>?
     fn verify_votes<D: Digest, I>(
         &self,
@@ -716,6 +717,87 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         )?;
 
         Ok((proposal_sig, seed_sig))
+    }
+
+    fn verify_vote<D: Digest>(
+        &self,
+        namespace: &[u8],
+        context: VoteContext<'_, D>,
+        vote: &Vote<Self>,
+    ) -> bool {
+        match context {
+            VoteContext::Notarize { proposal } => {
+                let Some(evaluated) = self.polynomial.get(vote.signer as usize) else {
+                    return false;
+                };
+
+                let notarize_namespace = notarize_namespace(namespace);
+                let notarize_message = proposal.encode();
+                let notarize_message =
+                    (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+
+                let seed_namespace = seed_namespace(namespace);
+                let seed_message = proposal.round.encode();
+                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+
+                let signature = aggregate_signatures::<V, _>(&[vote.signature.0, vote.signature.1]);
+
+                aggregate_verify_multiple_messages::<V, _>(
+                    &evaluated,
+                    &[notarize_message, seed_message],
+                    &signature,
+                    1,
+                )
+                .is_ok()
+            }
+            VoteContext::Nullify { round } => {
+                let Some(evaluated) = self.polynomial.get(vote.signer as usize) else {
+                    return false;
+                };
+
+                let nullify_namespace = nullify_namespace(namespace);
+                let nullify_message = round.encode();
+                let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
+
+                let seed_namespace = seed_namespace(namespace);
+                let seed_message = round.encode();
+                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+
+                let signature = aggregate_signatures::<V, _>(&[vote.signature.0, vote.signature.1]);
+
+                aggregate_verify_multiple_messages::<V, _>(
+                    &evaluated,
+                    &[nullify_message, seed_message],
+                    &signature,
+                    1,
+                )
+                .is_ok()
+            }
+            VoteContext::Finalize { proposal } => {
+                let Some(evaluated) = self.polynomial.get(vote.signer as usize) else {
+                    return false;
+                };
+
+                let finalize_namespace = finalize_namespace(namespace);
+                let finalize_message = proposal.encode();
+                let finalize_message =
+                    (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
+
+                let seed_namespace = seed_namespace(namespace);
+                let seed_message = proposal.round.encode();
+                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+
+                let signature = aggregate_signatures::<V, _>(&[vote.signature.0, vote.signature.1]);
+
+                aggregate_verify_multiple_messages::<V, _>(
+                    &evaluated,
+                    &[finalize_message, seed_message],
+                    &signature,
+                    1,
+                )
+                .is_ok()
+            }
+        }
     }
 
     fn verify_votes<D: Digest, I>(
