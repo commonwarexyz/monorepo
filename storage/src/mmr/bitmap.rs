@@ -213,6 +213,21 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.pruned_bits()
     }
 
+    /// Returns the number of complete chunks (excludes partial chunk at end, if any).
+    #[inline]
+    fn complete_chunks(&self) -> usize {
+        let chunks_len = self.bitmap.chunks_len();
+        if chunks_len == 0 {
+            return 0;
+        }
+        let (_, next_bit) = self.bitmap.last_chunk();
+        if next_bit == Self::CHUNK_SIZE_BITS {
+            chunks_len
+        } else {
+            chunks_len - 1
+        }
+    }
+
     /// Prune all complete chunks before the chunk containing the given bit.
     ///
     /// The chunk containing `bit` and all subsequent chunks are retained. All chunks
@@ -319,20 +334,8 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             return true;
         }
 
-        let chunks_len = self.bitmap.chunks_len();
-        if chunks_len == 0 {
-            return false;
-        }
-
         // Check if there are complete chunks that haven't been authenticated yet
-        let (_, next_bit) = self.bitmap.last_chunk();
-        let complete_chunks = if next_bit == Self::CHUNK_SIZE_BITS {
-            chunks_len
-        } else {
-            chunks_len - 1
-        };
-
-        self.authenticated_len < complete_chunks
+        self.authenticated_len < self.complete_chunks()
     }
 
     /// The chunks that have been modified or added since the last `sync`.
@@ -343,18 +346,9 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             .iter()
             .map(|&chunk| Location::new((chunk + pruned_chunks) as u64))
             .collect();
-        let chunks_len = self.bitmap.chunks_len();
-        if chunks_len == 0 {
-            return chunks;
-        }
 
         // Include complete chunks that haven't been authenticated yet
-        let (_, next_bit) = self.bitmap.last_chunk();
-        let complete_chunks = if next_bit == Self::CHUNK_SIZE_BITS {
-            chunks_len
-        } else {
-            chunks_len - 1
-        };
+        let complete_chunks = self.complete_chunks();
         for i in self.authenticated_len..complete_chunks {
             chunks.push(Location::from(i + pruned_chunks));
         }
@@ -366,22 +360,11 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     pub async fn sync(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
-        let chunks_len = self.bitmap.chunks_len();
-        if chunks_len > 0 {
-            // If the last chunk is complete, include it. Otherwise, exclude it.
-            let (_, next_bit) = self.bitmap.last_chunk();
-            let end = if next_bit == Self::CHUNK_SIZE_BITS {
-                chunks_len
-            } else {
-                chunks_len - 1
-            };
-            for i in start..end {
-                self.mmr.add_batched(hasher, self.bitmap.get_chunk(i));
-            }
-            self.authenticated_len = end;
-        } else {
-            self.authenticated_len = 0;
+        let end = self.complete_chunks();
+        for i in start..end {
+            self.mmr.add_batched(hasher, self.bitmap.get_chunk(i));
         }
+        self.authenticated_len = end;
 
         // Inform the MMR of modified chunks.
         let pruned_chunks = self.bitmap.pruned_chunks();
