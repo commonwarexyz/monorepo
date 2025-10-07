@@ -614,7 +614,7 @@ impl<C> ContextSlot<C> {
     }
 
     /// Return a context to the slot, panicking if one is already present.
-    pub fn return_context(&mut self, context: C) {
+    pub fn restore(&mut self, context: C) {
         match self {
             Self::Present(_) => panic!("{}", Self::DUPLICATE_CONTEXT),
             Self::Missing => {

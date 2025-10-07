@@ -115,7 +115,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn start(mut self) -> Handle<()> {
         let context = self.context.take();
         context.spawn(move |context| async move {
-            self.context.return_context(context);
+            self.context.restore(context);
             self.run().await;
         })
     }
