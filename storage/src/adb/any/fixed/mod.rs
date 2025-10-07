@@ -601,6 +601,8 @@ impl<
     /// Panics if there is not at least one active operation above the inactivity floor.
     async fn raise_floor(&mut self) -> Result<(), Error> {
         // Search for the first active operation above the inactivity floor and move it to tip.
+        //
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
         let mut op = self.log.read(*self.inactivity_floor_loc).await?;
         while self
             .move_op_if_active(op, self.inactivity_floor_loc)
