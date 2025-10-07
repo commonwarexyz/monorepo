@@ -58,7 +58,7 @@ enum MmrJournaledOperation {
     Close,
     Reinit,
     InitFromPinnedNodes {
-        size: usize,
+        size: u64,
     },
     InitSync {
         lower_bound_seed: u16,
@@ -366,7 +366,7 @@ fn fuzz(input: FuzzInput) {
                 MmrJournaledOperation::InitFromPinnedNodes { size } => {
                     if mmr.size() > 0 {
                         // Ensure limited_size doesn't exceed current MMR size
-                        let size = (size as u64).min(*mmr.size());
+                        let size = size.min(*mmr.size());
 
                         // Create a reasonable number of pinned nodes - use a simple heuristic
                         // For small MMRs, we need fewer pinned nodes; for larger ones, we need more
