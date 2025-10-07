@@ -14,51 +14,51 @@ use futures::{
 ///
 /// [Actor]: super::Actor
 #[allow(clippy::large_enum_variant)]
-pub enum Message<H, P, V>
+pub enum Message<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     /// A request for the [Actor]'s next [DealOutcome] for inclusion within a block.
     ///
     /// [Actor]: super::Actor
     Act {
-        response: oneshot::Sender<Option<DealOutcome<P, V>>>,
+        response: oneshot::Sender<Option<DealOutcome<C, V>>>,
     },
 
     /// A new block has been finalized.
-    Finalized { block: Block<H, P, V> },
+    Finalized { block: Block<H, C, V> },
 }
 
 /// Inbox for sending messages to the DKG [Actor].
 ///
 /// [Actor]: super::Actor
 #[derive(Clone)]
-pub struct Mailbox<H, P, V>
+pub struct Mailbox<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
-    sender: mpsc::Sender<Message<H, P, V>>,
+    sender: mpsc::Sender<Message<H, C, V>>,
 }
 
-impl<H, P, V> Mailbox<H, P, V>
+impl<H, C, V> Mailbox<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     /// Create a new mailbox.
-    pub fn new(sender: mpsc::Sender<Message<H, P, V>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Message<H, C, V>>) -> Self {
         Self { sender }
     }
 
     /// Request the [Actor]'s next payload for inclusion within a block.
     ///
     /// [Actor]: super::Actor
-    pub async fn act(&mut self) -> Option<DealOutcome<P, V>> {
+    pub async fn act(&mut self) -> Option<DealOutcome<C, V>> {
         let (response_tx, response_rx) = oneshot::channel();
         let message = Message::Act {
             response: response_tx,
@@ -69,13 +69,13 @@ where
     }
 }
 
-impl<H, P, V> Reporter for Mailbox<H, P, V>
+impl<H, C, V> Reporter for Mailbox<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
-    type Activity = Block<H, P, V>;
+    type Activity = Block<H, C, V>;
 
     async fn report(&mut self, block: Self::Activity) {
         self.sender

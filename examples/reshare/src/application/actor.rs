@@ -1,10 +1,11 @@
 use crate::{
-    application::{types::B, Mailbox, Message, H},
+    application::{types::genesis_block, Block, Mailbox, Message},
     dkg,
+    utils::{get_last_height, height_in_epoch},
 };
 use commonware_consensus::{marshal, types::Round};
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig, ed25519::PrivateKey, Digestible, Hasher, Sha256,
+    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, PrivateKey,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use futures::{
@@ -17,20 +18,26 @@ use rand::Rng;
 use std::{future, sync::Arc, time::Duration};
 use tracing::{info, warn};
 
-const GENESIS_MESSAGE: &[u8] = b"reshare spell";
-
 /// The application [Actor].
-pub struct Actor<E> {
+pub struct Actor<E, H, C, V>
+where
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
     context: E,
-    mailbox: mpsc::Receiver<Message>,
+    mailbox: mpsc::Receiver<Message<H, C, V>>,
 }
 
-impl<E> Actor<E>
+impl<E, H, C, V> Actor<E, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
 {
     /// Create a new application [Actor] and its associated [Mailbox].
-    pub fn new(context: E, mailbox_size: usize) -> (Self, Mailbox) {
+    pub fn new(context: E, mailbox_size: usize) -> (Self, Mailbox<H, C, V>) {
         let (sender, mailbox) = mpsc::channel(mailbox_size);
 
         (Self { context, mailbox }, Mailbox::new(sender))
@@ -39,8 +46,8 @@ where
     /// Start the application.
     pub fn start(
         mut self,
-        marshal: marshal::Mailbox<MinSig, B>,
-        dkg: dkg::Mailbox<Sha256, PrivateKey, MinSig>,
+        marshal: marshal::Mailbox<V, Block<H, C, V>>,
+        dkg: dkg::Mailbox<H, C, V>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(marshal, dkg))
     }
@@ -48,20 +55,32 @@ where
     /// Application control loop
     async fn run(
         mut self,
-        mut marshal: marshal::Mailbox<MinSig, B>,
-        dkg: dkg::Mailbox<Sha256, PrivateKey, MinSig>,
+        mut marshal: marshal::Mailbox<V, Block<H, C, V>>,
+        dkg: dkg::Mailbox<H, C, V>,
     ) {
-        let genesis = B::new(H::hash(GENESIS_MESSAGE), 0, None);
+        let genesis = genesis_block();
         let genesis_digest = genesis.digest();
         let built = Arc::new(Mutex::new(None));
 
         while let Some(message) = self.mailbox.next().await {
             match message {
-                Message::Genesis { response } => {
-                    let _ = response.send(genesis_digest);
+                Message::Genesis { epoch, response } => {
+                    // Case: Genesis.
+                    if epoch == 0 {
+                        let _ = response.send(genesis_block::<H, C, V>().commitment());
+                        continue;
+                    }
+
+                    // Case: Non-genesis.
+                    let height = get_last_height(epoch - 1);
+                    let Some(block) = marshal.get_block(height).await else {
+                        // No block exists, put the response in the responders map for later.
+                        continue;
+                    };
+                    let _ = response.send(block.commitment());
                 }
                 Message::Propose {
-                    view,
+                    round,
                     parent,
                     response,
                 } => {
@@ -71,7 +90,10 @@ where
                     } else {
                         Either::Right(
                             marshal
-                                .subscribe(Some(Round::new(0, parent_view)), parent_digest)
+                                .subscribe(
+                                    Some(Round::new(round.epoch(), parent_view)),
+                                    parent_digest,
+                                )
                                 .await,
                         )
                     };
@@ -83,6 +105,18 @@ where
                         .spawn(move |context| async move {
                             let parent = parent_request.await.expect("parent request cancelled");
 
+                            // Re-propose the parent block if it's already at the last height in the epoch.
+                            if parent.height == get_last_height(round.epoch()) {
+                                let result = response.send(parent.digest());
+                                info!(
+                                    ?round,
+                                    digest = ?parent.digest(),
+                                    success = result.is_ok(),
+                                    "re-proposed parent block at epoch boundary"
+                                );
+                                return;
+                            }
+
                             // Ask the DKG actor for a result to include
                             let reshare = context
                                 .timeout(Duration::from_millis(5), async move { dkg.act().await })
@@ -91,15 +125,15 @@ where
                                 .flatten();
 
                             // Create a new block
-                            let block = B::new(parent_digest, parent.height + 1, reshare);
+                            let block = Block::new(parent_digest, parent.height + 1, reshare);
                             let digest = block.digest();
                             let mut built = built.lock().await;
-                            *built = Some((view, block));
+                            *built = Some((round.view(), block));
 
                             // Send the digest to the consensus
                             let result = response.send(digest);
                             info!(
-                                view,
+                                ?round,
                                 ?digest,
                                 success = result.is_ok(),
                                 "proposed new block"
@@ -107,7 +141,7 @@ where
                         });
                 }
                 Message::Verify {
-                    view,
+                    round,
                     parent,
                     digest,
                     response,
@@ -118,7 +152,10 @@ where
                     } else {
                         Either::Right(
                             marshal
-                                .subscribe(Some(Round::new(0, parent_view)), parent_digest)
+                                .subscribe(
+                                    Some(Round::new(round.epoch(), parent_view)),
+                                    parent_digest,
+                                )
                                 .await,
                         )
                     };
@@ -132,14 +169,27 @@ where
                                     .await
                                     .unwrap();
 
+                            // You can only re-propose the same block if it's the last height in the epoch.
+                            if block.parent == block.commitment() {
+                                if block.height == get_last_height(round.epoch()) {
+                                    marshal.verified(round, block).await;
+                                    let _ = response.send(true);
+                                } else {
+                                    let _ = response.send(false);
+                                }
+                                return;
+                            }
+
                             // Verify the block
-                            if block.height != parent.height + 1 || block.parent != parent.digest()
+                            if block.height != parent.height + 1
+                                || block.parent != parent.digest()
+                                || !height_in_epoch(block.height, round.epoch())
                             {
                                 let _ = response.send(false);
                                 return;
                             }
 
-                            marshal.verified(Round::new(0, view), block).await;
+                            marshal.verified(round, block).await;
                             let _ = response.send(true);
                         });
                 }
@@ -166,6 +216,6 @@ where
             }
         }
 
-        info!(target: "application", "mailbox closed, exiting.");
+        info!("mailbox closed, exiting.");
     }
 }

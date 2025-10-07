@@ -205,19 +205,21 @@ impl<
         );
 
         // Wait for the resolver or voter to finish
-        let mut shutdown = self.context.stopped();
         select! {
-            _ = &mut shutdown => {
-                debug!("shutdown");
-            },
             _ = &mut voter_task => {
-                panic!("voter should not finish");
+                debug!("voter finished");
+                resolver_task.abort();
+                batcher_task.abort();
             },
             _ = &mut batcher_task => {
-                panic!("batcher should not finish");
+                debug!("batcher finished");
+                voter_task.abort();
+                resolver_task.abort();
             },
             _ = &mut resolver_task => {
-                panic!("resolver should not finish");
+                debug!("resolver finished");
+                voter_task.abort();
+                batcher_task.abort();
             },
         }
     }
