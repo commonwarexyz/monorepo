@@ -1757,43 +1757,28 @@ impl<S: SigningScheme, D: Digest> Response<S, D> {
 
     /// Verifies the signatures on this response.
     pub fn verify(&self, signing: &S, namespace: &[u8]) -> bool {
-        // FIXME: make this more efficient. need to aggregate across multiple certificates
-
         // Prepare to verify
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
             return true;
         }
 
-        for notarization in &self.notarizations {
-            if !signing
-                .verify_certificate::<D>(
-                    new_types::VoteContext::Notarize {
-                        namespace,
-                        proposal: &notarization.proposal,
-                    },
-                    &notarization.certificate,
-                )
-                .is_ok()
-            {
-                return false;
-            }
-        }
-        for nullification in &self.nullifications {
-            if !signing
-                .verify_certificate::<D>(
-                    new_types::VoteContext::Nullify {
-                        namespace,
-                        round: nullification.round,
-                    },
-                    &nullification.certificate,
-                )
-                .is_ok()
-            {
-                return false;
-            }
-        }
+        let notarizations = self.notarizations.iter().map(|notarization| {
+            let context = new_types::VoteContext::Notarize {
+                proposal: &notarization.proposal,
+            };
 
-        true
+            (context, &notarization.certificate)
+        });
+
+        let nullifications = self.nullifications.iter().map(|nullification| {
+            let context = new_types::VoteContext::Nullify {
+                round: nullification.round,
+            };
+
+            (context, &nullification.certificate)
+        });
+
+        signing.verify_certificates(namespace, notarizations.chain(nullifications))
     }
 }
 

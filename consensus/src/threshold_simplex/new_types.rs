@@ -21,7 +21,11 @@ use commonware_cryptography::{
     },
     Digest,
 };
-use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt::Debug,
+    hash::Hash,
+};
 use thiserror::Error;
 
 /// Errors emitted by signing scheme implementations.
@@ -532,6 +536,23 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         certificate: &Self::Certificate,
     ) -> Result<Option<Self::Randomness>, Error>;
 
+    fn verify_certificates<'a, D: Digest, I>(&self, namespace: &[u8], certificates: I) -> bool
+    where
+        I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
+        Self: Sized,
+    {
+        for (context, certificate) in certificates {
+            if self
+                .verify_certificate(namespace, context, certificate)
+                .is_err()
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness>;
 
     // FIXME: this probably doesn't make sense, only needed for certificates
@@ -905,6 +926,99 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         };
 
         Ok(Some(certificate.1.clone()))
+    }
+
+    fn verify_certificates<'a, D: Digest, I>(&self, namespace: &[u8], certificates: I) -> bool
+    where
+        I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
+        Self: Sized,
+    {
+        let mut seeds = HashMap::new();
+        let mut messages = Vec::new();
+        let mut signatures = Vec::new();
+
+        let notarize_namespace = notarize_namespace(namespace);
+        let nullify_namespace = nullify_namespace(namespace);
+        let finalize_namespace = finalize_namespace(namespace);
+        let seed_namespace = seed_namespace(namespace);
+
+        for (context, certificate) in certificates {
+            match context {
+                VoteContext::Notarize { proposal } => {
+                    // Prepare notarize message
+                    let notarize_message = proposal.encode().to_vec();
+                    let notarize_message = (Some(notarize_namespace.as_slice()), notarize_message);
+                    messages.push(notarize_message);
+                    signatures.push(&certificate.0);
+
+                    // Add seed message (if not already present)
+                    if let Some(previous) = seeds.get(&proposal.round.view()) {
+                        if *previous != &certificate.1 {
+                            return false;
+                        }
+                    } else {
+                        let seed_message: Vec<u8> = proposal.round.encode().into();
+                        let seed_message = (Some(seed_namespace.as_slice()), seed_message);
+                        messages.push(seed_message);
+                        signatures.push(&certificate.1);
+                        seeds.insert(proposal.round.view(), &certificate.1);
+                    }
+                }
+                VoteContext::Nullify { round } => {
+                    // Prepare nullify message
+                    let nullify_message: Vec<u8> = round.encode().into();
+                    let nullify_message = (Some(nullify_namespace.as_slice()), nullify_message);
+                    messages.push(nullify_message);
+                    signatures.push(&certificate.0);
+
+                    // Add seed message (if not already present)
+                    if let Some(previous) = seeds.get(&round.view()) {
+                        if *previous != &certificate.1 {
+                            return false;
+                        }
+                    } else {
+                        let seed_message: Vec<u8> = round.encode().into();
+                        let seed_message = (Some(seed_namespace.as_slice()), seed_message);
+                        messages.push(seed_message);
+                        signatures.push(&certificate.1);
+                        seeds.insert(round.view(), &certificate.1);
+                    }
+                }
+                VoteContext::Finalize { proposal } => {
+                    // Prepare finalize message
+                    let finalize_message = proposal.encode().to_vec();
+                    let finalize_message = (Some(finalize_namespace.as_slice()), finalize_message);
+                    messages.push(finalize_message);
+                    signatures.push(&certificate.0);
+
+                    // Add seed message (if not already present)
+                    if let Some(previous) = seeds.get(&proposal.round.view()) {
+                        if *previous != &certificate.1 {
+                            return false;
+                        }
+                    } else {
+                        let seed_message: Vec<u8> = proposal.round.encode().into();
+                        let seed_message = (Some(seed_namespace.as_slice()), seed_message);
+                        messages.push(seed_message);
+                        signatures.push(&certificate.1);
+                        seeds.insert(proposal.round.view(), &certificate.1);
+                    }
+                }
+            }
+        }
+
+        // Aggregate signatures
+        let signature = aggregate_signatures::<V, _>(signatures);
+        aggregate_verify_multiple_messages::<V, _>(
+            &self.identity,
+            &messages
+                .iter()
+                .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
+                .collect::<Vec<_>>(),
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness> {
