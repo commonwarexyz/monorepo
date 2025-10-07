@@ -2,7 +2,7 @@
 
 use crate::{
     threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Error, Proposal,
+        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Proposal,
         SigningScheme, Vote, VoteContext, VoteVerification,
     },
     types::Round,
@@ -155,7 +155,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
         }
     }
 
-    fn assemble_certificate<I>(&self, votes: I) -> Result<Self::Certificate, Error>
+    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
@@ -176,10 +176,7 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             .unzip();
 
         if message_partials.len() < self.threshold as usize {
-            return Err(Error::InsufficientVotes {
-                required: self.threshold,
-                actual: message_partials.len() as u32,
-            });
+            return None;
         }
 
         let (message_signature, seed_signature) = threshold_signature_recover_pair::<V, _>(
@@ -187,9 +184,9 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             message_partials.iter(),
             seed_partials.iter(),
         )
-        .map_err(|e| Error::Wrapped("BlsThresholdScheme", e.into()))?;
+        .ok()?;
 
-        Ok((message_signature, seed_signature))
+        Some((message_signature, seed_signature))
     }
 
     fn verify_vote<D: Digest>(
