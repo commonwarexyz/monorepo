@@ -8,8 +8,7 @@ use commonware_storage::{
         any::variable::{Any, Config},
         verify_proof,
     },
-    mmr,
-    mmr::hasher::Standard,
+    mmr::{self, hasher::Standard, MAX_LOCATION},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -107,7 +106,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             7 => Ok(Operation::GetMetadata),
             8 => {
-                let start_loc = u.arbitrary()?;
+                let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
                 let start_loc = Location::new_checked(start_loc).unwrap();
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
@@ -115,7 +114,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             9 => {
                 let size = u.arbitrary()?;
-                let start_loc = u.arbitrary()?;
+                let start_loc = u.arbitrary::<u64>()? % (MAX_LOCATION + 1);
                 let start_loc = Location::new_checked(start_loc).unwrap();
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
