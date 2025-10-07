@@ -86,7 +86,7 @@ cfg_if::cfg_if! {
 }
 
 pub use hasher::Standard as StandardHasher;
-pub use location::Location;
+pub use location::{Location, MAX_LOCATION};
 pub use position::Position;
 pub use proof::Proof;
 use thiserror::Error;

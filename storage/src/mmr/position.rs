@@ -16,6 +16,28 @@ impl Position {
         Self(pos)
     }
 
+    /// Attempts to convert a [Location] to a [Position], returning `None` if overflow would occur.
+    ///
+    /// This is a checked alternative to [Position::from] which panics on overflow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_storage::mmr::{Location, Position, MAX_LOCATION};
+    ///
+    /// let valid_loc = Location::new(100);
+    /// assert!(Position::checked_from_location(valid_loc).is_some());
+    ///
+    /// let invalid_loc = Location::new(MAX_LOCATION + 1);
+    /// assert!(Position::checked_from_location(invalid_loc).is_none());
+    /// ```
+    #[inline]
+    pub fn checked_from_location(loc: Location) -> Option<Self> {
+        let loc_val = *loc;
+        let doubled = loc_val.checked_mul(2)?;
+        Some(Self(doubled - loc_val.count_ones() as u64))
+    }
+
     /// Return the underlying `u64` value.
     #[inline]
     pub const fn as_u64(self) -> u64 {
@@ -97,7 +119,18 @@ impl From<Position> for u64 {
 ///
 /// # Panics
 ///
-/// Panics if `loc` is too large (must fit in 64 bits after multiplication by 2).
+/// Panics if `loc > MAX_LOCATION`. Use [Position::checked_from_location] if you need to handle
+/// this case without panicking.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_storage::mmr::{Location, Position};
+///
+/// let loc = Location::new(5);
+/// let pos = Position::from(loc);
+/// assert_eq!(pos, Position::new(8));
+/// ```
 impl From<Location> for Position {
     #[inline]
     fn from(loc: Location) -> Self {
@@ -325,5 +358,42 @@ mod tests {
         // Test sub assignment
         pos -= 3;
         assert_eq!(pos, 12u64);
+    }
+
+    #[test]
+    fn test_checked_from_location_success() {
+        use super::{super::location::MAX_LOCATION, Location};
+
+        // Normal conversions should work
+        let cases = vec![
+            (Location::new(0), Position::new(0)),
+            (Location::new(1), Position::new(1)),
+            (Location::new(100), Position::from(Location::new(100))),
+        ];
+
+        for (loc, expected) in cases {
+            let pos = Position::checked_from_location(loc).expect("should succeed");
+            assert_eq!(pos, expected);
+        }
+
+        // MAX_LOCATION should work
+        let max_loc = Location::new(MAX_LOCATION);
+        let pos = Position::checked_from_location(max_loc).expect("MAX_LOCATION should convert");
+        // For MAX_LOCATION = 2^63 - 1, popcount = 63
+        // Position = 2 * (2^63 - 1) - 63 = u64::MAX - 64
+        assert_eq!(*pos, u64::MAX - 64);
+    }
+
+    #[test]
+    fn test_checked_from_location_overflow() {
+        use super::{super::location::MAX_LOCATION, Location};
+
+        // MAX_LOCATION + 1 should fail
+        let over_loc = Location::new(MAX_LOCATION + 1);
+        assert!(Position::checked_from_location(over_loc).is_none());
+
+        // u64::MAX should fail
+        let max_loc = Location::new(u64::MAX);
+        assert!(Position::checked_from_location(max_loc).is_none());
     }
 }

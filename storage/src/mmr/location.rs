@@ -6,22 +6,68 @@ use core::{
 };
 use thiserror::Error;
 
+/// Maximum valid [Location] value that can be safely converted to a [Position].
+///
+/// This limit exists because converting `Location` to `Position` requires multiplying by 2,
+/// which would overflow for values larger than this. The formula `Position = 2L - popcount(L)`
+/// means the maximum safe location is the largest value where `2L` fits in a u64.
+///
+/// For `Location = 2^63 - 1 = 0x7FFF_FFFF_FFFF_FFFF`:
+/// - `2 * Location = 2^64 - 2 = u64::MAX - 1` ✓ (fits in u64)
+/// - `popcount = 63`
+/// - `Position = (2^64 - 2) - 63 = u64::MAX - 64`
+///
+/// For `Location = 2^63 = 0x8000_0000_0000_0000`:
+/// - `2 * Location = 2^64` ✗ (overflow)
+pub const MAX_LOCATION: u64 = 0x7FFF_FFFF_FFFF_FFFF; // 2^63 - 1
+
 /// A [Location] is an index into an MMR's _leaves_.
 /// This is in contrast to a [Position], which is an index into an MMR's _nodes_.
+///
+/// # Limits
+///
+/// While [Location] can technically hold any `u64` value, only values up to [MAX_LOCATION]
+/// can be safely converted to [Position]. Values exceeding this limit will cause the
+/// conversion to panic due to overflow in the underlying arithmetic.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
 pub struct Location(u64);
 
 impl Location {
     /// Return a new [Location] from a raw `u64`.
+    ///
+    /// # Warning
+    ///
+    /// This does not validate that `loc <= MAX_LOCATION`. If you need validation,
+    /// use [Location::new_checked] instead.
     #[inline]
     pub const fn new(loc: u64) -> Self {
         Self(loc)
+    }
+
+    /// Return a new [Location] from a raw `u64`, returning `None` if `loc > MAX_LOCATION`.
+    ///
+    /// Use this when you need to ensure the location can be safely converted to a [Position].
+    #[inline]
+    pub const fn new_checked(loc: u64) -> Option<Self> {
+        if loc > MAX_LOCATION {
+            None
+        } else {
+            Some(Self(loc))
+        }
     }
 
     /// Return the underlying `u64` value.
     #[inline]
     pub const fn as_u64(self) -> u64 {
         self.0
+    }
+
+    /// Returns `true` if this location can be safely converted to a [Position].
+    ///
+    /// This is equivalent to checking `self.as_u64() <= MAX_LOCATION`.
+    #[inline]
+    pub const fn is_valid_for_position(self) -> bool {
+        self.0 <= MAX_LOCATION
     }
 
     /// Return `self + rhs` returning `None` on overflow.
@@ -274,7 +320,7 @@ impl LocationRangeExt for Range<Location> {
 
 #[cfg(test)]
 mod tests {
-    use super::Location;
+    use super::{Location, MAX_LOCATION};
     use crate::mmr::position::Position;
 
     // Test that the [Location::try_from] function returns the correct location for leaf positions.
@@ -408,5 +454,70 @@ mod tests {
         // Test sub assignment
         loc -= 3;
         assert_eq!(loc, 12u64);
+    }
+
+    #[test]
+    fn test_new_checked() {
+        // Valid locations
+        assert!(Location::new_checked(0).is_some());
+        assert!(Location::new_checked(1000).is_some());
+        assert!(Location::new_checked(MAX_LOCATION).is_some());
+
+        // Invalid locations (too large)
+        assert!(Location::new_checked(MAX_LOCATION + 1).is_none());
+        assert!(Location::new_checked(u64::MAX).is_none());
+    }
+
+    #[test]
+    fn test_is_valid_for_position() {
+        assert!(Location::new(0).is_valid_for_position());
+        assert!(Location::new(1000).is_valid_for_position());
+        assert!(Location::new(MAX_LOCATION).is_valid_for_position());
+        assert!(!Location::new(MAX_LOCATION + 1).is_valid_for_position());
+        assert!(!Location::new(u64::MAX).is_valid_for_position());
+    }
+
+    #[test]
+    fn test_max_location_boundary() {
+        // MAX_LOCATION should convert successfully
+        let max_loc = Location::new(MAX_LOCATION);
+        assert!(max_loc.is_valid_for_position());
+        let pos = Position::from(max_loc);
+        // Verify the position value
+        // For MAX_LOCATION = 2^63 - 1, popcount = 63
+        // Position = 2 * (2^63 - 1) - 63 = 2^64 - 2 - 63 = u64::MAX - 64
+        let expected = u64::MAX - 64;
+        assert_eq!(*pos, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "leaf_loc overflow")]
+    fn test_overflow_location_panics() {
+        use super::Position;
+
+        // MAX_LOCATION + 1 should panic
+        let over_loc = Location::new(MAX_LOCATION + 1);
+        let _ = Position::from(over_loc);
+    }
+
+    #[test]
+    fn test_checked_from_location() {
+        use super::Position;
+
+        // Valid conversion
+        let valid_loc = Location::new(1000);
+        assert!(Position::checked_from_location(valid_loc).is_some());
+
+        // MAX_LOCATION should succeed
+        let max_loc = Location::new(MAX_LOCATION);
+        assert!(Position::checked_from_location(max_loc).is_some());
+
+        // Over MAX_LOCATION should fail
+        let over_loc = Location::new(MAX_LOCATION + 1);
+        assert!(Position::checked_from_location(over_loc).is_none());
+
+        // u64::MAX should fail
+        let max_u64_loc = Location::new(u64::MAX);
+        assert!(Position::checked_from_location(max_u64_loc).is_none());
     }
 }
