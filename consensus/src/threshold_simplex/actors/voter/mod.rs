@@ -50,7 +50,7 @@ mod tests {
         threshold_simplex::{
             actors::{batcher, resolver},
             mocks,
-            new_types::BlsThresholdScheme,
+            signing_scheme::bls12381_threshold,
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Vote, Voter},
         },
         types::Round,
@@ -257,7 +257,7 @@ mod tests {
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
             let seed_signature =
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
-            let finalization = Finalization::<BlsThresholdScheme<MinSig>, _> {
+            let finalization = Finalization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal,
                 certificate: (proposal_signature, seed_signature),
             };
@@ -329,7 +329,7 @@ mod tests {
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
             let seed_signature =
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
-            let notarization = Notarization::<BlsThresholdScheme<MinSig>, _> {
+            let notarization = Notarization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal,
                 certificate: (proposal_signature, seed_signature),
             };
@@ -365,7 +365,7 @@ mod tests {
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
             let seed_signature =
                 threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
-            let finalization = Finalization::<BlsThresholdScheme<MinSig>, _> {
+            let finalization = Finalization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal,
                 certificate: (proposal_signature, seed_signature),
             };
@@ -603,7 +603,7 @@ mod tests {
                 finalization_lf_sigs.iter().map(|(_, ss)| ss),
             )
             .unwrap();
-            let finalization = Finalization::<BlsThresholdScheme<MinSig>, _> {
+            let finalization = Finalization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal: proposal_lf,
                 certificate: (final_prop_sig, final_seed_sig),
             };
@@ -679,7 +679,7 @@ mod tests {
                 notarization_jft_sigs.iter().map(|n| &n.1),
             )
             .unwrap();
-            let notarization_for_floor = Notarization::<BlsThresholdScheme<MinSig>, _> {
+            let notarization_for_floor = Notarization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal: proposal_jft,
                 certificate: (not_prop_sig, not_seed_sig),
             };
@@ -738,7 +738,7 @@ mod tests {
                 notarization_bft_sigs.iter().map(|n| &n.1),
             )
             .unwrap();
-            let notarization_for_bft = Notarization::<BlsThresholdScheme<MinSig>, _> {
+            let notarization_for_bft = Notarization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal: proposal_bft,
                 certificate: (not_prop_sig, not_seed_sig),
             };
@@ -791,7 +791,7 @@ mod tests {
                 finalization_lf_sigs.iter().map(|(_, ss)| ss),
             )
             .unwrap();
-            let finalization = Finalization::<BlsThresholdScheme<MinSig>, _> {
+            let finalization = Finalization::<bls12381_threshold::Scheme<MinSig>, _> {
                 proposal: proposal_lf,
                 certificate: (final_prop_sig, final_seed_sig),
             };

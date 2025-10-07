@@ -1,4 +1,4 @@
-use crate::threshold_simplex::new_types::BlsThresholdScheme;
+use crate::threshold_simplex::signing_scheme::bls12381_threshold;
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
@@ -19,7 +19,7 @@ pub fn bls_threshold_fixture<V, R>(
 ) -> (
     Vec<ed25519::PrivateKey>,
     Vec<ed25519::PublicKey>,
-    Vec<BlsThresholdScheme<V>>,
+    Vec<bls12381_threshold::Scheme<V>>,
 )
 where
     V: Variant,
@@ -41,7 +41,9 @@ where
 
     let schemes = shares
         .into_iter()
-        .map(|share| BlsThresholdScheme::new(share.index, evaluations.clone(), identity, share, t))
+        .map(|share| {
+            bls12381_threshold::Scheme::new(share.index, evaluations.clone(), identity, share, t)
+        })
         .collect();
 
     (ed25519_keys, ed25519_public, schemes)

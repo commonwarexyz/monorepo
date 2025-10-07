@@ -166,7 +166,7 @@
 
 use crate::types::View;
 
-pub mod new_types;
+pub mod signing_scheme;
 pub mod types;
 
 use types::SigningScheme;

@@ -31,7 +31,7 @@ use thiserror::Error;
 
 /// Placeholder for the upcoming BLS threshold implementation.
 #[derive(Clone, Debug)]
-pub struct BlsThresholdScheme<V: Variant> {
+pub struct Scheme<V: Variant> {
     signer: u32,
     polynomial: Vec<V::Public>,
     identity: V::Public,
@@ -39,7 +39,7 @@ pub struct BlsThresholdScheme<V: Variant> {
     threshold: u32,
 }
 
-impl<V: Variant> BlsThresholdScheme<V> {
+impl<V: Variant> Scheme<V> {
     pub fn new(
         signer: u32,
         polynomial: Vec<V::Public>,
@@ -66,7 +66,7 @@ impl<V: Variant> BlsThresholdScheme<V> {
     }
 }
 
-impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
+impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     type Signature = (V::Signature, V::Signature);
     type Certificate = (V::Signature, V::Signature);
     type Randomness = V::Signature;
@@ -615,7 +615,7 @@ mod tests {
             generate_shares::<_, MinSig>(&mut rng, None, 4, threshold as u32);
         let polynomial = evaluate_all::<MinSig>(&public_poly, 4);
         let identity = *public_poly.constant();
-        let scheme: BlsThresholdScheme<MinSig> = BlsThresholdScheme::new(
+        let scheme: Scheme<MinSig> = Scheme::new(
             shares[0].index,
             polynomial.clone(),
             identity,

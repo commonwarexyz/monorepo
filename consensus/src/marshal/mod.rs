@@ -79,7 +79,7 @@ mod tests {
         marshal::ingress::mailbox::Identifier,
         threshold_simplex::{
             self,
-            new_types::BlsThresholdScheme,
+            signing_scheme::bls12381_threshold,
             types::{
                 finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
                 Finalize, Notarization, Notarize, Proposal, SigningScheme, VoteContext,
@@ -126,7 +126,7 @@ mod tests {
     type V = MinPk;
     type Sh = Share;
     type E = PrivateKey;
-    type S = BlsThresholdScheme<V>;
+    type S = bls12381_threshold::Scheme<V>;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
