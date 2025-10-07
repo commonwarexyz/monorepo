@@ -48,7 +48,7 @@ impl Reporter for Forwarder {
         // Skip if block height is not the last height in the epoch
         let height = block.height();
         let epoch = finalization.proposal.round.epoch();
-        if height != epoch::get_last_height(epoch) {
+        if height != epoch::get_boundary_height(epoch) {
             return;
         }
 

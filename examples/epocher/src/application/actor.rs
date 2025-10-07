@@ -69,7 +69,7 @@ impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
                     }
 
                     // Case: Non-genesis.
-                    let height = epoch::get_last_height(epoch - 1);
+                    let height = epoch::get_boundary_height(epoch - 1);
                     let Some(block) = self.marshal.get_block(height).await else {
                         // No block exists, put the response in the responders map for later.
                         self.responders.entry(height).or_default().push(response);
@@ -111,7 +111,7 @@ impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
                     info!(height, "finalized-delivered-to-app");
 
                     // Return early if not the last block in the epoch.
-                    let Some(epoch) = epoch::is_last_block_in_epoch(height) else {
+                    let Some(epoch) = epoch::is_boundary(height) else {
                         continue;
                     };
 
@@ -129,7 +129,7 @@ impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
                             seed: GENESIS_BLOCK.commitment(),
                         },
                         _ => {
-                            let previous_height = epoch::get_last_height(epoch - 1);
+                            let previous_height = epoch::get_boundary_height(epoch - 1);
                             let Some(previous_block) =
                                 self.marshal.get_block(previous_height).await
                             else {
@@ -161,7 +161,7 @@ impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
         let parent = self.subscribe_block(parent_round, parent_commitment).await;
 
         // Case: Reproposal.
-        if parent.height() == epoch::get_last_height(epoch) {
+        if parent.height() == epoch::get_boundary_height(epoch) {
             debug!(payload=?parent_commitment, "propose: repropose");
             return parent_commitment;
         }
@@ -190,7 +190,7 @@ impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
         let height = block.height();
 
         // Ensure that the height is appropriate for the epoch.
-        if !epoch::height_in_epoch(height, epoch) {
+        if !epoch::is_height_in_epoch(height, epoch) {
             debug!(payload=?payload, "verify: rejected-height-not-in-epoch");
             return false;
         }
@@ -199,7 +199,7 @@ impl<R: Rng + Spawner + Metrics + Storage> Application<R> {
         let (parent_view, parent_commitment) = context.parent;
         if block.commitment() == parent_commitment {
             // You can only re-propose the same block if it's the last height in the epoch.
-            if height == epoch::get_last_height(epoch) {
+            if height == epoch::get_boundary_height(epoch) {
                 debug!(payload=?payload, "verify: accepted-repropose");
                 self.marshal.verified(round, block).await;
                 return true;

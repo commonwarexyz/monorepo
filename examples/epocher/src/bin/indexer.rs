@@ -130,7 +130,7 @@ async fn upload(State(state): State<AppState>, body: AxumBytes) -> StatusCode {
 
     // Verify the block is at the end of the epoch
     let epoch = finalization.proposal.round.epoch();
-    if block.height() != epoch::get_last_height(epoch) {
+    if block.height() != epoch::get_boundary_height(epoch) {
         error!(
             "indexer: block height mismatch: height: {}, epoch: {}",
             block.height(),
