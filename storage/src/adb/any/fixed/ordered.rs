@@ -276,7 +276,7 @@ impl<
         let iter = self.snapshot.last_translated_key();
         let last_key = Self::last_key_in_iter(&self.log, iter).await?;
         let Some(last_key) = last_key else {
-            panic!("no last key found in non-empty snapshot");
+            unreachable!("no last key found in non-empty snapshot");
         };
 
         callback(Some(last_key.0));
@@ -365,7 +365,7 @@ impl<
         loc: Location,
     ) -> Result<(K, V, K), Error> {
         let Operation::Update(k, v, next_key) = log.read(*loc).await? else {
-            panic!("location does not reference update operation. loc={loc}");
+            unreachable!("location does not reference update operation. loc={loc}");
         };
 
         Ok((k, v, next_key))
@@ -435,7 +435,7 @@ impl<
         }
 
         // A span that includes any given key should always exist.
-        panic!("get_span: span should have been found");
+        unreachable!("get_span: span should have been found");
     }
 
     /// Get the value of the operation with location `loc` in the db.
@@ -605,7 +605,7 @@ impl<
         }
 
         let Some(prev_key) = prev_key else {
-            panic!("prev_key should have been found");
+            unreachable!("prev_key should have been found");
         };
 
         let loc = self.op_count();

@@ -201,7 +201,7 @@ impl<
         loc: Location,
     ) -> Result<(K, V), Error> {
         let Operation::Update(k, v) = log.read(*loc).await? else {
-            panic!("location does not reference update operation. loc={loc}");
+            unreachable!("location does not reference update operation. loc={loc}");
         };
 
         Ok((k, v))
