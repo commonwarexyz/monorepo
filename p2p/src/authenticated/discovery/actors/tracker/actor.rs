@@ -122,15 +122,16 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             directory,
         } = self;
         context.spawn(move |context| async move {
-            let actor = Self {
+            Self {
                 context,
                 receiver,
-                directory,
                 crypto,
                 max_peer_set_size,
                 peer_gossip_max_count,
-            };
-            actor.run().await;
+                directory,
+            }
+            .run()
+            .await;
         })
     }
 
