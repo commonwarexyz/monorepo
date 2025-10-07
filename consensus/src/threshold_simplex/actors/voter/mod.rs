@@ -693,7 +693,7 @@ mod tests {
                 .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Notarized { notarization } => {
-                    assert_eq!(notarization.proposal.view(), journal_floor_target);
+                    assert_eq!(notarization.view(), journal_floor_target);
                 }
                 _ => panic!("unexpected resolver message"),
             }
@@ -752,7 +752,7 @@ mod tests {
                 .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Notarized { notarization } => {
-                    assert_eq!(notarization.proposal.view(), problematic_view);
+                    assert_eq!(notarization.view(), problematic_view);
                 }
                 _ => panic!("unexpected resolver message"),
             }

@@ -789,7 +789,7 @@ impl<
 
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
         // Check to see if nullify is for proposal in view
-        let view = nullify.round.view();
+        let view = nullify.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.participants.clone(),
@@ -1052,7 +1052,7 @@ impl<
 
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
         // Check to see if notarize is for proposal in view
-        let view = notarize.proposal.view();
+        let view = notarize.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.participants.clone(),
@@ -1076,7 +1076,7 @@ impl<
 
     async fn notarization(&mut self, notarization: Notarization<S, D>) -> Action {
         // Check if we are still in a view where this notarization could help
-        let view = notarization.proposal.view();
+        let view = notarization.view();
         if !interesting(
             self.activity_timeout,
             self.last_finalized,
@@ -1107,7 +1107,7 @@ impl<
 
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
         // Create round (if it doesn't exist)
-        let view = notarization.proposal.view();
+        let view = notarization.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.participants.clone(),
@@ -1138,7 +1138,7 @@ impl<
             self.activity_timeout,
             self.last_finalized,
             self.view,
-            nullification.round.view(),
+            nullification.view(),
             true,
         ) {
             return Action::Skip;
@@ -1146,7 +1146,7 @@ impl<
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
-        if let Some(ref round) = self.views.get_mut(&nullification.round.view()) {
+        if let Some(ref round) = self.views.get_mut(&nullification.view()) {
             if round.broadcast_nullification {
                 return Action::Skip;
             }
@@ -1164,7 +1164,7 @@ impl<
 
     async fn handle_nullification(&mut self, nullification: Nullification<S>) {
         // Create round (if it doesn't exist)
-        let view = nullification.round.view();
+        let view = nullification.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.participants.clone(),
@@ -1191,7 +1191,7 @@ impl<
 
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
         // Get view for finalize
-        let view = finalize.proposal.view();
+        let view = finalize.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.participants.clone(),
@@ -1215,7 +1215,7 @@ impl<
 
     async fn finalization(&mut self, finalization: Finalization<S, D>) -> Action {
         // Check if we are still in a view where this finalization could help
-        let view = finalization.proposal.view();
+        let view = finalization.view();
         if !interesting(
             self.activity_timeout,
             self.last_finalized,
@@ -1246,7 +1246,7 @@ impl<
 
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         // Create round (if it doesn't exist)
-        let view = finalization.proposal.view();
+        let view = finalization.view();
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.participants.clone(),

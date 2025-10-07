@@ -118,7 +118,7 @@ where
                 self.notarizes
                     .lock()
                     .unwrap()
-                    .entry(notarize.proposal.view())
+                    .entry(notarize.view())
                     .or_default()
                     .entry(notarize.proposal.payload)
                     .or_default()
@@ -126,7 +126,7 @@ where
             }
             Activity::Notarization(notarization) => {
                 // Verify notarization
-                let view = notarization.proposal.view();
+                let view = notarization.view();
                 if !self.signing.verify_certificate::<D>(
                     &self.namespace,
                     VoteContext::Notarize {
@@ -162,13 +162,13 @@ where
                 self.nullifies
                     .lock()
                     .unwrap()
-                    .entry(nullify.round.view())
+                    .entry(nullify.view())
                     .or_default()
                     .insert(public_key);
             }
             Activity::Nullification(nullification) => {
                 // Verify nullification
-                let view = nullification.round.view();
+                let view = nullification.view();
                 if !self.signing.verify_certificate::<D>(
                     &self.namespace,
                     VoteContext::Nullify {
@@ -207,7 +207,7 @@ where
                 self.finalizes
                     .lock()
                     .unwrap()
-                    .entry(finalize.proposal.view())
+                    .entry(finalize.view())
                     .or_default()
                     .entry(finalize.proposal.payload)
                     .or_default()
@@ -215,7 +215,7 @@ where
             }
             Activity::Finalization(finalization) => {
                 // Verify finalization
-                let view = finalization.proposal.view();
+                let view = finalization.view();
                 if !self.signing.verify_certificate::<D>(
                     &self.namespace,
                     VoteContext::Finalize {
@@ -240,10 +240,10 @@ where
                 self.record_leader(view + 1, self.signing.randomness(&finalization.certificate));
 
                 // Send message to subscribers
-                *self.latest.lock().unwrap() = finalization.proposal.view();
+                *self.latest.lock().unwrap() = finalization.view();
                 let mut subscribers = self.subscribers.lock().unwrap();
                 for subscriber in subscribers.iter_mut() {
-                    let _ = subscriber.try_send(finalization.proposal.view());
+                    let _ = subscriber.try_send(finalization.view());
                 }
             }
             Activity::ConflictingNotarize(conflicting) => {

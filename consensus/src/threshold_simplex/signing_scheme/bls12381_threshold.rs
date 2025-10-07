@@ -1,8 +1,11 @@
 //! Signing abstractions for simplex.
 
-use crate::threshold_simplex::types::{
-    finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, SigningScheme, Vote,
-    VoteContext, VoteVerification,
+use crate::{
+    threshold_simplex::types::{
+        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, SigningScheme,
+        Vote, VoteContext, VoteVerification,
+    },
+    Viewable,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -489,7 +492,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                     signatures.push(&certificate.0);
 
                     // Add seed message (if not already present)
-                    if let Some(previous) = seeds.get(&proposal.round.view()) {
+                    if let Some(previous) = seeds.get(&proposal.view()) {
                         if *previous != &certificate.1 {
                             return false;
                         }
@@ -498,7 +501,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                         let seed_message = (Some(seed_namespace.as_slice()), seed_message);
                         messages.push(seed_message);
                         signatures.push(&certificate.1);
-                        seeds.insert(proposal.round.view(), &certificate.1);
+                        seeds.insert(proposal.view(), &certificate.1);
                     }
                 }
                 VoteContext::Nullify { round } => {
@@ -529,7 +532,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                     signatures.push(&certificate.0);
 
                     // Add seed message (if not already present)
-                    if let Some(previous) = seeds.get(&proposal.round.view()) {
+                    if let Some(previous) = seeds.get(&proposal.view()) {
                         if *previous != &certificate.1 {
                             return false;
                         }
@@ -538,7 +541,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                         let seed_message = (Some(seed_namespace.as_slice()), seed_message);
                         messages.push(seed_message);
                         signatures.push(&certificate.1);
-                        seeds.insert(proposal.round.view(), &certificate.1);
+                        seeds.insert(proposal.view(), &certificate.1);
                     }
                 }
             }

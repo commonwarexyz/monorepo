@@ -751,12 +751,12 @@ impl<S: SigningScheme, D: Digest> Epochable for Voter<S, D> {
 
     fn epoch(&self) -> Epoch {
         match self {
-            Voter::Notarize(v) => v.proposal.epoch(),
-            Voter::Notarization(v) => v.proposal.epoch(),
-            Voter::Nullify(v) => v.round.epoch(),
-            Voter::Nullification(v) => v.round.epoch(),
-            Voter::Finalize(v) => v.proposal.epoch(),
-            Voter::Finalization(v) => v.proposal.epoch(),
+            Voter::Notarize(v) => v.epoch(),
+            Voter::Notarization(v) => v.epoch(),
+            Voter::Nullify(v) => v.epoch(),
+            Voter::Nullification(v) => v.epoch(),
+            Voter::Finalize(v) => v.epoch(),
+            Voter::Finalization(v) => v.epoch(),
         }
     }
 }
@@ -766,12 +766,12 @@ impl<S: SigningScheme, D: Digest> Viewable for Voter<S, D> {
 
     fn view(&self) -> View {
         match self {
-            Voter::Notarize(v) => v.proposal.view(),
-            Voter::Notarization(v) => v.proposal.view(),
-            Voter::Nullify(v) => v.round.view(),
-            Voter::Nullification(v) => v.round.view(),
-            Voter::Finalize(v) => v.proposal.view(),
-            Voter::Finalization(v) => v.proposal.view(),
+            Voter::Notarize(v) => v.view(),
+            Voter::Notarization(v) => v.view(),
+            Voter::Nullify(v) => v.view(),
+            Voter::Nullification(v) => v.view(),
+            Voter::Finalize(v) => v.view(),
+            Voter::Finalization(v) => v.view(),
         }
     }
 }
@@ -1548,7 +1548,7 @@ impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
         let mut views = HashSet::new();
         let notarizations = Vec::<Notarization<S, D>>::read_range(reader, ..=*max_len)?;
         for notarization in notarizations.iter() {
-            if !views.insert(notarization.proposal.view()) {
+            if !views.insert(notarization.view()) {
                 return Err(Error::Invalid(
                     "consensus::threshold_simplex::Response",
                     "Duplicate notarization",
@@ -1559,7 +1559,7 @@ impl<S: SigningScheme, D: Digest> Read for Response<S, D> {
         views.clear();
         let nullifications = Vec::<Nullification<S>>::read_range(reader, ..=remaining)?;
         for nullification in nullifications.iter() {
-            if !views.insert(nullification.round.view()) {
+            if !views.insert(nullification.view()) {
                 return Err(Error::Invalid(
                     "consensus::threshold_simplex::Response",
                     "Duplicate nullification",
@@ -1946,7 +1946,7 @@ impl<S: SigningScheme, D: Digest> Hash for ConflictingNotarize<S, D> {
 impl<S: SigningScheme, D: Digest> ConflictingNotarize<S, D> {
     /// Creates a new conflicting notarize evidence from two conflicting notarizes.
     pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
-        assert_eq!(notarize_1.proposal.view(), notarize_2.proposal.view());
+        assert_eq!(notarize_1.view(), notarize_2.view());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
         ConflictingNotarize {
             round: notarize_1.proposal.round,
@@ -2121,7 +2121,7 @@ impl<S: SigningScheme, D: Digest> Hash for ConflictingFinalize<S, D> {
 impl<S: SigningScheme, D: Digest> ConflictingFinalize<S, D> {
     /// Creates a new conflicting finalize evidence from two conflicting finalizes.
     pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
-        assert_eq!(finalize_1.proposal.view(), finalize_2.proposal.view());
+        assert_eq!(finalize_1.view(), finalize_2.view());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
         ConflictingFinalize {
             round: finalize_1.proposal.round,
@@ -2282,7 +2282,7 @@ impl<S: SigningScheme, D: Digest> Hash for NullifyFinalize<S, D> {
 impl<S: SigningScheme, D: Digest> NullifyFinalize<S, D> {
     /// Creates a new nullify-finalize evidence from a nullify and a finalize.
     pub fn new(nullify: Nullify<S>, finalize: Finalize<S, D>) -> Self {
-        assert_eq!(nullify.round.view(), finalize.proposal.view());
+        assert_eq!(nullify.view(), finalize.view());
         assert_eq!(nullify.signer(), finalize.signer());
         NullifyFinalize {
             proposal: finalize.proposal,

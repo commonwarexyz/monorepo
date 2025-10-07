@@ -377,7 +377,7 @@ impl<
                         }
                         Message::Notarized { notarization } => {
                             // Update current view
-                            let view = notarization.proposal.view();
+                            let view = notarization.view();
                             if view > current_view {
                                 current_view = view;
                             } else {
@@ -392,7 +392,7 @@ impl<
                         }
                         Message::Nullified { nullification } => {
                             // Update current view
-                            let view = nullification.round.view();
+                            let view = nullification.view();
                             if view > current_view {
                                 current_view = view;
                             } else {
@@ -508,7 +508,7 @@ impl<
                             }
 
                             // Validate that all notarizations and nullifications are from the current epoch
-                            if response.notarizations.iter().any(|n| n.proposal.epoch() != self.epoch) || response.nullifications.iter().any(|n| n.round.epoch() != self.epoch) {
+                            if response.notarizations.iter().any(|n| n.epoch() != self.epoch) || response.nullifications.iter().any(|n| n.epoch() != self.epoch) {
                                 warn!(sender = ?s, "blocking peer for epoch mismatch");
                                 self.requester.block(s.clone());
                                 self.blocker.block(s).await;
@@ -519,7 +519,7 @@ impl<
                             let mut voters = Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
                             let mut notarizations_found = BTreeSet::new();
                             for notarization in response.notarizations {
-                                let view = notarization.proposal.view();
+                                let view = notarization.view();
                                 let entry = Entry { task: Task::Notarization, view };
                                 if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary notarization");
@@ -531,7 +531,7 @@ impl<
                             }
                             let mut nullifications_found = BTreeSet::new();
                             for nullification in response.nullifications {
-                                let view = nullification.round.view();
+                                let view = nullification.view();
                                 let entry = Entry { task: Task::Nullification, view };
                                 if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary nullification");
