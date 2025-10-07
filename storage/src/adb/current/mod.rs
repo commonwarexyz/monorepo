@@ -1,8 +1,8 @@
 //! Authenticated databases (ADBs) that provide succinct proofs of _any_ value ever associated with
 //! a key, and also whether that value is the _current_ value associated with it. The
-//! implementations are based on an [Any] authenticated database combined with an authenticated
-//! [BitMap] over the activity status of each operation. The two structures are "grafted" together
-//! to minimize proof sizes.
+//! implementations are based on an [crate::adb::any::fixed::Any] authenticated database combined
+//! with an authenticated [BitMap] over the activity status of each operation. The two structures
+//! are "grafted" together to minimize proof sizes.
 
 use crate::{
     mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof},
@@ -21,7 +21,7 @@ pub use unordered::Current;
 /// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator> {
-    /// The name of the [RStorage] partition used for the MMR's backing journal.
+    /// The name of the storage partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
@@ -30,10 +30,10 @@ pub struct Config<T: Translator> {
     /// The size of the write buffer to use for each blob in the MMR journal.
     pub mmr_write_buffer: NonZeroUsize,
 
-    /// The name of the [RStorage] partition used for the MMR's metadata.
+    /// The name of the storage partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// The name of the [RStorage] partition used to persist the (pruned) log of operations.
+    /// The name of the storage partition used to persist the (pruned) log of operations.
     pub log_journal_partition: String,
 
     /// The items per blob configuration value used by the log journal.
@@ -42,7 +42,7 @@ pub struct Config<T: Translator> {
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: NonZeroUsize,
 
-    /// The name of the [RStorage] partition used for the bitmap metadata.
+    /// The name of the storage partition used for the bitmap metadata.
     pub bitmap_metadata_partition: String,
 
     /// The translator used by the compressed index.
