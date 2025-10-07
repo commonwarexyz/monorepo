@@ -2,7 +2,7 @@ use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
 use crate::authenticated::discovery::{
     actors::tracker::ingress::Releaser,
     metrics,
-    types::{self, PeerInfo},
+    types::{self, Info},
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
@@ -32,7 +32,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
+pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
     // ---------- Configuration ----------
@@ -56,7 +56,7 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
-    releaser: Releaser<E, C>,
+    releaser: Releaser<C>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
@@ -68,9 +68,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     pub fn init(
         context: E,
         bootstrappers: Vec<(C, SocketAddr)>,
-        myself: PeerInfo<C>,
+        myself: Info<C>,
         cfg: Config,
-        releaser: Releaser<E, C>,
+        releaser: Releaser<C>,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
         let mut peers = HashMap::new();
@@ -143,7 +143,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Using a list of (already-validated) peer information, update the records.
-    pub fn update_peers(&mut self, infos: Vec<types::PeerInfo<C>>) {
+    pub fn update_peers(&mut self, infos: Vec<types::Info<C>>) {
         for info in infos {
             // Update peer address
             //
@@ -217,7 +217,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn dial(&mut self, peer: &C) -> Option<Reservation<E, C>> {
+    pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
         let socket = self.peers.get(peer)?.socket()?;
         self.reserve(Metadata::Dialer(peer.clone(), socket))
     }
@@ -225,7 +225,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C) -> Option<Reservation<E, C>> {
+    pub fn listen(&mut self, peer: &C) -> Option<Reservation<C>> {
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
@@ -248,14 +248,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     // ---------- Getters ----------
 
     /// Returns the sharable information for a given peer.
-    pub fn info(&self, peer: &C) -> Option<PeerInfo<C>> {
+    pub fn info(&self, peer: &C) -> Option<Info<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())
     }
 
     /// Returns all available peer information for a given bit vector.
     ///
     /// Returns `None` if the bit vector is malformed.
-    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::PeerInfo<C>>> {
+    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
         let Some(set) = self.sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.
             debug!(index = bit_vec.index, "requested peer set not found");
@@ -263,7 +263,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         };
 
         // Ensure that the bit vector is the same size as the peer set
-        if bit_vec.bits.len() != set.len() {
+        if bit_vec.bits.len() != set.len() as u64 {
             debug!(
                 index = bit_vec.index,
                 expected = set.len(),
@@ -320,7 +320,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Attempt to reserve a peer.
     ///
     /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
-    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<E, C>> {
+    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
         let peer = metadata.public_key();
 
         // Not reservable
@@ -346,11 +346,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Reserve
         if record.reserve() {
             self.metrics.reserved.inc();
-            return Some(Reservation::new(
-                self.context.clone(),
-                metadata,
-                self.releaser.clone(),
-            ));
+            return Some(Reservation::new(metadata, self.releaser.clone()));
         }
         None
     }

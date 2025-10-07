@@ -6,7 +6,9 @@ use crate::authenticated::{
             tracker::{self, Metadata},
         },
         metrics,
+        types::InfoVerifier,
     },
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
@@ -29,11 +31,12 @@ pub struct Actor<
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
-    max_peer_set_size: usize,
+    max_peer_set_size: u64,
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
+    info_verifier: InfoVerifier<C>,
 
-    receiver: mpsc::Receiver<Message<E, O, I, C>>,
+    receiver: mpsc::Receiver<Message<O, I, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -49,7 +52,7 @@ impl<
     > Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, O, I, C>>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -70,7 +73,7 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
         (
             Self {
@@ -81,19 +84,20 @@ impl<
                 max_peer_set_size: cfg.max_peer_set_size,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
+                info_verifier: cfg.info_verifier,
                 receiver,
                 connections,
                 sent_messages,
                 received_messages,
                 rate_limited,
             },
-            Mailbox::new(sender),
+            sender,
         )
     }
 
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
@@ -101,7 +105,7 @@ impl<
 
     async fn run(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
+        tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
         while let Some(msg) = self.receiver.next().await {
@@ -114,19 +118,17 @@ impl<
                     // Mark peer as connected
                     self.connections.inc();
 
-                    // Clone required variables
-                    let connections = self.connections.clone();
-                    let sent_messages = self.sent_messages.clone();
-                    let received_messages = self.received_messages.clone();
-                    let rate_limited = self.rate_limited.clone();
-                    let mut tracker = tracker.clone();
-                    let mut router = router.clone();
-                    let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
-
                     // Spawn peer
-                    self.context
-                        .with_label("peer")
-                        .spawn(move |context| async move {
+                    self.context.with_label("peer").spawn({
+                        let connections = self.connections.clone();
+                        let sent_messages = self.sent_messages.clone();
+                        let received_messages = self.received_messages.clone();
+                        let rate_limited = self.rate_limited.clone();
+                        let mut tracker = tracker.clone();
+                        let mut router = router.clone();
+                        let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
+                        let info_verifier = self.info_verifier.clone();
+                        move |context| async move {
                             // Create peer
                             debug!(?peer, "peer started");
                             let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
@@ -141,6 +143,7 @@ impl<
                                     max_peer_set_size: self.max_peer_set_size,
                                     allowed_peers_rate: self.allowed_peers_rate,
                                     peer_gossip_max_count: self.peer_gossip_max_count,
+                                    info_verifier,
                                 },
                             );
 
@@ -161,7 +164,8 @@ impl<
                             router.release(peer).await;
                             // Release the reservation
                             drop(reservation);
-                        });
+                        }
+                    });
                 }
             }
         }

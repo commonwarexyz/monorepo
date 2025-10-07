@@ -25,7 +25,6 @@ pub use reservation::Reservation;
 pub struct Config<C: Signer> {
     pub crypto: C,
     pub address: SocketAddr,
-    pub mailbox_size: usize,
     pub tracked_peer_sets: usize,
     pub allowed_connection_rate_per_peer: Quota,
     pub allow_private_ips: bool,
