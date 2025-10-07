@@ -58,7 +58,7 @@ enum MmrJournaledOperation {
     Close,
     Reinit,
     InitFromPinnedNodes {
-        size: u64,
+        size: usize,
     },
     InitSync {
         lower_bound_seed: u16,
@@ -366,11 +366,11 @@ fn fuzz(input: FuzzInput) {
                 MmrJournaledOperation::InitFromPinnedNodes { size } => {
                     if mmr.size() > 0 {
                         // Ensure limited_size doesn't exceed current MMR size
-                        let limited_size = ((size % mmr.size().as_u64()).max(1)).min(*mmr.size());
+                        let size = (size as u64).min(*mmr.size());
 
                         // Create a reasonable number of pinned nodes - use a simple heuristic
                         // For small MMRs, we need fewer pinned nodes; for larger ones, we need more
-                        let estimated_pins = ((limited_size as f64).log2().ceil() as usize).max(1);
+                        let estimated_pins = ((size as f64).log2().ceil() as usize).max(1);
 
                         let pinned_nodes: Vec<Digest> = (0..estimated_pins)
                             .map(|i| Sha256::hash(&(i as u32).to_be_bytes()))
@@ -379,13 +379,13 @@ fn fuzz(input: FuzzInput) {
                         if let Ok(new_mmr) = Mmr::<_, Sha256>::init_from_pinned_nodes(
                             context.clone(),
                             pinned_nodes.clone(),
-                            limited_size.into(),
+                            size.into(),
                             test_config("pinned"),
                         )
                         .await
                         {
-                            assert_eq!(new_mmr.size(), limited_size);
-                            assert_eq!(new_mmr.pruned_to_pos(), limited_size);
+                            assert_eq!(new_mmr.size(), size);
+                            assert_eq!(new_mmr.pruned_to_pos(), size);
                             new_mmr.destroy().await.unwrap();
                         }
                     }
