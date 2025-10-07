@@ -33,8 +33,7 @@ fn fuzz(input: FuzzInput) {
     );
     let mut model: HashSet<Vec<u8>> = HashSet::new();
 
-    let hashers_usize = hashers as usize;
-    let cfg = ((hashers_usize..=hashers_usize).into(), bits as u64);
+    let cfg = (hashers, bits as u64);
 
     for op in input.ops.into_iter().take(64) {
         match op {

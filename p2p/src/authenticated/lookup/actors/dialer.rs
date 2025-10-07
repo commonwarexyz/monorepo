@@ -8,6 +8,7 @@ use crate::authenticated::{
         },
         metrics,
     },
+    mailbox::UnboundedMailbox,
     Mailbox,
 };
 use commonware_cryptography::Signer;
@@ -79,8 +80,8 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     #[allow(clippy::type_complexity)]
     async fn dial_peer(
         &mut self,
-        reservation: Reservation<E, C::PublicKey>,
-        supervisor: &mut Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        reservation: Reservation<C::PublicKey>,
+        supervisor: &mut Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer, address) = reservation.metadata().clone() else {
@@ -126,20 +127,18 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     /// Start the dialer actor.
     #[allow(clippy::type_complexity)]
     pub fn start(
-        self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut self,
+        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(tracker, supervisor))
+        self.context.spawn_ref()(self.run(tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();

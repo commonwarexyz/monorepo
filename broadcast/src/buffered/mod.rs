@@ -269,7 +269,7 @@ mod tests {
                     let has = match context.timeout(A_JIFFY, receiver).await {
                         Ok(r) => r.is_ok(),
                         Err(Error::Timeout) => false,
-                        Err(e) => panic!("unexpected error: {:?}", e),
+                        Err(e) => panic!("unexpected error: {e:?}"),
                     };
                     all_received &= has;
                 }
@@ -390,7 +390,7 @@ mod tests {
             match context.timeout(A_JIFFY, receiver).await {
                 Ok(_) => panic!("receiver should have failed"),
                 Err(Error::Timeout) => {} // Expected timeout
-                Err(e) => panic!("unexpected error: {:?}", e),
+                Err(e) => panic!("unexpected error: {e:?}"),
             }
         });
     }
@@ -455,7 +455,7 @@ mod tests {
             match context.timeout(A_JIFFY, receiver).await {
                 Ok(_) => panic!("M1 should not be retrievable"),
                 Err(Error::Timeout) => {} // Expected timeout
-                Err(e) => panic!("unexpected error: {:?}", e),
+                Err(e) => panic!("unexpected error: {e:?}"),
             }
         });
     }

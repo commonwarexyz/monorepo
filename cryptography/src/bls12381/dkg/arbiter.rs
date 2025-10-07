@@ -38,7 +38,10 @@
 
 use crate::{
     bls12381::{
-        dkg::{ops, Error},
+        dkg::{
+            ops::{construct_public, recover_public, verify_commitment, verify_share},
+            Error,
+        },
         primitives::{group::Share, poly, variant::Variant},
     },
     PublicKey,
@@ -53,10 +56,10 @@ pub struct Output<V: Variant> {
     pub public: poly::Public<V>,
 
     /// `2f + 1` commitments used to derive group polynomial.
-    pub commitments: HashMap<u32, poly::Public<V>>,
+    pub commitments: BTreeMap<u32, poly::Public<V>>,
 
     /// Reveals published by dealers of selected commitments.
-    pub reveals: HashMap<u32, Vec<Share>>,
+    pub reveals: BTreeMap<u32, Vec<Share>>,
 }
 
 /// Gather commitments, acknowledgements, and reveals from all dealers.
@@ -135,10 +138,10 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Verify the commitment is valid
-        if let Err(e) = ops::verify_commitment::<V>(
+        if let Err(e) = verify_commitment::<V>(
             self.previous.as_ref(),
-            idx,
             &commitment,
+            idx,
             self.player_threshold,
         ) {
             self.disqualified.insert(dealer);
@@ -185,14 +188,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
             }
 
             // Verify share
-            ops::verify_share::<V>(
-                self.previous.as_ref(),
-                idx,
-                &commitment,
-                self.player_threshold,
-                share.index,
-                share,
-            )?;
+            verify_share::<V>(&commitment, share.index, share)?;
         }
 
         // Active must be equal to number of players
@@ -237,22 +233,26 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
 
         // If there exist more than `2f + 1` commitments, take the first `2f + 1`
         // sorted by dealer index.
-        let selected = self
-            .commitments
-            .into_iter()
-            .take(dealer_threshold)
-            .collect::<Vec<_>>();
+        let mut commitments = BTreeMap::new();
+        let mut reveals = BTreeMap::new();
+        for (dealer_idx, (commitment, _, shares)) in
+            self.commitments.into_iter().take(dealer_threshold)
+        {
+            commitments.insert(dealer_idx, commitment);
+
+            // If there are no reveals for dealer, skip
+            if shares.is_empty() {
+                continue;
+            }
+            reveals.insert(dealer_idx, shares);
+        }
 
         // Recover group
         let public = match self.previous {
             Some(previous) => {
-                let mut commitments = BTreeMap::new();
-                for (dealer_idx, (commitment, _, _)) in &selected {
-                    commitments.insert(*dealer_idx, commitment.clone());
-                }
-                match ops::recover_public::<V>(
+                match recover_public::<V>(
                     &previous,
-                    commitments,
+                    &commitments,
                     self.player_threshold,
                     self.concurrency,
                 ) {
@@ -260,35 +260,20 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
                     Err(e) => return (Err(e), self.disqualified),
                 }
             }
-            None => {
-                let mut commitments = Vec::new();
-                for (_, (commitment, _, _)) in &selected {
-                    commitments.push(commitment.clone());
-                }
-                match ops::construct_public::<V>(commitments, self.player_threshold) {
-                    Ok(public) => public,
-                    Err(e) => return (Err(e), self.disqualified),
-                }
-            }
-        };
-
-        // Generate output
-        let mut commitments = HashMap::new();
-        let mut reveals = HashMap::new();
-        for (dealer_idx, (commitment, _, shares)) in selected {
-            commitments.insert(dealer_idx, commitment.clone());
-            if shares.is_empty() {
-                continue;
-            }
-            reveals.insert(dealer_idx, shares.clone());
-        }
-        let output = Output {
-            public,
-            commitments,
-            reveals,
+            None => match construct_public::<V>(commitments.values(), self.player_threshold) {
+                Ok(public) => public,
+                Err(e) => return (Err(e), self.disqualified),
+            },
         };
 
         // Return output
-        (Ok(output), self.disqualified)
+        (
+            Ok(Output {
+                public,
+                commitments,
+                reveals,
+            }),
+            self.disqualified,
+        )
     }
 }

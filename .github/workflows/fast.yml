@@ -43,7 +43,7 @@ jobs:
       with:
         tool: just@1.43.0
     - name: Fmt
-      run: just check-fmt ${{ env.NIGHTLY_VERSION }}
+      run: just check-fmt +${{ env.NIGHTLY_VERSION }}
     - name: Lint
       run: just clippy ${{ matrix.flags }}
     - name: Check docs
@@ -123,7 +123,7 @@ jobs:
       with:
         tool: just@1.43.0,cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
-      run: just udeps ${{ env.NIGHTLY_VERSION }}
+      run: just udeps +${{ env.NIGHTLY_VERSION }}
 
   Lock:
     runs-on: ubuntu-latest
@@ -170,7 +170,7 @@ jobs:
 
   no_std:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4

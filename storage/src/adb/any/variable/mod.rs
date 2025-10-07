@@ -832,8 +832,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Simulate an unclean shutdown by consuming the db without syncing (or only partially syncing)
     /// the log and/or locations and/or mmr. When _not_ fully syncing the mmr, the `write_limit`
     /// parameter dictates how many mmr nodes to write during a partial sync (can be 0).
-    #[cfg(test)]
-    pub(super) async fn simulate_failure(
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub async fn simulate_failure(
         mut self,
         sync_log: bool,
         sync_locations: bool,
@@ -950,6 +950,36 @@ pub(super) mod test {
                 Location::new(0),
                 &[] as &[Operation<Digest, Digest>],
                 &root
+            ));
+
+            // Single op proof should verify.
+            let (proof, ops) = db.proof(Location::new(0), NZU64!(1)).await.unwrap();
+            assert!(verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &root
+            ));
+
+            // Add one more op.
+            db.commit(None).await.unwrap();
+            // Historical proof from larger db should match proof from smaller db.
+            let (proof2, ops2) = db
+                .historical_proof(Location::new(1), Location::new(0), NZU64!(1))
+                .await
+                .unwrap();
+            assert_eq!(proof, proof2);
+            assert_eq!(ops, ops2);
+
+            // Proof will not verify against the root of the bigger db.
+            let root2 = db.root(&mut hasher);
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new(0),
+                &ops,
+                &root2
             ));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.

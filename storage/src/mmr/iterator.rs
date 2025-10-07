@@ -106,11 +106,20 @@ impl PeakIterator {
     //
     // TODO(https://github.com/commonwarexyz/monorepo/issues/820): This is an O(log2(n)^2)
     // implementation but it's reasonably straightforward to make it O(log2(n)).
+    //
+    /// # Panics
+    ///
+    /// Panics if `size` is too large (specifically, the topmost bit should be 0).
     pub fn to_nearest_size(mut size: Position) -> Position {
+        // If we don't check for overflow here, we could get stuck looping for a _very_ long time
+        // below, since we no longer have a log(n) bound on the number of iterations.
+        assert_ne!(size.leading_zeros(), 0, "overflow");
+
         while !PeakIterator::check_validity(size) {
             // A size-0 MMR is always valid so this loop must terminate before underflow.
             size -= 1;
         }
+
         size
     }
 }
@@ -316,5 +325,18 @@ mod tests {
         assert!(!PeakIterator::check_validity(Position::new(
             (u64::MAX >> 1) + 1
         )));
+
+        let largest_valid_size = Position::new(u64::MAX >> 1);
+        assert_eq!(
+            PeakIterator::to_nearest_size(largest_valid_size),
+            largest_valid_size
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_to_nearest_size_panic() {
+        let largest_valid_size = Position::new(u64::MAX >> 1);
+        PeakIterator::to_nearest_size(largest_valid_size + Position::new(1));
     }
 }

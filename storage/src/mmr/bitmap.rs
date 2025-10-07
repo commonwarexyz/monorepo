@@ -156,7 +156,8 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         });
 
         Ok(Self {
-            bitmap: BitMap::new_with_pruned_chunks(pruned_chunks),
+            bitmap: BitMap::new_with_pruned_chunks(pruned_chunks)
+                .map_err(|_| PrunedChunksOverflow)?,
             authenticated_len: 0,
             mmr,
             dirty_chunks: HashSet::new(),
@@ -212,22 +213,28 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.pruned_bits()
     }
 
-    /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit.
+    /// Prune all complete chunks before the chunk containing the given bit.
+    ///
+    /// The chunk containing `bit` and all subsequent chunks are retained. All chunks
+    /// before it are pruned from the bitmap and the underlying MMR.
+    ///
+    /// If `bit` equals the bitmap length, this prunes all complete chunks while retaining
+    /// the empty trailing chunk, preparing the bitmap for appending new data.
     ///
     /// # Warning
     ///
-    /// - Panics if the referenced bit is greater than the number of bits in the bitmap.
+    /// - Panics if `bit` is greater than the bitmap length.
     ///
     /// - Panics if there are unprocessed updates.
-    pub fn prune_to_bit(&mut self, bit_offset: u64) {
-        let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset);
-        if chunk_loc < self.bitmap.pruned_chunks() {
+    pub fn prune_to_bit(&mut self, bit: u64) {
+        let chunk = BitMap::<N>::unpruned_chunk(bit);
+        if chunk < self.bitmap.pruned_chunks() {
             return;
         }
         assert!(!self.is_dirty(), "cannot prune with unprocessed updates");
 
         // Prune inner bitmap
-        self.bitmap.prune_to_bit(bit_offset);
+        self.bitmap.prune_to_bit(bit);
 
         // Update authenticated length
         let chunks_len = self.bitmap.chunks_len();
@@ -243,7 +250,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         }
 
         // Update MMR
-        let mmr_pos = Position::from(Location::new(chunk_loc as u64));
+        let mmr_pos = Position::from(Location::new(chunk as u64));
         self.mmr.prune_to_pos(mmr_pos);
     }
 
@@ -260,8 +267,8 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     ///
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
-    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
-        self.bitmap.get_chunk(bit_offset)
+    pub fn get_chunk_containing(&self, bit: u64) -> &[u8; N] {
+        self.bitmap.get_chunk_containing(bit)
     }
 
     /// Add a single bit to the end of the bitmap.
@@ -273,43 +280,36 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         self.bitmap.push(bit);
     }
 
-    /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
-    #[inline]
-    #[cfg(test)]
-    pub(crate) fn leaf_pos(bit_offset: u64) -> Position {
-        let chunk_loc = BitMap::<N>::raw_chunk_index(bit_offset);
-        Position::from(Location::new(chunk_loc as u64))
-    }
-
     /// Get the value of a bit.
     ///
     /// # Warning
     ///
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
-    pub fn get_bit(&self, bit_offset: u64) -> bool {
-        self.bitmap.get_bit(bit_offset)
+    pub fn get_bit(&self, bit: u64) -> bool {
+        self.bitmap.get_bit(bit)
     }
 
     #[inline]
     /// Get the value of a bit from its chunk.
-    pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
-        BitMap::<N>::get_bit_from_chunk(chunk, bit_offset)
+    /// bit is an index into the entire bitmap, not just the chunk.
+    pub fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
+        BitMap::<N>::get_bit_from_chunk(chunk, bit)
     }
 
-    /// Set the value of the referenced bit.
+    /// Set the value of the given bit.
     ///
     /// # Warning
     ///
     /// The update will not impact the root until `sync` is called.
-    pub fn set_bit(&mut self, bit_offset: u64, bit: bool) {
+    pub fn set_bit(&mut self, bit: u64, value: bool) {
         // Apply the change to the inner bitmap
-        self.bitmap.set_bit(bit_offset, bit);
+        self.bitmap.set_bit(bit, value);
 
         // If the updated chunk is already in the MMR, mark it as dirty.
-        let chunk_index = self.bitmap.pruned_chunk_index(bit_offset);
-        if chunk_index < self.authenticated_len {
-            self.dirty_chunks.insert(chunk_index);
+        let chunk = self.bitmap.pruned_chunk(bit);
+        if chunk < self.authenticated_len {
+            self.dirty_chunks.insert(chunk);
         }
     }
 
@@ -341,7 +341,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         let mut chunks: Vec<Location> = self
             .dirty_chunks
             .iter()
-            .map(|&chunk_index| Location::new((chunk_index + pruned_chunks) as u64))
+            .map(|&chunk| Location::new((chunk + pruned_chunks) as u64))
             .collect();
         let chunks_len = self.bitmap.chunks_len();
         if chunks_len == 0 {
@@ -376,8 +376,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
                 chunks_len - 1
             };
             for i in start..end {
-                self.mmr
-                    .add_batched(hasher, self.bitmap.get_chunk_by_index(i));
+                self.mmr.add_batched(hasher, self.bitmap.get_chunk(i));
             }
             self.authenticated_len = end;
         } else {
@@ -389,9 +388,9 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         let updates = self
             .dirty_chunks
             .iter()
-            .map(|chunk_index| {
-                let pos = Position::from(Location::new((*chunk_index + pruned_chunks) as u64));
-                (pos, self.bitmap.get_chunk_by_index(*chunk_index))
+            .map(|chunk| {
+                let pos = Position::from(Location::new((*chunk + pruned_chunks) as u64));
+                (pos, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
         self.mmr.update_leaf_batched(hasher, &updates);
@@ -472,16 +471,16 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
     pub async fn proof(
         &self,
         hasher: &mut impl Hasher<H>,
-        bit_offset: u64,
+        bit: u64,
     ) -> Result<(Proof<H::Digest>, [u8; N]), Error> {
-        assert!(bit_offset < self.len(), "out of bounds");
+        assert!(bit < self.len(), "out of bounds");
         assert!(
             !self.is_dirty(),
             "cannot compute proof with unprocessed updates"
         );
 
-        let chunk = *self.get_chunk(bit_offset);
-        let chunk_loc = Location::from(BitMap::<N>::raw_chunk_index(bit_offset));
+        let chunk = *self.get_chunk_containing(bit);
+        let chunk_loc = Location::from(BitMap::<N>::unpruned_chunk(bit));
         let (last_chunk, next_bit) = self.bitmap.last_chunk();
 
         if chunk_loc == self.mmr.leaves() {
@@ -513,28 +512,28 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
         Ok((proof, chunk))
     }
 
-    /// Verify whether `proof` proves that the `chunk` containing the referenced bit belongs to the
+    /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
         hasher: &mut impl Hasher<H>,
         proof: &Proof<H::Digest>,
         chunk: &[u8; N],
-        bit_offset: u64,
+        bit: u64,
         root: &H::Digest,
     ) -> bool {
         let bit_len = *proof.size;
-        if bit_offset >= bit_len {
-            debug!(bit_len, bit_offset, "tried to verify non-existent bit");
+        if bit >= bit_len {
+            debug!(bit_len, bit, "tried to verify non-existent bit");
             return false;
         }
 
-        let leaves = BitMap::<N>::raw_chunk_index(bit_len);
+        let leaves = BitMap::<N>::unpruned_chunk(bit_len);
         let mut mmr_proof = Proof::<H::Digest> {
             size: Position::from(Location::from(leaves)),
             digests: proof.digests.clone(),
         };
 
-        let loc = BitMap::<N>::raw_chunk_index(bit_offset);
+        let loc = BitMap::<N>::unpruned_chunk(bit);
         if bit_len % Self::CHUNK_SIZE_BITS == 0 {
             return mmr_proof.verify_element_inclusion(
                 hasher,
@@ -646,8 +645,14 @@ mod tests {
         /// - The update will not impact the root until `sync` is called.
         ///
         /// - Panics if self.next_bit is not chunk aligned.
-        pub fn push_chunk(&mut self, chunk: &[u8; N]) {
+        fn push_chunk(&mut self, chunk: &[u8; N]) {
             self.bitmap.push_chunk(chunk);
+        }
+
+        /// Convert a bit into the position of the Merkle tree leaf it belongs to.
+        pub(crate) fn leaf_pos(bit: u64) -> Position {
+            let chunk_loc = BitMap::<N>::unpruned_chunk(bit);
+            Position::from(Location::new(chunk_loc as u64))
         }
     }
 
@@ -943,11 +948,11 @@ mod tests {
         });
     }
 
-    fn flip_bit<const N: usize>(bit_offset: u64, chunk: &[u8; N]) -> [u8; N] {
-        let byte_offset = BitMap::<N>::chunk_byte_offset(bit_offset);
-        let mask = BitMap::<N>::chunk_byte_bitmask(bit_offset);
+    fn flip_bit<const N: usize>(bit: u64, chunk: &[u8; N]) -> [u8; N] {
+        let byte = BitMap::<N>::chunk_byte_offset(bit);
+        let mask = BitMap::<N>::chunk_byte_bitmask(bit);
         let mut tmp = chunk.to_vec();
-        tmp[byte_offset] ^= mask;
+        tmp[byte] ^= mask;
         tmp.try_into().unwrap()
     }
 

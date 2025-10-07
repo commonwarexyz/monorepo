@@ -119,4 +119,6 @@ pub enum Error {
     InvalidSize(u64),
     #[error("empty")]
     Empty,
+    #[error("pruned chunks causes u64 overflow")]
+    PrunedChunksOverflow,
 }

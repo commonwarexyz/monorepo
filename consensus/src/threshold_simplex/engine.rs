@@ -146,7 +146,7 @@ impl<
     ///
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub fn start(
-        self,
+        mut self,
         pending_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -160,9 +160,7 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(pending_network, recovered_network, resolver_network))
+        self.context.spawn_ref()(self.run(pending_network, recovered_network, resolver_network))
     }
 
     async fn run(
