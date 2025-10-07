@@ -8,9 +8,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{
-    spawn_ref, Clock, ContextSlot, Handle, Metrics as RuntimeMetrics, Spawner,
-};
+use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, IpAddrExt, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
@@ -23,7 +21,7 @@ const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
-    context: ContextSlot<E>,
+    context: E,
 
     // ---------- Configuration ----------
     /// For signing and verifying messages.
@@ -95,7 +93,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         (
             Self {
-                context: ContextSlot::new(context),
+                context,
                 crypto: cfg.crypto,
                 ip_namespace,
                 allow_private_ips: cfg.allow_private_ips,
@@ -152,7 +150,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     }
 
     /// Start the actor and run it in the background.
-    pub fn start(mut self) -> Handle<()> {
+    pub fn start(self) -> Handle<()> {
         let Self {
             context,
             receiver,
@@ -164,8 +162,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             peer_gossip_max_count,
             directory,
         } = self;
-        context.spawn(|context| async move {
-            let mut actor = Self {
+        context.spawn(move |context| async move {
+            let actor = Self {
                 context,
                 receiver,
                 directory,
