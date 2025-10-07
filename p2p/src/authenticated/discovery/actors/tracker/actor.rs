@@ -153,7 +153,31 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Start the actor and run it in the background.
     pub fn start(mut self) -> Handle<()> {
-        spawn_ref!(self.context, |actor| actor.run())
+        let Self {
+            context,
+            receiver,
+            crypto,
+            ip_namespace,
+            allow_private_ips,
+            synchrony_bound,
+            max_peer_set_size,
+            peer_gossip_max_count,
+            directory,
+        } = self;
+        context.spawn(|context| async move {
+            let mut actor = Self {
+                context,
+                receiver,
+                directory,
+                crypto,
+                ip_namespace,
+                allow_private_ips,
+                synchrony_bound,
+                max_peer_set_size,
+                peer_gossip_max_count,
+            };
+            actor.run().await;
+        })
     }
 
     async fn run(mut self) {
