@@ -1,7 +1,123 @@
+//! This module implements the [ZODA](https://eprint.iacr.org/2025/034) coding scheme.
+//!
+//! At a high level, the scheme works like any other coding scheme: you start with
+//! a piece of data, and split it into shards, and a commitment. Each shard can
+//! be checked to belong to the commitment, and, given enough shards, the data can
+//! be reconstructed.
+//!
+//! What makes ZODA interesting is that upon receiving and checking one shard,
+//! you become convinced that there exists an original piece of data that will
+//! be reconstructable given enough shards. This fails in the case of, e.g.,
+//! plain Reed-Solomon coding. For example, if you give people random shards,
+//! instead of actually encoding data, then when they attempt to reconstruct the
+//! data, they can come to different results depending on which shards they use.
+//!
+//! Ultimately, this stems from the fact that you can't know if your shard comes
+//! from a valid encoding of the data until you have enough shards to reconstruct
+//! the data. With ZODA, you know that the shard comes from a valid encoding as
+//! soon as you've checked it.
+//!
+//! # Variant
+//!
+//! ZODA supports different configurations based on the coding scheme you use
+//! for sharding data, and for checking it.
+//!
+//! We use the Reed-Solomon x Hadamard variant of ZODA: in essence, this means
+//! that the shards are Reed-Solomon encoded, and we include additional checksum
+//! data which does not help reconstruct the data.
+//!
+//! ## Deviations
+//!
+//! In the paper, a sample consists of rows chosen at random from the encoding of
+//! the data. With multiple participants receiving samples, they might receive
+//! overlapping samples, which we don't want. Instead, we shuffle the rows of
+//! the encoded data, and each participant receives a different segment.
+//! From that participant's perspective, they've received a completely random
+//! choice of rows. The other participants' rows are less random, since they're
+//! guaranteed to not overlap. However, no guarantee on the randomness of the other
+//! rows is required: each sample is large enough to guarantee that the data
+//! has been validly encoded.
+//!
+//! We also use a Fiat-Shamir transform to make all randomness sampled
+//! non-interactively, based on the commitment to the encoded data.
+//!
+//! # Protocol
+//!
+//! Let n denote the minimum number of shards needed to recover the data.
+//! Let k denote the number of extra shards to generate.
+//!
+//! We consider the data as being an array of elements in a field F, of 64 bits.
+//!
+//! Given n and k, we have a certain number of required samples R.
+//! We can split these into row samples S, and column samples S',
+//! such that S * S' = R.
+//!
+//! Given a choice of S, our data will need to be arranged into a matrix of size
+//!
+//!   n S x c
+//!
+//! with c being >= 1.
+//!
+//! We choose S as close to R as possible without padding the data. We then
+//! choose S' so that S * S' >= R.
+//!
+//! We also then double S', because the field over which we compute checksums
+//! only has 64 bits. This effectively makes the checksum calculated over the
+//! extension field F^2. Because we don't actually need to multiply elements
+//! in F^2 together, but only ever take linear combinations with elements in F,
+//! we can effectively compute over the larger field simply by using 2 "virtual"
+//! checksum columns per required column.
+//!
+//! For technical reasons, the encoded data will have not have (n + k) S rows,
+//! but pad((n + k) S) rows, where pad returns the next power of two.
+//! This is to our advantage, in that given n shards, we will be able to reconstruct
+//! the data, but these shards consists of rows sampled at random from
+//! pad((n + k) S) rows, thus requiring fewer samples.
+//!
+//! ## Encoding
+//!
+//! 1. The data is arranged as a matrix X of size n S x c.
+//! 2. The data is Reed-Solomon encoded, turning it into a matrix X' of size pad((n + k) S) x c.
+//! 3. The rows of X' are committed to using a vector commitment V (concretely, a Merkle Tree).
+//! 4. V, along with the size of the data, in bytes, are committed to, producing Com.
+//! 5. Com is hashed to create randomness, first to generate a matrix H of size c x S',
+//!    and then to shuffle the rows of X'.
+//! 6. Z := X H, a matrix of size n S x S' is computed.
+//! 7. The ith shard (starting from 0) then consists of:
+//!    - the size of the data, in bytes,
+//!    - the vector commitment, V,
+//!    - the checksum Z,
+//!    - rows i..(i + 1) * S of Y, along with a proof of inclusion in V, at the original index.
+//!
+//! ## Re-Sharding
+//!
+//! When re-transmitting a shard to other people, only the following are transmitted:
+//! - rows i..(i + 1) * S of Y, along with the inclusion proofs.
+//!
+//! ## Checking
+//!
+//! Let A_{S} denote the matrix formed by taking the rows in a given subset S.
+//!
+//! 1. Check that Com is the hash of V and the size of the data, in bytes.
+//! 2. Use Com to compute H of size c x S', and figure recompute the ith row sample S_i.
+//! 3. Check that Z is of size n S x S'.
+//! 4. Encode Z to get Z', a matrix of size pad((n + k) S) x S'.
+//!
+//! These steps now depend on the particular shard.
+//!
+//! 5. Check that X'_{S_i} (the shard's data) is a matrix of size S x c.
+//! 6. Use the inclusion proofs to check that each row of X'_{S_i} is included in V,
+//!    at the correct index.
+//! 7. Check that X'_{S_i} H = Z'_{S_i}
+//!
+//! ## Decoding
+//!
+//! 1. Given n checked shards, you have n S encoded rows, which can be Reed-Solomon decoded.
+//!
 use crate::{
     field::F,
     poly::{EvaluationVector, Matrix},
-    Config, Scheme,
+    Config, Scheme, ValidatingScheme,
 };
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
@@ -254,17 +370,24 @@ impl<H: Hasher> Read for ReShard<H> {
     }
 }
 
+/// A ZODA shard that has been checked for integrity already.
 pub struct CheckedShard {
     index: usize,
     shard: Matrix,
 }
 
+/// Take indices up to `total`, and shuffle them.
+///
+/// The shuffle depends, deterministically, on the transcript.
 fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<usize> {
     let mut out = (0..total).collect::<Vec<_>>();
     out.shuffle(&mut transcript.noise(b"shuffle"));
     out
 }
 
+/// Create a checking matrix of the right shape.
+///
+/// This matrix is random, using the transcript as a deterministic source of randomness.
 fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
     Matrix::rand(
         &mut transcript.noise(b"checking matrix"),
@@ -523,3 +646,5 @@ impl<H: Hasher> Scheme for Zoda<H> {
         ))
     }
 }
+
+impl<H: Hasher> ValidatingScheme for Zoda<H> {}
