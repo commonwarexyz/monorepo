@@ -1,14 +1,10 @@
 //! Signing abstractions for simplex.
 
-use crate::{
-    threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, Proposal,
-        SigningScheme, Vote, VoteContext, VoteVerification,
-    },
-    types::Round,
+use crate::threshold_simplex::types::{
+    finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, SigningScheme, Vote,
+    VoteContext, VoteVerification,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
@@ -18,16 +14,13 @@ use commonware_cryptography::{
         },
         poly::PartialSignature,
         variant::Variant,
-        Error as ThresholdError,
     },
     Digest,
 };
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
-    hash::Hash,
 };
-use thiserror::Error;
 
 /// Placeholder for the upcoming BLS threshold implementation.
 #[derive(Clone, Debug)]
@@ -213,7 +206,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let signature = aggregate_signatures::<V, _>(&[vote.signature.0, vote.signature.1]);
 
                 aggregate_verify_multiple_messages::<V, _>(
-                    &evaluated,
+                    evaluated,
                     &[notarize_message, seed_message],
                     &signature,
                     1,
@@ -235,7 +228,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let signature = aggregate_signatures::<V, _>(&[vote.signature.0, vote.signature.1]);
 
                 aggregate_verify_multiple_messages::<V, _>(
-                    &evaluated,
+                    evaluated,
                     &[nullify_message, seed_message],
                     &signature,
                     1,
@@ -259,7 +252,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
                 let signature = aggregate_signatures::<V, _>(&[vote.signature.0, vote.signature.1]);
 
                 aggregate_verify_multiple_messages::<V, _>(
-                    &evaluated,
+                    evaluated,
                     &[finalize_message, seed_message],
                     &signature,
                     1,
@@ -392,7 +385,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
 
         let verified = message_partials
             .into_iter()
-            .zip(seed_partials.into_iter())
+            .zip(seed_partials)
             .map(|(message, seed)| Vote {
                 signer: message.index,
                 signature: (message.value, seed.value),
@@ -566,7 +559,7 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
     }
 
     fn randomness(&self, certificate: &Self::Certificate) -> Option<Self::Randomness> {
-        Some(certificate.1.clone())
+        Some(certificate.1)
     }
 
     fn signature_read_cfg() -> Self::SignatureReadCfg {
@@ -581,12 +574,11 @@ impl<V: Variant + Send + Sync> SigningScheme for Scheme<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threshold_simplex::types;
-    use commonware_codec::{DecodeExt, Encode};
+    use crate::{threshold_simplex::types::Proposal, types::Round};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops::{evaluate_all, generate_shares},
-            primitives::{group::Element, variant::MinSig},
+            primitives::variant::MinSig,
         },
         sha256::Digest as Sha256Digest,
     };
@@ -597,7 +589,6 @@ mod tests {
         let round = Round::new(0, 0);
         let payload = Sha256Digest::from([0u8; 32]);
         let proposal = Proposal::new(round, round.view(), payload);
-        let namespace = b"ns";
         let ctx = VoteContext::Notarize {
             proposal: &proposal,
         };

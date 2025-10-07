@@ -1,7 +1,7 @@
 //! Byzantine participant that sends invalid notarize/finalize messages.
 
 use crate::threshold_simplex::types::{Finalize, Notarize, SigningScheme, Voter};
-use commonware_codec::{DecodeExt, Encode, Read};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -62,7 +62,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Invalid<
                     );
 
                     // Manipulate signature
-                    let mut invalid_signature =
+                    let invalid_signature =
                         Notarize::<S, _>::sign(&self.signing, &[], notarize.proposal)
                             .vote
                             .signature;
@@ -82,7 +82,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Invalid<
                     );
 
                     // Manipulate signature
-                    let mut invalid_signature =
+                    let invalid_signature =
                         Finalize::<S, _>::sign(&self.signing, &[], finalize.proposal)
                             .vote
                             .signature;

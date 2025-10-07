@@ -235,11 +235,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
-            primitives::{
-                poly::public,
-                variant::{MinPk, MinSig, Variant},
-            },
+            primitives::variant::{MinPk, MinSig, Variant},
             tle::{decrypt, encrypt, Block},
         },
         ed25519::PrivateKey,
@@ -254,7 +250,7 @@ mod tests {
     use governor::Quota;
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::HashMap,
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
@@ -593,7 +589,6 @@ mod tests {
     fn observer<V: Variant>() {
         // Create context
         let n_active = 5;
-        let threshold = quorum(n_active);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -929,7 +924,6 @@ mod tests {
     fn backfill<V: Variant>() {
         // Create context
         let n = 4;
-        let threshold = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -1427,7 +1421,6 @@ mod tests {
     fn slow_validator<V: Variant>() {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -1458,10 +1451,6 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
-
-            // Derive threshold
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1602,7 +1591,6 @@ mod tests {
     fn all_recovery<V: Variant>() {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 2;
@@ -1799,7 +1787,6 @@ mod tests {
     fn partition<V: Variant>() {
         // Create context
         let n = 10;
-        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -1989,7 +1976,6 @@ mod tests {
     fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
         // Create context
         let n = 5;
-        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2151,7 +2137,6 @@ mod tests {
     fn conflicter<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
-        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2327,7 +2312,6 @@ mod tests {
     fn invalid<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
-        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2488,7 +2472,6 @@ mod tests {
     fn impersonator<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
-        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2648,7 +2631,6 @@ mod tests {
     fn reconfigurer<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
-        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2807,7 +2789,6 @@ mod tests {
     fn nuller<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
-        let threshold = quorum(n);
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2976,7 +2957,6 @@ mod tests {
     fn outdated<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
-        let threshold = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -3128,7 +3108,6 @@ mod tests {
     fn run_1k<V: Variant>() {
         // Create context
         let n = 10;
-        let threshold = quorum(n);
         let required_containers = 1_000;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -3268,7 +3247,6 @@ mod tests {
     fn tle<V: Variant>() {
         // Create context
         let n = 4;
-        let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
         let activity_timeout = 100;
         let skip_timeout = 50;

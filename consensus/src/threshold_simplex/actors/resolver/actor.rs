@@ -106,7 +106,6 @@ pub struct Actor<
     D: Digest,
 > {
     context: E,
-    participants: Vec<P>,
     signing: S,
 
     blocker: B,
@@ -174,7 +173,6 @@ impl<
         (
             Self {
                 context,
-                participants: cfg.participants,
                 signing: cfg.signing,
 
                 blocker: cfg.blocker,

@@ -81,28 +81,18 @@ mod tests {
             self,
             signing_scheme::bls12381_threshold,
             types::{
-                finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
-                Finalize, Notarization, Notarize, Proposal, SigningScheme, VoteContext,
+                Activity, Finalization, Finalize, Notarization, Notarize, Proposal, SigningScheme,
             },
         },
         types::Round,
         Block as _, Reporter,
     };
     use commonware_broadcast::buffered;
-    use commonware_codec::Encode;
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops::generate_shares,
-            primitives::{
-                group::Share,
-                ops::{partial_sign_message, threshold_signature_recover},
-                poly,
-                variant::{MinPk, Variant},
-            },
-        },
+        bls12381::primitives::variant::MinPk,
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Sha256},
-        Digestible, Hasher as _, PrivateKeyExt as _, Signer as _,
+        Digestible, Hasher as _, Signer as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -124,7 +114,6 @@ mod tests {
     type B = Block<D>;
     type P = PublicKey;
     type V = MinPk;
-    type Sh = Share;
     type E = PrivateKey;
     type S = bls12381_threshold::Scheme<V>;
 

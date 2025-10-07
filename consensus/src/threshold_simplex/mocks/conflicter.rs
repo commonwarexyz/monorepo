@@ -1,10 +1,6 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
-use crate::{
-    threshold_simplex::types::{Finalize, Notarize, Proposal, SigningScheme, Voter},
-    types::View,
-    Viewable,
-};
+use crate::threshold_simplex::types::{Finalize, Notarize, Proposal, SigningScheme, Voter};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -55,7 +51,6 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Conflict
             match msg {
                 Voter::Notarize(notarize) => {
                     // Notarize random digest
-                    let view = notarize.proposal.view();
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(notarize.proposal.round, notarize.proposal.parent, payload);
@@ -71,7 +66,6 @@ impl<E: Clock + Rng + CryptoRng + Spawner, S: SigningScheme, H: Hasher> Conflict
                 }
                 Voter::Finalize(finalize) => {
                     // Finalize random digest
-                    let view = finalize.proposal.view();
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(finalize.proposal.round, finalize.proposal.parent, payload);

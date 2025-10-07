@@ -7,7 +7,7 @@ use crate::{
         min_active, select_leader,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, Proposal, SigningScheme, VoteContext, Voter,
+            Nullification, Nullify, Proposal, SigningScheme, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},

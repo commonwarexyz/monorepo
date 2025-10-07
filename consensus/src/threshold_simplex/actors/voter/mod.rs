@@ -51,20 +51,17 @@ mod tests {
             actors::{batcher, resolver},
             mocks,
             signing_scheme::bls12381_threshold,
-            types::{Finalization, Finalize, Notarization, Notarize, Proposal, Vote, Voter},
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
         Viewable,
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops,
-            primitives::{
-                ops::threshold_signature_recover, poly::PartialSignature, variant::MinSig,
-            },
+        bls12381::primitives::{
+            ops::threshold_signature_recover, poly::PartialSignature, variant::MinSig,
         },
-        ed25519, Hasher as _, PrivateKeyExt as _, Sha256,
+        Hasher as _, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -74,7 +71,7 @@ mod tests {
     use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, StreamExt};
-    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);

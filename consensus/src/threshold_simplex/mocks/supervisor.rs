@@ -5,14 +5,13 @@ use crate::{
         select_leader,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal,
-            SigningScheme, Vote, VoteContext,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize,
+            SigningScheme, VoteContext,
         },
     },
     types::View,
     Monitor, Reporter, Viewable,
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::mpsc::{Receiver, Sender};
