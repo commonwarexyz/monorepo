@@ -11,18 +11,13 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_p2p::authenticated::discovery::Oracle;
-use commonware_runtime::{Metrics, Spawner};
 pub use ingress::{EpochCert, EpochTransition, Mailbox, Message};
 
 type D = Sha256Digest;
 
 /// Configuration for the orchestrator.
-pub struct Config<
-    E: Spawner + Metrics,
-    C: Signer,
-    A: Automaton<Context = Context<D>, Digest = D> + Relay<Digest = D>,
-> {
-    pub oracle: Oracle<E, C::PublicKey>,
+pub struct Config<C: Signer, A: Automaton<Context = Context<D>, Digest = D> + Relay<Digest = D>> {
+    pub oracle: Oracle<C::PublicKey>,
     pub signer: C,
     pub application: A,
     pub marshal: marshal::Mailbox<MinSig, Block>,

@@ -43,7 +43,7 @@ pub struct Orchestrator<
     application: A,
     polynomial: poly::Public<MinSig>,
     shares: Vec<group::Share>,
-    oracle: Oracle<E, C::PublicKey>,
+    oracle: Oracle<C::PublicKey>,
     marshal: marshal::Mailbox<MinSig, Block>,
 
     mailbox: mpsc::Receiver<Message>,
@@ -69,7 +69,7 @@ impl<
         A: Automaton<Context = Context<D>, Digest = D> + Relay<Digest = D>,
     > Orchestrator<E, C, A>
 {
-    pub fn new(context: E, cfg: Config<E, C, A>) -> (Self, Mailbox) {
+    pub fn new(context: E, cfg: Config<C, A>) -> (Self, Mailbox) {
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
@@ -212,17 +212,14 @@ impl<
         epoch: Epoch,
         seed: sha256::Digest,
         p_mux: &mut MuxHandle<
-            E,
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
         rc_mux: &mut MuxHandle<
-            E,
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
         rs_mux: &mut MuxHandle<
-            E,
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
