@@ -19,17 +19,35 @@ const ITEMS_PER_BLOB: u64 = 7;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum MmrJournaledOperation {
-    Add { data: Vec<u8> },
-    AddBatched { data: Vec<u8> },
-    Pop { count: u8 },
-    GetNode { pos: u64 },
-    Proof { location: u64 },
-    RangeProof { start_loc: u8, end_loc: u8 },
-    HistoricalRangeProof { start_loc: u8, end_loc: u8 },
+    Add {
+        data: Vec<u8>,
+    },
+    AddBatched {
+        data: Vec<u8>,
+    },
+    Pop {
+        count: u8,
+    },
+    GetNode {
+        pos: u64,
+    },
+    Proof {
+        location: u64,
+    },
+    RangeProof {
+        start_loc: u8,
+        end_loc: u8,
+    },
+    HistoricalRangeProof {
+        start_loc: u8,
+        end_loc: u8,
+    },
     Sync,
     ProcessUpdates,
     PruneAll,
-    PruneToPos { pos: u64 },
+    PruneToPos {
+        pos: u64,
+    },
     GetRoot,
     GetSize,
     GetLeaves,
@@ -39,8 +57,13 @@ enum MmrJournaledOperation {
     GetOldestRetainedPos,
     Close,
     Reinit,
-    InitFromPinnedNodes { size: u64 },
-    InitSync { lower_bound: u64, upper_bound: u64 },
+    InitFromPinnedNodes {
+        size: u64,
+    },
+    InitSync {
+        lower_bound_seed: u16,
+        upper_bound_seed: u16,
+    },
 }
 
 #[derive(Debug)]
@@ -369,23 +392,28 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::InitSync {
-                    lower_bound,
-                    upper_bound,
+                    lower_bound_seed,
+                    upper_bound_seed,
                 } => {
-                    let safe_lower = Position::new(lower_bound % 1000);
-                    let safe_upper = Position::new(*(safe_lower + (upper_bound % 100)));
+                    const MAX_RANGE_SIZE: u64 = 1000;
+
+                    let lower_bound_pos = Position::new(lower_bound_seed as u64 % MAX_RANGE_SIZE);
+                    // +1 to ensure the range is non-empty
+                    let upper_bound_pos = Position::new(
+                        *(lower_bound_pos + ((upper_bound_seed as u64) % MAX_RANGE_SIZE) + 1),
+                    );
 
                     let sync_config = SyncConfig {
                         config: test_config("sync"),
-                        range: safe_lower..safe_upper,
+                        range: lower_bound_pos..upper_bound_pos,
                         pinned_nodes: None,
                     };
 
                     if let Ok(sync_mmr) =
                         Mmr::<_, Sha256>::init_sync(context.clone(), sync_config).await
                     {
-                        assert!(sync_mmr.size() <= safe_upper);
-                        assert_eq!(sync_mmr.pruned_to_pos(), safe_lower);
+                        assert!(sync_mmr.size() <= upper_bound_pos);
+                        assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
                         sync_mmr.destroy().await.unwrap();
                     }
                 }
