@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::Span;
 
 /// Represents a message sent between peers.
@@ -95,7 +95,7 @@ impl<Key: Span> Read for Payload<Key> {
                 // we can safely read the bytes with no limit. If an attacker encodes the length of
                 // the bytes with a value greater than the buffer size, the read will fail without
                 // allocating more memory.
-                let data = Bytes::read_cfg(buf, &RangeCfg::new(..))?;
+                let data = Bytes::read_cfg(buf, &(..).into())?;
                 Ok(Payload::Response(data))
             }
             2 => Ok(Payload::ErrorResponse),

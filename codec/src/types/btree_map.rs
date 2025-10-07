@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn test_empty_btreemap() {
         let map = BTreeMap::<u32, u64>::new();
-        round_trip_btree(&map, RangeCfg::new(..), (), ());
+        round_trip_btree(&map, (..).into(), (), ());
         assert_eq!(map.encode_size(), 1); // varint 0
         let encoded = map.encode();
         assert_eq!(encoded, Bytes::from_static(&[0]));
@@ -157,7 +157,7 @@ mod tests {
         map.insert(1u32, 100u64);
         map.insert(5u32, 500u64);
         map.insert(2u32, 200u64);
-        round_trip_btree(&map, RangeCfg::new(..), (), ());
+        round_trip_btree(&map, (..).into(), (), ());
         assert_eq!(map.encode_size(), 1 + 3 * (u32::SIZE + u64::SIZE));
         // Check encoding order (BTreeMap guarantees sorted keys: 1, 2, 5)
         let mut expected = BytesMut::new();
@@ -178,7 +178,7 @@ mod tests {
         for i in 0..1000 {
             map.insert(i as u16, i as u64 * 2);
         }
-        round_trip_btree(&map, RangeCfg::new(0..=1000), (), ());
+        round_trip_btree(&map, (0..=1000).into(), (), ());
 
         // Variable-size items
         let mut map = BTreeMap::new();
@@ -187,9 +187,9 @@ mod tests {
         }
         round_trip_btree(
             &map,
-            RangeCfg::new(0..=1000),
-            RangeCfg::new(..=1000),
-            RangeCfg::new(1000..=2000),
+            (0..=1000).into(),
+            (..=1000).into(),
+            (1000..=2000).into(),
         );
     }
 
@@ -200,7 +200,7 @@ mod tests {
         map.insert(5u32, 500u64);
 
         let encoded = map.encode();
-        let config_tuple = (RangeCfg::new(0..=1), ((), ()));
+        let config_tuple = ((0..=1).into(), ((), ()));
 
         let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::InvalidLength(2))));
@@ -215,7 +215,7 @@ mod tests {
         2u32.write(&mut encoded); // Key 2 (out of order)
         200u64.write(&mut encoded); // Value 200
 
-        let range = RangeCfg::new(..);
+        let range = (..).into();
         let config_tuple = (range, ((), ()));
 
         let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
@@ -234,8 +234,7 @@ mod tests {
         1u32.write(&mut encoded); // Duplicate Key 1
         200u64.write(&mut encoded); // Value 200
 
-        let range = RangeCfg::new(..);
-        let config_tuple = (range, ((), ()));
+        let config_tuple = ((..).into(), ((), ()));
 
         let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(

@@ -22,7 +22,7 @@ use crate::{
         Location, Position, Proof,
     },
 };
-use commonware_codec::{DecodeExt, RangeCfg};
+use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::sequence::prefixed_u64::U64;
@@ -130,7 +130,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.to_string(),
-            codec_config: (RangeCfg::new(0..), ()),
+            codec_config: ((0..).into(), ()),
         };
         let metadata =
             Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
@@ -196,7 +196,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     ) -> Result<(), Error> {
         let metadata_cfg = MConfig {
             partition: partition.to_string(),
-            codec_config: (RangeCfg::new(0..), ()),
+            codec_config: ((0..).into(), ()),
         };
         let mut metadata =
             Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
@@ -651,7 +651,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     ) -> Result<(), Error> {
         let metadata_cfg = MConfig {
             partition: partition.to_string(),
-            codec_config: (RangeCfg::new(0..), ()),
+            codec_config: ((0..).into(), ()),
         };
         let metadata =
             Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;

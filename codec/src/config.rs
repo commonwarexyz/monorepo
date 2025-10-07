@@ -37,6 +37,42 @@ pub struct RangeCfg<T> {
     end: Bound<T>,
 }
 
+impl<T: Copy + PartialOrd> From<core::ops::Range<T>> for RangeCfg<T> {
+    fn from(r: core::ops::Range<T>) -> Self {
+        Self::new(r)
+    }
+}
+
+impl<T: Copy + PartialOrd> From<core::ops::RangeInclusive<T>> for RangeCfg<T> {
+    fn from(r: core::ops::RangeInclusive<T>) -> Self {
+        Self::new(r)
+    }
+}
+
+impl<T: Copy + PartialOrd> From<core::ops::RangeFrom<T>> for RangeCfg<T> {
+    fn from(r: core::ops::RangeFrom<T>) -> Self {
+        Self::new(r)
+    }
+}
+
+impl<T: Copy + PartialOrd> From<core::ops::RangeTo<T>> for RangeCfg<T> {
+    fn from(r: core::ops::RangeTo<T>) -> Self {
+        Self::new(r)
+    }
+}
+
+impl<T: Copy + PartialOrd> From<core::ops::RangeToInclusive<T>> for RangeCfg<T> {
+    fn from(r: core::ops::RangeToInclusive<T>) -> Self {
+        Self::new(r)
+    }
+}
+
+impl<T: Copy + PartialOrd> From<core::ops::RangeFull> for RangeCfg<T> {
+    fn from(_: core::ops::RangeFull) -> Self {
+        Self::new(..)
+    }
+}
+
 impl<T: Copy + PartialOrd> RangeCfg<T> {
     /// Creates a new `RangeCfg` from any type implementing `RangeBounds<T>`.
     ///
@@ -49,21 +85,13 @@ impl<T: Copy + PartialOrd> RangeCfg<T> {
     /// assert!(cfg.contains(&500));
     /// ```
     pub fn new(r: impl RangeBounds<T>) -> Self {
-        fn own<U: Copy>(b: Bound<&U>) -> Bound<U> {
-            match b {
-                Bound::Included(&v) => Bound::Included(v),
-                Bound::Excluded(&v) => Bound::Excluded(v),
-                Bound::Unbounded => Bound::Unbounded,
-            }
-        }
-
         RangeCfg {
-            start: own(r.start_bound()),
-            end: own(r.end_bound()),
+            start: r.start_bound().cloned(),
+            end: r.end_bound().cloned(),
         }
     }
 
-    /// Returns `true` if the given value is within the configured range.
+    /// Returns true if the value is within this range.
     pub fn contains(&self, value: &T) -> bool {
         // Exclude by start bound
         match &self.start {

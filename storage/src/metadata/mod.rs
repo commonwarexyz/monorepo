@@ -47,7 +47,7 @@
 //!     // Create a store
 //!     let mut metadata = Metadata::init(context, Config{
 //!         partition: "partition".to_string(),
-//!         codec_config: (RangeCfg::new(0..), ()),
+//!         codec_config: ((0..).into(), ()),
 //!     }).await.unwrap();
 //!
 //!     // Store metadata
@@ -105,7 +105,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -148,7 +148,7 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -187,7 +187,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -226,7 +226,7 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -262,7 +262,7 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -292,7 +292,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -324,7 +324,7 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -346,7 +346,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -381,7 +381,7 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -409,7 +409,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -439,7 +439,7 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -461,7 +461,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -491,7 +491,7 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -516,7 +516,7 @@ mod tests {
                 // Create a metadata store
                 let cfg = Config {
                     partition: "test".to_string(),
-                    codec_config: (RangeCfg::new(0..), ()),
+                    codec_config: ((0..).into(), ()),
                 };
                 let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -529,7 +529,7 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -558,7 +558,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -579,7 +579,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -684,7 +684,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -723,7 +723,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
                 .await
@@ -766,7 +766,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
                 .await
@@ -812,7 +812,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -880,7 +880,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
                 .await
@@ -940,7 +940,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
                 .await
@@ -989,7 +989,7 @@ mod tests {
         executor.start(|mut context| async move {
             let cfg = Config {
                 partition: "test_determinism".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
                 .await
@@ -1059,7 +1059,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -1112,7 +1112,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await
@@ -1151,7 +1151,7 @@ mod tests {
             metadata.close().await.unwrap();
             let cfg = Config {
                 partition: "test".to_string(),
-                codec_config: (RangeCfg::new(0..), ()),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
                 .await

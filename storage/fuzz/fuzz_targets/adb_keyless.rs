@@ -1,7 +1,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::RangeCfg;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
@@ -132,7 +131,7 @@ fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()
         log_journal_partition: format!("{test_name}_log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
-        log_codec_config: (RangeCfg::new(0..=10000), ()),
+        log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         locations_journal_partition: format!("{test_name}_locations"),
         locations_items_per_blob: NZU64!(11),

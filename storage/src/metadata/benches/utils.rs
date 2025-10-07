@@ -18,7 +18,7 @@ pub type Val = Vec<u8>;
 pub async fn init(ctx: Context) -> MetadataType {
     let cfg = Config {
         partition: PARTITION.into(),
-        codec_config: (RangeCfg::new(0..), ()),
+        codec_config: ((0..).into(), ()),
     };
     Metadata::init(ctx, cfg).await.unwrap()
 }

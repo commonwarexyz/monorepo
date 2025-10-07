@@ -40,7 +40,7 @@ impl Read for Data {
 mod tests {
     use crate::authenticated::data::Data;
     use bytes::Bytes;
-    use commonware_codec::{Decode as _, Encode as _, Error, RangeCfg};
+    use commonware_codec::{Decode as _, Encode as _, Error};
 
     #[test]
     fn test_data_codec() {
@@ -49,20 +49,20 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = original.encode();
-        let decoded = Data::decode_cfg(encoded, &RangeCfg::new(13..=13)).unwrap();
+        let decoded = Data::decode_cfg(encoded, &(13..=13).into()).unwrap();
         assert_eq!(original, decoded);
 
-        let too_short = Data::decode_cfg(original.encode(), &RangeCfg::new(0..13));
+        let too_short = Data::decode_cfg(original.encode(), &(0..13).into());
         assert!(matches!(too_short, Err(Error::InvalidLength(13))));
 
-        let too_long = Data::decode_cfg(original.encode(), &RangeCfg::new(14..));
+        let too_long = Data::decode_cfg(original.encode(), &(14..).into());
         assert!(matches!(too_long, Err(Error::InvalidLength(13))));
     }
 
     #[test]
     fn test_decode_invalid() {
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let result = Data::decode_cfg(&invalid_payload[..], &RangeCfg::new(..));
+        let result = Data::decode_cfg(&invalid_payload[..], &(..).into());
         assert!(result.is_err());
     }
 }

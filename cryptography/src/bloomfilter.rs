@@ -171,7 +171,7 @@ mod tests {
         bf.insert(b"test1");
         bf.insert(b"test2");
 
-        let cfg = (RangeCfg::new(1..=100), RangeCfg::new(100..=100));
+        let cfg = ((1..=100).into(), (100..=100).into());
 
         let encoded = bf.encode();
         let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn test_codec_empty() {
         let bf = BloomFilter::new(NZU8!(4), NZUsize!(128));
-        let cfg = (RangeCfg::new(1..=100), RangeCfg::new(128..=128));
+        let cfg = ((1..=100).into(), (128..=128).into());
         let encoded = bf.encode();
         let decoded = BloomFilter::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(bf, decoded);
@@ -195,7 +195,7 @@ mod tests {
         let encoded = bf.encode();
 
         // Too small
-        let cfg = (RangeCfg::<usize>::new(10..=10), RangeCfg::new(100..=100));
+        let cfg = ((10..=10).into(), (100..=100).into());
         let decoded = BloomFilter::decode_cfg(encoded.clone(), &cfg);
         assert!(matches!(
             decoded,
@@ -203,7 +203,7 @@ mod tests {
         ));
 
         // Too large
-        let cfg = (RangeCfg::new(0..5), RangeCfg::new(100..=100));
+        let cfg = ((0..5).into(), (100..=100).into());
         let decoded = BloomFilter::decode_cfg(encoded, &cfg);
         assert!(matches!(
             decoded,
@@ -218,12 +218,12 @@ mod tests {
         let encoded = bf.encode();
 
         // Too small
-        let cfg_small = (RangeCfg::new(5..=5), RangeCfg::new(101..=110));
+        let cfg_small = ((5..=5).into(), (101..=110).into());
         let result_small = BloomFilter::decode_cfg(encoded.clone(), &cfg_small);
         assert!(matches!(result_small, Err(CodecError::InvalidLength(100))));
 
         // Too large
-        let cfg_large = (RangeCfg::new(5..=5), RangeCfg::new(0..100));
+        let cfg_large = ((5..=5).into(), (0..100).into());
         let result_large = BloomFilter::decode_cfg(encoded.clone(), &cfg_large);
         assert!(matches!(result_large, Err(CodecError::InvalidLength(100))));
     }

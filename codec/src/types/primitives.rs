@@ -270,7 +270,7 @@ mod tests {
         for value in values.iter() {
             let encoded = value.encode();
             assert_eq!(value.encode_size(), UInt(*value as u32).encode_size());
-            let decoded = usize::decode_cfg(encoded, &RangeCfg::new(..)).unwrap();
+            let decoded = usize::decode_cfg(encoded, &(..).into()).unwrap();
             assert_eq!(*value, decoded);
         }
     }

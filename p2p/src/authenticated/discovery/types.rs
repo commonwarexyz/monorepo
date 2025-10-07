@@ -1,8 +1,7 @@
 use crate::authenticated::data::Data;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, ReadRangeExt,
-    Write,
+    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::Clock;
@@ -116,7 +115,7 @@ impl<C: PublicKey> Read for Payload<C> {
             DATA_PREFIX => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
-                let data = Data::read_cfg(buf, &RangeCfg::new(..))?;
+                let data = Data::read_cfg(buf, &(..).into())?;
                 Ok(Payload::Data(data))
             }
             _ => Err(CodecError::Invalid(
@@ -157,7 +156,7 @@ impl Read for BitVec {
 
     fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, CodecError> {
         let index = UInt::read(buf)?.into();
-        let bits = UtilsBitVec::read_cfg(buf, &RangeCfg::new(..=*max_bits))?;
+        let bits = UtilsBitVec::read_cfg(buf, &(..=*max_bits).into())?;
         Ok(Self { index, bits })
     }
 }

@@ -35,7 +35,6 @@ pub mod mocks;
 mod tests {
     use super::{mocks::TestMessage, *};
     use crate::Broadcaster;
-    use commonware_codec::RangeCfg;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Committable, Digestible, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
@@ -122,7 +121,7 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                codec_config: RangeCfg::new(..),
+                codec_config: (..).into(),
             };
             let (engine, engine_mailbox) =
                 Engine::<_, PublicKey, TestMessage>::new(context.clone(), config);

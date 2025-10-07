@@ -1,7 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
     bls12381::{
         dkg::types::{Ack, Share},
@@ -171,7 +169,7 @@ impl<S: Signature> Read for Payload<S> {
             4 => {
                 let commitments = BTreeMap::<u32, poly::Public<MinSig>>::read_cfg(
                     buf,
-                    &(RangeCfg::new(..=*p), ((), t)),
+                    &((..=*p).into(), ((), t)),
                 )?;
                 let reveals = BTreeMap::<u32, group::Share>::read_range(buf, ..=*p)?;
                 Payload::Success {

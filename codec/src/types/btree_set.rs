@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn test_empty_btreeset() {
         let set = BTreeSet::<u32>::new();
-        round_trip_btree(&set, RangeCfg::new(..), ());
+        round_trip_btree(&set, (..).into(), ());
         assert_eq!(set.encode_size(), 1); // varint 0
         let encoded = set.encode();
         assert_eq!(encoded, Bytes::from_static(&[0]));
@@ -138,7 +138,7 @@ mod tests {
         set.insert(1u32);
         set.insert(5u32);
         set.insert(2u32);
-        round_trip_btree(&set, RangeCfg::new(..), ());
+        round_trip_btree(&set, (..).into(), ());
         assert_eq!(set.encode_size(), 1 + 3 * u32::SIZE);
     }
 
@@ -146,11 +146,11 @@ mod tests {
     fn test_large_btreeset() {
         // Fixed-size items
         let set: BTreeSet<_> = (0..1000u16).collect();
-        round_trip_btree(&set, RangeCfg::new(1000..=1000), ());
+        round_trip_btree(&set, (1000..=1000).into(), ());
 
         // Variable-size items
         let set: BTreeSet<_> = (0..1000usize).collect();
-        round_trip_btree(&set, RangeCfg::new(1000..=1000), RangeCfg::new(..=1000));
+        round_trip_btree(&set, (1000..=1000).into(), (..=1000).into());
     }
 
     #[test]
@@ -160,7 +160,7 @@ mod tests {
         set.insert(5u32);
         let encoded = set.encode();
 
-        let config_tuple = (RangeCfg::new(0..=1), ());
+        let config_tuple = ((0..=1).into(), ());
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::InvalidLength(2))));
     }
@@ -172,7 +172,7 @@ mod tests {
         5u32.write(&mut encoded); // Item 5
         2u32.write(&mut encoded); // Item 2 (out of order)
 
-        let config_tuple = (RangeCfg::new(..), ());
+        let config_tuple = ((..).into(), ());
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
             result,
@@ -187,7 +187,7 @@ mod tests {
         1u32.write(&mut encoded); // Item 1
         1u32.write(&mut encoded); // Duplicate Item 1
 
-        let config_tuple = (RangeCfg::new(..), ());
+        let config_tuple = ((..).into(), ());
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
             result,

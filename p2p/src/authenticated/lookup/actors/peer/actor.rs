@@ -5,7 +5,7 @@ use crate::authenticated::{
     relay::Relay,
     Mailbox,
 };
-use commonware_codec::{Decode, Encode, RangeCfg};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
@@ -165,7 +165,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
-                    let msg = match types::Message::decode_cfg(msg, &RangeCfg::new(..)) {
+                    let msg = match types::Message::decode_cfg(msg, &(..).into()) {
                         Ok(msg) => msg,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");

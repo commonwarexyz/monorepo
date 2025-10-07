@@ -1,7 +1,7 @@
 use crate::net::{ErrorResponse, RequestId};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    DecodeExt, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
 use commonware_storage::{
@@ -241,7 +241,7 @@ where
         let request_id = RequestId::read_cfg(buf, &())?;
         let proof = Proof::<D>::read_cfg(buf, &MAX_DIGESTS)?;
         let operations = {
-            let range_cfg = RangeCfg::new(0..=MAX_DIGESTS);
+            let range_cfg = (0..=MAX_DIGESTS).into();
             Vec::<Op>::read_cfg(buf, &(range_cfg, ()))?
         };
         Ok(Self {

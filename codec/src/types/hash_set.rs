@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn test_empty_hashset() {
         let set = HashSet::<u32>::new();
-        round_trip_hash(&set, RangeCfg::new(..), ());
+        round_trip_hash(&set, (..).into(), ());
         assert_eq!(set.encode_size(), 1); // varint 0
         let encoded = set.encode();
         assert_eq!(encoded, Bytes::from_static(&[0]));
@@ -139,7 +139,7 @@ mod tests {
         set.insert(1u32);
         set.insert(5u32);
         set.insert(2u32);
-        round_trip_hash(&set, RangeCfg::new(..), ());
+        round_trip_hash(&set, (..).into(), ());
         // Size calculation: varint len + size of each item (order doesn't matter for size)
         assert_eq!(set.encode_size(), 1 + 3 * u32::SIZE);
         // Encoding check: items must be sorted (1, 2, 5)
@@ -155,11 +155,11 @@ mod tests {
     fn test_large_hashset() {
         // Fixed-size items
         let set: HashSet<_> = (0..1000u16).collect();
-        round_trip_hash(&set, RangeCfg::new(1000..=1000), ());
+        round_trip_hash(&set, (1000..=1000).into(), ());
 
         // Variable-size items
         let set: HashSet<_> = (0..1000usize).collect();
-        round_trip_hash(&set, RangeCfg::new(1000..=1000), RangeCfg::new(..=1000));
+        round_trip_hash(&set, (1000..=1000).into(), (..=1000).into());
     }
 
     #[test]
@@ -172,7 +172,7 @@ mod tests {
         let set_range = 0..=10;
         let item_range = ..=10; // Range for Bytes length
 
-        round_trip_hash(&set, RangeCfg::new(set_range), RangeCfg::new(item_range));
+        round_trip_hash(&set, (set_range).into(), (item_range).into());
     }
 
     #[test]
@@ -182,7 +182,7 @@ mod tests {
         set.insert(5u32);
 
         let encoded = set.encode();
-        let config_tuple = (RangeCfg::new(0..=1), ());
+        let config_tuple = ((0..=1).into(), ());
 
         let result = HashSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::InvalidLength(2))));
@@ -197,10 +197,7 @@ mod tests {
         let restrictive_item_range = ..=5; // Limit item length
 
         let encoded = set.encode();
-        let config_tuple = (
-            RangeCfg::new(set_range),
-            RangeCfg::new(restrictive_item_range),
-        );
+        let config_tuple = ((set_range).into(), (restrictive_item_range).into());
         let result = HashSet::<Bytes>::decode_cfg(encoded, &config_tuple);
 
         assert!(matches!(result, Err(Error::InvalidLength(8))));
@@ -213,7 +210,7 @@ mod tests {
         5u32.write(&mut encoded); // Item 5
         2u32.write(&mut encoded); // Item 2 (out of order)
 
-        let config_tuple = (RangeCfg::new(..), ());
+        let config_tuple = ((..).into(), ());
 
         let result = HashSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
@@ -229,7 +226,7 @@ mod tests {
         1u32.write(&mut encoded); // Item 1
         1u32.write(&mut encoded); // Duplicate Item 1
 
-        let config_tuple = (RangeCfg::new(..), ());
+        let config_tuple = ((..).into(), ());
         let result = HashSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
             result,
@@ -246,7 +243,7 @@ mod tests {
         let mut encoded = set.encode(); // Will be sorted: [1, 5]
         encoded.truncate(set.encode_size() - 2); // Truncate during last item (5)
 
-        let config_tuple = (RangeCfg::new(..), ());
+        let config_tuple = ((..).into(), ());
         let result = HashSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::EndOfBuffer)));
     }
@@ -260,7 +257,7 @@ mod tests {
         encoded.put_u8(0xFF); // Add extra byte
 
         // Use decode_cfg which enforces buffer is fully consumed
-        let config_tuple = (RangeCfg::new(..), ()); // Clone range for read_cfg later
+        let config_tuple = ((..).into(), ()); // Clone range for read_cfg later
         let result = HashSet::<u32>::decode_cfg(encoded.clone(), &config_tuple);
         assert!(matches!(result, Err(Error::ExtraData(1))));
 

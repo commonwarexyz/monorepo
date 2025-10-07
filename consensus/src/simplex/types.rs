@@ -1080,7 +1080,7 @@ impl<S: CSignature, D: Digest> Read for Response<S, D> {
             Vec::<Notarization<S, D>>::read_cfg(reader, &(RangeCfg::new(..=total), *max_sigs))?;
         let rem = total - notarizations.len();
         let nullifications =
-            Vec::<Nullification<S>>::read_cfg(reader, &(RangeCfg::new(..=rem), *max_sigs))?;
+            Vec::<Nullification<S>>::read_cfg(reader, &((..=rem).into(), *max_sigs))?;
         Ok(Self {
             id,
             notarizations,

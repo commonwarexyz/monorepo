@@ -1,7 +1,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::RangeCfg;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
@@ -165,7 +164,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         log_items_per_section: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
-        log_codec_config: (RangeCfg::new(0..=100000), ()),
+        log_codec_config: ((0..=100000).into(), ()),
         locations_journal_partition: format!("{test_name}_locations"),
         locations_items_per_blob: NZU64!(3),
         translator: TwoCap,

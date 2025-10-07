@@ -1,10 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{
-    codec::{EncodeSize, Read, Write},
-    RangeCfg,
-};
+use commonware_codec::codec::{EncodeSize, Read, Write};
 use commonware_utils::BitVec;
 use libfuzzer_sys::fuzz_target;
 
@@ -475,7 +472,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert!(!buf.is_empty());
 
                 let mut cursor = std::io::Cursor::new(buf);
-                let range_cfg = RangeCfg::new(0..MAX_SIZE);
+                let range_cfg = (0..MAX_SIZE).into();
                 if let Ok(decoded) = BitVec::read_cfg(&mut cursor, &range_cfg) {
                     assert_eq!(decoded.len(), v.len());
                     for i in 0..decoded.len() {

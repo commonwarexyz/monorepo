@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Decode, Encode, EncodeSize, RangeCfg};
+use commonware_codec::{Decode, Encode, EncodeSize};
 use commonware_cryptography::BloomFilter;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -36,8 +36,8 @@ fn fuzz(input: FuzzInput) {
     let hashers_usize = hashers as usize;
     let bits_usize = bits as usize;
     let cfg = (
-        RangeCfg::new(hashers_usize..=hashers_usize),
-        RangeCfg::new(bits_usize..=bits_usize),
+        (hashers_usize..=hashers_usize).into(),
+        (bits_usize..=bits_usize).into(),
     );
 
     for op in input.ops.into_iter().take(64) {

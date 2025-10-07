@@ -405,9 +405,9 @@ fn fuzz(input: FuzzInput) {
                         handler,
                         mailbox_size: (mailbox_size as usize),
                         priority_request,
-                        request_codec: RangeCfg::new(..=MAX_LEN),
+                        request_codec: (..=MAX_LEN).into(),
                         priority_response,
-                        response_codec: RangeCfg::new(..=MAX_LEN),
+                        response_codec: (..=MAX_LEN).into(),
                     };
 
                     let (engine, mailbox) = Engine::new(context.clone(), config);

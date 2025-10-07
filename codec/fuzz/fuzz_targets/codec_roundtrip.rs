@@ -32,18 +32,18 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
 
     // Decode with too long length
     assert!(matches!(
-        Bytes::decode_cfg(encoded_bytes.clone(), &RangeCfg::new(0..input_len)),
+        Bytes::decode_cfg(encoded_bytes.clone(), &(0..input_len).into()),
         Err(Error::InvalidLength(_))
     ));
 
     // Decode with too short length
     assert!(matches!(
-        Bytes::decode_cfg(encoded_bytes.clone(), &RangeCfg::new(input_len + 1..)),
+        Bytes::decode_cfg(encoded_bytes.clone(), &(input_len + 1..).into()),
         Err(Error::InvalidLength(_))
     ));
 
     // Decode with full length
-    let decoded_bytes = Bytes::decode_cfg(encoded_bytes, &RangeCfg::new(input_len..=input_len))
+    let decoded_bytes = Bytes::decode_cfg(encoded_bytes, &(input_len..=input_len).into())
         .expect("Failed to decode bytes!");
 
     // Check matching
@@ -116,17 +116,17 @@ where
 
     // Decode with too long length
     assert!(matches!(
-        Vec::<T>::decode_cfg(encoded_vec.clone(), &(RangeCfg::new(0..input_len), ())),
+        Vec::<T>::decode_cfg(encoded_vec.clone(), &((0..input_len).into(), ())),
         Err(Error::InvalidLength(_))
     ));
 
     // Decode with too short length
     assert!(matches!(
-        Vec::<T>::decode_cfg(encoded_vec.clone(), &(RangeCfg::new(input_len + 1..), ())),
+        Vec::<T>::decode_cfg(encoded_vec.clone(), &((input_len + 1..).into(), ())),
         Err(Error::InvalidLength(_))
     ));
 
-    let decoded = Vec::<T>::decode_cfg(encoded_vec, &(RangeCfg::new(input_len..=input_len), ()))
+    let decoded = Vec::<T>::decode_cfg(encoded_vec, &((input_len..=input_len).into(), ()))
         .expect("Failed to decode Vec<T>!");
 
     assert_eq!(vec, decoded);
@@ -166,7 +166,7 @@ fn fuzz(input: FuzzInput) {
     match input {
         FuzzInput::Socket(it) => roundtrip_socket(it.0),
         FuzzInput::Bytes(it) => roundtrip_bytes(Bytes::from(it.to_vec())),
-        FuzzInput::Map(it) => roundtrip_map(&it, RangeCfg::new(..), (), ()), // TODO this needs proper length specifiers for the type if doing dynamic lengths!
+        FuzzInput::Map(it) => roundtrip_map(&it, (..).into(), (), ()), // TODO this needs proper length specifiers for the type if doing dynamic lengths!
         FuzzInput::Vec(it) => roundtrip_vec(it),
 
         // Primitive roundtrips
