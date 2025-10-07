@@ -362,9 +362,9 @@ mod tests {
             let start_loc = Location::new(3u64);
             let end_loc = Location::new(8u64);
 
-            // Get required digests
+            // Get required digests (note: range is exclusive, so end_loc + 1)
             let required_positions =
-                digests_required_for_proof::<Digest>(OP_COUNT, start_loc..end_loc);
+                digests_required_for_proof::<Digest>(OP_COUNT, start_loc..end_loc + 1);
 
             // Fetch the actual digests
             let mut digests = Vec::new();

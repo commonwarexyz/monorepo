@@ -111,7 +111,7 @@ impl<D: Digest> Proof<D> {
     /// Return true if this proof proves that `element` appears at location `loc` within the MMR
     /// with root digest `root`.
     ///
-    /// Returns `false` if `loc` exceeds [MAX_LOCATION], or if the proof is invalid.
+    /// Returns `false` if `loc` exceeds [crate::mmr::MAX_LOCATION], or if the proof is invalid.
     pub fn verify_element_inclusion<I, H>(
         &self,
         hasher: &mut H,
@@ -129,7 +129,8 @@ impl<D: Digest> Proof<D> {
     /// Return true if this proof proves that the `elements` appear consecutively starting at
     /// position `start_loc` within the MMR with root digest `root`.
     ///
-    /// Returns `false` if `start_loc` exceeds [MAX_LOCATION], or if the proof is invalid or malformed.
+    /// Returns `false` if `start_loc` exceeds [crate::mmr::MAX_LOCATION], or if the proof is
+    /// invalid or malformed.
     pub fn verify_range_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
@@ -168,8 +169,8 @@ impl<D: Digest> Proof<D> {
     /// Return true if this proof proves that the elements at the specified locations are included
     /// in the MMR with the root digest `root`.
     ///
-    /// Returns `false` if any location in `elements` exceeds [MAX_LOCATION], or if the proof is
-    /// invalid or malformed.
+    /// Returns `false` if any location in `elements` exceeds [crate::mmr::MAX_LOCATION], or if the
+    /// proof is invalid or malformed.
     ///
     /// The order of the elements does not affect the output.
     pub fn verify_multi_inclusion<I, H, E>(
@@ -560,7 +561,7 @@ pub(crate) fn nodes_required_for_range_proof(
 ///
 /// Panics if:
 /// - `locations` is empty
-/// - Any location in `locations` exceeds [MAX_LOCATION] (panics in [Position::from])
+/// - Any location in `locations` exceeds [crate::mmr::MAX_LOCATION]
 ///
 /// # Assumptions
 ///

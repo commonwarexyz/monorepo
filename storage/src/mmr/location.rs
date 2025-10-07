@@ -26,7 +26,7 @@ pub const MAX_LOCATION: u64 = 0x7FFF_FFFF_FFFF_FFFF; // 2^63 - 1
 ///
 /// # Limits
 ///
-/// While [Location] can technically hold any `u64` value, only values up to [MAX_LOCATION]
+/// While [Location] can technically hold any `u64` value, only values up to [`MAX_LOCATION`]
 /// can be safely converted to [Position]. Values exceeding this limit will cause the
 /// conversion to panic due to overflow in the underlying arithmetic.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
@@ -53,13 +53,14 @@ impl Location {
     /// ```
     #[inline]
     pub(crate) const fn new(loc: u64) -> Self {
+        #[cfg(all(debug_assertions, not(test)))]
         debug_assert!(loc <= MAX_LOCATION);
         Self(loc)
     }
 
-    /// Create a new [Location] from a raw `u64`, validating it does not exceed [MAX_LOCATION].
+    /// Create a new [Location] from a raw `u64`, validating it does not exceed [`MAX_LOCATION`].
     ///
-    /// Returns `None` if `loc > MAX_LOCATION`. Locations exceeding [MAX_LOCATION] cannot be
+    /// Returns `None` if `loc > MAX_LOCATION`. Locations exceeding [`MAX_LOCATION`] cannot be
     /// safely converted to [Position] and will cause panics in MMR operations.
     ///
     /// # Examples
@@ -94,14 +95,14 @@ impl Location {
 
     /// Returns `true` if this location can be safely converted to a [Position].
     ///
-    /// Returns `false` if this location exceeds [MAX_LOCATION], which would cause
+    /// Returns `false` if this location exceeds [`MAX_LOCATION`], which would cause
     /// [Position::from] to panic due to overflowing u64.
     #[inline]
     pub const fn is_valid(self) -> bool {
         self.0 <= MAX_LOCATION
     }
 
-    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_LOCATION].
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds [`MAX_LOCATION`].
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
@@ -125,7 +126,7 @@ impl Location {
         }
     }
 
-    /// Return `self + rhs` saturating at [MAX_LOCATION].
+    /// Return `self + rhs` saturating at [`MAX_LOCATION`].
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
         let result = self.0.saturating_add(rhs);

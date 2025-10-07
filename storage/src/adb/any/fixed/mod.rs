@@ -336,7 +336,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [Error::Mmr]([mmr::Error::LocationOverflow]) if `loc` exceeds [mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::OperationPruned] if the location precedes the oldest retained location.
     ///
     /// # Panics
@@ -636,7 +636,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [Error::Mmr]([mmr::Error::LocationOverflow]) if `target_prune_loc` exceeds [mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::LocationOverflow] if `target_prune_loc` exceeds [crate::mmr::MAX_LOCATION].
     ///
     /// # Panics
     ///
