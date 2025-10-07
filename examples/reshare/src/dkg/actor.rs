@@ -1,37 +1,50 @@
 use super::{Mailbox, Message};
-use crate::dkg::DkgManager;
+use crate::{
+    dkg::DkgManager,
+    orchestrator::EpochTransition,
+    utils::{is_last_block_in_epoch, BLOCKS_PER_EPOCH},
+};
+use commonware_consensus::Reporter;
 use commonware_cryptography::{
     bls12381::{
         dkg::player::Output,
-        primitives::{group::Share, poly::Public, variant::MinSig},
+        primitives::{group::Share, poly::Public, variant::Variant},
     },
-    ed25519::{PrivateKey, PublicKey},
-    Sha256,
+    Digestible, Hasher, PrivateKey,
 };
-use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{tokio, Handle, Spawner};
+use commonware_p2p::{utils::mux::Muxer, Receiver, Sender};
+use commonware_runtime::{Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
+use rand_core::CryptoRngCore;
 use std::cmp::Ordering;
 use tracing::info;
 
-/// The number of blocks in an epoch.
-const EPOCH_LENGTH: u64 = 150;
-
-pub struct Actor {
-    context: tokio::Context,
-    mailbox: mpsc::Receiver<Message<Sha256, PrivateKey, MinSig>>,
-    signer: PrivateKey,
-    contributors: Vec<PublicKey>,
+pub struct Actor<E, H, C, V>
+where
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
+    context: E,
+    mailbox: mpsc::Receiver<Message<H, C, V>>,
+    signer: C,
+    contributors: Vec<C::PublicKey>,
 }
 
-impl Actor {
+impl<E, H, C, V> Actor<E, H, C, V>
+where
+    E: Spawner + Metrics + CryptoRngCore,
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub fn new(
-        context: tokio::Context,
-        signer: PrivateKey,
-        mut contributors: Vec<PublicKey>,
+        context: E,
+        signer: C,
+        mut contributors: Vec<C::PublicKey>,
         mailbox_size: usize,
-    ) -> (Self, Mailbox<Sha256, PrivateKey, MinSig>) {
+    ) -> (Self, Mailbox<H, C, V>) {
         // Sort the list of contributors to ensure everyone agrees on ordering.
         contributors.sort();
 
@@ -50,24 +63,31 @@ impl Actor {
     /// Start the DKG actor.
     pub fn start(
         mut self,
-        initial_public: Public<MinSig>,
+        initial_public: Public<V>,
         initial_share: Share,
-        (mut sender, mut receiver): (
-            impl Sender<PublicKey = PublicKey>,
-            impl Receiver<PublicKey = PublicKey>,
+        mut orchestrator: impl Reporter<Activity = EpochTransition<V, H>>,
+        (sender, receiver): (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
         self.context.spawn_ref()(async move {
+            // Start a muxer for the physical channel used by DKG/reshare
+            let (mux, mut dkg_mux) =
+                Muxer::new(self.context.with_label("dkg_mux"), sender, receiver, 100);
+            mux.start();
+
             // Initialize the DKG manager for the first round.
-            let mut manager = DkgManager::new(
+            let mut manager = DkgManager::init(
                 &mut self.context,
+                0, // TODO: Pick up on last epoch from storage.
                 initial_public,
                 initial_share,
                 &mut self.signer,
                 &self.contributors,
-                &mut sender,
-                &mut receiver,
-            );
+                &mut dkg_mux,
+            )
+            .await;
 
             while let Some(message) = self.mailbox.next().await {
                 match message {
@@ -85,54 +105,63 @@ impl Actor {
                         let _ = response.send(outcome);
                     }
                     Message::Finalized { block } => {
-                        let round = block.height / EPOCH_LENGTH;
-                        let relative_height = block.height % EPOCH_LENGTH;
+                        let epoch = block.height / BLOCKS_PER_EPOCH;
+                        let relative_height = block.height % BLOCKS_PER_EPOCH;
 
-                        // Finalize the round if at the end of an epoch.
-                        //
-                        // This will never include genesis, as marshal never reports that block.
-                        if relative_height == 0 {
-                            let Output { public, share } =
-                                manager.finalize(round.saturating_sub(1)).await;
+                        // Attempt to transition epochs.
+                        if let Some(epoch) = is_last_block_in_epoch(block.height) {
+                            let Output { public, share } = manager.finalize(epoch).await;
+
+                            info!(epoch, "finalized epoch's reshare; instructing reconfiguration after reshare.");
+                            let next_epoch = epoch + 1;
+
+                            let transition: EpochTransition<V, H> = EpochTransition {
+                                epoch: next_epoch,
+                                seed: block.digest(),
+                                poly: public.clone(),
+                                share: share.clone(),
+                            };
+                            orchestrator.report(transition).await;
 
                             // Rotate the manager to begin a new round.
-                            manager = DkgManager::new(
+                            manager = DkgManager::init(
                                 &mut self.context,
+                                next_epoch,
                                 public,
                                 share,
                                 &mut self.signer,
                                 &self.contributors,
-                                &mut sender,
-                                &mut receiver,
-                            );
-                        }
+                                &mut dkg_mux,
+                            )
+                            .await;
+                        };
 
-                        match relative_height.cmp(&(EPOCH_LENGTH / 2)) {
+                        match relative_height.cmp(&(BLOCKS_PER_EPOCH / 2)) {
                             Ordering::Less => {
                                 // Continuously distribute shares to any players who haven't acknowledged
                                 // receipt yet.
-                                manager.distribute(round).await;
+                                manager.distribute(epoch).await;
 
                                 // Process any incoming messages from other dealers/players.
-                                manager.process_messages(round).await;
+                                manager.process_messages(epoch).await;
                             }
                             Ordering::Equal => {
                                 // Process any final messages from other dealers/players.
-                                manager.process_messages(round).await;
+                                manager.process_messages(epoch).await;
 
                                 // At the midpoint of the epoch, construct the deal outcome for inclusion.
-                                manager.construct_deal_outcome(round);
+                                manager.construct_deal_outcome(epoch);
                             }
                             Ordering::Greater => {
                                 // Process any incoming deal outcomes from dealing contributors.
-                                manager.process_block(round, block).await;
+                                manager.process_block(epoch, block).await;
                             }
                         }
                     }
                 }
             }
 
-            info!(target: "dkg", "mailbox closed, exiting.");
+            info!("mailbox closed, exiting.");
         })
     }
 }

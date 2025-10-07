@@ -1,28 +1,19 @@
-//! Types for the `commonware-reshare` example
+//! Types for the `commonware-reshare` example application.
 
 use crate::dkg::DealOutcome;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::Block as ConsensusBlock;
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinSig, Variant},
-    ed25519, Committable, Digestible, Hasher, PrivateKey, Sha256,
+    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, PrivateKey,
 };
-
-pub type H = Sha256;
-pub type D = <H as Hasher>::Digest;
-pub type B = Block<H, ed25519::PrivateKey, MinSig>;
-
-pub type Identity = <MinSig as Variant>::Public;
-pub type Evaluation = Identity;
-pub type Signature = <MinSig as Variant>::Signature;
 
 /// A block in the reshare chain.
 #[derive(Clone)]
-pub struct Block<H, P, V>
+pub struct Block<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     /// The parent digest.
@@ -32,17 +23,21 @@ where
     pub height: u64,
 
     /// An optional outcome of a resharing operation.
-    pub reshare_outcome: Option<DealOutcome<P, V>>,
+    pub reshare_outcome: Option<DealOutcome<C, V>>,
 }
 
-impl<H, P, V> Block<H, P, V>
+impl<H, C, V> Block<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     /// Create a new [Block].
-    pub fn new(parent: H::Digest, height: u64, reshare_outcome: Option<DealOutcome<P, V>>) -> Self {
+    pub const fn new(
+        parent: H::Digest,
+        height: u64,
+        reshare_outcome: Option<DealOutcome<C, V>>,
+    ) -> Self {
         Self {
             parent,
             height,
@@ -51,10 +46,10 @@ where
     }
 }
 
-impl<H, P, V> Write for Block<H, P, V>
+impl<H, C, V> Write for Block<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     fn write(&self, buf: &mut impl BufMut) {
@@ -64,10 +59,10 @@ where
     }
 }
 
-impl<H, P, V> EncodeSize for Block<H, P, V>
+impl<H, C, V> EncodeSize for Block<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     fn encode_size(&self) -> usize {
@@ -75,10 +70,10 @@ where
     }
 }
 
-impl<H, P, V> Read for Block<H, P, V>
+impl<H, C, V> Read for Block<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     type Cfg = usize;
@@ -87,15 +82,15 @@ where
         Ok(Self {
             parent: H::Digest::read(buf)?,
             height: u64::read(buf)?,
-            reshare_outcome: Option::<DealOutcome<P, V>>::read_cfg(buf, cfg)?,
+            reshare_outcome: Option::<DealOutcome<C, V>>::read_cfg(buf, cfg)?,
         })
     }
 }
 
-impl<H, P, V> Digestible for Block<H, P, V>
+impl<H, C, V> Digestible for Block<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     type Digest = H::Digest;
@@ -108,10 +103,10 @@ where
     }
 }
 
-impl<H, P, V> Committable for Block<H, P, V>
+impl<H, C, V> Committable for Block<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     type Commitment = H::Digest;
@@ -121,10 +116,10 @@ where
     }
 }
 
-impl<H, P, V> ConsensusBlock for Block<H, P, V>
+impl<H, C, V> ConsensusBlock for Block<H, C, V>
 where
     H: Hasher,
-    P: PrivateKey,
+    C: PrivateKey,
     V: Variant,
 {
     fn parent(&self) -> Self::Commitment {
@@ -134,4 +129,14 @@ where
     fn height(&self) -> u64 {
         self.height
     }
+}
+
+/// Returns the genesis block.
+pub fn genesis_block<H, C, V>() -> Block<H, C, V>
+where
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
+    Block::new(H::empty(), 0, None)
 }

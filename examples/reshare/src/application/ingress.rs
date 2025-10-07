@@ -1,9 +1,12 @@
 //! Application ingress (mailbox and messages).
 
-use crate::application::types::{B, D};
+use crate::application::Block;
 use commonware_consensus::{
-    threshold_simplex::types::Context, types::View, Automaton, Epochable, Relay, Reporter, Viewable,
+    threshold_simplex::types::Context,
+    types::{Epoch, Round, View},
+    Automaton, Epochable, Relay, Reporter,
 };
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, PrivateKey};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -13,53 +16,76 @@ use futures::{
 ///
 /// [Actor]: super::Actor
 #[allow(clippy::large_enum_variant)]
-pub enum Message {
+pub enum Message<H, C, V>
+where
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
     /// A request for the genesis payload.
-    Genesis { response: oneshot::Sender<D> },
+    Genesis {
+        epoch: Epoch,
+        response: oneshot::Sender<H::Digest>,
+    },
 
     /// A request to propose a new payload.
     Propose {
-        view: View,
-        parent: (View, D),
-        response: oneshot::Sender<D>,
+        round: Round,
+        parent: (View, H::Digest),
+        response: oneshot::Sender<H::Digest>,
     },
 
     /// A request to verify a payload.
     Verify {
-        view: View,
-        parent: (View, D),
-        digest: D,
+        round: Round,
+        parent: (View, H::Digest),
+        digest: H::Digest,
         response: oneshot::Sender<bool>,
     },
 
     /// A notification that a payload should be broadcasted to peers.
-    Broadcast { digest: D },
+    Broadcast { digest: H::Digest },
 
     /// A notification that a block has been finalized.
-    Finalized { block: B },
+    Finalized { block: Block<H, C, V> },
 }
 
 /// Mailbox for the application.
 #[derive(Clone)]
-pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
+pub struct Mailbox<H, C, V>
+where
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
+    sender: mpsc::Sender<Message<H, C, V>>,
 }
 
-impl Mailbox {
+impl<H, C, V> Mailbox<H, C, V>
+where
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
     /// Create a new application mailbox.
-    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
+    pub(super) fn new(sender: mpsc::Sender<Message<H, C, V>>) -> Self {
         Self { sender }
     }
 }
 
-impl Automaton for Mailbox {
-    type Digest = D;
+impl<H, C, V> Automaton for Mailbox<H, C, V>
+where
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
+    type Digest = H::Digest;
     type Context = Context<Self::Digest>;
 
-    async fn genesis(&mut self, _: <Self::Context as Epochable>::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, epoch: <Self::Context as Epochable>::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Genesis { response })
+            .send(Message::Genesis { epoch, response })
             .await
             .expect("Failed to send genesis");
         receiver.await.expect("Failed to receive genesis")
@@ -69,7 +95,7 @@ impl Automaton for Mailbox {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Propose {
-                view: context.view(),
+                round: context.round,
                 parent: context.parent,
                 response,
             })
@@ -86,7 +112,7 @@ impl Automaton for Mailbox {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Verify {
-                view: context.view(),
+                round: context.round,
                 parent: context.parent,
                 digest,
                 response,
@@ -97,8 +123,13 @@ impl Automaton for Mailbox {
     }
 }
 
-impl Relay for Mailbox {
-    type Digest = D;
+impl<H, C, V> Relay for Mailbox<H, C, V>
+where
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
+    type Digest = H::Digest;
 
     async fn broadcast(&mut self, digest: Self::Digest) {
         self.sender
@@ -108,8 +139,13 @@ impl Relay for Mailbox {
     }
 }
 
-impl Reporter for Mailbox {
-    type Activity = B;
+impl<H, C, V> Reporter for Mailbox<H, C, V>
+where
+    H: Hasher,
+    C: PrivateKey,
+    V: Variant,
+{
+    type Activity = Block<H, C, V>;
 
     async fn report(&mut self, block: Self::Activity) {
         self.sender
