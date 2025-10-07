@@ -1,3 +1,5 @@
+use core::ops::Range;
+
 use crate::mmr::{
     proof, verification, verification::ProofStore, Error, Location, Position, Proof,
     StandardHasher as Standard,
@@ -57,13 +59,22 @@ where
 }
 
 /// Calculate the digests required to construct a [Proof] for a range of operations.
+///
+/// # Panics
+///
+/// Panics if:
+/// - Any location in `range` exceeds MAX_LOCATION
+/// - op_count exceeds MAX_LOCATION
+/// - The location of the last element in the range exceeds op_count
 pub fn digests_required_for_proof<D: Digest>(
     op_count: Location,
-    start_loc: Location,
-    end_loc: Location,
+    range: Range<Location>,
 ) -> Vec<Position> {
+    if !op_count.is_valid() {
+        panic!("op_count exceeds MAX_LOCATION");
+    }
     let mmr_size = Position::from(op_count);
-    proof::nodes_required_for_range_proof(mmr_size, start_loc..end_loc + 1)
+    proof::nodes_required_for_range_proof(mmr_size, range)
 }
 
 /// Create a [Proof] from a op_count and a list of digests.
@@ -344,11 +355,11 @@ mod tests {
 
             // The size here is the number of leaves added (15 in this case)
             let start_loc = Location::new(3u64);
-            let end_loc = Location::new(7u64);
+            let end_loc = Location::new(8u64);
 
             // Get required digests
             let required_positions =
-                digests_required_for_proof::<Digest>(OP_COUNT, start_loc, end_loc);
+                digests_required_for_proof::<Digest>(OP_COUNT, start_loc..end_loc);
 
             // Fetch the actual digests
             let mut digests = Vec::new();

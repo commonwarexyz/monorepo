@@ -468,13 +468,8 @@ impl<D: Digest> Proof<D> {
 /// # Panics
 ///
 /// Panics if:
-/// - The range is invalid for the given `size`
-/// - Any location in `range` exceeds [MAX_LOCATION] (panics in [Position::from])
-///
-/// # Assumptions
-///
-/// This is an internal function. Callers must validate locations using [Location::is_valid]
-/// before calling this function to avoid panics.
+/// - The Position of the last element in the range exceeds `size`
+/// - Any location in `range` exceeds MAX_LOCATION
 pub(crate) fn nodes_required_for_range_proof(
     size: Position,
     range: Range<Location>,
