@@ -47,12 +47,6 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
-// /// Seedable is a trait that provides access to the seed associated with a message.
-// pub trait Seedable<G: SigningScheme> {
-//     /// Returns the seed associated with this object.
-//     fn seed(&self) -> Seed<G::Randomness>;
-// }
-
 /// Identifies the context in which a vote or certificate is produced.
 pub enum VoteContext<'a, D: Digest> {
     Notarize { proposal: &'a Proposal<D> },
@@ -956,12 +950,6 @@ impl<S: SigningScheme, D: Digest> Read for Notarization<S, D> {
     }
 }
 
-// impl<V: Variant, D: Digest> Seedable<V> for Notarization<V, D> {
-//     fn seed(&self) -> Seed<V> {
-//         Seed::new(self.proposal.round, self.seed_signature)
-//     }
-// }
-
 impl<S: SigningScheme, D: Digest> Epochable for Notarization<S, D> {
     type Epoch = Epoch;
 
@@ -1113,12 +1101,6 @@ impl<S: SigningScheme> Read for Nullification<S> {
         Ok(Self { round, certificate })
     }
 }
-
-// impl<V: Variant> Seedable<V> for Nullification<V> {
-//     fn seed(&self) -> Seed<V> {
-//         Seed::new(self.round, self.seed_signature)
-//     }
-// }
 
 impl<S: SigningScheme> Epochable for Nullification<S> {
     type Epoch = Epoch;
@@ -1283,12 +1265,6 @@ impl<S: SigningScheme, D: Digest> Read for Finalization<S, D> {
         })
     }
 }
-
-// impl<V: Variant, D: Digest> Seedable<V> for Finalization<V, D> {
-//     fn seed(&self) -> Seed<V> {
-//         Seed::new(self.proposal.round, self.seed_signature)
-//     }
-// }
 
 impl<S: SigningScheme, D: Digest> Epochable for Finalization<S, D> {
     type Epoch = Epoch;
