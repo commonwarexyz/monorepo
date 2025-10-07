@@ -120,18 +120,16 @@ impl<E: CryptoRng> CryptoRng for ContextSlot<E> {}
 
 #[macro_export]
 macro_rules! spawn_ref {
-    ($owner:ident . $field:ident, |mut $actor:ident| $body:expr) => {{
+    ($owner:ident . $field:ident, | $actor:ident | $body:expr) => {
+        $crate::spawn_ref!(@impl $owner, $field, $actor, , $body)
+    };
+    ($owner:ident . $field:ident, | mut $actor:ident | $body:expr) => {
+        $crate::spawn_ref!(@impl $owner, $field, $actor, mut, $body)
+    };
+    (@impl $owner:ident, $field:ident, $actor:ident, $($mut:tt)?, $body:expr) => {{
         let (__context_handle, __context_lease) = $owner.$field.take();
         __context_handle.spawn(move |__runtime_context| {
-            let mut $actor = $owner;
-            $actor.$field.put(__runtime_context, __context_lease);
-            $body
-        })
-    }};
-    ($owner:ident . $field:ident, |$actor:ident| $body:expr) => {{
-        let (__context_handle, __context_lease) = $owner.$field.take();
-        __context_handle.spawn(move |__runtime_context| {
-            let $actor = $owner;
+            let $($mut)? $actor = $owner;
             $actor.$field.put(__runtime_context, __context_lease);
             $body
         })
