@@ -17,6 +17,7 @@ commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 thiserror = { workspace = true }
+num-rational = { workspace = true }
 reed-solomon-simd = "3.0.1"
 rand_core = { workspace = true }
 rand = { workspace = true }
