@@ -1,5 +1,8 @@
 use crate::{
-    threshold_simplex::new_types::{Finalization, Notarization, SigningScheme},
+    threshold_simplex::{
+        new_types::SigningScheme,
+        types::{Finalization, Notarization},
+    },
     types::{Epoch, Round, View},
     Block,
 };

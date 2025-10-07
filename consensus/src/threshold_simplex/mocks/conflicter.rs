@@ -2,8 +2,8 @@
 
 use crate::{
     threshold_simplex::{
-        new_types::{Finalize, Notarize, SigningScheme},
-        types::{Proposal, Voter},
+        new_types::SigningScheme,
+        types::{Finalize, Notarize, Proposal, Voter},
     },
     types::View,
     Viewable,

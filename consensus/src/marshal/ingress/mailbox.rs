@@ -1,7 +1,7 @@
 use crate::{
     threshold_simplex::{
-        new_types::{Finalization, Notarization, SigningScheme},
-        types::Activity,
+        new_types::SigningScheme,
+        types::{Activity, Finalization, Notarization},
     },
     types::Round,
     Block, Reporter,

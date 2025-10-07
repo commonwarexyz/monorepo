@@ -1,5 +1,8 @@
 use crate::{
-    threshold_simplex::new_types::{Notarization, Nullification, SigningScheme},
+    threshold_simplex::{
+        new_types::SigningScheme,
+        types::{Notarization, Nullification},
+    },
     types::View,
 };
 use commonware_cryptography::Digest;

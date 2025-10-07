@@ -53,8 +53,8 @@ mod tests {
         threshold_simplex::{
             actors::{batcher, resolver},
             mocks,
-            new_types::{BlsThresholdScheme, Finalization, Finalize, Notarization, Notarize, Vote},
-            types::{Proposal, Voter},
+            new_types::BlsThresholdScheme,
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal, Vote, Voter},
         },
         types::Round,
         Viewable,

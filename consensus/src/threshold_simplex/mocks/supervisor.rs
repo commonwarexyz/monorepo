@@ -2,14 +2,12 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     threshold_simplex::{
-        new_types::{
-            self, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            SigningScheme, Vote, VoteContext,
-        },
+        new_types::{self, SigningScheme},
         select_leader,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, NullifyFinalize,
-            Proposal,
+            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal,
+            Vote, VoteContext,
         },
     },
     types::View,
@@ -47,11 +45,11 @@ pub struct Supervisor<P: PublicKey, S: SigningScheme, D: Digest> {
     pub leaders: Arc<Mutex<HashMap<View, P>>>,
     pub seeds: Arc<Mutex<HashMap<View, Option<S::Randomness>>>>,
     pub notarizes: Arc<Mutex<Participation<P, D>>>,
-    pub notarizations: Arc<Mutex<HashMap<View, new_types::Notarization<S, D>>>>,
+    pub notarizations: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
-    pub nullifications: Arc<Mutex<HashMap<View, new_types::Nullification<S>>>>,
+    pub nullifications: Arc<Mutex<HashMap<View, Nullification<S>>>>,
     pub finalizes: Arc<Mutex<Participation<P, D>>>,
-    pub finalizations: Arc<Mutex<HashMap<View, new_types::Finalization<S, D>>>>,
+    pub finalizations: Arc<Mutex<HashMap<View, Finalization<S, D>>>>,
     pub faults: Arc<Mutex<Faults<P, S, D>>>,
     pub invalid: Arc<Mutex<usize>>,
 
@@ -133,7 +131,7 @@ where
                 let view = notarization.proposal.view();
                 if !self.signing.verify_certificate::<D>(
                     &self.namespace,
-                    new_types::VoteContext::Notarize {
+                    VoteContext::Notarize {
                         proposal: &notarization.proposal,
                     },
                     &notarization.certificate,
@@ -175,7 +173,7 @@ where
                 let view = nullification.round.view();
                 if !self.signing.verify_certificate::<D>(
                     &self.namespace,
-                    new_types::VoteContext::Nullify {
+                    VoteContext::Nullify {
                         round: nullification.round,
                     },
                     &nullification.certificate,
@@ -222,7 +220,7 @@ where
                 let view = finalization.proposal.view();
                 if !self.signing.verify_certificate::<D>(
                     &self.namespace,
-                    new_types::VoteContext::Finalize {
+                    VoteContext::Finalize {
                         proposal: &finalization.proposal,
                     },
                     &finalization.certificate,

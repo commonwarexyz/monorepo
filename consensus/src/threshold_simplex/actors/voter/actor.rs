@@ -5,12 +5,12 @@ use crate::{
         interesting,
         metrics::{self, Inbound, Outbound},
         min_active,
-        new_types::{
-            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, SigningScheme,
-            VoteContext,
-        },
+        new_types::SigningScheme,
         select_leader,
-        types::{Activity, Attributable, Context, Proposal, Voter},
+        types::{
+            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
+            Nullification, Nullify, Proposal, VoteContext, Voter,
+        },
     },
     types::{Epoch, Round as Rnd, View},
     Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,

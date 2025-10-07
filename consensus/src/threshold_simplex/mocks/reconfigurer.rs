@@ -4,8 +4,8 @@
 
 use crate::{
     threshold_simplex::{
-        new_types::{Finalize, Notarize, Nullify, SigningScheme},
-        types::Voter,
+        new_types::SigningScheme,
+        types::{Finalize, Notarize, Nullify, Voter},
     },
     types::Epoch,
 };
