@@ -384,7 +384,7 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
@@ -392,13 +392,13 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -419,7 +419,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -448,8 +448,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -458,24 +458,24 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let latest_complete = required_containers - activity_timeout;
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
 
                 // Ensure seeds for all views
                 {
-                    let seeds = supervisor.seeds.lock().unwrap();
+                    let seeds = reporter.seeds.lock().unwrap();
                     for view in 1..latest_complete {
                         // Ensure seed for every view
                         if !seeds.contains_key(&view) {
@@ -488,7 +488,7 @@ mod tests {
                 let mut notarized = HashMap::new();
                 let mut finalized = HashMap::new();
                 {
-                    let notarizes = supervisor.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock().unwrap();
                     for view in 1..latest_complete {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
@@ -508,7 +508,7 @@ mod tests {
                     }
                 }
                 {
-                    let notarizations = supervisor.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock().unwrap();
                     for view in 1..latest_complete {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
@@ -521,7 +521,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock().unwrap();
                     for view in 1..latest_complete {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
@@ -546,7 +546,7 @@ mod tests {
                         }
 
                         // Ensure no nullifies for any finalizers
-                        let nullifies = supervisor.nullifies.lock().unwrap();
+                        let nullifies = reporter.nullifies.lock().unwrap();
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
@@ -560,7 +560,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizations = supervisor.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock().unwrap();
                     for view in 1..latest_complete {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
@@ -634,7 +634,7 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
 
             for (idx, scheme) in schemes.into_iter().enumerate() {
                 let is_observer = scheme.public_key() == pk_observer;
@@ -649,13 +649,13 @@ mod tests {
                 } else {
                     signing_schemes[idx].clone()
                 };
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -676,7 +676,7 @@ mod tests {
                     signing: signing.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -705,8 +705,8 @@ mod tests {
 
             // Wait for all  engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -716,14 +716,14 @@ mod tests {
             join_all(finalizers).await;
 
             // Sanity check
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults or invalid signatures
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
 
@@ -792,7 +792,7 @@ mod tests {
 
                 // Create engines
                 let relay = Arc::new(mocks::relay::Relay::new());
-                let mut supervisors = HashMap::new();
+                let mut reporters = HashMap::new();
                 let mut engine_handlers = Vec::new();
                 for (idx, scheme) in schemes.into_iter().enumerate() {
                     // Create scheme context
@@ -800,13 +800,13 @@ mod tests {
 
                     // Configure engine
                     let validator = scheme.public_key();
-                    let supervisor_config = mocks::supervisor::Config {
+                    let reporter_config = mocks::reporter::Config {
                         namespace: namespace.clone(),
                         participants: validators.clone(),
                         signing: signing_schemes[idx].clone(),
                     };
-                    let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                    supervisors.insert(validator.clone(), supervisor.clone());
+                    let reporter = mocks::reporter::Reporter::new(reporter_config);
+                    reporters.insert(validator.clone(), reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -827,7 +827,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -856,8 +856,8 @@ mod tests {
 
                 // Store all finalizer handles
                 let mut finalizers = Vec::new();
-                for (_, supervisor) in supervisors.iter_mut() {
-                    let (mut latest, mut monitor) = supervisor.subscribe().await;
+                for (_, reporter) in reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
                             latest = monitor.next().await.expect("event missing");
@@ -870,21 +870,21 @@ mod tests {
                     context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
-                        // Collect supervisors to check faults
+                        // Collect reporters to check faults
                         {
                             let mut shutdowns = shutdowns.lock().unwrap();
                             debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
                             *shutdowns += 1;
                         }
-                        supervised.lock().unwrap().push(supervisors);
+                        supervised.lock().unwrap().push(reporters);
                         false
                     },
                     _ = join_all(finalizers) => {
-                        // Check supervisors for faults activity
+                        // Check reporters for faults activity
                         let supervised = supervised.lock().unwrap();
-                        for supervisors in supervised.iter() {
-                            for (_, supervisor) in supervisors.iter() {
-                                let faults = supervisor.faults.lock().unwrap();
+                        for reporters in supervised.iter() {
+                            for (_, reporter) in reporters.iter() {
+                                let faults = reporter.faults.lock().unwrap();
                                 assert!(faults.is_empty());
                             }
                         }
@@ -963,7 +963,7 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.iter().enumerate() {
                 // Skip first peer
@@ -976,13 +976,13 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -1003,7 +1003,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1032,8 +1032,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1097,13 +1097,13 @@ mod tests {
             .await;
 
             // Configure engine
-            let supervisor_config = mocks::supervisor::Config {
+            let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone(),
                 signing: signing_schemes[0].clone(),
             };
-            let mut supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-            supervisors.push(supervisor.clone());
+            let mut reporter = mocks::reporter::Reporter::new(reporter_config);
+            reporters.push(reporter.clone());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
@@ -1124,7 +1124,7 @@ mod tests {
                 blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter: supervisor.clone(),
+                reporter: reporter.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: 333,
@@ -1151,7 +1151,7 @@ mod tests {
             engine_handlers.push(engine.start(pending, recovered, resolver));
 
             // Wait for new engine to finalize required
-            let (mut latest, mut monitor) = supervisor.subscribe().await;
+            let (mut latest, mut monitor) = reporter.subscribe().await;
             while latest < required_containers {
                 latest = monitor.next().await.expect("event missing");
             }
@@ -1212,7 +1212,7 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Skip first peer
@@ -1225,13 +1225,13 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -1252,7 +1252,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1281,8 +1281,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1291,26 +1291,26 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let exceptions = 0;
             let offline = &validators[0];
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
 
                 // Ensure offline node is never active
                 let mut exceptions = 0;
                 {
-                    let notarizes = supervisor.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(offline) {
@@ -1320,7 +1320,7 @@ mod tests {
                     }
                 }
                 {
-                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    let nullifies = reporter.nullifies.lock().unwrap();
                     for (view, participants) in nullifies.iter() {
                         if participants.contains(offline) {
                             panic!("view: {view}");
@@ -1328,7 +1328,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock().unwrap();
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(offline) {
@@ -1341,7 +1341,7 @@ mod tests {
                 // Identify offline views
                 let mut offline_views = Vec::new();
                 {
-                    let leaders = supervisor.leaders.lock().unwrap();
+                    let leaders = reporter.leaders.lock().unwrap();
                     for (view, leader) in leaders.iter() {
                         if leader == offline {
                             offline_views.push(*view);
@@ -1352,7 +1352,7 @@ mod tests {
 
                 // Ensure nullifies/nullification collected for offline node
                 {
-                    let nullifies = supervisor.nullifies.lock().unwrap();
+                    let nullifies = reporter.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).map_or(0, |n| n.len());
                         if nullifies < threshold as usize {
@@ -1362,7 +1362,7 @@ mod tests {
                     }
                 }
                 {
-                    let nullifications = supervisor.nullifications.lock().unwrap();
+                    let nullifications = reporter.nullifications.lock().unwrap();
                     for view in offline_views.iter() {
                         if !nullifications.contains_key(view) {
                             warn!("missing expected view nullifies: {}", view);
@@ -1454,7 +1454,7 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
@@ -1462,13 +1462,13 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
                         hasher: Sha256::default(),
@@ -1499,7 +1499,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1528,8 +1528,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1538,24 +1538,24 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let slow = &validators[0];
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
 
                 // Ensure slow node never emits a notarize or finalize (will never finish verification in a timely manner)
                 {
-                    let notarizes = supervisor.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
@@ -1565,7 +1565,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock().unwrap();
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(slow) {
@@ -1624,7 +1624,7 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, scheme) in schemes.iter().enumerate() {
                 // Create scheme context
@@ -1632,13 +1632,13 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -1659,7 +1659,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1688,8 +1688,8 @@ mod tests {
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (_, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (_, mut monitor) = reporter.subscribe().await;
                 finalizers.push(
                     context
                         .with_label("finalizer")
@@ -1713,8 +1713,8 @@ mod tests {
 
             // Get latest view
             let mut latest = 0;
-            for supervisor in supervisors.iter() {
-                let nullifies = supervisor.nullifies.lock().unwrap();
+            for reporter in reporters.iter() {
+                let nullifies = reporter.nullifies.lock().unwrap();
                 let max = nullifies.keys().max().unwrap();
                 if *max > latest {
                     latest = *max;
@@ -1731,8 +1731,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1741,17 +1741,17 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
 
@@ -1762,7 +1762,7 @@ mod tests {
                 {
                     // Ensure nearly all views around latest finalize
                     let mut found = 0;
-                    let finalizations = supervisor.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock().unwrap();
                     for i in latest..latest + activity_timeout {
                         if finalizations.contains_key(&i) {
                             found += 1;
@@ -1820,7 +1820,7 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, scheme) in schemes.iter().enumerate() {
                 // Create scheme context
@@ -1828,13 +1828,13 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -1855,7 +1855,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -1884,8 +1884,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -1906,8 +1906,8 @@ mod tests {
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (_, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (_, mut monitor) = reporter.subscribe().await;
                 finalizers.push(
                     context
                         .with_label("finalizer")
@@ -1934,8 +1934,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 let required = latest + required_containers;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required {
@@ -1945,17 +1945,17 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2012,7 +2012,7 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
@@ -2020,13 +2020,13 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -2047,7 +2047,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -2076,8 +2076,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2086,17 +2086,17 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2173,19 +2173,19 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2202,7 +2202,7 @@ mod tests {
                         );
                     engine.start(pending);
                 } else {
-                    supervisors.push(supervisor.clone());
+                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -2223,7 +2223,7 @@ mod tests {
                         signing: signing_schemes[idx_scheme].clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2248,8 +2248,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2258,13 +2258,13 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let byz = &validators[0];
             let mut count_conflicting = 0;
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure only faults for byz
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for (_, faults) in faulter.iter() {
@@ -2284,7 +2284,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2348,19 +2348,19 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2374,7 +2374,7 @@ mod tests {
                         mocks::invalid::Invalid::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
-                    supervisors.push(supervisor.clone());
+                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -2395,7 +2395,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2420,8 +2420,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2430,19 +2430,19 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let mut invalid_count = 0;
             let byz = &validators[0];
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Count invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     if *invalid > 0 {
                         invalid_count += 1;
                     }
@@ -2508,19 +2508,19 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2537,7 +2537,7 @@ mod tests {
                         );
                     engine.start(pending);
                 } else {
-                    supervisors.push(supervisor.clone());
+                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -2558,7 +2558,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2583,8 +2583,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2593,18 +2593,18 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let byz = &validators[0];
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2667,19 +2667,19 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2695,7 +2695,7 @@ mod tests {
                         );
                     engine.start(pending);
                 } else {
-                    supervisors.push(supervisor.clone());
+                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -2716,7 +2716,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2741,8 +2741,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2751,18 +2751,18 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let byz = &validators[0];
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2825,19 +2825,19 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2850,7 +2850,7 @@ mod tests {
                         mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
-                    supervisors.push(supervisor.clone());
+                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -2871,7 +2871,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -2896,8 +2896,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -2906,13 +2906,13 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
+            // Check reporters for correct activity
             let byz = &validators[0];
             let mut count_nullify_and_finalize = 0;
-            for supervisor in supervisors.iter() {
+            for reporter in reporters.iter() {
                 // Ensure only faults for byz
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for (_, faults) in faulter.iter() {
@@ -2929,7 +2929,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2993,19 +2993,19 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
 
                 // Start engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx_scheme].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
                 let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -3019,7 +3019,7 @@ mod tests {
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
-                    supervisors.push(supervisor.clone());
+                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -3040,7 +3040,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
-                        reporter: supervisor.clone(),
+                        reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: 333,
@@ -3065,8 +3065,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -3075,17 +3075,17 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -3142,7 +3142,7 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
@@ -3150,13 +3150,13 @@ mod tests {
 
                 // Configure engine
                 let validator = scheme.public_key();
-                let supervisor_config = mocks::supervisor::Config {
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -3177,7 +3177,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -3206,8 +3206,8 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for supervisor in supervisors.iter_mut() {
-                let (mut latest, mut monitor) = supervisor.subscribe().await;
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
@@ -3216,17 +3216,17 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check supervisors for correct activity
-            for supervisor in supervisors.iter() {
+            // Check reporters for correct activity
+            for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = supervisor.faults.lock().unwrap();
+                    let faults = reporter.faults.lock().unwrap();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = supervisor.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -3277,11 +3277,11 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
-            // Create engines and supervisors
+            // Create engines and reporters
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut supervisors = Vec::new();
+            let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
-            let monitor_supervisor = Arc::new(Mutex::new(None));
+            let monitor_reporter = Arc::new(Mutex::new(None));
             for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", scheme.public_key()));
@@ -3289,16 +3289,16 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
 
-                // Store first supervisor for monitoring
-                let supervisor_config = mocks::supervisor::Config {
+                // Store first reporter for monitoring
+                let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
                     participants: validators.clone(),
                     signing: signing_schemes[idx].clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                supervisors.push(supervisor.clone());
+                let reporter = mocks::reporter::Reporter::new(reporter_config);
+                reporters.push(reporter.clone());
                 if idx == 0 {
-                    *monitor_supervisor.lock().unwrap() = Some(supervisor.clone());
+                    *monitor_reporter.lock().unwrap() = Some(reporter.clone());
                 }
 
                 // Configure application
@@ -3322,7 +3322,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: supervisor.clone(),
+                    reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -3364,11 +3364,11 @@ mod tests {
             );
 
             // Wait for consensus to reach the target view and then decrypt
-            let supervisor = monitor_supervisor.lock().unwrap().clone().unwrap();
+            let reporter = monitor_reporter.lock().unwrap().clone().unwrap();
             loop {
                 // Wait for notarization
                 context.sleep(Duration::from_millis(100)).await;
-                let notarizations = supervisor.notarizations.lock().unwrap();
+                let notarizations = reporter.notarizations.lock().unwrap();
                 let Some(notarization) = notarizations.get(&target.view()) else {
                     continue;
                 };

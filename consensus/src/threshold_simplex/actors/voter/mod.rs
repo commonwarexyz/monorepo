@@ -107,12 +107,12 @@ mod tests {
             let scheme = schemes[0].clone();
             let signing = signing_schemes[0].clone();
             let validator = scheme.public_key();
-            let supervisor_config = mocks::supervisor::Config {
+            let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone(),
                 signing: signing.clone(),
             };
-            let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+            let reporter = mocks::reporter::Reporter::new(reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -133,7 +133,7 @@ mod tests {
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter: supervisor.clone(),
+                reporter: reporter.clone(),
                 partition: "test".to_string(),
                 epoch: 333,
                 namespace: namespace.clone(),
@@ -442,12 +442,12 @@ mod tests {
             let private_key = schemes[0].clone();
             let signing = signing_schemes[0].clone();
             let validator = private_key.public_key();
-            let supervisor_config = mocks::supervisor::Config {
+            let reporter_config = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone(),
                 signing: signing.clone(),
             };
-            let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+            let reporter = mocks::reporter::Reporter::new(reporter_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let app_config = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -466,7 +466,7 @@ mod tests {
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter: supervisor.clone(),
+                reporter: reporter.clone(),
                 partition: format!("voter_actor_test_{validator}"),
                 epoch: 333,
                 namespace: namespace.clone(),
@@ -855,12 +855,12 @@ mod tests {
                 mocks::fixtures::bls_threshold_fixture::<MinSig, _>(&mut context, n);
 
             // Setup application mock
-            let supervisor_cfg = mocks::supervisor::Config {
+            let reporter_cfg = mocks::reporter::Config {
                 namespace: namespace.clone(),
                 participants: validators.clone(),
                 signing: signing_schemes[0].clone(),
             };
-            let supervisor = mocks::supervisor::Supervisor::new(supervisor_cfg);
+            let reporter = mocks::reporter::Reporter::new(reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -881,7 +881,7 @@ mod tests {
                 blocker: oracle.control(validators[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter: supervisor.clone(),
+                reporter: reporter.clone(),
                 partition: "voter_finalization_test".to_string(),
                 epoch: 333,
                 namespace: namespace.clone(),
@@ -984,11 +984,11 @@ mod tests {
             assert_eq!(finalized_view, Some(view));
 
             // Verify no notarization certificate was recorded
-            let notarizations = supervisor.notarizations.lock().unwrap();
+            let notarizations = reporter.notarizations.lock().unwrap();
             assert!(notarizations.is_empty());
 
             // Finalization must match the signatures recovered from finalize votes
-            let finalizations = supervisor.finalizations.lock().unwrap();
+            let finalizations = reporter.finalizations.lock().unwrap();
             let recorded = finalizations
                 .get(&view)
                 .expect("missing recorded finalization");

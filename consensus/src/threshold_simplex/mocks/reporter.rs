@@ -1,4 +1,4 @@
-//! Mock `Monitor` for tests: tracks participants/leaders, verifies activities,
+//! Mock `Reporter` for tests: tracks participants/leaders, verifies activities,
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     threshold_simplex::{
@@ -10,7 +10,7 @@ use crate::{
         },
     },
     types::View,
-    Monitor, Reporter, Viewable,
+    Monitor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};
@@ -25,7 +25,7 @@ use std::{
 type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 
-/// Supervisor configuration used in tests.
+/// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
 pub struct Config<P: PublicKey, S: SigningScheme> {
     pub namespace: Vec<u8>,
@@ -34,7 +34,7 @@ pub struct Config<P: PublicKey, S: SigningScheme> {
 }
 
 #[derive(Clone)]
-pub struct Supervisor<P: PublicKey, S: SigningScheme, D: Digest> {
+pub struct Reporter<P: PublicKey, S: SigningScheme, D: Digest> {
     participants: Vec<P>,
     signing: S,
 
@@ -55,7 +55,7 @@ pub struct Supervisor<P: PublicKey, S: SigningScheme, D: Digest> {
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<P, S, D> Supervisor<P, S, D>
+impl<P, S, D> Reporter<P, S, D>
 where
     P: PublicKey + Eq + Hash + Clone,
     S: SigningScheme,
@@ -91,7 +91,7 @@ where
     }
 }
 
-impl<P, S, D> Reporter for Supervisor<P, S, D>
+impl<P, S, D> crate::Reporter for Reporter<P, S, D>
 where
     P: PublicKey + Eq + Hash + Clone,
     S: SigningScheme,
@@ -307,7 +307,7 @@ where
     }
 }
 
-impl<P, S, D> Monitor for Supervisor<P, S, D>
+impl<P, S, D> Monitor for Reporter<P, S, D>
 where
     P: PublicKey + Eq + Hash + Clone,
     S: SigningScheme,
