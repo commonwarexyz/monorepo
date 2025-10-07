@@ -67,6 +67,9 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()> + Clone, const N:
     /// The location of the operation that assigned this value to the key.
     pub loc: Location,
 
+    /// The next key in the key space, for ordered keyspaces.
+    pub next_key: Option<K>,
+
     /// The status bitmap chunk that contains the bit corresponding the operation's location.
     pub chunk: [u8; N],
 }
