@@ -179,7 +179,7 @@ fn fuzz(input: FuzzInput) {
                 mailbox_size: 1024,
                 deque_size: input.cache_size,
                 priority: false,
-                codec_config: (..).into(),
+                codec_config: RangeCfg::from(..),
             };
 
             // Create engine

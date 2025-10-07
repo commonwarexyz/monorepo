@@ -193,9 +193,9 @@ mod tests {
         map.insert(Bytes::from_static(b"banana"), vec![3, 4, 5]);
         map.insert(Bytes::from_static(b"cherry"), vec![]);
 
-        let map_range = (0..=10).into();
-        let key_range = (..=10).into();
-        let val_range = (0..=100).into();
+        let map_range = RangeCfg::from(0..=10);
+        let key_range = RangeCfg::from(..=10);
+        let val_range = RangeCfg::from(0..=100);
 
         round_trip_hash(&map, map_range, key_range, (val_range, ()));
     }
@@ -218,9 +218,9 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(Bytes::from_static(b"key1"), vec![1u8, 2u8, 3u8, 4u8, 5u8]);
 
-        let key_range = (..=10).into();
-        let map_range = (0..=10).into();
-        let restrictive_val_range = (0..=3).into();
+        let key_range = RangeCfg::from(..=10);
+        let map_range = RangeCfg::from(0..=10);
+        let restrictive_val_range = RangeCfg::from(0..=3);
 
         let encoded = map.encode();
         let config_tuple = (map_range, (key_range, (restrictive_val_range, ())));
@@ -291,7 +291,7 @@ mod tests {
         let mut encoded = map.encode();
         encoded.truncate(map.encode_size() - 4); // Truncate during last value
 
-        let range = (..).into();
+        let range = RangeCfg::from(..);
         let config_tuple = (range, ((), ()));
         let result = HashMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(result, Err(Error::EndOfBuffer)));

@@ -17,7 +17,7 @@ use core::ops::{Bound, RangeBounds};
 /// assert!(!cfg.contains(&2000));
 ///
 /// // Allow any length >= 1
-/// let cfg_min = RangeCfg::new(1..);
+/// let cfg_min = RangeCfg::from(1..);
 /// assert!(cfg_min.contains(&1));
 /// assert!(!cfg_min.contains(&0));
 ///
@@ -128,9 +128,9 @@ mod tests {
     use core::ops::Bound::{Excluded, Included, Unbounded};
 
     #[test]
-    fn test_range_cfg_new() {
+    fn test_range_cfg_from() {
         // Full range
-        let cfg_full: RangeCfg<usize> = RangeCfg::new(..);
+        let cfg_full: RangeCfg<usize> = (..).into();
         assert_eq!(
             cfg_full,
             RangeCfg {
@@ -140,7 +140,7 @@ mod tests {
         );
 
         // Start bounded, end unbounded
-        let cfg_start_incl = RangeCfg::new(5..);
+        let cfg_start_incl: RangeCfg<usize> = (5..).into();
         assert_eq!(
             cfg_start_incl,
             RangeCfg {
@@ -150,7 +150,7 @@ mod tests {
         );
 
         // Start unbounded, end bounded (exclusive)
-        let cfg_end_excl = RangeCfg::new(..10);
+        let cfg_end_excl: RangeCfg<usize> = (..10).into();
         assert_eq!(
             cfg_end_excl,
             RangeCfg {
@@ -160,7 +160,7 @@ mod tests {
         );
 
         // Start unbounded, end bounded (inclusive)
-        let cfg_end_incl = RangeCfg::new(..=10);
+        let cfg_end_incl: RangeCfg<usize> = (..=10).into();
         assert_eq!(
             cfg_end_incl,
             RangeCfg {
@@ -170,7 +170,7 @@ mod tests {
         );
 
         // Fully bounded (inclusive start, exclusive end)
-        let cfg_incl_excl = RangeCfg::new(5..10);
+        let cfg_incl_excl: RangeCfg<usize> = (5..10).into();
         assert_eq!(
             cfg_incl_excl,
             RangeCfg {
@@ -180,7 +180,7 @@ mod tests {
         );
 
         // Fully bounded (inclusive)
-        let cfg_incl_incl = RangeCfg::new(5..=10);
+        let cfg_incl_incl: RangeCfg<usize> = (5..=10).into();
         assert_eq!(
             cfg_incl_incl,
             RangeCfg {
@@ -212,34 +212,34 @@ mod tests {
     #[test]
     fn test_range_cfg_contains() {
         // Unbounded range (..)
-        let cfg_unbounded = RangeCfg::new(..);
+        let cfg_unbounded: RangeCfg<usize> = (..).into();
         assert!(cfg_unbounded.contains(&0));
         assert!(cfg_unbounded.contains(&100));
         assert!(cfg_unbounded.contains(&usize::MAX));
 
         // Inclusive start (5..)
-        let cfg_start_incl = RangeCfg::new(5..);
+        let cfg_start_incl: RangeCfg<usize> = (5..).into();
         assert!(!cfg_start_incl.contains(&4));
         assert!(cfg_start_incl.contains(&5));
         assert!(cfg_start_incl.contains(&6));
         assert!(cfg_start_incl.contains(&usize::MAX));
 
         // Exclusive end (..10)
-        let cfg_end_excl = RangeCfg::new(..10);
+        let cfg_end_excl: RangeCfg<usize> = (..10).into();
         assert!(cfg_end_excl.contains(&0));
         assert!(cfg_end_excl.contains(&9));
         assert!(!cfg_end_excl.contains(&10));
         assert!(!cfg_end_excl.contains(&11));
 
         // Inclusive end (..=10)
-        let cfg_end_incl = RangeCfg::new(..=10);
+        let cfg_end_incl: RangeCfg<usize> = (..=10).into();
         assert!(cfg_end_incl.contains(&0));
         assert!(cfg_end_incl.contains(&9));
         assert!(cfg_end_incl.contains(&10));
         assert!(!cfg_end_incl.contains(&11));
 
         // Inclusive start, exclusive end (5..10)
-        let cfg_incl_excl = RangeCfg::new(5..10);
+        let cfg_incl_excl: RangeCfg<usize> = (5..10).into();
         assert!(!cfg_incl_excl.contains(&4));
         assert!(cfg_incl_excl.contains(&5));
         assert!(cfg_incl_excl.contains(&9));
@@ -247,7 +247,7 @@ mod tests {
         assert!(!cfg_incl_excl.contains(&11));
 
         // Inclusive start, inclusive end (5..=10)
-        let cfg_incl_incl = RangeCfg::new(5..=10);
+        let cfg_incl_incl: RangeCfg<usize> = (5..=10).into();
         assert!(!cfg_incl_incl.contains(&4));
         assert!(cfg_incl_incl.contains(&5));
         assert!(cfg_incl_incl.contains(&9));
@@ -279,14 +279,14 @@ mod tests {
     #[test]
     fn test_contains_empty_range() {
         // Empty range (e.g., 5..5)
-        let cfg_empty_excl = RangeCfg::new(5..5);
+        let cfg_empty_excl: RangeCfg<usize> = (5..5).into();
         assert!(!cfg_empty_excl.contains(&4));
         assert!(!cfg_empty_excl.contains(&5));
         assert!(!cfg_empty_excl.contains(&6));
 
         // Slightly less obvious empty range (e.g., 6..=5)
         #[allow(clippy::reversed_empty_ranges)]
-        let cfg_empty_incl = RangeCfg::new(6..=5);
+        let cfg_empty_incl: RangeCfg<usize> = (6..=5).into();
         assert!(!cfg_empty_incl.contains(&5));
         assert!(!cfg_empty_incl.contains(&6));
     }

@@ -692,7 +692,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 mod test {
     use super::*;
     use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr};
-    use commonware_codec::RangeCfg;
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};

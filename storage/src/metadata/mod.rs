@@ -91,7 +91,6 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::RangeCfg;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::sequence::U64;

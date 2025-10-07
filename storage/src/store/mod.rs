@@ -764,7 +764,6 @@ where
 mod test {
     use super::*;
     use crate::translator::TwoCap;
-    use commonware_codec::RangeCfg;
     use commonware_cryptography::{
         blake3::{hash, Digest},
         Digest as _,

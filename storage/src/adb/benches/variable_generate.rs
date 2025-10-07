@@ -1,4 +1,3 @@
-use commonware_codec::RangeCfg;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},

@@ -172,7 +172,7 @@ mod tests {
         let set_range = 0..=10;
         let item_range = ..=10; // Range for Bytes length
 
-        round_trip_hash(&set, (set_range).into(), (item_range).into());
+        round_trip_hash(&set, set_range.into(), item_range.into());
     }
 
     #[test]
@@ -197,7 +197,7 @@ mod tests {
         let restrictive_item_range = ..=5; // Limit item length
 
         let encoded = set.encode();
-        let config_tuple = ((set_range).into(), (restrictive_item_range).into());
+        let config_tuple = (set_range.into(), restrictive_item_range.into());
         let result = HashSet::<Bytes>::decode_cfg(encoded, &config_tuple);
 
         assert!(matches!(result, Err(Error::InvalidLength(8))));

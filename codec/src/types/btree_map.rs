@@ -234,7 +234,8 @@ mod tests {
         1u32.write(&mut encoded); // Duplicate Key 1
         200u64.write(&mut encoded); // Value 200
 
-        let config_tuple = ((..).into(), ((), ()));
+        let range = (..).into();
+        let config_tuple = (range, ((), ()));
 
         let result = BTreeMap::<u32, u64>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(

@@ -1,4 +1,3 @@
-use commonware_codec::RangeCfg;
 use commonware_runtime::tokio::Context;
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::sequence::U64;
