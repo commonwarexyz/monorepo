@@ -509,7 +509,6 @@ pub trait SigningScheme: Clone + Send + Sync + 'static {
         !verification.verified.is_empty()
     }
 
-    // FIXME: avoid cloning votes, maybe just Iterator<&Vote>?
     fn verify_votes<D: Digest, I>(
         &self,
         namespace: &[u8],
@@ -809,52 +808,49 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
     where
         I: IntoIterator<Item = Vote<Self>>,
     {
-        let votes: Vec<Vote<Self>> = votes.into_iter().collect();
-        if votes.is_empty() {
-            return VoteVerification::new(Vec::new(), Vec::new());
-        }
-
         let mut invalid = BTreeSet::new();
+        let (message_partials, seed_partials): (Vec<_>, Vec<_>) = votes
+            .into_iter()
+            .map(|vote| {
+                (
+                    PartialSignature::<V> {
+                        index: vote.signer,
+                        value: vote.signature.0,
+                    },
+                    PartialSignature::<V> {
+                        index: vote.signer,
+                        value: vote.signature.1,
+                    },
+                )
+            })
+            .unzip();
 
         match context {
             VoteContext::Notarize { proposal } => {
-                let notarize_ns = notarize_namespace(namespace);
-                let proposal_bytes = proposal.encode();
-                let proposal_partials: Vec<_> = votes
-                    .iter()
-                    .map(|vote| PartialSignature::<V> {
-                        index: vote.signer,
-                        value: vote.signature.0.clone(),
-                    })
-                    .collect();
+                let notarize_namespace = notarize_namespace(namespace);
+                let notarize_message = proposal.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
                     &self.polynomial,
-                    Some(notarize_ns.as_ref()),
-                    proposal_bytes.as_ref(),
-                    proposal_partials.iter(),
+                    Some(notarize_namespace.as_ref()),
+                    notarize_message.as_ref(),
+                    message_partials.iter(),
                 ) {
                     for partial in errs {
                         invalid.insert(partial.index);
                     }
                 }
 
-                let seed_ns = seed_namespace(namespace);
-                let seed_bytes = proposal.round.encode();
-                let seed_partials: Vec<_> = votes
-                    .iter()
-                    .filter(|vote| !invalid.contains(&vote.signer))
-                    .map(|vote| PartialSignature::<V> {
-                        index: vote.signer,
-                        value: vote.signature.1.clone(),
-                    })
-                    .collect();
+                let seed_namespace = seed_namespace(namespace);
+                let seed_message = proposal.round.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
                     &self.polynomial,
-                    Some(seed_ns.as_ref()),
-                    seed_bytes.as_ref(),
-                    seed_partials.iter(),
+                    Some(seed_namespace.as_ref()),
+                    seed_message.as_ref(),
+                    seed_partials
+                        .iter()
+                        .filter(|partial| !invalid.contains(&partial.index)),
                 ) {
                     for partial in errs {
                         invalid.insert(partial.index);
@@ -862,42 +858,30 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                 }
             }
             VoteContext::Nullify { round } => {
-                let nullify_ns = nullify_namespace(namespace);
-                let message_bytes = round.encode();
-                let view_partials: Vec<_> = votes
-                    .iter()
-                    .map(|vote| PartialSignature::<V> {
-                        index: vote.signer,
-                        value: vote.signature.0.clone(),
-                    })
-                    .collect();
+                let nullify_namespace = nullify_namespace(namespace);
+                let nullify_message = round.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
                     &self.polynomial,
-                    Some(nullify_ns.as_ref()),
-                    message_bytes.as_ref(),
-                    view_partials.iter(),
+                    Some(nullify_namespace.as_ref()),
+                    nullify_message.as_ref(),
+                    message_partials.iter(),
                 ) {
                     for partial in errs {
                         invalid.insert(partial.index);
                     }
                 }
 
-                let seed_ns = seed_namespace(namespace);
-                let seed_partials: Vec<_> = votes
-                    .iter()
-                    .filter(|vote| !invalid.contains(&vote.signer))
-                    .map(|vote| PartialSignature::<V> {
-                        index: vote.signer,
-                        value: vote.signature.1.clone(),
-                    })
-                    .collect();
+                let seed_namespace = seed_namespace(namespace);
+                let seed_message = round.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
                     &self.polynomial,
-                    Some(seed_ns.as_ref()),
-                    message_bytes.as_ref(),
-                    seed_partials.iter(),
+                    Some(seed_namespace.as_ref()),
+                    seed_message.as_ref(),
+                    seed_partials
+                        .iter()
+                        .filter(|partial| !invalid.contains(&partial.index)),
                 ) {
                     for partial in errs {
                         invalid.insert(partial.index);
@@ -905,43 +889,30 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
                 }
             }
             VoteContext::Finalize { proposal } => {
-                let finalize_ns = finalize_namespace(namespace);
-                let proposal_bytes = proposal.encode();
-                let proposal_partials: Vec<_> = votes
-                    .iter()
-                    .map(|vote| PartialSignature::<V> {
-                        index: vote.signer,
-                        value: vote.signature.0.clone(),
-                    })
-                    .collect();
+                let finalize_namespace = finalize_namespace(namespace);
+                let finalize_message = proposal.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
                     &self.polynomial,
-                    Some(finalize_ns.as_ref()),
-                    proposal_bytes.as_ref(),
-                    proposal_partials.iter(),
+                    Some(finalize_namespace.as_ref()),
+                    finalize_message.as_ref(),
+                    message_partials.iter(),
                 ) {
                     for partial in errs {
                         invalid.insert(partial.index);
                     }
                 }
 
-                let seed_ns = seed_namespace(namespace);
-                let seed_bytes = proposal.round.encode();
-                let seed_partials: Vec<_> = votes
-                    .iter()
-                    .filter(|vote| !invalid.contains(&vote.signer))
-                    .map(|vote| PartialSignature::<V> {
-                        index: vote.signer,
-                        value: vote.signature.1.clone(),
-                    })
-                    .collect();
+                let seed_namespace = seed_namespace(namespace);
+                let seed_message = proposal.round.encode();
 
                 if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
                     &self.polynomial,
-                    Some(seed_ns.as_ref()),
-                    seed_bytes.as_ref(),
-                    seed_partials.iter(),
+                    Some(seed_namespace.as_ref()),
+                    seed_message.as_ref(),
+                    seed_partials
+                        .iter()
+                        .filter(|partial| !invalid.contains(&partial.index)),
                 ) {
                     for partial in errs {
                         invalid.insert(partial.index);
@@ -950,8 +921,13 @@ impl<V: Variant + Send + Sync> SigningScheme for BlsThresholdScheme<V> {
             }
         }
 
-        let verified = votes
+        let verified = message_partials
             .into_iter()
+            .zip(seed_partials.into_iter())
+            .map(|(message, seed)| Vote {
+                signer: message.index,
+                signature: (message.value.clone(), seed.value.clone()),
+            })
             .filter(|vote| !invalid.contains(&vote.signer))
             .collect();
 
