@@ -1,6 +1,6 @@
 use crate::field::F;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-use commonware_utils::BitVec;
+use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
 use rand_core::CryptoRngCore;
 use std::ops::{Index, IndexMut};
 
@@ -329,7 +329,7 @@ impl Polynomial {
     ///
     /// e.g. with `except` = 1001, then the resulting polynomial will
     /// evaluate to 0 at w^1 and w^2, where w is a 4th root of unity.
-    fn vanishing(except: &BitVec) -> Self {
+    fn vanishing(except: &BitMap) -> Self {
         // Algorithm taken from: https://ethresear.ch/t/reed-solomon-erasure-code-recovery-in-n-log-2-n-time-with-ffts/3039.
         // The basic idea of the algorithm is that given a set of indices S,
         // we can split it in two: the even indices (first bit = 0) and the odd indices.
@@ -370,9 +370,9 @@ impl Polynomial {
         //
         // The tricky part is transforming this algorithm into an iterative one, and respecting
         // the reverse bit order of the coefficients we need
-        let rows = except.len();
+        let rows = except.len() as usize;
         let padded_rows = rows.next_power_of_two();
-        let zeroes = except.count_zeros() + padded_rows - rows;
+        let zeroes = except.count_zeros() as usize + padded_rows - rows;
         assert!(zeroes < padded_rows, "too many points to vanish over");
         let lg_rows = padded_rows.ilog2();
         // At each iteration, we split `except` into sections.
@@ -400,10 +400,10 @@ impl Polynomial {
         let mut polynomial_size: usize = 2;
         // For the first iteration, each
         let mut polynomials = vec![F::zero(); 2 * padded_rows];
-        let mut active = BitVec::with_capacity(polynomial_count);
+        let mut active = BitMap::<DEFAULT_CHUNK_SIZE>::with_capacity(polynomial_count as u64);
         for i in 0..polynomial_count {
             let rev_i = reverse_bits(lg_rows, i as u64) as usize;
-            if !except.get(rev_i).unwrap_or(false) {
+            if !except.get(rev_i as u64) {
                 polynomials[2 * i] = -F::one();
                 polynomials[2 * i + 1] = F::one();
                 active.push(true);
@@ -438,8 +438,16 @@ impl Polynomial {
             // Our goal is to construct the ith polynomial.
             for i in 0..polynomial_count {
                 let start = new_polynomial_size * i;
-                let has_left = active.get(2 * i).unwrap_or(false);
-                let has_right = active.get(2 * i + 1).unwrap_or(false);
+                let has_left = if ((2 * i) as u64) < active.len() {
+                    active.get((2 * i) as u64)
+                } else {
+                    false
+                };
+                let has_right = if ((2 * i + 1) as u64) < active.len() {
+                    active.get((2 * i + 1) as u64)
+                } else {
+                    false
+                };
                 match (has_left, has_right) {
                     // No polynomials to combine.
                     (false, false) => {}
@@ -512,13 +520,14 @@ impl Polynomial {
                 }
                 // If there was a polynomial on the left or the right, then on the next iteration
                 // the combined section will have data to process, so we need to set it to true
-                active.set_to(i, has_left | has_right);
+                // Resize active if needed and set the bit
+                active.set(i as u64, has_left | has_right);
             }
             polynomial_size = new_polynomial_size;
         }
         // If the final polynomial is inactive, there are no points to vanish over,
         // so we want to return the polynomial f(X) = 1.
-        if !active.get(0).unwrap_or(false) {
+        if !active.get(0) {
             let mut coefficients = vec![F::zero(); padded_rows];
             coefficients[0] = F::one();
             return Self { coefficients };
@@ -632,7 +641,7 @@ impl PolynomialVector {
     /// Evaluate each polynomial in this vector over all points in an interpolation domain.
     pub fn evaluate(mut self) -> EvaluationVector {
         self.data.ntt::<true>();
-        let active_rows = BitVec::ones(self.data.rows);
+        let active_rows = BitMap::ones(self.data.rows as u64);
         EvaluationVector {
             data: self.data,
             active_rows,
@@ -666,7 +675,7 @@ impl PolynomialVector {
 
         EvaluationVector {
             data: vandermonde_matrix.mul(&self.data),
-            active_rows: BitVec::ones(rows),
+            active_rows: BitMap::ones(rows as u64),
         }
     }
 
@@ -778,7 +787,7 @@ impl PolynomialVector {
 #[derive(Debug, PartialEq)]
 pub struct EvaluationVector {
     data: Matrix,
-    active_rows: BitVec,
+    active_rows: BitMap,
 }
 
 impl EvaluationVector {
@@ -795,7 +804,7 @@ impl EvaluationVector {
     /// Create an empty element of this struct, with no filled rows.
     pub fn empty(lg_rows: usize, cols: usize) -> Self {
         let data = Matrix::zero(1 << lg_rows, cols);
-        let active = BitVec::zeroes(data.rows);
+        let active = BitMap::zeroes(data.rows as u64);
         Self {
             data,
             active_rows: active,
@@ -806,7 +815,7 @@ impl EvaluationVector {
     pub fn fill_row(&mut self, row: usize, data: &[F]) {
         assert!(data.len() <= self.data.cols);
         self.data[row][..data.len()].copy_from_slice(data);
-        self.active_rows.set(row);
+        self.active_rows.set(row as u64, true);
     }
 
     /// Erase a particular row.
@@ -815,7 +824,7 @@ impl EvaluationVector {
     #[cfg(test)]
     fn remove_row(&mut self, row: usize) {
         self.data[row].fill(F::zero());
-        self.active_rows.clear(row);
+        self.active_rows.set(row as u64, false);
     }
 
     fn multiply(&mut self, polynomial: Polynomial) {
@@ -892,13 +901,13 @@ mod test {
         })
     }
 
-    fn any_bit_vec_not_all_0(max_log_rows: usize) -> impl Strategy<Value = BitVec> {
+    fn any_bit_vec_not_all_0(max_log_rows: usize) -> impl Strategy<Value = BitMap> {
         (0..=max_log_rows).prop_flat_map(move |lg_rows| {
             let rows = (1 << lg_rows) as usize;
             (0..rows).prop_flat_map(move |set_row| {
                 proptest::collection::vec(any::<bool>(), 1 << lg_rows).prop_map(move |mut bools| {
                     bools[set_row] = true;
-                    BitVec::from_bools(&bools)
+                    BitMap::from(bools.as_slice())
                 })
             })
         })
@@ -910,7 +919,7 @@ mod test {
         k: usize,
         cols: usize,
         data: Vec<F>,
-        present: BitVec,
+        present: BitMap,
     }
 
     impl RecoverySetup {
@@ -925,9 +934,9 @@ mod test {
                                 n..=padded_rows,
                             )
                             .prop_map(move |indices| {
-                                let mut present = BitVec::zeroes(padded_rows);
+                                let mut present = BitMap::zeroes(padded_rows as u64);
                                 for i in indices {
-                                    present.set(i);
+                                    present.set(i as u64, true);
                                 }
                                 Self {
                                     n,
@@ -986,7 +995,7 @@ mod test {
         fn test_vanishing_polynomial(bv in any_bit_vec_not_all_0(8)) {
             let v = Polynomial::vanishing(&bv);
             let expected_degree = bv.count_zeros();
-            assert_eq!(v.degree(), expected_degree, "expected v to have degree {expected_degree}");
+            assert_eq!(v.degree(), expected_degree as usize, "expected v to have degree {expected_degree}");
             let w = F::root_of_unity(bv.len().ilog2() as u8).unwrap();
             let mut w_i = F::one();
             for b_i in bv.iter() {
