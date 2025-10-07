@@ -1761,41 +1761,41 @@ impl<S: SigningScheme, D: Digest> Read for Activity<S, D> {
     }
 }
 
-// impl<V: Variant, D: Digest> Epochable for Activity<V, D> {
-//     type Epoch = Epoch;
+impl<S: SigningScheme, D: Digest> Epochable for Activity<S, D> {
+    type Epoch = Epoch;
 
-//     fn epoch(&self) -> Epoch {
-//         match self {
-//             Activity::Notarize(v) => v.epoch(),
-//             Activity::Notarization(v) => v.epoch(),
-//             Activity::Nullify(v) => v.epoch(),
-//             Activity::Nullification(v) => v.epoch(),
-//             Activity::Finalize(v) => v.epoch(),
-//             Activity::Finalization(v) => v.epoch(),
-//             Activity::ConflictingNotarize(v) => v.epoch(),
-//             Activity::ConflictingFinalize(v) => v.epoch(),
-//             Activity::NullifyFinalize(v) => v.epoch(),
-//         }
-//     }
-// }
+    fn epoch(&self) -> Epoch {
+        match self {
+            Activity::Notarize(v) => v.epoch(),
+            Activity::Notarization(v) => v.epoch(),
+            Activity::Nullify(v) => v.epoch(),
+            Activity::Nullification(v) => v.epoch(),
+            Activity::Finalize(v) => v.epoch(),
+            Activity::Finalization(v) => v.epoch(),
+            Activity::ConflictingNotarize(v) => v.epoch(),
+            Activity::ConflictingFinalize(v) => v.epoch(),
+            Activity::NullifyFinalize(v) => v.epoch(),
+        }
+    }
+}
 
-// impl<V: Variant, D: Digest> Viewable for Activity<V, D> {
-//     type View = View;
+impl<S: SigningScheme, D: Digest> Viewable for Activity<S, D> {
+    type View = View;
 
-//     fn view(&self) -> View {
-//         match self {
-//             Activity::Notarize(v) => v.view(),
-//             Activity::Notarization(v) => v.view(),
-//             Activity::Nullify(v) => v.view(),
-//             Activity::Nullification(v) => v.view(),
-//             Activity::Finalize(v) => v.view(),
-//             Activity::Finalization(v) => v.view(),
-//             Activity::ConflictingNotarize(v) => v.view(),
-//             Activity::ConflictingFinalize(v) => v.view(),
-//             Activity::NullifyFinalize(v) => v.view(),
-//         }
-//     }
-// }
+    fn view(&self) -> View {
+        match self {
+            Activity::Notarize(v) => v.view(),
+            Activity::Notarization(v) => v.view(),
+            Activity::Nullify(v) => v.view(),
+            Activity::Nullification(v) => v.view(),
+            Activity::Finalize(v) => v.view(),
+            Activity::Finalization(v) => v.view(),
+            Activity::ConflictingNotarize(v) => v.view(),
+            Activity::ConflictingFinalize(v) => v.view(),
+            Activity::NullifyFinalize(v) => v.view(),
+        }
+    }
+}
 
 // /// Seed represents a threshold signature over the current view.
 // #[derive(Clone, Debug, PartialEq, Hash, Eq)]
