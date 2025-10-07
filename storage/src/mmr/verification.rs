@@ -79,8 +79,6 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 
 /// Return a range proof for the nodes corresponding to the given location range.
 ///
-/// Validates locations and returns errors instead of panicking.
-///
 /// # Errors
 ///
 /// - Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION]
@@ -96,8 +94,6 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
 /// had `size` nodes.
 ///
-/// Validates locations and returns errors instead of panicking.
-///
 /// # Errors
 ///
 /// - Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION]
@@ -109,18 +105,17 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
     // Validate locations before passing to internal functions
-    if !range.start.is_valid() {
-        return Err(Error::LocationOverflow(range.start));
-    }
-    if !range.end.is_valid() {
-        return Err(Error::LocationOverflow(range.end));
-    }
     if range.is_empty() {
         return Err(Error::Empty);
     }
+    if !range.start.is_valid() {
+        return Err(Error::LocationOverflow(range.start));
+    }
+    if !(range.end - 1).is_valid() {
+        return Err(Error::LocationOverflow(range.end));
+    }
 
     // Get the positions of all nodes needed to generate the proof.
-    // Locations have been validated above, so this won't panic
     let positions = proof::nodes_required_for_range_proof(size, range);
 
     // Fetch the digest of each.
@@ -142,8 +137,6 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 /// range_proof but supports non-contiguous locations.
 ///
 /// The order of positions does not affect the output (sorted internally).
-///
-/// Validates locations and returns errors instead of panicking.
 ///
 /// # Errors
 ///
@@ -167,7 +160,6 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
     }
 
     // Collect all required node positions
-    // Locations have been validated above, so this won't panic
     let size = mmr.size();
     let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations);
 

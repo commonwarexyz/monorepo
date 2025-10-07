@@ -562,11 +562,6 @@ pub(crate) fn nodes_required_for_range_proof(
 /// Panics if:
 /// - `locations` is empty
 /// - Any location in `locations` exceeds [crate::mmr::MAX_LOCATION]
-///
-/// # Assumptions
-///
-/// This is an internal function. Callers must validate locations using [Location::is_valid]
-/// before calling this function to avoid panics.
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
     size: Position,

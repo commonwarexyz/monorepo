@@ -20,6 +20,10 @@ impl Position {
     ///
     /// This is a checked alternative to [Position::from] which panics on overflow.
     ///
+    /// Note: We cannot use `TryFrom<Location>` because we already have `impl From<Location> for Position`,
+    /// and the standard library provides a blanket `impl<T, U> TryFrom<U> for T where U: Into<T>` that
+    /// conflicts with any manual `TryFrom` implementation.
+    ///
     /// # Examples
     ///
     /// ```
@@ -119,7 +123,7 @@ impl From<Position> for u64 {
 ///
 /// # Panics
 ///
-/// Panics if `loc > MAX_LOCATION`.
+/// Panics if `loc` > [super::MAX_LOCATION].
 ///
 /// Use [Position::checked_from_location] for a non-panicking alternative that returns `None`
 /// on overflow.
@@ -257,6 +261,8 @@ impl SubAssign<u64> for Position {
 
 #[cfg(test)]
 mod tests {
+    use crate::mmr::MAX_LOCATION;
+
     use super::{Location, Position};
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
@@ -368,8 +374,6 @@ mod tests {
 
     #[test]
     fn test_checked_from_location_success() {
-        use super::{super::location::MAX_LOCATION, Location};
-
         // Normal conversions should work
         let cases = vec![
             (Location::new(0), Position::new(0)),
@@ -384,16 +388,12 @@ mod tests {
 
         // MAX_LOCATION should work
         let max_loc = Location::new(MAX_LOCATION);
-        let pos = Position::checked_from_location(max_loc).expect("MAX_LOCATION should convert");
-        // For MAX_LOCATION = 2^63 - 1, popcount = 63
-        // Position = 2 * (2^63 - 1) - 63 = u64::MAX - 64
+        let pos = Position::checked_from_location(max_loc).expect("MAX_LOCATION should succeed");
         assert_eq!(*pos, u64::MAX - 64);
     }
 
     #[test]
     fn test_checked_from_location_overflow() {
-        use super::{super::location::MAX_LOCATION, Location};
-
         // MAX_LOCATION + 1 should fail
         let over_loc = Location::new(MAX_LOCATION + 1);
         assert!(Position::checked_from_location(over_loc).is_none());

@@ -631,6 +631,7 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    /// Returns [Error::Empty] if the range is empty.
     ///
     /// # Panics
     ///
@@ -642,10 +643,13 @@ impl<H: CHasher> Mmr<H> {
         );
 
         // Validate locations
+        if range.is_empty() {
+            return Err(Error::Empty);
+        }
         if !range.start.is_valid() {
             return Err(Error::LocationOverflow(range.start));
         }
-        if !range.end.is_valid() {
+        if !(range.end - 1).is_valid() {
             return Err(Error::LocationOverflow(range.end));
         }
 
