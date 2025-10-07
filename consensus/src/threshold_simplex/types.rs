@@ -1773,68 +1773,6 @@ impl<S: SigningScheme, D: Digest> Viewable for Activity<S, D> {
     }
 }
 
-// /// Seed represents a threshold signature over the current view.
-// #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-// pub struct Seed<V: Variant> {
-//     /// The round for which this seed is generated
-//     pub round: Round,
-//     /// The partial signature on the seed
-//     pub signature: V::Signature,
-// }
-
-// impl<V: Variant> Seed<V> {
-//     /// Creates a new seed with the given view and signature.
-//     pub fn new(round: Round, signature: V::Signature) -> Self {
-//         Seed { round, signature }
-//     }
-
-//     /// Verifies the threshold signature on this [Seed].
-//     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
-//         let seed_namespace = seed_namespace(namespace);
-//         let message = self.round.encode();
-//         verify_message::<V>(identity, Some(&seed_namespace), &message, &self.signature).is_ok()
-//     }
-// }
-
-// impl<V: Variant> Epochable for Seed<V> {
-//     type Epoch = Epoch;
-
-//     fn epoch(&self) -> Epoch {
-//         self.round.epoch()
-//     }
-// }
-
-// impl<V: Variant> Viewable for Seed<V> {
-//     type View = View;
-
-//     fn view(&self) -> View {
-//         self.round.view()
-//     }
-// }
-
-// impl<V: Variant> Write for Seed<V> {
-//     fn write(&self, writer: &mut impl BufMut) {
-//         self.round.write(writer);
-//         self.signature.write(writer);
-//     }
-// }
-
-// impl<V: Variant> Read for Seed<V> {
-//     type Cfg = ();
-
-//     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-//         let round = Round::read(reader)?;
-//         let signature = V::Signature::read(reader)?;
-//         Ok(Seed { round, signature })
-//     }
-// }
-
-// impl<V: Variant> EncodeSize for Seed<V> {
-//     fn encode_size(&self) -> usize {
-//         self.round.encode_size() + self.signature.encode_size()
-//     }
-// }
-
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug, Eq)]
