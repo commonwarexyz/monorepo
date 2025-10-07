@@ -196,8 +196,8 @@ fn fuzz(input: FuzzInput) {
                     if mmr.leaves() == 0 {
                         continue;
                     }
-                    let range =
-                        Location::new_checked(start_loc).unwrap()..Location::new_checked(end_loc).unwrap();
+                    let range = Location::new_checked(start_loc).unwrap()
+                        ..Location::new_checked(end_loc).unwrap();
                     let start_pos = Position::from(range.start);
 
                     if start_loc >= mmr.leaves()
@@ -237,8 +237,8 @@ fn fuzz(input: FuzzInput) {
                     {
                         continue;
                     }
-                    let range =
-                        Location::new_checked(start_loc).unwrap()..Location::new_checked(end_loc).unwrap();
+                    let range = Location::new_checked(start_loc).unwrap()
+                        ..Location::new_checked(end_loc).unwrap();
                     mmr.process_updates(&mut hasher);
                     if let Ok(historical_proof) =
                         mmr.historical_range_proof(mmr.size(), range.clone()).await
