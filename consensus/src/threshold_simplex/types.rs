@@ -7,7 +7,6 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
-use commonware_utils::union;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
@@ -53,41 +52,6 @@ pub trait Attributable {
 //     /// Returns the seed associated with this object.
 //     fn seed(&self) -> Seed<G::Randomness>;
 // }
-
-// Constants for domain separation in signature verification
-// These are used to prevent cross-protocol attacks and message-type confusion
-pub const SEED_SUFFIX: &[u8] = b"_SEED";
-pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
-pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
-pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
-
-/// Creates a namespace for seed messages by appending the SEED_SUFFIX
-/// The seed is used for leader election and randomness generation
-#[inline]
-pub fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
-    union(namespace, SEED_SUFFIX)
-}
-
-/// Creates a namespace for notarize messages by appending the NOTARIZE_SUFFIX
-/// Domain separation prevents cross-protocol attacks
-#[inline]
-pub fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
-    union(namespace, NOTARIZE_SUFFIX)
-}
-
-/// Creates a namespace for nullify messages by appending the NULLIFY_SUFFIX
-/// Domain separation prevents cross-protocol attacks
-#[inline]
-pub fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
-    union(namespace, NULLIFY_SUFFIX)
-}
-
-/// Creates a namespace for finalize messages by appending the FINALIZE_SUFFIX
-/// Domain separation prevents cross-protocol attacks
-#[inline]
-pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
-    union(namespace, FINALIZE_SUFFIX)
-}
 
 /// Identifies the context in which a vote or certificate is produced.
 pub enum VoteContext<'a, D: Digest> {

@@ -1,9 +1,11 @@
 //! Signing abstractions for simplex.
 
 use crate::{
-    threshold_simplex::types::{
-        finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace, SigningScheme,
-        Vote, VoteContext, VoteVerification,
+    threshold_simplex::{
+        signing_scheme::{
+            finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
+        },
+        types::{SigningScheme, Vote, VoteContext, VoteVerification},
     },
     Viewable,
 };

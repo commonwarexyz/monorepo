@@ -231,7 +231,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{threshold_simplex::types::seed_namespace, types::Round, Monitor};
+    use crate::{threshold_simplex::signing_scheme::seed_namespace, types::Round, Monitor};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{
