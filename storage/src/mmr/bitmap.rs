@@ -333,8 +333,7 @@ impl<H: CHasher, const N: usize> MerkleizedBitMap<H, N> {
             .collect();
 
         // Include complete chunks that haven't been authenticated yet
-        let complete_chunks = self.complete_chunks();
-        for i in self.authenticated_len..complete_chunks {
+        for i in self.authenticated_len..self.complete_chunks() {
             chunks.push(Location::from(i + pruned_chunks));
         }
 
